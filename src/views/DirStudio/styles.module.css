@@ -1,0 +1,53 @@
+.container {
+  display: flex;
+  flex-direction: row;
+  max-width: 100vw;
+}
+
+.stageContainer {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.castInspector {
+  flex: 1;
+}
+
+.leftContainer {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 300px;
+  background-color: #aaa;
+}
+
+.centerContainer { 
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rightContainer {
+  display: flex;
+  flex-direction: column;
+  width: 300px;
+  height: 100vh;
+  background-color: #aaa;
+}
+
+.bottomContainer {
+  height: 300px;
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+}
+
+.scriptError {
+  display: flex;
+  background-color: yellow;
+  align-items: flex-start;
+  padding: 5px 10px;
+}

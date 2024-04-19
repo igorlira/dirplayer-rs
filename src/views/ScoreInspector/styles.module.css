@@ -1,0 +1,59 @@
+:root {
+  --frame-cell-width: 16px;
+}
+
+.container {
+  width: 100%;
+}
+
+.scriptHeader {
+  width: 100%;
+  height: 20px;
+  text-align: start;
+}
+
+.scriptHeaderCell {
+  width: var(--frame-cell-width);
+  height: 100%;
+  display: inline-block;
+
+  &.scripted {
+    background-color: blue;
+  }
+}
+
+.frameHeader {
+  width: 100%;
+  height: 20px;
+  text-align: start;
+}
+
+.frameHeaderCell {
+  width: var(--frame-cell-width);
+  display: inline-block;
+  text-align: center;
+
+  &.current {
+    background-color: red;
+    color: white;
+  }
+}
+
+.channelList {
+  height: 300px;
+  overflow-y: scroll;
+}
+
+.channelRow {
+  width: 100%;
+  height: 20px;
+  text-align: start;
+  border: 1px solid transparent;
+  &:nth-child(odd) {
+    background-color: #ccc;
+  }
+
+  &.selected {
+    border: 1px solid red;
+  }
+}

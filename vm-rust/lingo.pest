@@ -1,0 +1,49 @@
+alpha           =  { 'a'..'z' | 'A'..'Z' }
+digit           =  { '0'..'9' }
+ident           =  { !digit ~ (alpha | digit)+ }
+string_interior =  {
+    (!("\"") // unless the next character is a quotation mark
+  // followed by the correct amount of number signs,
+  ~ ANY // consume one character
+  )*
+}
+WHITESPACE      = _{ (" " | "\t" | "\r" | "\n") }
+
+symbol     =  { "#" ~ (ident) }
+nohash_symbol = { (ident) }
+quote      = _{ "\"" }
+string     =  { quote ~ (string_interior) ~ quote }
+string_empty = { "EMPTY" }
+empty_list =  { "[]" }
+multi_list =  { "[" ~ (expr) ~ ("," ~ (expr))* ~ "]" }
+void       =  { "void" | "VOID" | "Void" }
+bool_true       =  { "true" | "True" | "TRUE" }
+bool_false      =  { "false" | "False" | "FALSE" }
+
+number_sign    = { "+" | "-" }
+float_exponent = { "e" ~ number_sign? ~ digit+ }
+
+number_int     = { (number_sign?) ~ (digit+) }
+number_float_a = { (number_sign?) ~ (digit*) ~ "." ~ (digit+) ~ (float_exponent?) }
+number_float_b = { (number_sign?) ~ (digit+) ~ "." ~ (digit*) ~ (float_exponent?) }
+number_float   = { number_float_a | number_float_b }
+
+prop_list_key   = _{ (symbol | nohash_symbol | string | number_float | number_int | void | bool_true | bool_false | string_empty) }
+prop_list_pair  = { prop_list_key ~ ":" ~ expr }
+empty_prop_list = { "[" ~ ":" ~ "]" }
+multi_prop_list = { "[" ~ (prop_list_pair) ~ ("," ~ (prop_list_pair))* ~ "]" }
+prop_list       = { empty_prop_list | multi_prop_list }
+
+list = { empty_list | multi_list }
+
+rgb_num_arg   = { digit{,3} }
+rgb_num_color = { "rgb" ~ "(" ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ ")" }
+rgb_str_color = { "rgb" ~ "(" ~ (string) ~ ")" }
+rgb_color     = { rgb_num_color | rgb_str_color }
+
+rect          = { "rect" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ ")" }
+point         = { "point" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ ")" }
+
+expr       =  { (symbol | list | string | prop_list | number_float | number_int | rgb_color | void | rect | bool_true | bool_false | string_empty | point) }
+eval_expr  = _{ SOI ~ expr ~ EOI }
+ident_list = _{ !digit ~ ident ~ (" " ~ ident)+ }

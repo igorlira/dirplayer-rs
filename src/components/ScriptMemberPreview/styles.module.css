@@ -1,0 +1,34 @@
+.handlerName {
+  composes: bodyMonospace from global;
+}
+
+.bytecodeLine {
+  composes: bodyMonospace from global;
+}
+
+.bytecodeLineHighlighted, .handlerNameHighlighted {
+  composes: bytecodeLine from global;
+  background-color: #ffff00;
+}
+
+.bytecodeLineBackground, .handlerNameBackground {
+  background-color: #f0f0f0;
+}
+
+.scriptContainer {
+  flex: 1;
+}
+
+.breakpointColumn {
+  width: 30px;
+
+  &.hasBreakpoint {
+    background-color: #ff0000;
+  }
+}
+
+.bytecodeLine {
+  display: flex;
+  flex-direction: row;
+  justify-content: stretch;
+}

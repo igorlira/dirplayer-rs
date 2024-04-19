@@ -1,0 +1,12 @@
+.iconButton {
+  width: 32px;
+  height: 32px;
+  background-color: #ccc;
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: center;
+
+  &:hover {
+    background-color: #ddd;
+  }
+}

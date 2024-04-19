@@ -1,0 +1,20 @@
+
+.selectedListItem {
+  background-color: #f0f0f0;
+}
+
+.listItem {
+  width: 100%;
+  display: flex;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  &:hover {
+    background-color: #e3e3e3;
+  }
+
+  > button {
+    width: 100%;
+  }
+}
+

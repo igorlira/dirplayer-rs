@@ -1,0 +1,29 @@
+.container {
+  text-align: start;
+  max-height: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.textPreview {
+  white-space: pre-wrap;
+  word-wrap: break-all;
+}
+
+.preview {
+  flex: 1;
+  overflow: scroll;
+  display: block;
+  max-width: 100%;
+}
+
+.paletteGrid {
+  width: 200px;
+  display: grid;
+  grid-template-columns: repeat(32, 1fr);
+  grid-template-rows: repeat(8, 1fr);
+  grid-column-gap: 0px;
+  grid-row-gap: 0px; 
+}

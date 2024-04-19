@@ -1,0 +1,27 @@
+.container { 
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  text-align: start;
+  width: 25%;
+}
+
+.stackContainer {
+  flex: 1;
+  overflow-y: scroll;
+}
+
+.variablesContainer {
+  flex: 1;
+  overflow-y: scroll;
+}
+
+.variablesTabView {
+  flex: 1;
+}
+
+.buttonContainer {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
