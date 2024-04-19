@@ -212,6 +212,18 @@ impl StringChunkHandlers {
     })
   }
 
+  pub fn set_prop(_: &mut DirPlayer, _: DatumRef, prop: &String, _value_ref: DatumRef) -> Result<(), ScriptError> {
+    match prop.as_str() {
+      "font" | "fontStyle" => {
+        // TODO
+      },
+      _ => {
+        return Err(ScriptError::new(format!("Cannot set property {prop} for string chunk datum")))
+      }
+    }
+    Ok(())
+  }
+
   fn delete(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;

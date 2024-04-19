@@ -7,7 +7,7 @@ use crate::director::{
 };
 
 use super::{
-    bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, get_datum, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, score::{sprite_get_prop, sprite_set_prop}, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF
+    bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, get_datum, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, score::{sprite_get_prop, sprite_set_prop}, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF
 };
 
 #[derive(Clone)]
@@ -300,6 +300,9 @@ pub async fn player_set_obj_prop(
         }),
         Datum::IntRect(..) => reserve_player_mut(|player| {
             RectDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
+        }),
+        Datum::StringChunk(..) => reserve_player_mut(|player| {
+            StringChunkHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
         _ => reserve_player_ref(|player| {
             Err(ScriptError::new(
