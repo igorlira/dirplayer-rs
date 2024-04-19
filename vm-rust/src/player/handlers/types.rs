@@ -216,6 +216,7 @@ impl TypeHandlers {
         Datum::String(s) => {
           Datum::Int(s.parse::<i32>().unwrap_or(0))
         },
+        Datum::Void => Datum::Void,
         _ => return Err(ScriptError::new(format!("Cannot convert datum of type {} to integer", value.type_str()))),
       };
       Ok(player.alloc_datum(result))
