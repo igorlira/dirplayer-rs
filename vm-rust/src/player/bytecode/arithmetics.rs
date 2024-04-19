@@ -121,6 +121,7 @@ impl ArithmeticsBytecodeHandler {
         (Datum::Float(left), Datum::Int(right)) => Datum::Float(*left * (*right as f32)),
         (Datum::Float(left), Datum::Float(right)) => Datum::Float(left * right),
         (Datum::IntRect((x1, y1, x2, y2)), Datum::Int(right)) => Datum::IntRect((x1 * *right as i16, y1 * *right as i16, x2 * *right as i16, y2 * *right as i16)),
+        (Datum::IntPoint((x, y)), Datum::Int(right)) => Datum::IntPoint((x * *right as i16, y * *right as i16)),
         (Datum::List(_, list, _), Datum::Float(right)) => {
           let mut new_list = vec![];
           for item in list {

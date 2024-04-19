@@ -23,7 +23,7 @@ impl TypeUtils {
       Datum::BitmapRef(..) => Ok(vec!["image"]),
       Datum::IntRect(..) => Ok(vec!["rect"]),
       Datum::IntPoint(..) => Ok(vec!["point"]),
-      // Datum::sprite(..) => Ok(vec!["sprite"]),
+      Datum::SpriteRef(..) => Ok(vec!["sprite"]),
       _ => Err(ScriptError::new(format!("Getting ilk for unknown type: {}", datum.type_str())))?,
     }
   }

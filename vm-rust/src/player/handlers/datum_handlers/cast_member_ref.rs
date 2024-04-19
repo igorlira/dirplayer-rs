@@ -190,6 +190,7 @@ impl CastMemberRefHandlers {
       "castLibNum" => Ok(Datum::Int(-1)),
       "width" => Ok(Datum::Void),
       "height" => Ok(Datum::Void),
+      "rect" => Ok(Datum::Void),
       _ => Err(ScriptError::new(format!("Cannot get prop {} of invalid cast member ({}, {})", prop, member_ref.cast_lib, member_ref.cast_member))),
     }
   }
