@@ -111,7 +111,7 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
                 let font = player.font_manager.get_system_font().unwrap(); // TODO
                 let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
-                bitmap.draw_text(&field_member.text, font, font_bitmap, sprite.loc_h, sprite.loc_v, sprite.ink as u32, sprite.bg_color.clone(), &palettes);
+                bitmap.draw_text(&field_member.text, font, font_bitmap, sprite.loc_h, sprite.loc_v, sprite.ink as u32, sprite.bg_color.clone(), &palettes, field_member.fixed_line_space, field_member.top_spacing);
 
                 if player.keyboard_focus_sprite == sprite.number as i16 {
                     let cursor_x = sprite.loc_h + (sprite.width / 2);

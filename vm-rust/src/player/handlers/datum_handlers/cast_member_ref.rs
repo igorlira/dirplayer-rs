@@ -253,31 +253,42 @@ impl CastMemberRefHandlers {
             }
             Ok(Datum::List(DatumType::List, item_refs, false))
           },
-          "fixedLineSpace" => Ok(datum_bool(text_data.fixed_line_space)),
+          "fixedLineSpace" => Ok(Datum::Int(text_data.fixed_line_space as i32)),
           "topSpacing" => Ok(Datum::Int(text_data.top_spacing as i32)),
           "boxType" => Ok(Datum::Symbol(text_data.box_type.to_owned())),
           "antialias" => Ok(datum_bool(text_data.anti_alias)),
           "rect" => {
             let font = player.font_manager.get_system_font().unwrap();
-            let (width, height) = measure_text(&text_data.text, &font, None);
+            let (width, height) = measure_text(&text_data.text, &font, None, text_data.fixed_line_space, text_data.top_spacing);
             Ok(Datum::IntRect((0, 0, width as i16, height as i16)))
           },
           "height" => {
             let font = player.font_manager.get_system_font().unwrap();
-            let (_, height) = measure_text(&text_data.text, &font, None);
+            let (_, height) = measure_text(&text_data.text, &font, None, text_data.fixed_line_space, text_data.top_spacing);
             Ok(Datum::Int(height as i32))
           },
           "image" => {
             // TODO: alignment
             let font = player.font_manager.get_system_font().unwrap();
-            let (width, height) = measure_text(&text_data.text, &font, None);
+            let (width, height) = measure_text(&text_data.text, &font, None, text_data.fixed_line_space, text_data.top_spacing);
             // TODO use 32 bits
             let mut bitmap = Bitmap::new(width, height, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale));
             let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
             let palettes = player.movie.cast_manager.palettes();
 
             let ink = 36;
-            bitmap.draw_text(&text_data.text, font, font_bitmap, 0, 0, ink, bitmap.get_bg_color_ref(), &palettes);
+            bitmap.draw_text(
+              &text_data.text, 
+              font, 
+              font_bitmap, 
+              0, 
+              text_data.top_spacing, 
+              ink, 
+              bitmap.get_bg_color_ref(), 
+              &palettes,
+              text_data.fixed_line_space,
+              text_data.top_spacing,
+            );
 
             let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
             Ok(Datum::BitmapRef(bitmap_ref))
@@ -387,7 +398,7 @@ impl CastMemberRefHandlers {
             member_ref, 
             |player| value.bool_value(&player.datums), 
             |cast_member, value| {
-              cast_member.member_type.as_field_mut().unwrap().fixed_line_space = value?;
+              cast_member.member_type.as_field_mut().unwrap().fixed_line_space = value? as u16;
               Ok(())
             }
           ),
@@ -512,9 +523,9 @@ impl CastMemberRefHandlers {
           },
           "fixedLineSpace" => borrow_member_mut(
             member_ref, 
-            |player| value.bool_value(&player.datums), 
+            |player| value.int_value(&player.datums), 
             |cast_member, value| {
-              cast_member.member_type.as_text_mut().unwrap().fixed_line_space = value?;
+              cast_member.member_type.as_text_mut().unwrap().fixed_line_space = value? as u16;
               Ok(())
             }
           ),

@@ -517,9 +517,12 @@ impl Bitmap {
         ink: u32,
         bg_color: ColorRef,
         palettes: &PaletteMap,
+        line_spacing: u16,
+        top_spacing: i16,
     ) {
         let mut x = loc_h;
         let mut y = loc_v;
+        let line_height = font.char_height;
 
         let mut params = CopyPixelsParams::default(&self);
         params.ink = ink;
@@ -528,7 +531,7 @@ impl Bitmap {
         for char_num in text.chars() {
             if char_num == '\r' || char_num == '\n' {
                 x = loc_h;
-                y += font.char_height as i16 + 1;
+                y += line_height as i16 + line_spacing as i16 + 1;
                 continue;
             }
             bitmap_font_copy_char(font, font_bitmap, char_num as u8, self, x, y, &palettes, &params);

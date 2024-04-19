@@ -174,21 +174,25 @@ pub fn bitmap_font_copy_char(
     )
 }
 
-pub fn measure_text(text: &str, font: &BitmapFont, line_height: Option<u16>) -> (u16, u16) {
+pub fn measure_text(text: &str, font: &BitmapFont, line_height: Option<u16>, line_spacing: u16, top_spacing: i16) -> (u16, u16) {
     let mut width = 0;
     let mut line_width = 0;
     let line_height = line_height.unwrap_or(font.char_height);
-    let mut height = line_height;
+    let mut height = (top_spacing + line_height as i16) as u16;
+    let mut index = 0;
     for c in text.chars() {
         if c == '\r' || c == '\n' {
-            height += line_height + 1;
             if line_width > width {
                 width = line_width;
             }
             line_width = 0;
         } else {
+            if line_width == 0 && index > 0 {
+                height += (line_height as i16 + line_spacing as i16 + 1) as u16;
+            }
             line_width += font.char_width + 1;
         }
+        index += 1;
     }
     if line_width > width {
         width = line_width;
