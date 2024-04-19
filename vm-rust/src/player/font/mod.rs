@@ -176,15 +176,22 @@ pub fn bitmap_font_copy_char(
 
 pub fn measure_text(text: &str, font: &BitmapFont, line_height: Option<u16>) -> (u16, u16) {
     let mut width = 0;
+    let mut line_width = 0;
     let line_height = line_height.unwrap_or(font.char_height);
     let mut height = line_height;
     for c in text.chars() {
         if c == '\r' || c == '\n' {
             height += line_height + 1;
-            width = 0;
+            if line_width > width {
+                width = line_width;
+            }
+            line_width = 0;
         } else {
-            width += font.char_width + 1;
+            line_width += font.char_width + 1;
         }
+    }
+    if line_width > width {
+        width = line_width;
     }
     return (width, height);
 }
