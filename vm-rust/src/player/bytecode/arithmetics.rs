@@ -61,7 +61,41 @@ impl ArithmeticsBytecodeHandler {
         (Datum::Int(left), Datum::Float(right)) => Datum::Float((*left as f32) % right),
         (Datum::Float(left), Datum::Int(right)) => Datum::Float(*left % (*right as f32)),
         (Datum::Float(left), Datum::Float(right)) => Datum::Float(left % right),
-        _ => return Err(ScriptError::new("Modulus operator only works with ints and floats".to_string())),
+        (Datum::List(_, list, _), Datum::Float(right)) => {
+          let mut new_list = vec![];
+          for item in list {
+            let item_datum = player.get_datum(*item);
+            let result_datum = match item_datum {
+              Datum::Int(n) => Datum::Int(((*n as f32) % right) as i32),
+              Datum::Float(n) => Datum::Int((n % right) as i32),
+              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(*item, player)))),
+            };
+            new_list.push(result_datum);
+          }
+          let mut ref_list = vec![];
+          for item in new_list {
+            ref_list.push(player.alloc_datum(item));
+          }
+          Datum::List(DatumType::List, ref_list, false)
+        }
+        (Datum::List(_, list, _), Datum::Int(right)) => {
+          let mut new_list = vec![];
+          for item in list {
+            let item_datum = player.get_datum(*item);
+            let result_datum = match item_datum {
+              Datum::Int(n) => Datum::Int((*n % right) as i32),
+              Datum::Float(n) => Datum::Int((*n % *right as f32) as i32),
+              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(*item, player)))),
+            };
+            new_list.push(result_datum);
+          }
+          let mut ref_list = vec![];
+          for item in new_list {
+            ref_list.push(player.alloc_datum(item));
+          }
+          Datum::List(DatumType::List, ref_list, false)
+        }
+        _ => return Err(ScriptError::new(format!("Modulus operator only works with ints and floats (given {} and {})", left.type_str(), right.type_str()))),
       };
       let result_id = player.alloc_datum(result);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
