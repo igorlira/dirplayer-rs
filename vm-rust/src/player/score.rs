@@ -4,7 +4,7 @@ use itertools::Itertools;
 
 use crate::{director::{file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi};
 
-use super::{cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, sprite::{CursorRef, Sprite}, DirPlayer, ScriptError};
+use super::{cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 
 #[allow(dead_code)]
 pub struct SpriteChannel {
@@ -188,6 +188,8 @@ pub fn sprite_get_prop(
       let rect = get_sprite_rect(player, sprite_id);
       Ok(Datum::IntRect(rect))
     },
+    "bgColor" => Ok(Datum::ColorRef(sprite.map_or(ColorRef::PaletteIndex(0), |sprite| sprite.bg_color.clone()))),
+    "skew" => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.skew))),
     "locH" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.loc_h) as i32)),
     "locV" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.loc_v) as i32)),
     "locZ" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.loc_z) as i32)),
