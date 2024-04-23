@@ -304,6 +304,9 @@ pub async fn player_set_obj_prop(
         Datum::StringChunk(..) => reserve_player_mut(|player| {
             StringChunkHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
+        Datum::ColorRef(..) => reserve_player_mut(|player| {
+            ColorDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
+        }),
         _ => reserve_player_ref(|player| {
             Err(ScriptError::new(
                 format!(

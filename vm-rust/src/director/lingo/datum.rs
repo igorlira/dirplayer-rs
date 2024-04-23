@@ -366,6 +366,13 @@ impl Datum {
     }
   }
 
+  pub fn to_color_ref_mut(&mut self) -> Result<&mut ColorRef, ScriptError> {
+    match self {
+      Datum::ColorRef(color) => Ok(color),
+      _ => Err(ScriptError::new("Cannot convert datum to color ref".to_string())),
+    }
+  }
+
   pub fn to_sprite_ref(&self) -> Result<i16, ScriptError> {
     match self {
       Datum::SpriteRef(sprite_ref) => Ok(*sprite_ref),

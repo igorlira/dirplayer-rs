@@ -1,4 +1,4 @@
-use crate::director::lingo::datum::Datum;
+use crate::{director::lingo::datum::Datum, player::sprite::ColorRef};
 
 use super::{get_datum, DatumRef, DirPlayer};
 
@@ -62,8 +62,15 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
     Datum::TimeoutRef(name) => {
       format!("timeout(\"{name}\")")
     }
-    Datum::ColorRef(_) => {
-      format!("<color>")
+    Datum::ColorRef(color_ref) => {
+      match color_ref {
+        ColorRef::PaletteIndex(i) => {
+          format!("color({})", i)
+        }
+        ColorRef::Rgb(r, g, b) => {
+          format!("rgb({}, {}, {})", r, g, b)
+        }
+      }
     }
     Datum::BitmapRef(bitmap) => {
       let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();

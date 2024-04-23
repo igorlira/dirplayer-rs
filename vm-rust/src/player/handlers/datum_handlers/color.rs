@@ -51,11 +51,53 @@ impl ColorDatumHandlers {
     }
   }
 
-  // pub fn set_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String, value: DatumRef) -> Result<(), ScriptError> {
-  //   match prop.as_str() {
-  //     _ => {
-  //       Err(ScriptError::new(format!("Cannot set color property {}", prop)))
-  //     },
-  //   }
-  // }
+  pub fn set_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String, value: DatumRef) -> Result<(), ScriptError> {
+    match prop.as_str() {
+      "red" => {
+        let r = player.get_datum(value).int_value(&player.datums)?;
+        let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;
+        match color_ref {
+          ColorRef::Rgb(_, g, b) => {
+            *color_ref = ColorRef::Rgb(r as u8, *g, *b);
+            Ok(())
+          },
+          ColorRef::PaletteIndex(_) => {
+            *color_ref = ColorRef::Rgb(r as u8, 0, 0);
+            Ok(())
+          },
+        }
+      },
+      "green" => {
+        let g = player.get_datum(value).int_value(&player.datums)?;
+        let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;
+        match color_ref {
+          ColorRef::Rgb(r, _, b) => {
+            *color_ref = ColorRef::Rgb(*r, g as u8, *b);
+            Ok(())
+          },
+          ColorRef::PaletteIndex(_) => {
+            *color_ref = ColorRef::Rgb(0, g as u8, 0);
+            Ok(())
+          },
+        }
+      },
+      "blue" => {
+        let b = player.get_datum(value).int_value(&player.datums)?;
+        let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;
+        match color_ref {
+          ColorRef::Rgb(r, g, _) => {
+            *color_ref = ColorRef::Rgb(*r, *g, b as u8);
+            Ok(())
+          },
+          ColorRef::PaletteIndex(_) => {
+            *color_ref = ColorRef::Rgb(0, 0, b as u8);
+            Ok(())
+          },
+        }
+      },
+      _ => {
+        Err(ScriptError::new(format!("Cannot set color property {}", prop)))
+      },
+    }
+  }
 }
