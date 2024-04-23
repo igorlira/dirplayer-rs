@@ -67,7 +67,10 @@ export default function Stage() {
         onPointerMove={(e) => onMouseEvent('move', e)}
         onPointerDown={(e) => onMouseEvent('down', e)}
         onPointerUp={(e) => onMouseEvent('up', e)}
-        onKeyDown={e => key_down(e.key, e.keyCode)}
+        onKeyDown={e => {
+          e.preventDefault();
+          key_down(e.key, e.keyCode)
+        }}
         onKeyUp={e => key_up(e.key, e.keyCode)}
       ></div>
     </div>
