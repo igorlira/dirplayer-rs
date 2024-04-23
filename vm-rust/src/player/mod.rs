@@ -27,6 +27,7 @@ pub mod commands;
 pub mod events;
 pub mod keyboard;
 pub mod keyboard_map;
+pub mod keyboard_events;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
