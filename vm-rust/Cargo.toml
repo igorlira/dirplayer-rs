@@ -1,7 +1,7 @@
 [package]
 name = "vm-rust"
 version = "0.1.0"
-authors = ["Igor Lira <lira@work.co>"]
+authors = ["Igor Lira <lira@hey.com>"]
 edition = "2018"
 
 [lib]
