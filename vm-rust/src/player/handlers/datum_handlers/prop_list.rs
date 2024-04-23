@@ -176,7 +176,7 @@ impl PropListDatumHandlers {
       "setAt" => Self::set_at(datum, args),
       "sort" => Self::sort(datum, args),
       "getPropAt" => Self::get_prop_at(datum, args),
-      "addProp" => Self::set_opt_prop(datum, args),
+      "addProp" => Self::add_prop(datum, args),
       "setaProp" => Self::set_opt_prop(datum, args),
       "setProp" => Self::set_required_prop(datum, args),
       "getProp" => Self::get_prop(datum, args),
@@ -346,6 +346,18 @@ impl PropListDatumHandlers {
       let value_ref = args[1];
       
       PropListUtils::set_prop(datum, prop_name_ref, value_ref, player, false, formatted_key)?;
+      Ok(VOID_DATUM_REF)
+    })
+  }
+
+  fn add_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+      
+      let prop_name_ref = args[0];
+      let value_ref = args[1];
+      prop_list.push((prop_name_ref, value_ref));
+      
       Ok(VOID_DATUM_REF)
     })
   }
