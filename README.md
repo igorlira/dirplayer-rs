@@ -33,3 +33,5 @@ https://github.com/Brian151/OpenShockwave/
 https://gist.github.com/MrBrax/1f3ae06c9320863f1d7b79b988c03e60
 
 https://www.scummvm.org/
+
+https://github.com/csnover/earthquake-rust/
