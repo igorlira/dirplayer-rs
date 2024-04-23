@@ -75,6 +75,7 @@ pub fn datum_equals(left: &Datum, right: &Datum, datum: &DatumRefMap) -> Result<
       CastMemberRefHandlers::get_cast_slot_number(left.cast_lib as u32, left.cast_member as u32) == CastMemberRefHandlers::get_cast_slot_number(right.cast_lib as u32, right.cast_member as u32)
     ),
     (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left == right),
+    (Datum::Null, Datum::Int(_)) => Ok(false),
     _ => {
       console_warn!("datum_equals not supported for types: {} and {}", left.type_str(), right.type_str());
       Ok(false)

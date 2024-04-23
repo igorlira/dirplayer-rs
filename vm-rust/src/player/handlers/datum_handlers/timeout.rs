@@ -23,7 +23,6 @@ impl TimeoutDatumHandlers {
         _ => return Err(ScriptError::new("Cannot create timeout from non-timeout".to_string())),
       };
 
-      console_warn!("Setting up new timeout {}", timeout_name);
       let mut timeout = Timeout {
         handler: timeout_handler,
         name: timeout_name.to_owned(),
@@ -46,7 +45,6 @@ impl TimeoutDatumHandlers {
           _ => Err(ScriptError::new("Cannot forget non-timeout".to_string())),
         }?
       };
-      console_warn!("Forgetting timeout {}", timeout_name);
       player.timeout_manager.forget_timeout(&timeout_name);
       Ok(VOID_DATUM_REF)
     })

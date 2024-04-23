@@ -59,14 +59,12 @@ export function initVmCallbacks() {
         trigger_timeout(timeoutName)
       }, periodMs);
       store.dispatch(setTimeoutHandle({ name: timeoutName, handle }))
-      console.log("Scheduled timeout", timeoutName, periodMs);
     },
     onClearTimeout: (timeoutName: string) => {
       const handle = store.getState().vm.timeoutHandles[timeoutName];
       if (handle) {
         clearInterval(handle);
         store.dispatch(removeTimeoutHandle(timeoutName))
-        console.log("Cleared timeout", timeoutName);
       }
     },
     onClearAllTimeouts: () => {
