@@ -1,4 +1,4 @@
-use crate::{console_warn, director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, get_datum, reserve_player_mut, DatumRef, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, get_datum, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError, VOID_DATUM_REF}};
 
 pub struct MovieHandlers {}
 
@@ -116,5 +116,12 @@ impl MovieHandlers {
     // The updateStage() method redraws sprites, performs transitions, plays sounds, sends a prepareFrame message
     // (affecting movie and behavior scripts), and sends a stepFrame message (which affects actorList)
     Ok(VOID_DATUM_REF)
+  }
+
+  pub fn rollover(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
+      Ok(player.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
+    })
   }
 }

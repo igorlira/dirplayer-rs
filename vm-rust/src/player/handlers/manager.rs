@@ -224,6 +224,7 @@ impl BuiltInHandlerManager {
       "max" => TypeHandlers::max(args),
       "sort" => TypeHandlers::sort(args),
       "intersect" => TypeHandlers::intersect(args),
+      "rollover" => MovieHandlers::rollover(args),
       _ => {
         let msg = format!("No built-in handler: {}", name);
         console_warn!("{msg}");
