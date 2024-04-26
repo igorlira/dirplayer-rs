@@ -2,6 +2,10 @@
 
 DirPlayer is a Shockwave Player emulator written in Rust that aims to make playing old browser games possible on modern browsers.
 
+## Demo
+
+Check out a live demo of this project at http://dirplayer-rs.s3-website-us-west-2.amazonaws.com/
+
 ## Installing dependencies
 ```bash
 npm install
