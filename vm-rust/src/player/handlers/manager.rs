@@ -226,6 +226,7 @@ impl BuiltInHandlerManager {
       "intersect" => TypeHandlers::intersect(args),
       "rollover" => MovieHandlers::rollover(args),
       "getPropAt" => TypeHandlers::get_prop_at(args),
+      "puppetSound" => Ok(VOID_DATUM_REF), // TODO
       _ => {
         let formatted_args = reserve_player_ref(|player| {
           let mut formatted_args = String::new();
