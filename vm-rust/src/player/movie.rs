@@ -30,10 +30,10 @@ impl Movie {
     );
     self.base_path = file.base_path.to_string();
     self.rect = IntRect {
-      left: file.config.movie_left as i16,
-      top: file.config.movie_top as i16,
-      right: file.config.movie_right as i16,
-      bottom: file.config.movie_bottom as i16,
+      left: file.config.movie_left as i32,
+      top: file.config.movie_top as i32,
+      right: file.config.movie_right as i32,
+      bottom: file.config.movie_bottom as i32,
     };
     self.cast_manager.load_from_dir(file, net_manager, bitmap_manager).await;
     self.score.load_from_dir(file);

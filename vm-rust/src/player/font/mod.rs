@@ -140,8 +140,8 @@ pub fn bitmap_font_copy_char(
     font_bitmap: &Bitmap,
     char_num: u8,
     dest: &mut Bitmap,
-    dest_x: i16,
-    dest_y: i16,
+    dest_x: i32,
+    dest_y: i32,
     palettes: &PaletteMap,
     draw_params: &CopyPixelsParams,
 ) {
@@ -152,23 +152,23 @@ pub fn bitmap_font_copy_char(
     let char_x = char_num % font.grid_columns;
     let char_y = char_num / font.grid_columns;
 
-    let src_x = char_x as u16 * font.grid_cell_width + font.char_offset_x;
-    let src_y = char_y as u16 * font.grid_cell_height + font.char_offset_y;
+    let src_x = char_x as i32 * font.grid_cell_width as i32 + font.char_offset_x as i32;
+    let src_y = char_y as i32 * font.grid_cell_height as i32 + font.char_offset_y as i32;
 
     dest.copy_pixels_with_params(
         palettes,
         font_bitmap,
         IntRect::from(
-            dest_x as i16,
-            dest_y as i16,
-            dest_x as i16 + font.char_width as i16,
-            dest_y as i16 + font.char_height as i16,
+            dest_x,
+            dest_y,
+            dest_x + font.char_width as i32,
+            dest_y + font.char_height as i32,
         ),
         IntRect::from(
-            src_x as i16,
-            src_y as i16,
-            src_x as i16 + font.char_width as i16,
-            src_y as i16 + font.char_height as i16,
+            src_x,
+            src_y,
+            src_x + font.char_width as i32,
+            src_y + font.char_height as i32,
         ),
         &draw_params,
     )

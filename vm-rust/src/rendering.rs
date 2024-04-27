@@ -67,7 +67,7 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
                 } else {
                     None
                 };
-                let src_rect = IntRect::from(0, 0, sprite.width as i16, sprite.height as i16);
+                let src_rect = IntRect::from(0, 0, sprite.width as i32, sprite.height as i32);
                 let dst_rect = sprite_rect;
                 let dst_rect = IntRect::from(
                     if sprite.flip_h { dst_rect.right } else { dst_rect.left },
@@ -119,7 +119,7 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
                     let cursor_width = 1;
                     let cursor_height = field_member.font_size as i16;
                     
-                    bitmap.fill_rect(cursor_x, cursor_y, cursor_x + cursor_width, cursor_y + cursor_height, (0, 0, 0), &palettes, 1.0)
+                    bitmap.fill_rect(cursor_x, cursor_y, cursor_x + cursor_width, cursor_y + cursor_height as i32, (0, 0, 0), &palettes, 1.0)
                 }
             }
             _ => {}
@@ -202,12 +202,12 @@ fn draw_cursor(player: &DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMap) {
                 &palettes, 
                 cursor_bitmap, 
                 IntRect::from_size(
-                    player.mouse_loc.0 - cursor_bitmap_member.reg_point.0,
-                    player.mouse_loc.1 - cursor_bitmap_member.reg_point.1, 
-                    cursor_bitmap.width as i16, 
-                    cursor_bitmap.height as i16
+                    player.mouse_loc.0 - cursor_bitmap_member.reg_point.0 as i32,
+                    player.mouse_loc.1 - cursor_bitmap_member.reg_point.1 as i32, 
+                    cursor_bitmap.width as i32, 
+                    cursor_bitmap.height as i32
                 ), 
-                IntRect::from_size(0, 0, cursor_bitmap.width as i16, cursor_bitmap.height as i16),
+                IntRect::from_size(0, 0, cursor_bitmap.width as i32, cursor_bitmap.height as i32),
                 &CopyPixelsParams {
                     blend: 100,
                     ink: 41,
@@ -298,11 +298,11 @@ impl PlayerCanvasRenderer {
                 bitmap.copy_pixels(
                     &player.movie.cast_manager.palettes(),
                     sprite_bitmap,
-                    IntRect::from(0, 0, sprite_bitmap.width as i16, sprite_bitmap.height as i16),
-                    IntRect::from(0, 0, sprite_bitmap.width as i16, sprite_bitmap.height as i16),
+                    IntRect::from(0, 0, sprite_bitmap.width as i32, sprite_bitmap.height as i32),
+                    IntRect::from(0, 0, sprite_bitmap.width as i32, sprite_bitmap.height as i32),
                     &HashMap::new(),
                 );
-                bitmap.set_pixel(sprite_member.reg_point.0, sprite_member.reg_point.1, (255, 0, 255), palettes);
+                bitmap.set_pixel(sprite_member.reg_point.0 as i32, sprite_member.reg_point.1 as i32, (255, 0, 255), palettes);
 
                 if self.preview_size.0 != bitmap.width as u32 || self.preview_size.1 != bitmap.height as u32 {
                     self.set_preview_size(bitmap.width as u32, bitmap.height as u32);

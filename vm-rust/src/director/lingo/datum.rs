@@ -117,8 +117,8 @@ pub enum Datum {
   ScriptInstanceRef(ScriptInstanceId),
   CastMember(CastMemberRef),
   SpriteRef(i16),
-  IntRect((i16, i16, i16, i16)),
-  IntPoint((i16, i16)),
+  IntRect((i32, i32, i32, i32)),
+  IntPoint((i32, i32)),
   CursorRef(CursorRef),
   TimeoutRef(TimeoutRef),
   ColorRef(ColorRef),
@@ -345,14 +345,14 @@ impl Datum {
     }
   }
 
-  pub fn to_int_rect(&self) -> Result<(i16, i16, i16, i16), ScriptError> {
+  pub fn to_int_rect(&self) -> Result<(i32, i32, i32, i32), ScriptError> {
     match self {
       Datum::IntRect(rect) => Ok(*rect),
       _ => Err(ScriptError::new("Cannot convert datum to int rect".to_string())),
     }
   }
 
-  pub fn to_int_rect_mut(&mut self) -> Result<&mut (i16, i16, i16, i16), ScriptError> {
+  pub fn to_int_rect_mut(&mut self) -> Result<&mut (i32, i32, i32, i32), ScriptError> {
     match self {
       Datum::IntRect(rect) => Ok(rect),
       _ => Err(ScriptError::new("Cannot convert datum to int rect".to_string())),
@@ -380,14 +380,14 @@ impl Datum {
     }
   }
 
-  pub fn to_int_point(&self) -> Result<(i16, i16), ScriptError> {
+  pub fn to_int_point(&self) -> Result<(i32, i32), ScriptError> {
     match self {
       Datum::IntPoint(point) => Ok(*point),
       _ => Err(ScriptError::new("Cannot convert datum to point".to_string())),
     }
   }
 
-  pub fn to_int_point_mut(&mut self) -> Result<&mut (i16, i16), ScriptError> {
+  pub fn to_int_point_mut(&mut self) -> Result<&mut (i32, i32), ScriptError> {
     match self {
       Datum::IntPoint(point) => Ok(point),
       _ => Err(ScriptError::new("Cannot convert datum to point".to_string())),

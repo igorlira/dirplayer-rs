@@ -126,13 +126,13 @@ impl BitmapDatumHandlers {
         let int_value = color_obj_or_int.int_value(&player.datums)? as u8;
         let palettes = player.movie.cast_manager.palettes();
         let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
-        bitmap.set_pixel(x as i16, y as i16, (int_value, int_value, int_value), &palettes);
+        bitmap.set_pixel(x, y, (int_value, int_value, int_value), &palettes);
       } else {
         let color = color_obj_or_int.to_color_ref()?;
         let palettes = player.movie.cast_manager.palettes();
         let color = resolve_color_ref(&palettes, &color, &palette_ref);
         let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
-        bitmap.set_pixel(x as i16, y as i16, color, &palettes);
+        bitmap.set_pixel(x, y, color, &palettes);
       }
       Ok(player.alloc_datum(datum_bool(true)))
     })
@@ -146,10 +146,10 @@ impl BitmapDatumHandlers {
         let color = player.get_datum(args[1]).to_color_ref()?;
         (rect, color)
       } else if args.len() == 5 {
-        let x = player.get_datum(args[0]).int_value(&player.datums)? as i16;
-        let y = player.get_datum(args[1]).int_value(&player.datums)? as i16;
-        let width = player.get_datum(args[2]).int_value(&player.datums)? as i16;
-        let height = player.get_datum(args[3]).int_value(&player.datums)? as i16;
+        let x = player.get_datum(args[0]).int_value(&player.datums)?;
+        let y = player.get_datum(args[1]).int_value(&player.datums)?;
+        let width = player.get_datum(args[2]).int_value(&player.datums)?;
+        let height = player.get_datum(args[3]).int_value(&player.datums)?;
         let color = player.get_datum(args[4]).to_color_ref()?;
         ((x, y, width, height), color)
       } else {
@@ -227,7 +227,7 @@ impl BitmapDatumHandlers {
         Ok(Datum::Int(bitmap.height as i32))
       },
       "rect" => {
-        Ok(Datum::IntRect((0, 0, bitmap.width as i16, bitmap.height as i16)))
+        Ok(Datum::IntRect((0, 0, bitmap.width as i32, bitmap.height as i32)))
       },
       "depth" => {
         Ok(Datum::Int(bitmap.bit_depth as i32))

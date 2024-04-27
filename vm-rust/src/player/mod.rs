@@ -84,7 +84,7 @@ pub struct DirPlayer {
   pub keyboard_focus_sprite: i16,
   pub text_selection_start: u16,
   pub text_selection_end: u16,
-  pub mouse_loc: (i16, i16),
+  pub mouse_loc: (i32, i32),
   pub mouse_down_sprite: i16,
   pub subscribed_member_refs: Vec<CastMemberRef>, // TODO move to debug module
   pub is_subscribed_to_channel_names: bool, // TODO move to debug module

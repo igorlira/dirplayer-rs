@@ -266,8 +266,8 @@ impl TypeHandlers {
 
   pub fn point(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let x = player.get_datum(args[0]).int_value(&player.datums)? as i16;
-      let y = player.get_datum(args[1]).int_value(&player.datums)? as i16;
+      let x = player.get_datum(args[0]).int_value(&player.datums)?;
+      let y = player.get_datum(args[1]).int_value(&player.datums)?;
       Ok(player.alloc_datum(Datum::IntPoint((x, y))))
     })
   }
@@ -276,10 +276,10 @@ impl TypeHandlers {
     reserve_player_mut(|player| {
       let first_arg_is_num = player.get_datum(args[0]).is_number();
       let (left, top, right, bottom) = if args.len() == 4 && first_arg_is_num {
-        let left = player.get_datum(args[0]).int_value(&player.datums)? as i16;
-        let top = player.get_datum(args[1]).int_value(&player.datums)? as i16;
-        let right = player.get_datum(args[2]).int_value(&player.datums)? as i16;
-        let bottom = player.get_datum(args[3]).int_value(&player.datums)? as i16;
+        let left = player.get_datum(args[0]).int_value(&player.datums)?;
+        let top = player.get_datum(args[1]).int_value(&player.datums)?;
+        let right = player.get_datum(args[2]).int_value(&player.datums)?;
+        let bottom = player.get_datum(args[3]).int_value(&player.datums)?;
         (left, top, right, bottom)
       } else if args.len() == 4 && !first_arg_is_num {
         let top_left = player.get_datum(args[0]).to_int_point()?;

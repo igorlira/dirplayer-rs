@@ -101,8 +101,8 @@ fn blend_pixel(
 }
 
 impl Bitmap {
-    pub fn set_pixel(&mut self, x: i16, y: i16, color: (u8, u8, u8), palettes: &PaletteMap) {
-        if x < 0 || y < 0 || x >= self.width as i16 || y >= self.height as i16 {
+    pub fn set_pixel(&mut self, x: i32, y: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
         }
         self.matte = None; // TODO draw on matte instead
@@ -280,7 +280,7 @@ impl Bitmap {
                 let dst_x = self.width as usize - x - 1;
                 let dst_y = self.height as usize - y - 1;
                 let src_color = self.get_pixel_color(palettes, src_x as u16, src_y as u16);
-                flipped.set_pixel(dst_x as i16, dst_y as i16, src_color, palettes);
+                flipped.set_pixel(dst_x as i32, dst_y as i32, src_color, palettes);
             }
         }
         flipped
@@ -295,7 +295,7 @@ impl Bitmap {
                 let dst_x = self.width as usize - x - 1;
                 let dst_y = y;
                 let src_color = self.get_pixel_color(palettes, src_x as u16, src_y as u16);
-                flipped.set_pixel(dst_x as i16, dst_y as i16, src_color, palettes);
+                flipped.set_pixel(dst_x as i32, dst_y as i32, src_color, palettes);
             }
         }
         flipped
@@ -310,21 +310,21 @@ impl Bitmap {
                 let dst_x = x;
                 let dst_y = self.height as usize - y - 1;
                 let src_color = self.get_pixel_color(palettes, src_x as u16, src_y as u16);
-                flipped.set_pixel(dst_x as i16, dst_y as i16, src_color, palettes);
+                flipped.set_pixel(dst_x as i32, dst_y as i32, src_color, palettes);
             }
         }
         flipped
     }
 
-    pub fn stroke_sized_rect(&mut self, left: i16, top: i16, width: u16, height: u16, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
-        let left = left.max(0) as u16;
-        let top: u16 = top.max(0) as u16;
-        let right = (left + width) as u16;
-        let bottom = (top + height) as u16;
-        self.stroke_rect(left as i16, top as i16, right as i16, bottom as i16, color, palettes, alpha);
+    pub fn stroke_sized_rect(&mut self, left: i32, top: i32, width: i32, height: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+        let left = left.max(0) as i32;
+        let top = top.max(0) as i32;
+        let right = (left + width) as i32;
+        let bottom = (top + height) as i32;
+        self.stroke_rect(left, top, right, bottom, color, palettes, alpha);
     }
 
-    pub fn stroke_rect(&mut self, x1: i16, y1: i16, x2: i16, y2: i16, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn stroke_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
         let left = x1;
         let top = y1;
         let right = x2 - 1;
@@ -335,20 +335,20 @@ impl Bitmap {
             let bottom_color = self.get_pixel_color(palettes, x as u16, bottom as u16);
             let blended_top = blend_color_alpha(top_color, color, alpha);
             let blended_bottom = blend_color_alpha(bottom_color, color, alpha);
-            self.set_pixel(x as i16, top as i16, blended_top, palettes);
-            self.set_pixel(x as i16, bottom as i16, blended_bottom, palettes);
+            self.set_pixel(x as i32, top as i32, blended_top, palettes);
+            self.set_pixel(x as i32, bottom as i32, blended_bottom, palettes);
         }
         for y in y1..y2 {
             let left_color = self.get_pixel_color(palettes, left as u16, y as u16);
             let right_color = self.get_pixel_color(palettes, right as u16, y as u16);
             let blended_left = blend_color_alpha(left_color, color, alpha);
             let blended_right = blend_color_alpha(right_color, color, alpha);
-            self.set_pixel(left as i16, y as i16, blended_left, palettes);
-            self.set_pixel(right as i16, y as i16, blended_right, palettes);
+            self.set_pixel(left as i32, y as i32, blended_left, palettes);
+            self.set_pixel(right as i32, y as i32, blended_right, palettes);
         }
     }
 
-    pub fn clear_rect(&mut self, x1: i16, y1: i16, x2: i16, y2: i16, color: (u8, u8, u8), palettes: &PaletteMap) {
+    pub fn clear_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
         for y in y1..y2 {
             for x in x1..x2 {
                 self.set_pixel(x, y, color, palettes);
@@ -356,21 +356,21 @@ impl Bitmap {
         }
     }
 
-    pub fn fill_relative_rect(&mut self, left: i16, top: i16, right: i16, bottom: i16, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn fill_relative_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
         let left = left.max(0);
         let top = top.max(0);
-        let right = right.min(self.width as i16 - 1);
-        let bottom = bottom.min(self.height as i16 - 1);
+        let right = right.min(self.width as i32 - 1);
+        let bottom = bottom.min(self.height as i32 - 1);
         
         let x1 = left;
         let y1 = top;
-        let x2 = self.width as i16 - right;
-        let y2 = self.height as i16 - bottom;
+        let x2 = self.width as i32 - right;
+        let y2 = self.height as i32 - bottom;
 
         self.fill_rect(x1, y1, x2, y2, color, palettes, alpha);
     }
 
-    pub fn fill_rect(&mut self, x1: i16, y1: i16, x2: i16, y2: i16, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn fill_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
         if alpha == 0.0 {
             return;
         }
@@ -382,7 +382,7 @@ impl Bitmap {
                     let dst_color = self.get_pixel_color(palettes, x as u16, y as u16);
                     blend_color_alpha(dst_color, color, alpha)
                 };
-                self.set_pixel(x as i16, y as i16, blended_color, palettes);
+                self.set_pixel(x as i32, y as i32, blended_color, palettes);
             }
         }
     }
@@ -489,10 +489,10 @@ impl Bitmap {
         &mut self,
         palettes: &PaletteMap,
         bitmap: &Bitmap, 
-        loc_h: i16, 
-        loc_v: i16, 
-        width: i16,
-        height: i16,
+        loc_h: i32, 
+        loc_v: i32, 
+        width: i32,
+        height: i32,
         ink: u32, 
         bg_color: (u8, u8, u8),
         alpha: f32,
@@ -502,8 +502,8 @@ impl Bitmap {
         params.insert("ink".to_owned(), Datum::Int(ink as i32));
         params.insert("bgColor".to_owned(), Datum::ColorRef(ColorRef::Rgb(bg_color.0, bg_color.1, bg_color.2)));
 
-        let src_rect = IntRect::from_tuple((0, 0, bitmap.width as i16, bitmap.height as i16));
-        let dst_rect = IntRect::from_tuple((loc_h, loc_v, loc_h + width as i16, loc_v + height as i16));
+        let src_rect = IntRect::from_tuple((0, 0, bitmap.width as i32, bitmap.height as i32));
+        let dst_rect = IntRect::from_tuple((loc_h, loc_v, loc_h + width as i32, loc_v + height as i32));
         self.copy_pixels(palettes, bitmap, dst_rect, src_rect, &params);
     }
 
@@ -512,8 +512,8 @@ impl Bitmap {
         text: &str,
         font: &BitmapFont,
         font_bitmap: &Bitmap,
-        loc_h: i16,
-        loc_v: i16,
+        loc_h: i32,
+        loc_v: i32,
         ink: u32,
         bg_color: ColorRef,
         palettes: &PaletteMap,
@@ -531,24 +531,24 @@ impl Bitmap {
         for char_num in text.chars() {
             if char_num == '\r' || char_num == '\n' {
                 x = loc_h;
-                y += line_height as i16 + line_spacing as i16 + 1;
+                y += line_height as i32 + line_spacing as i32 + 1;
                 continue;
             }
             bitmap_font_copy_char(font, font_bitmap, char_num as u8, self, x, y, &palettes, &params);
-            x += font.char_width as i16 + 1;
+            x += font.char_width as i32 + 1;
         }
     }
 
     pub fn trim_whitespace(&mut self, palettes: &PaletteMap) {
-        let mut left = 0;
-        let mut top = 0;
-        let mut right = self.width as i16;
-        let mut bottom = self.height as i16;
+        let mut left = 0 as i32;
+        let mut top = 0 as i32;
+        let mut right = self.width as i32;
+        let mut bottom = self.height as i32;
         let bg_color = self.get_bg_color_ref();
 
-        for x in 0..self.width as i16 {
+        for x in 0..self.width as i32 {
             let mut is_empty = true;
-            for y in 0..self.height as i16 {
+            for y in 0..self.height as i32 {
                 let color = self.get_pixel_color_ref(x as u16, y as u16);
                 if color != bg_color {
                     is_empty = false;
@@ -561,9 +561,9 @@ impl Bitmap {
             }
         }
 
-        for x in (0..self.width as i16).rev() {
+        for x in (0..self.width as i32).rev() {
             let mut is_empty = true;
-            for y in 0..self.height as i16 {
+            for y in 0..self.height as i32 {
                 let color = self.get_pixel_color_ref(x as u16, y as u16);
                 if color != bg_color {
                     is_empty = false;
@@ -576,9 +576,9 @@ impl Bitmap {
             }
         }
 
-        for y in 0..self.height as i16 {
+        for y in 0..self.height as i32 {
             let mut is_empty = true;
-            for x in 0..self.width as i16 {
+            for x in 0..self.width as i32 {
                 let color = self.get_pixel_color_ref(x as u16, y as u16);
                 if color != bg_color {
                     is_empty = false;
@@ -591,9 +591,9 @@ impl Bitmap {
             }
         }
 
-        for y in (0..self.height as i16).rev() {
+        for y in (0..self.height as i32).rev() {
             let mut is_empty = true;
-            for x in 0..self.width as i16 {
+            for x in 0..self.width as i32 {
                 let color = self.get_pixel_color_ref(x as u16, y as u16);
                 if color != bg_color {
                     is_empty = false;

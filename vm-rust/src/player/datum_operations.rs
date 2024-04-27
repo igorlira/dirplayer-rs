@@ -18,8 +18,8 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
         let b = ref_list.iter()
           .map(|r|
             get_datum(*r, &player.datums).int_value(&player.datums)
-              .map(|x| x as i16)
-          ).collect::<Result<Vec<i16>, ScriptError>>()?;
+              .map(|x| x as i32)
+          ).collect::<Result<Vec<i32>, ScriptError>>()?;
         Ok(Datum::IntRect((a.0 + b[0], a.1 + b[1], a.2 + b[2], a.3 + b[3])))
       } else {
         Err(ScriptError::new(format!("Invalid list length for add_datums: {}", ref_list.len())))
@@ -55,15 +55,15 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
         let b = ref_list.iter()
           .map(|r| 
             get_datum(*r, &player.datums).int_value(&player.datums)
-              .map(|x| x as i16)
+              .map(|x| x as i32)
           )
-          .collect::<Result<Vec<i16>, ScriptError>>()?;
+          .collect::<Result<Vec<i32>, ScriptError>>()?;
         Ok(Datum::IntPoint((a.0 + b[0], a.1 + b[1])))
       } else {
         Err(ScriptError::new(format!("Invalid list length for add_datums: {}", ref_list.len())))
       }
     },
-    (Datum::IntPoint(a), Datum::Int(b)) => Ok(Datum::IntPoint((a.0 + *b as i16, a.1 + *b as i16))),
+    (Datum::IntPoint(a), Datum::Int(b)) => Ok(Datum::IntPoint((a.0 + *b as i32, a.1 + *b as i32))),
     (Datum::ColorRef(a), Datum::ColorRef(b)) => {
       match (a, b) {
         (ColorRef::PaletteIndex(a), ColorRef::PaletteIndex(b)) => Ok(Datum::ColorRef(ColorRef::PaletteIndex(a + b))),
@@ -87,9 +87,9 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
         let b = ref_list.iter()
           .map(|r| 
             get_datum(*r, &player.datums).int_value(&player.datums)
-              .map(|x| x as i16)
+              .map(|x| x as i32)
           )
-          .collect::<Result<Vec<i16>, ScriptError>>()?;
+          .collect::<Result<Vec<i32>, ScriptError>>()?;
         Ok(Datum::IntRect((a.0 - b[0], a.1 - b[1], a.2 - b[2], a.3 - b[3])))
       } else {
         Err(ScriptError::new(format!("Invalid list length for subtract_datums: {}", ref_list.len())))
@@ -110,13 +110,13 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
     (Datum::IntPoint(a), Datum::List(_, ref_list, _)) => {
       if ref_list.len() == 2 {
         let b = ref_list.iter()
-          .map(|r| get_datum(*r, &player.datums).int_value(&player.datums).map(|x| x as i16)).collect::<Result<Vec<i16>, ScriptError>>()?;
+          .map(|r| get_datum(*r, &player.datums).int_value(&player.datums).map(|x| x as i32)).collect::<Result<Vec<i32>, ScriptError>>()?;
         Ok(Datum::IntPoint((a.0 - b[0], a.1 - b[1])))
       } else {
         Err(ScriptError::new(format!("Invalid list length for subtract_datums: {}", ref_list.len())))
       }
     },
-    (Datum::Int(a), Datum::IntPoint(b)) => Ok(Datum::IntPoint((*a as i16 - b.0, *a as i16 - b.1))),
+    (Datum::Int(a), Datum::IntPoint(b)) => Ok(Datum::IntPoint((*a as i32 - b.0, *a as i32 - b.1))),
     (Datum::ColorRef(a), Datum::ColorRef(b)) => {
       match (a, b) {
         (ColorRef::PaletteIndex(a), ColorRef::PaletteIndex(b)) => Ok(Datum::ColorRef(ColorRef::PaletteIndex(a - b))),

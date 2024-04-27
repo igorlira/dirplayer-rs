@@ -78,7 +78,7 @@ impl TextMemberHandlers {
                     text_data.fixed_line_space,
                     text_data.top_spacing,
                 );
-                Ok(Datum::IntRect((0, 0, width as i16, height as i16)))
+                Ok(Datum::IntRect((0, 0, width as i32, height as i32)))
             }
             "height" => {
                 let font = player.font_manager.get_system_font().unwrap();
@@ -117,7 +117,7 @@ impl TextMemberHandlers {
                     font,
                     font_bitmap,
                     0,
-                    text_data.top_spacing,
+                    text_data.top_spacing as i32,
                     ink,
                     bitmap.get_bg_color_ref(),
                     &palettes,

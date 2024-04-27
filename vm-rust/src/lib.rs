@@ -84,17 +84,17 @@ pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
 
 #[wasm_bindgen]
 pub fn mouse_down(x: f64, y: f64) {
-  player_dispatch(PlayerVMCommand::MouseDown((x.to_i16().unwrap(), y.to_i16().unwrap())));
+  player_dispatch(PlayerVMCommand::MouseDown((x.to_i32().unwrap(), y.to_i32().unwrap())));
 }
 
 #[wasm_bindgen]
 pub fn mouse_up(x: f64, y: f64) {
-  player_dispatch(PlayerVMCommand::MouseUp((x.to_i16().unwrap(), y.to_i16().unwrap())));
+  player_dispatch(PlayerVMCommand::MouseUp((x.to_i32().unwrap(), y.to_i32().unwrap())));
 }
 
 #[wasm_bindgen]
 pub fn mouse_move(x: f64, y: f64) {
-  player_dispatch(PlayerVMCommand::MouseMove((x.to_i16().unwrap(), y.to_i16().unwrap())));
+  player_dispatch(PlayerVMCommand::MouseMove((x.to_i32().unwrap(), y.to_i32().unwrap())));
 }
 
 #[wasm_bindgen]

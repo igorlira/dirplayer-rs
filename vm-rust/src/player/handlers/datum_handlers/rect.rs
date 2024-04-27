@@ -4,7 +4,7 @@ pub struct RectDatumHandlers {}
 pub struct RectUtils {}
 
 impl RectUtils {
-  pub fn union(rect1: (i16, i16, i16, i16), rect2: (i16, i16, i16, i16)) -> (i16, i16, i16, i16) {
+  pub fn union(rect1: (i32, i32, i32, i32), rect2: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
     let left = rect1.0.min(rect2.0);
     let top = rect1.1.min(rect2.1);
     let right = rect1.2.max(rect2.2);
@@ -12,7 +12,7 @@ impl RectUtils {
     (left, top, right, bottom)
   }
 
-  pub fn intersect(rect1: (i16, i16, i16, i16), rect2: (i16, i16, i16, i16)) -> (i16, i16, i16, i16) {
+  pub fn intersect(rect1: (i32, i32, i32, i32), rect2: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
     let left = rect1.0.max(rect2.0);
     let top = rect1.1.max(rect2.1);
     let right = rect1.2.min(rect2.2);
@@ -56,8 +56,8 @@ impl RectDatumHandlers {
 
   pub fn set_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let pos = player.get_datum(args[0]).int_value(&player.datums)? as i16;
-      let value = player.get_datum(args[1]).int_value(&player.datums)? as i16;
+      let pos = player.get_datum(args[0]).int_value(&player.datums)?;
+      let value = player.get_datum(args[1]).int_value(&player.datums)?;
 
       let rect = player.get_datum_mut(datum);
       let rect = match rect {
@@ -109,25 +109,25 @@ impl RectDatumHandlers {
   pub fn set_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String, value_ref: DatumRef) -> Result<(), ScriptError> {
     match prop.as_str() {
       "left" => {
-        let value = player.get_datum(value_ref).int_value(&player.datums)? as i16;
+        let value = player.get_datum(value_ref).int_value(&player.datums)?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
         rect.0 = value;
         Ok(())
       },
       "top" => {
-        let value = player.get_datum(value_ref).int_value(&player.datums)? as i16;
+        let value = player.get_datum(value_ref).int_value(&player.datums)?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
         rect.1 = value;
         Ok(())
       },
       "right" => {
-        let value = player.get_datum(value_ref).int_value(&player.datums)? as i16;
+        let value = player.get_datum(value_ref).int_value(&player.datums)?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
         rect.1 = value;
         Ok(())
       },
       "bottom" => {
-        let value = player.get_datum(value_ref).int_value(&player.datums)? as i16;
+        let value = player.get_datum(value_ref).int_value(&player.datums)?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
         rect.1 = value;
         Ok(())

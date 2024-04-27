@@ -39,10 +39,10 @@ impl BitmapMemberHandlers {
                     .map(|x| x.palette_ref.clone())
                     .unwrap_or(PaletteRef::BuiltIn(BuiltInPalette::GrayScale)),
             )),
-            "regPoint" => Ok(Datum::IntPoint(bitmap_member.reg_point)),
+            "regPoint" => Ok(Datum::IntPoint((bitmap_member.reg_point.0 as i32, bitmap_member.reg_point.1 as i32))),
             "rect" => {
-                let width = bitmap.map(|x| x.width as i16).unwrap_or(0);
-                let height = bitmap.map(|x| x.height as i16).unwrap_or(0);
+                let width = bitmap.map(|x| x.width as i32).unwrap_or(0);
+                let height = bitmap.map(|x| x.height as i32).unwrap_or(0);
                 Ok(Datum::IntRect((0, 0, width, height)))
             }
             _ => Err(ScriptError::new(format!(

@@ -249,7 +249,7 @@ pub fn sprite_set_prop(
       sprite_id, 
       |player| value.int_value(&player.datums),
       |sprite, value| {
-        sprite.loc_h = value? as i16;
+        sprite.loc_h = value?;
         Ok(())
       }
     ),
@@ -257,7 +257,7 @@ pub fn sprite_set_prop(
       sprite_id, 
       |player| value.int_value(&player.datums),
       |sprite, value| {
-        sprite.loc_v = value? as i16;
+        sprite.loc_v = value?;
         Ok(())
       }
     ),
@@ -273,7 +273,7 @@ pub fn sprite_set_prop(
       sprite_id, 
       |player| value.int_value(&player.datums),
       |sprite, value| {
-        sprite.width = value? as i16;
+        sprite.width = value?;
         Ok(())
       }
     ),
@@ -281,7 +281,7 @@ pub fn sprite_set_prop(
       sprite_id, 
       |player| value.int_value(&player.datums),
       |sprite, value| {
-        sprite.height = value? as i16;
+        sprite.height = value?;
         Ok(())
       }
     ),
@@ -412,8 +412,8 @@ pub fn sprite_set_prop(
       |sprite, value| {
         let (mem_ref, width, height) = value?;
         if mem_ref.is_some() && width > 0 && height > 0 {
-          sprite.width = width as i16;
-          sprite.height = height as i16;
+          sprite.width = width as i32;
+          sprite.height = height as i32;
         }
         sprite.member = mem_ref;
         JsApi::on_sprite_member_changed(sprite_id);
@@ -500,8 +500,8 @@ pub fn sprite_set_prop(
       |sprite, reg_point| {
         match value {
           Datum::IntRect((left, top, right, bottom)) => {
-            sprite.loc_h = left + reg_point.0;
-            sprite.loc_v = top + reg_point.1;
+            sprite.loc_h = left + reg_point.0 as i32;
+            sprite.loc_v = top + reg_point.1 as i32;
             sprite.width = right - left;
             sprite.height = bottom - top;
             Ok(())
@@ -568,8 +568,8 @@ pub fn sprite_set_prop(
 pub fn concrete_sprite_hit_test(
   player: &DirPlayer,
   sprite: &Sprite,
-  x: i16,
-  y: i16,
+  x: i32,
+  y: i32,
 ) -> bool {
   let rect = get_concrete_sprite_rect(player, sprite);
   let left = rect.left;
@@ -579,7 +579,7 @@ pub fn concrete_sprite_hit_test(
   return x >= left && x < right && y >= top && y < bottom;
 }
 
-pub fn get_sprite_at(player: &DirPlayer, x: i16, y: i16, scripted: bool) -> Option<u32> {
+pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Option<u32> {
   for channel in player.movie.score.get_sorted_channels().iter().rev() {
     if concrete_sprite_hit_test(player, &channel.sprite, x, y) && (!scripted || channel.sprite.script_instance_list.len() > 0) {
       return Some(channel.sprite.number as u32);
@@ -611,10 +611,10 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
         let reg_y = if sprite.flip_v { src_bitmap.height as i16 - bitmap_member.reg_point.1 } else { bitmap_member.reg_point.1 };
 
         let dst_rect = IntRect::from(
-            sprite.loc_h as i16 - reg_x,
-            sprite.loc_v as i16 - reg_y, 
-            sprite.loc_h as i16 - reg_x + sprite.width as i16, 
-            sprite.loc_v as i16 - reg_y + sprite.height as i16
+            sprite.loc_h - reg_x as i32,
+            sprite.loc_v - reg_y as i32, 
+            sprite.loc_h - reg_x as i32 + sprite.width, 
+            sprite.loc_v - reg_y as i32 + sprite.height
         );
         dst_rect
     }
@@ -622,14 +622,14 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
         let reg_x = shape_member.shape_info.reg_point.0;
         let reg_y = shape_member.shape_info.reg_point.1;
         IntRect::from(
-          sprite.loc_h - reg_x, 
-          sprite.loc_v - reg_y,
-          sprite.width as i16 + sprite.loc_h - reg_x,
-          sprite.height as i16 + sprite.loc_v - reg_y,
+          sprite.loc_h - reg_x as i32, 
+          sprite.loc_v - reg_y as i32,
+          sprite.width + sprite.loc_h - reg_x as i32,
+          sprite.height + sprite.loc_v - reg_y as i32,
         )
     }
-    CastMemberType::Field(field_member) => IntRect::from_size(sprite.loc_h, sprite.loc_v, field_member.width as i16, 12), // TODO
-    CastMemberType::Text(text_member) => IntRect::from_size(sprite.loc_h, sprite.loc_v, text_member.width as i16, 12), // TODO
+    CastMemberType::Field(field_member) => IntRect::from_size(sprite.loc_h, sprite.loc_v, field_member.width as i32, 12), // TODO
+    CastMemberType::Text(text_member) => IntRect::from_size(sprite.loc_h, sprite.loc_v, text_member.width as i32, 12), // TODO
     _ => IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height)
   }
 }

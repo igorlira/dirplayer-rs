@@ -36,8 +36,8 @@ impl PointDatumHandlers {
 
   pub fn set_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let pos = player.get_datum(args[0]).int_value(&player.datums)? as i16;
-      let value = player.get_datum(args[1]).int_value(&player.datums)? as i16;
+      let pos = player.get_datum(args[0]).int_value(&player.datums)?;
+      let value = player.get_datum(args[1]).int_value(&player.datums)?;
 
       let point = player.get_datum_mut(datum);
       let point = match point {
@@ -73,13 +73,13 @@ impl PointDatumHandlers {
     let value = player.get_datum(value_ref);
     match prop.as_str() {
       "locH" => {
-        let value = value.int_value(&player.datums)? as i16;
+        let value = value.int_value(&player.datums)?;
         let point = player.get_datum_mut(datum).to_int_point_mut()?;
         point.0 = value;
         Ok(())
       },
       "locV" => {
-        let value = value.int_value(&player.datums)? as i16;
+        let value = value.int_value(&player.datums)?;
         let point = player.get_datum_mut(datum).to_int_point_mut()?;
         point.1 = value;
         Ok(())

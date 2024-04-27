@@ -52,10 +52,10 @@ pub fn eval_lingo_pair(pair: Pair<Rule>, player: &mut DirPlayer) -> Result<Datum
         player.alloc_datum(
           Datum::IntRect(
             (
-              inner.next().unwrap().as_str().parse::<i16>().unwrap(),
-              inner.next().unwrap().as_str().parse::<i16>().unwrap(),
-              inner.next().unwrap().as_str().parse::<i16>().unwrap(),
-              inner.next().unwrap().as_str().parse::<i16>().unwrap(),
+              inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+              inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+              inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+              inner.next().unwrap().as_str().parse::<i32>().unwrap(),
             )
           )
         )
@@ -106,8 +106,8 @@ pub fn eval_lingo_pair(pair: Pair<Rule>, player: &mut DirPlayer) -> Result<Datum
         player.alloc_datum(
           Datum::IntPoint(
             (
-              inner.next().unwrap().as_str().parse::<i16>().unwrap(),
-              inner.next().unwrap().as_str().parse::<i16>().unwrap()
+              inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+              inner.next().unwrap().as_str().parse::<i32>().unwrap()
             )
           )
         )

@@ -50,9 +50,9 @@ impl CastMemberRefHandlers {
           let result = if text_data.text.is_empty() || char_pos <= 0 {
             Datum::IntPoint((0, 0))
           } else if char_pos > text_data.text.len() as u16 {
-            Datum::IntPoint(((char_width * (text_data.text.len() as u16)) as i16, line_height as i16))
+            Datum::IntPoint(((char_width * (text_data.text.len() as u16)) as i32, line_height as i32))
           } else {
-            Datum::IntPoint(((char_width * (char_pos - 1)) as i16, line_height as i16))
+            Datum::IntPoint(((char_width * (char_pos - 1)) as i32, line_height as i32))
           };
           // TODO this is a stub!
           Ok(player.alloc_datum(result))
