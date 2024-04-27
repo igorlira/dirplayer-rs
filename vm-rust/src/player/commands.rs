@@ -319,9 +319,10 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     None
                 }
             });
-            let _is_inside = result.as_ref().map(|x| x.1).unwrap_or(true);
+            let is_inside = result.as_ref().map(|x| x.1).unwrap_or(true);
             let instance_ids = result.as_ref().map(|x| &x.0);
-            player_dispatch_targeted_event(&"mouseUp".to_string(), &vec![], instance_ids);
+            let event_name = if is_inside { "mouseUp" } else { "mouseUpOutSide" };
+            player_dispatch_targeted_event(&event_name.to_string(), &vec![], instance_ids);
             return Ok(VOID_DATUM_REF);
         }
         PlayerVMCommand::MouseMove((x, y)) => {
