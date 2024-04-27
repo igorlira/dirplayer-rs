@@ -475,7 +475,8 @@ pub fn sprite_set_prop(
             sprite.loc_v = y;
             Ok(())
           },
-          _ => Err(ScriptError::new("loc must be a point".to_string())),
+          Datum::Void => Ok(()),
+          _ => Err(ScriptError::new(format!("loc must be a point (received {})", value.type_str()))),
         }
       }
     ),
