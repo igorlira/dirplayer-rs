@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{compare::{datum_equals, datum_less_than}, get_datum, reserve_player_mut, reserve_player_ref, DatumRef, DatumRefMap, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{compare::{datum_equals, datum_less_than}, get_datum, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DatumRefMap, ScriptError, VOID_DATUM_REF}};
 
 pub struct ListDatumHandlers {}
 pub struct ListDatumUtils {}
@@ -224,16 +222,6 @@ impl ListDatumHandlers {
   }
 
   pub fn duplicate(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| {
-      let list_datum = player.get_datum(datum);
-      match list_datum {
-        Datum::List(_, list, _) => {
-          let new_list = list.clone();
-          // TODO should is_sorted be copied?
-          Ok(player.alloc_datum(Datum::List(DatumType::List, new_list, false)))
-        },
-        _ => Err(ScriptError::new("Expected list datum".to_string()))
-      }
-    })
+    Ok(player_duplicate_datum(datum))
   }
 }

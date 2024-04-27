@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{bitmap::{bitmap::{resolve_color_ref, BuiltInPalette, PaletteRef}, manager::BitmapRef}, geometry::IntRect, reserve_player_mut, DatumRef, DirPlayer, ScriptError}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{bitmap::{bitmap::{resolve_color_ref, BuiltInPalette, PaletteRef}, manager::BitmapRef}, geometry::IntRect, player_duplicate_datum, reserve_player_mut, DatumRef, DirPlayer, ScriptError}};
 
 use super::prop_list::PropListUtils;
 
@@ -57,17 +57,7 @@ impl BitmapDatumHandlers {
   }
 
   pub fn duplicate(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| {
-      let bitmap = player.get_datum(datum);
-      let bitmap_ref = match bitmap {
-        Datum::BitmapRef(bitmap) => Ok(bitmap),
-        _ => Err(ScriptError::new("Cannot duplicate non-bitmap".to_string())),
-      }?;
-      let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
-      let new_bitmap = bitmap.clone();
-      let new_bitmap_ref = player.bitmap_manager.add_bitmap(new_bitmap);
-      Ok(player.alloc_datum(Datum::BitmapRef(new_bitmap_ref)))
-    })
+    Ok(player_duplicate_datum(datum))
   }
 
   pub fn draw(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

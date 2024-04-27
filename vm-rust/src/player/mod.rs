@@ -38,7 +38,7 @@ use net_manager::NetManager;
 use lazy_static::lazy_static;
 use nohash_hasher::IntMap;
 
-use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, handlers::datum_handlers::player_call_datum_handler, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
+use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
 
 use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef, ScriptInstance, ScriptInstanceId}, sprite::ColorRef, timeout::TimeoutManager};
 
@@ -780,4 +780,48 @@ fn get_ticks() -> u32 {
   // 60 ticks per second
   let millis = time.timestamp_millis();
   (millis as f32 / (1000.0 / 60.0)) as u32
+}
+
+fn player_duplicate_datum(datum: DatumRef) -> DatumRef {
+  let datum_type = reserve_player_ref(|player| {
+    player.get_datum(datum).type_enum()
+  });
+  let new_datum = match datum_type {
+    DatumType::PropList => {
+      let props = reserve_player_mut(|player| {
+        player.get_datum(datum).to_map().unwrap().clone()
+      });
+      let mut new_props = Vec::new();
+        for (key, value) in props {
+          let new_key = player_duplicate_datum(key);
+          let new_value = player_duplicate_datum(value);
+          new_props.push((new_key, new_value));
+        }
+        Datum::PropList(new_props)
+    },
+    DatumType::List => {
+      let (list_type, list, sorted) = reserve_player_ref(|player| {
+        let (a, b, c) = player.get_datum(datum).to_list_tuple().unwrap();
+        (a.clone(), b.clone(), c)
+      });
+      let mut new_list = Vec::new();
+      for item in list {
+        let new_item = player_duplicate_datum(item);
+        new_list.push(new_item);
+      }
+      Datum::List(list_type.clone(), new_list, sorted)
+    },
+    DatumType::BitmapRef => reserve_player_mut(|player| {
+      let bitmap_ref = player.get_datum(datum).to_bitmap_ref().unwrap();
+      let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
+      let new_bitmap = bitmap.clone();
+      let new_bitmap_ref = player.bitmap_manager.add_bitmap(new_bitmap);
+      Datum::BitmapRef(new_bitmap_ref)
+    }),
+    _ => reserve_player_ref(|player| {
+      player.get_datum(datum).clone()
+    }),
+  };
+  let new_datum_ref = player_alloc_datum(new_datum);
+  new_datum_ref
 }

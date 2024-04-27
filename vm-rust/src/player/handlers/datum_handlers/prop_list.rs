@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{datum_bool, Datum, PropListPair}, player::{compare::datum_equals, datum_formatting::{format_concrete_datum, format_datum}, get_datum, handlers::types::TypeUtils, reserve_player_mut, DatumRef, DatumRefMap, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum, PropListPair}, player::{compare::datum_equals, datum_formatting::{format_concrete_datum, format_datum}, get_datum, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, DatumRef, DatumRefMap, DirPlayer, ScriptError, VOID_DATUM_REF}};
 
 pub struct PropListDatumHandlers {}
 
@@ -281,15 +281,7 @@ impl PropListDatumHandlers {
   }
 
   fn duplicate(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| {
-      let prop_list = player.get_datum(datum);
-      let prop_list = match prop_list {
-        Datum::PropList(list) => list,
-        _ => return Err(ScriptError::new("Cannot set prop list at non-prop list".to_string())),
-      };
-      let prop_list = prop_list.clone();
-      Ok(player.alloc_datum(Datum::PropList(prop_list)))
-    })
+    Ok(player_duplicate_datum(datum))
   }
 
   pub fn get_a_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
