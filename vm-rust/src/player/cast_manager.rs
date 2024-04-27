@@ -200,6 +200,9 @@ impl CastManager {
   }
 
   pub fn find_mut_member_by_ref(&mut self, member_ref: &CastMemberRef) -> Option<&mut CastMember> {
+    if member_ref.cast_lib <= 0 || member_ref.cast_lib > self.casts.len() as i32 {
+      return None;
+    }
     self.get_cast_mut(member_ref.cast_lib as u32).find_mut_member_by_number(member_ref.cast_member as u32)
   }
 
@@ -230,7 +233,7 @@ impl CastManager {
   }
 
   pub fn remove_member_with_ref(&mut self, member_ref: &CastMemberRef) -> Result<(), ScriptError> {
-    if member_ref.cast_lib == 0 { 
+    if member_ref.cast_lib <= 0 || member_ref.cast_lib > self.casts.len() as i32 { 
       return Err(ScriptError::new("Cannot remove member with invalid cast lib".to_string()));
     }
     let cast = self.get_cast_mut(member_ref.cast_lib as u32);
