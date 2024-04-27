@@ -442,6 +442,13 @@ impl Datum {
       _ => Err(ScriptError::new("Cannot convert datum to script instance id".to_string())),
     }
   }
+
+  pub fn to_member_ref(&self) -> Result<CastMemberRef, ScriptError> {
+    match self {
+      Datum::CastMember(member_ref) => Ok(member_ref.clone()),
+      _ => Err(ScriptError::new("Cannot convert datum to cast member ref".to_string())),
+    }
+  }
 }
 
 pub fn datum_bool(val: bool) -> Datum {

@@ -14,6 +14,7 @@ pub mod void;
 pub mod point;
 pub mod int;
 pub mod color;
+pub mod cast_member;
 
 use crate::{director::lingo::datum::DatumType, player::{format_datum, reserve_player_ref, xtra::manager::{call_xtra_instance_async_handler, call_xtra_instance_handler, has_xtra_instance_async_handler}, DatumRef, ScriptError, ScriptErrorCode}};
 
