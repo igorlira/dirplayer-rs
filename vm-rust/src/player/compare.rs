@@ -1,6 +1,6 @@
 use crate::{console_warn, director::lingo::datum::Datum};
 
-use super::{get_datum, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, DatumRef, DatumRefMap, ScriptError};
+use super::{bitmap::bitmap::PaletteRef, get_datum, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, DatumRef, DatumRefMap, ScriptError};
 
 pub fn datum_equals(left: &Datum, right: &Datum, datum: &DatumRefMap) -> Result<bool, ScriptError> {
   match (left, right) {
@@ -76,6 +76,18 @@ pub fn datum_equals(left: &Datum, right: &Datum, datum: &DatumRefMap) -> Result<
     ),
     (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left == right),
     (Datum::Null, Datum::Int(_)) => Ok(false),
+    (Datum::PropList(_), Datum::Void) => Ok(false),
+    (Datum::Symbol(_), Datum::Int(_)) => Ok(false),
+    (Datum::PaletteRef(palette_ref), Datum::Symbol(symbol)) => match palette_ref {
+      PaletteRef::BuiltIn(palette) => Ok(palette.symbol_string().eq_ignore_ascii_case(&symbol)),
+      _ => Ok(false)
+    }
+    (Datum::String(_), Datum::Void) => Ok(false),
+    (Datum::Void, Datum::Symbol(_)) => Ok(false),
+    (Datum::ColorRef(color_ref), Datum::String(string)) => {
+      console_warn!("Datum equals not supported for ColorRef and String: {:?} and {}", color_ref, string);
+      Ok(false)
+    }
     _ => {
       console_warn!("datum_equals not supported for types: {} and {}", left.type_str(), right.type_str());
       Ok(false)
@@ -103,6 +115,7 @@ pub fn datum_greater_than(left: &Datum, right: &Datum) -> Result<bool, ScriptErr
     (Datum::Float(left), Datum::Int(right)) => Ok(*left > (*right as f32)),
     (Datum::Float(left), Datum::Float(right)) => Ok(*left > *right),
     (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left.0 > right.0 && left.1 > right.1),
+    (Datum::Void, Datum::Int(_)) => Ok(false),
     _ => {
       console_warn!("datum_greater_than not supported for types: {} and {}", left.type_str(), right.type_str());
       Ok(false)
