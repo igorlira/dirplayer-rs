@@ -574,4 +574,12 @@ impl TypeHandlers {
       Ok(player.alloc_datum(Datum::IntRect(RectUtils::intersect(left, right))))
     })
   }
+
+  pub fn get_prop_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    let datum_ref = args.get(0).unwrap();
+    let prop_key_ref = args.get(1).unwrap();
+    reserve_player_mut(|player| {
+      TypeUtils::get_sub_prop(*datum_ref, *prop_key_ref, player)
+    })
+  }
 }
