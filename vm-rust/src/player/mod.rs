@@ -85,6 +85,7 @@ pub struct DirPlayer {
   pub text_selection_start: u16,
   pub text_selection_end: u16,
   pub mouse_loc: (i16, i16),
+  pub mouse_down_sprite: i16,
   pub subscribed_member_refs: Vec<CastMemberRef>, // TODO move to debug module
   pub is_subscribed_to_channel_names: bool, // TODO move to debug module
   pub font_manager: FontManager,
@@ -143,6 +144,7 @@ impl DirPlayer {
       bg_color: ColorRef::Rgb(0, 0, 0),
       keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
       mouse_loc: (0, 0),
+      mouse_down_sprite: 0,
       subscribed_member_refs: vec![],
       is_subscribed_to_channel_names: false,
       font_manager: FontManager::new(),

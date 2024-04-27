@@ -565,17 +565,24 @@ pub fn sprite_set_prop(
   result
 }
 
+pub fn concrete_sprite_hit_test(
+  player: &DirPlayer,
+  sprite: &Sprite,
+  x: i16,
+  y: i16,
+) -> bool {
+  let rect = get_concrete_sprite_rect(player, sprite);
+  let left = rect.left;
+  let top = rect.top;
+  let right = rect.right;
+  let bottom = rect.bottom;
+  return x >= left && x < right && y >= top && y < bottom;
+}
+
 pub fn get_sprite_at(player: &DirPlayer, x: i16, y: i16, scripted: bool) -> Option<u32> {
   for channel in player.movie.score.get_sorted_channels().iter().rev() {
-    let sprite = &channel.sprite;
-    let rect = get_concrete_sprite_rect(player, sprite);
-    let left = rect.left;
-    let top = rect.top;
-    let right = rect.right;
-    let bottom = rect.bottom;
-
-    if x >= left && x < right && y >= top && y < bottom && (!scripted || sprite.script_instance_list.len() > 0) {
-      return Some(sprite.number as u32);
+    if concrete_sprite_hit_test(player, &channel.sprite, x, y) && (!scripted || channel.sprite.script_instance_list.len() > 0) {
+      return Some(channel.sprite.number as u32);
     }
   }
 

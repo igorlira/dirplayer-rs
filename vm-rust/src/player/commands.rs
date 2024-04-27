@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    cast_lib::CastMemberRef, cast_member::CastMemberType, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::get_sprite_at, script::ScriptInstanceId, DatumRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX, VOID_DATUM_REF
+    cast_lib::CastMemberRef, cast_member::CastMemberType, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, DatumRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX, VOID_DATUM_REF
 };
 
 #[allow(dead_code)]
@@ -287,6 +287,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                         }
                     }
 
+                    player.mouse_down_sprite = sprite_number as i16;
                     sprite.map(|x| x.script_instance_list.clone())
                 } else {
                     None
@@ -303,17 +304,24 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if !player_is_playing().await {
                 return Ok(VOID_DATUM_REF);
             }
-            let instance_ids = reserve_player_mut(|player| {
+            let result = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
-                let sprite = get_sprite_at(player, x, y, true);
+                let sprite = if player.mouse_down_sprite > 0 {
+                    player.movie.score.get_sprite(player.mouse_down_sprite)
+                } else {
+                    None
+                };
+                player.mouse_down_sprite = -1;
                 if let Some(sprite) = sprite {
-                    let sprite = &player.movie.score.get_sprite(sprite as i16);
-                    sprite.map(|x| x.script_instance_list.clone())
+                    let is_inside = concrete_sprite_hit_test(player, sprite, x, y);
+                    Some((sprite.script_instance_list.clone(), is_inside))
                 } else {
                     None
                 }
             });
-            player_dispatch_targeted_event(&"mouseUp".to_string(), &vec![], instance_ids.as_ref());
+            let _is_inside = result.as_ref().map(|x| x.1).unwrap_or(true);
+            let instance_ids = result.as_ref().map(|x| &x.0);
+            player_dispatch_targeted_event(&"mouseUp".to_string(), &vec![], instance_ids);
             return Ok(VOID_DATUM_REF);
         }
         PlayerVMCommand::MouseMove((x, y)) => {
