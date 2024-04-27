@@ -140,6 +140,25 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
         );
         bitmap.set_pixel(sprite.loc_h, sprite.loc_v, (0, 255, 0), &palettes);
     }
+
+    // Draw pick rect
+    let is_picking_sprite = player.keyboard_manager.is_alt_down() && (player.keyboard_manager.is_control_down() || player.keyboard_manager.is_command_down());
+    if is_picking_sprite {
+        let hovered_sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
+        if let Some(hovered_sprite) = hovered_sprite {
+            let sprite = player.movie.score.get_sprite(hovered_sprite as i16).unwrap();
+            let sprite_rect = get_concrete_sprite_rect(player, sprite);
+            bitmap.stroke_rect(
+                sprite_rect.left, 
+                sprite_rect.top, 
+                sprite_rect.right, 
+                sprite_rect.bottom, 
+                (0, 255, 0), 
+                &palettes, 
+                1.0
+            );
+        }
+    }
     draw_cursor(player, bitmap, &palettes);
 }
 
