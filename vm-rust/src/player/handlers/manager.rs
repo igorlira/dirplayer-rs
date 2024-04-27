@@ -46,7 +46,7 @@ impl BuiltInHandlerManager {
           line.push_str(" ");
         }
         let arg = player.get_datum(*arg);
-        line.push_str(&arg.string_value(&player.datums)?);
+        line.push_str(&format_concrete_datum(&arg, player));
         i += 1;
       }
       JsApi::dispatch_debug_message(line.as_str());
