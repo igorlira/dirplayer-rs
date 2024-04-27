@@ -32,6 +32,7 @@ pub mod keyboard_events;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_std::{channel::{self, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
+use chrono::Local;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use lazy_static::lazy_static;
@@ -91,6 +92,7 @@ pub struct DirPlayer {
   pub float_precision: u8,
   pub last_handler_result: DatumRef,
   pub hovered_sprite: Option<i16>,
+  pub timer_tick_start: u32,
 }
 
 pub type DatumRef = u32;
@@ -150,6 +152,7 @@ impl DirPlayer {
       float_precision: 4,
       last_handler_result: VOID_DATUM_REF,
       hovered_sprite: None,
+      timer_tick_start: get_ticks(),
     }
   }
 
@@ -321,6 +324,7 @@ impl DirPlayer {
     let prop_name = get_anim_prop_name(prop_id);
     match prop_name.as_str() {
       "colorDepth" => Ok(Datum::Int(32)),
+      "timer" => Ok(Datum::Int(get_ticks() as i32 - self.timer_tick_start as i32)),
       _ => Err(ScriptError::new(format!("Unknown anim prop {}", prop_name)))
     }
   }
@@ -767,4 +771,11 @@ async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: Scop
       }
     }
   }
+}
+
+fn get_ticks() -> u32 {
+  let time = Local::now();
+  // 60 ticks per second
+  let millis = time.timestamp_millis();
+  (millis as f32 / (1000.0 / 60.0)) as u32
 }
