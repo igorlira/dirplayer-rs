@@ -40,7 +40,7 @@ use nohash_hasher::IntMap;
 
 use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
 
-use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef, ScriptInstance, ScriptInstanceId}, sprite::ColorRef, timeout::TimeoutManager};
+use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef, ScriptInstance, ScriptInstanceId}, sprite::{ColorRef, CursorRef}, timeout::TimeoutManager};
 
 pub enum HandlerExecutionResult {
   Advance,
@@ -76,7 +76,7 @@ pub struct DirPlayer {
   pub current_breakpoint: Option<BreakpointContext>,
   pub stage_size: (u32, u32),
   pub bitmap_manager: bitmap::manager::BitmapManager,
-  pub cursor_num: u32,
+  pub cursor: CursorRef,
   pub start_time: chrono::DateTime<chrono::Local>,
   pub timeout_manager: TimeoutManager,
   pub title: String,
@@ -137,7 +137,7 @@ impl DirPlayer {
       current_breakpoint: None,
       stage_size: (100, 100),
       bitmap_manager: bitmap::manager::BitmapManager::new(),
-      cursor_num: 0,
+      cursor: CursorRef::System(0),
       start_time: chrono::Local::now(),
       timeout_manager: TimeoutManager::new(),
       title: "".to_string(),

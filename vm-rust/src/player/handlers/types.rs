@@ -1,4 +1,6 @@
-use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::{format_concrete_datum, format_datum}, eval::eval_lingo, geometry::IntRect, get_datum, reserve_player_mut, reserve_player_ref, sprite::ColorRef, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DatumRefMap, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use itertools::Itertools;
+
+use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::{format_concrete_datum, format_datum}, eval::eval_lingo, geometry::IntRect, get_datum, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DatumRefMap, DirPlayer, ScriptError, VOID_DATUM_REF}};
 
 use super::datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, prop_list::{PropListDatumHandlers, PropListUtils}, rect::RectUtils};
 
@@ -303,7 +305,12 @@ impl TypeHandlers {
       if args.len() == 1 {
         let arg = player.get_datum(args[0]);
         if arg.is_int() {
-          player.cursor_num = arg.int_value(&player.datums)? as u32;
+          player.cursor = CursorRef::System(arg.int_value(&player.datums)?);
+          Ok(VOID_DATUM_REF)
+        } else if arg.is_list() {
+          let list = arg.to_list()?;
+          let members = list.clone().iter().map(|x| *x as i32).collect_vec();
+          player.cursor = CursorRef::Member(members);
           Ok(VOID_DATUM_REF)
         } else {
           Err(ScriptError::new("Invalid argument for cursor".to_string()))
