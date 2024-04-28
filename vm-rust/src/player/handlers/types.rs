@@ -582,4 +582,24 @@ impl TypeHandlers {
       TypeUtils::get_sub_prop(*datum_ref, *prop_key_ref, player)
     })
   }
+
+  pub fn pi(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      Ok(player.alloc_datum(Datum::Float(std::f32::consts::PI)))
+    })
+  }
+
+  pub fn sin(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let value = player.get_datum(args[0]).to_float()?;
+      Ok(player.alloc_datum(Datum::Float(value.sin())))
+    })
+  }
+
+  pub fn cos(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let value = player.get_datum(args[0]).to_float()?;
+      Ok(player.alloc_datum(Datum::Float(value.cos())))
+    })
+  }
 }

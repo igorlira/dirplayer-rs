@@ -227,6 +227,9 @@ impl BuiltInHandlerManager {
       "rollover" => MovieHandlers::rollover(args),
       "getPropAt" => TypeHandlers::get_prop_at(args),
       "puppetSound" => Ok(VOID_DATUM_REF), // TODO
+      "pi" => TypeHandlers::pi(args),
+      "sin" => TypeHandlers::sin(args),
+      "cos" => TypeHandlers::cos(args),
       _ => {
         let formatted_args = reserve_player_ref(|player| {
           let mut formatted_args = String::new();
