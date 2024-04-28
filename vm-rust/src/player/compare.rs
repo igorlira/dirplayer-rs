@@ -155,8 +155,10 @@ pub fn datum_is_zero(datum: &Datum, datums: &DatumRefMap) -> Result<bool, Script
     Datum::Float(value) => *value == 0.0,
     Datum::Void => true,
     Datum::ScriptInstanceRef(_) => false,
+    Datum::Null => true,
+    Datum::IntPoint(_) => false,
     _ => {
-      console_warn!("datum_less_than not supported for type: {}", datum.type_str());
+      console_warn!("datum_is_zero not supported for type: {}", datum.type_str());
       datum.int_value(&datums)? == 0
     }
   })
