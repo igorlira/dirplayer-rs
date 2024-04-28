@@ -388,6 +388,9 @@ pub fn sprite_set_prop(
         } else if value.is_string() {
           let member = player.movie.cast_manager.find_member_ref_by_name(&value.string_value(&player.datums)?);
           member
+        } else if value.is_number() {
+          let member = player.movie.cast_manager.find_member_ref_by_number(value.int_value(&player.datums)? as u32);
+          member
         } else {
           None
         };
@@ -590,11 +593,12 @@ pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Opti
 }
 
 pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect {
-  let member_ref = sprite.member.as_ref().unwrap();
-  let member = player
-    .movie
-    .cast_manager
-    .find_member_by_ref(member_ref);
+  let member = sprite.member.as_ref().and_then(|member_ref| 
+    player
+      .movie
+      .cast_manager
+      .find_member_by_ref(member_ref)
+  );
   if member.is_none() {
     return IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height);
   }
