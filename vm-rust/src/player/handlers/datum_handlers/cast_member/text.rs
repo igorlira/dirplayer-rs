@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType},
     player::{
-        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, font::measure_text, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, DatumRef, DirPlayer, ScriptError
+        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, font::{get_text_index_at_pos, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, DatumRef, DirPlayer, ScriptError
     },
 };
 
@@ -35,6 +35,17 @@ impl TextMemberHandlers {
               };
               let resolved_str = StringChunkUtils::resolve_chunk_expr_string(&text.text, &chunk_expr)?;
               Ok(player.alloc_datum(Datum::StringChunk(StringChunkSource::Member(member_ref), chunk_expr, resolved_str)))
+            }
+            "locToCharPos" => {
+                let (x, y) = player.get_datum(args[0]).to_int_point()?;
+                let params = DrawTextParams {
+                    font: player.font_manager.get_system_font().unwrap(),
+                    line_height: None,
+                    line_spacing: text.fixed_line_space,
+                    top_spacing: text.top_spacing,
+                };
+                let index = get_text_index_at_pos(&text.text, &params, x, y);
+                Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
             }
             _ => Err(ScriptError::new(format!("No handler {handler_name} for text member type")))
           }

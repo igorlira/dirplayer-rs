@@ -34,6 +34,13 @@ pub struct BitmapFont {
     pub first_char_num: u8,
 }
 
+pub struct DrawTextParams<'a> {
+    pub font: &'a BitmapFont,
+    pub line_height: Option<u16>,
+    pub line_spacing: u16,
+    pub top_spacing: i16,
+}
+
 impl FontManager {
     pub fn new() -> FontManager {
         return FontManager {
@@ -198,4 +205,61 @@ pub fn measure_text(text: &str, font: &BitmapFont, line_height: Option<u16>, lin
         width = line_width;
     }
     return (width, height);
+}
+
+pub fn _get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize) -> (i16, i16) {
+    let mut x = 0;
+    let mut y = params.top_spacing;
+    let mut line_width = 0;
+    let mut line_index = 0;
+    for c in text.chars() {
+        if c == '\r' || c == '\n' {
+            if line_index == char_index {
+                return (x, y);
+            }
+            if line_width > x {
+                x = line_width;
+            }
+            line_width = 0;
+            y += params.line_height.unwrap_or(params.font.char_height) as i16 + params.line_spacing as i16 + 1;
+        } else {
+            if line_index == char_index {
+                return (x, y);
+            }
+            line_width += params.font.char_width as i16 + 1;
+        }
+        line_index += 1;
+    }
+    if line_width > x {
+        x = line_width;
+    }
+    return (x, y);
+}
+
+pub fn get_text_index_at_pos(text: &str, params: &DrawTextParams, x: i32, y: i32) -> usize {
+    let mut index = 0;
+    let mut line_width = 0;
+    let mut line_y = params.top_spacing as i32;
+    for c in text.chars() {
+        if c == '\r' || c == '\n' {
+            if y >= line_y && y < line_y + params.line_height.unwrap_or(params.font.char_height) as i32 {
+                if x < line_width {
+                    return index;
+                }
+            }
+            if line_width > x {
+                line_width = 0;
+            }
+            line_y += params.line_height.unwrap_or(params.font.char_height) as i32 + params.line_spacing as i32 + 1;
+        } else {
+            if y >= line_y && y < line_y + params.line_height.unwrap_or(params.font.char_height) as i32 {
+                if x < line_width {
+                    return index;
+                }
+            }
+            line_width += params.font.char_width as i32 + 1;
+        }
+        index += 1;
+    }
+    return index;
 }
