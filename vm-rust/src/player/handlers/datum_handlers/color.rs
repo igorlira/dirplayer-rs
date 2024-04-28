@@ -1,13 +1,21 @@
-use crate::{director::lingo::datum::Datum, player::{sprite::ColorRef, DatumRef, DirPlayer, ScriptError}};
+use crate::{director::lingo::datum::Datum, player::{bitmap::bitmap::{get_system_default_palette, resolve_color_ref, PaletteRef}, reserve_player_mut, sprite::ColorRef, DatumRef, DirPlayer, ScriptError}};
 
 pub struct ColorDatumHandlers {}
 
 impl ColorDatumHandlers {
-  // pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-  //   match handler_name.as_str() {
-  //     _ => Err(ScriptError::new(format!("No handler {handler_name} for color")))
-  //   }
-  // }
+  pub fn call(datum: DatumRef, handler_name: &String, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    match handler_name.as_str() {
+      "hexString" => {
+        reserve_player_mut(|player| {
+          let color_ref = player.get_datum(datum).to_color_ref()?;
+          let (r, g, b) = resolve_color_ref(&player.movie.cast_manager.palettes(), color_ref, &PaletteRef::BuiltIn(get_system_default_palette()));
+          let hex_string = format!("#{:02x}{:02x}{:02x}", r, g, b);
+          Ok(player.alloc_datum(Datum::String(hex_string)))
+        })
+      },
+      _ => Err(ScriptError::new(format!("No handler {handler_name} for color")))
+    }
+  }
 
   pub fn get_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String) -> Result<DatumRef, ScriptError> {
     let color_ref = player.get_datum(datum).to_color_ref()?;

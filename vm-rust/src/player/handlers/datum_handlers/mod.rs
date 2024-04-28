@@ -72,6 +72,7 @@ pub async fn player_call_datum_handler(
         call_xtra_instance_handler(&xtra_name, instance_id, handler_name, args)
       }
     }
+    DatumType::ColorRef => color::ColorDatumHandlers::call(obj_ref, handler_name, args),
     _ => reserve_player_ref(|player| {
       let formatted_datum = format_datum(obj_ref, &player);
       Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("No handler {handler_name} for datum {}", formatted_datum)))
