@@ -106,6 +106,20 @@ impl ScriptInstanceDatumHandlers {
     }
   }
 
+  fn get_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let key = player.get_datum(args[0]).string_value(&player.datums)?;
+      match key.as_str() {
+        "ancestor" => {
+          let datum = player.get_datum(datum);
+          let script_instance = player.script_instances.get(&datum.to_script_instance_id()?).unwrap();
+          Ok(player.alloc_datum(if let Some(ancestor) = script_instance.ancestor { Datum::ScriptInstanceRef(ancestor) } else { Datum::Int(0) }))
+        }
+        _ => Self::get_a_prop(datum, args)
+      }
+    })
+  }
+
   fn set_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let key = player.get_datum(args[0]).string_value(&player.datums)?;
@@ -211,6 +225,7 @@ impl ScriptInstanceDatumHandlers {
       "getProp" => Self::get_prop(datum, args),
       "getPropRef" => Self::get_prop(datum, args),
       "getaProp" => Self::get_a_prop(datum, args),
+      "getAt" => Self::get_at(datum, args),
       "count" => Self::count(datum, args),
       _ => Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("No handler {handler_name} for script instance datum")))
     }
