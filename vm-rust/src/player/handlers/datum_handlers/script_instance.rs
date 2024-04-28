@@ -190,6 +190,18 @@ impl ScriptInstanceDatumHandlers {
     })
   }
 
+  pub fn get_a_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
+      let instance_id = match player.get_datum(datum) {
+        Datum::ScriptInstanceRef(instance_id) => *instance_id,
+        _ => return Err(ScriptError::new("Cannot get property on non-script instance".to_string())),
+      };
+      let prop_value = script_get_prop(player, instance_id, &prop_name)?;
+      Ok(prop_value)
+    })
+  }
+
   pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "setAt" => Self::set_at(datum, args),
@@ -198,6 +210,7 @@ impl ScriptInstanceDatumHandlers {
       "setProp" => Self::set_prop(datum, args),
       "getProp" => Self::get_prop(datum, args),
       "getPropRef" => Self::get_prop(datum, args),
+      "getaProp" => Self::get_a_prop(datum, args),
       "count" => Self::count(datum, args),
       _ => Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("No handler {handler_name} for script instance datum")))
     }
