@@ -45,6 +45,22 @@ impl ArithmeticsBytecodeHandler {
     })
   }
 
+  fn safe_mod_int(left: i32, right: i32) -> i32 {
+    if right == 0 {
+      0
+    } else {
+      left % right
+    }
+  }
+
+  fn safe_mod_float(left: f32, right: f32) -> f32 {
+    if right == 0.0 {
+      0.0
+    } else {
+      left % right
+    }
+  }
+
   pub fn mod_handler(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
@@ -57,17 +73,17 @@ impl ArithmeticsBytecodeHandler {
       let left = player.get_datum(left);
 
       let result = match (left, right) {
-        (Datum::Int(left), Datum::Int(right)) => Datum::Int(left % right),
-        (Datum::Int(left), Datum::Float(right)) => Datum::Float((*left as f32) % right),
-        (Datum::Float(left), Datum::Int(right)) => Datum::Float(*left % (*right as f32)),
-        (Datum::Float(left), Datum::Float(right)) => Datum::Float(left % right),
+        (Datum::Int(left), Datum::Int(right)) => Datum::Int(Self::safe_mod_int(*left, *right)),
+        (Datum::Int(left), Datum::Float(right)) => Datum::Float(Self::safe_mod_float(*left as f32, *right)),
+        (Datum::Float(left), Datum::Int(right)) => Datum::Float(Self::safe_mod_float(*left, *right as f32)),
+        (Datum::Float(left), Datum::Float(right)) => Datum::Float(Self::safe_mod_float(*left, *right)),
         (Datum::List(_, list, _), Datum::Float(right)) => {
           let mut new_list = vec![];
           for item in list {
             let item_datum = player.get_datum(*item);
             let result_datum = match item_datum {
-              Datum::Int(n) => Datum::Int(((*n as f32) % right) as i32),
-              Datum::Float(n) => Datum::Int((n % right) as i32),
+              Datum::Int(n) => Datum::Int(Self::safe_mod_float(*n as f32, *right) as i32),
+              Datum::Float(n) => Datum::Int(Self::safe_mod_float(*n, *right) as i32),
               _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(*item, player)))),
             };
             new_list.push(result_datum);
@@ -83,8 +99,8 @@ impl ArithmeticsBytecodeHandler {
           for item in list {
             let item_datum = player.get_datum(*item);
             let result_datum = match item_datum {
-              Datum::Int(n) => Datum::Int((*n % right) as i32),
-              Datum::Float(n) => Datum::Int((*n % *right as f32) as i32),
+              Datum::Int(n) => Datum::Int(Self::safe_mod_int(*n, *right)),
+              Datum::Float(n) => Datum::Int(Self::safe_mod_float(*n, *right as f32) as i32),
               _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(*item, player)))),
             };
             new_list.push(result_datum);
