@@ -44,7 +44,7 @@ fn blend_color_alpha(dst: (u8, u8, u8), src: (u8, u8, u8), alpha: f32) -> (u8, u
 }
 
 pub fn should_matte_sprite(ink: u32) -> bool {
-    ink == 36 || ink == 33 || ink == 41 || ink == 8
+    ink == 36 || ink == 33 || ink == 41 || ink == 8 || ink == 7
 }
 
 fn blend_pixel(
@@ -59,8 +59,18 @@ fn blend_pixel(
             // Copy
             blend_color_alpha(dst, src, alpha)
         }
+        7 => {
+            // Not Ghost
+            // TODO
+            blend_color_alpha(dst, src, alpha)
+        }
         8 => {
             // Matte
+            // TODO
+            blend_color_alpha(dst, src, alpha)
+        }
+        9 => {
+            // Mask
             // TODO
             blend_color_alpha(dst, src, alpha)
         }
