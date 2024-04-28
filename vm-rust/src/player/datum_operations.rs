@@ -128,6 +128,7 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
       // returns junk data
       Ok(Datum::Int(0xFFFF))
     },
+    (left, Datum::Void) => Ok(left.clone()),
     _ => Err(ScriptError::new(format!("Invalid operands for subtract_datums: {}, {}", left.type_str(), right.type_str()))),
   }
 }
