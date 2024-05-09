@@ -42,19 +42,7 @@ pub fn get_basename_no_extension(path: &str) -> String {
 pub fn get_base_url(url: &Url) -> Url {
     let mut result = url.clone();
     result.set_fragment(None);
-
-    let path_segments = url
-        .path_segments()
-        .map(|f| f.collect_vec())
-        .unwrap_or(Vec::new());
-    let has_path_segments = !path_segments.is_empty();
-    if !has_path_segments || path_segments.last().unwrap().is_empty() {
-        return result;
-    } else {
-        let path_no_filename = path_segments[0..path_segments.len() - 1].join(",");
-        result.set_path(format!("{}/", path_no_filename).as_str());
-        return result;
-    }
+    return result.join("./").unwrap();
 }
 
 pub const PATH_SEPARATOR: &str = "/";
