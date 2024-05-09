@@ -84,6 +84,9 @@ impl Score {
 
   #[allow(dead_code)]
   pub fn get_sprite(&self, number: i16) -> Option<&Sprite> {
+    if number <= 0 || number as usize > self.channels.len() {
+      return None;
+    }
     let channel = &self.channels.get(number as usize - 1);
     return channel.map(|x| &x.sprite);
   }
