@@ -77,11 +77,11 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
 
 pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<Datum, ScriptError> {
   match (&left, &right) {
-    (Datum::Int(left), Datum::Int(right)) => Ok(Datum::Int(left - right)),
+    (Datum::Int(left), Datum::Int(right)) => Ok(Datum::Int(left.wrapping_sub(*right))),
     (Datum::Float(left), Datum::Float(right)) => Ok(Datum::Float(left - right)),
     (Datum::Float(left), Datum::Int(right)) => Ok(Datum::Float(left - (*right as f32))),
     (Datum::Int(left), Datum::Float(right)) => Ok(Datum::Float((*left as f32) - right)),
-    (Datum::IntRect(a), Datum::IntRect(b)) => Ok(Datum::IntRect((a.0 - b.0, a.1 - b.1, a.2 - b.2, a.3 - b.3))),
+    (Datum::IntRect(a), Datum::IntRect(b)) => Ok(Datum::IntRect((a.0.wrapping_sub(b.0), a.1.wrapping_sub(b.1), a.2.wrapping_sub(b.2), a.3.wrapping_sub(b.3)))),
     (Datum::IntRect(a), Datum::List(_, ref_list, _)) => {
       if ref_list.len() == 4 {
         let b = ref_list.iter()
@@ -90,7 +90,7 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
               .map(|x| x as i32)
           )
           .collect::<Result<Vec<i32>, ScriptError>>()?;
-        Ok(Datum::IntRect((a.0 - b[0], a.1 - b[1], a.2 - b[2], a.3 - b[3])))
+        Ok(Datum::IntRect((a.0.wrapping_sub(b[0]), a.1.wrapping_sub(b[1]), a.2.wrapping_sub(b[2]), a.3.wrapping_sub(b[3]))))
       } else {
         Err(ScriptError::new(format!("Invalid list length for subtract_datums: {}", ref_list.len())))
       }
@@ -106,21 +106,21 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
       }
       Ok(Datum::List(DatumType::List, result, false))
     },
-    (Datum::IntPoint(a), Datum::IntPoint(b)) => Ok(Datum::IntPoint((a.0 - b.0, a.1 - b.1))),
+    (Datum::IntPoint(a), Datum::IntPoint(b)) => Ok(Datum::IntPoint((a.0.wrapping_sub(b.0), a.1.wrapping_sub(b.1)))),
     (Datum::IntPoint(a), Datum::List(_, ref_list, _)) => {
       if ref_list.len() == 2 {
         let b = ref_list.iter()
           .map(|r| get_datum(*r, &player.datums).int_value(&player.datums).map(|x| x as i32)).collect::<Result<Vec<i32>, ScriptError>>()?;
-        Ok(Datum::IntPoint((a.0 - b[0], a.1 - b[1])))
+        Ok(Datum::IntPoint((a.0.wrapping_sub(b[0]), a.1.wrapping_sub(b[1]))))
       } else {
         Err(ScriptError::new(format!("Invalid list length for subtract_datums: {}", ref_list.len())))
       }
     },
-    (Datum::Int(a), Datum::IntPoint(b)) => Ok(Datum::IntPoint((*a as i32 - b.0, *a as i32 - b.1))),
+    (Datum::Int(a), Datum::IntPoint(b)) => Ok(Datum::IntPoint(((*a as i32).wrapping_sub(b.0), (*a as i32).wrapping_sub(b.1)))),
     (Datum::ColorRef(a), Datum::ColorRef(b)) => {
       match (a, b) {
-        (ColorRef::PaletteIndex(a), ColorRef::PaletteIndex(b)) => Ok(Datum::ColorRef(ColorRef::PaletteIndex(a - b))),
-        (ColorRef::Rgb(a_r, a_g, a_b), ColorRef::Rgb(b_r, b_g, b_b)) => Ok(Datum::ColorRef(ColorRef::Rgb(a_r - b_r, a_g - b_g, a_b - b_b))),
+        (ColorRef::PaletteIndex(a), ColorRef::PaletteIndex(b)) => Ok(Datum::ColorRef(ColorRef::PaletteIndex(a.wrapping_sub(*b)))),
+        (ColorRef::Rgb(a_r, a_g, a_b), ColorRef::Rgb(b_r, b_g, b_b)) => Ok(Datum::ColorRef(ColorRef::Rgb(a_r.wrapping_sub(*b_r), a_g.wrapping_sub(*b_g), a_b.wrapping_sub(*b_b)))),
         _ => Err(ScriptError::new(format!("Invalid operands for subtract_datums: {:?}, {:?}", a, b))),
       }
     },
