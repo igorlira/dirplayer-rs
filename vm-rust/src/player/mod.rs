@@ -359,6 +359,10 @@ impl DirPlayer {
         self.float_precision = value.int_value(&self.datums)? as u8;
         Ok(())
       },
+      "centerStage" => {
+        // TODO
+        Ok(())
+      },
       _ => {
         self.movie.set_prop(prop, value, &self.datums)
       }
