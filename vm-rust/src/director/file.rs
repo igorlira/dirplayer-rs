@@ -727,7 +727,7 @@ fn get_chunk_data(
           chunk_container.cached_chunk_views.insert(id, reader.read_bytes(info.len).unwrap().to_vec());
         } else if compression_implemented(&info.compression_id) {
           let mut uncomp_buf: Option<Vec<u8>> = None;
-          if info.compression_id == ZLIB_COMPRESSION_GUID {
+          if info.compression_id == ZLIB_COMPRESSION_GUID || info.compression_id == ZLIB_COMPRESSION_GUID2 {
             uncomp_buf = Some(reader.read_zlib_bytes(info.len).unwrap());
           } else if info.compression_id == SND_COMPRESSION_GUID {
             // TODO line 406-409
@@ -801,5 +801,5 @@ pub fn get_children_of_chunk<'a>(chunk_id: &u32, key_table: &'a KeyTableChunk) -
 }
 
 fn compression_implemented(compression_id: &MoaID) -> bool {
-  return *compression_id == ZLIB_COMPRESSION_GUID || *compression_id == SND_COMPRESSION_GUID;
+  return *compression_id == ZLIB_COMPRESSION_GUID || *compression_id == ZLIB_COMPRESSION_GUID2 || *compression_id == SND_COMPRESSION_GUID;
 }
