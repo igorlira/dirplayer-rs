@@ -188,7 +188,8 @@ impl DirPlayer {
     self.is_script_paused = false;
     // TODO runVM()
     async_std::task::spawn_local(async move {
-      if let Err(_) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
+      if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
+        reserve_player_mut(|player| player.on_script_error(&err));
         return;
       }
       run_frame_loop(PLAYER_LOCK.clone()).await;
