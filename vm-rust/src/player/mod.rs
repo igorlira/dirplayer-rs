@@ -627,6 +627,9 @@ pub async fn run_frame_loop(player_arc: Arc<Mutex<Option<DirPlayer>>>) {
       if !frame_skipped {
         // TODO only call this after timeout completes
         player_unwrap_result(player_invoke_global_event(&"exitFrame".to_string(), &vec![]).await);
+        (is_playing, is_script_paused) = reserve_player_mut(|player| {
+          (player.is_playing, player.is_script_paused)
+        });
       }
     };   
   }
