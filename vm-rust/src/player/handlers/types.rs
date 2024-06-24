@@ -26,6 +26,7 @@ impl TypeUtils {
       Datum::IntRect(..) => Ok(vec!["rect"]),
       Datum::IntPoint(..) => Ok(vec!["point"]),
       Datum::SpriteRef(..) => Ok(vec!["sprite"]),
+      Datum::PaletteRef(..) => Ok(vec!["palette"]),
       _ => Err(ScriptError::new(format!("Getting ilk for unknown type: {}", datum.type_str())))?,
     }
   }
