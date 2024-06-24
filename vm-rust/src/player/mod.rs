@@ -32,6 +32,7 @@ pub mod keyboard_events;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_std::{channel::{self, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
+use cast_manager::CastPreloadReason;
 use chrono::Local;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
@@ -624,6 +625,9 @@ pub async fn run_frame_loop(player_arc: Arc<Mutex<Option<DirPlayer>>>) {
     }
     timeout(Duration::from_millis(1000 / fps as u64), future::pending::<()>()).await.unwrap_err();
     player_wait_available().await;
+
+    let mut prev_frame = 0;
+    let mut new_frame = 0;
     reserve_player_mut(|player| {
       is_playing = player.is_playing;
       is_script_paused = player.is_script_paused;
@@ -631,12 +635,19 @@ pub async fn run_frame_loop(player_arc: Arc<Mutex<Option<DirPlayer>>>) {
       if !player.is_playing {
         return;
       }
+      prev_frame = player.movie.current_frame;
       if !player.is_script_paused {
         player.advance_frame();
       }
+      new_frame = player.movie.current_frame;
     });
     if !is_playing {
       return;
+    }
+    if new_frame > 1 && prev_frame <= 1 {
+      let mut player = player_arc.lock().await;
+      let player = player.as_mut().unwrap();
+      player.movie.cast_manager.preload_casts(CastPreloadReason::AfterFrameOne, &mut player.net_manager, &mut player.bitmap_manager).await;
     }
     if !is_script_paused {
       let frame_skipped = reserve_player_ref(|player| {

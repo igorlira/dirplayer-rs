@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use url::Url;
 
-use crate::{director::{cast::CastDef, file::{read_director_file_bytes, DirectorFile}, lingo::{datum::Datum, script::ScriptContext}}, js_api::JsApi, utils::{get_base_url, get_basename_no_extension, log_i}};
+use crate::{director::{cast::CastDef, file::{read_director_file_bytes, DirectorFile}, lingo::{datum::Datum, script::ScriptContext}}, js_api::{self, JsApi}, utils::{get_base_url, get_basename_no_extension, log_i}};
 
 use super::{bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, manager::BitmapManager}, cast_member::{BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, net_task::NetResult, script::Script, DatumRefMap, ScriptError, PLAYER_LOCK};
 
@@ -10,6 +10,8 @@ pub struct CastLib {
   pub name: String,
   pub file_name: String,
   pub number: u32,
+  pub is_external: bool,
+  pub is_loaded: bool,
   pub is_loading: bool,
   pub lctx: Option<ScriptContext>,
   pub members: HashMap<u32, CastMember>,
@@ -64,10 +66,11 @@ impl CastLib {
       } else {
         log_i(format!("Could not parse {load_file_name}").to_string().as_str());
       }
-      self.is_loading = false;
+      self.is_loaded = true;
     } else {
       log_i(format!("Fetching {load_file_name} failed").to_string().as_str());
     }
+    self.is_loading = false;
   }
 
   pub fn find_member_by_number(&self, number: u32) -> Option<&CastMember> {
@@ -88,7 +91,16 @@ impl CastLib {
   }
 
   fn clear(&mut self) {
-    // TODO
+    if !self.is_loaded {
+      return;
+    }
+    self.members.clear();
+    self.scripts.clear();
+    self.lctx = None;
+    self.is_loaded = false;
+    self.is_loading = false;
+
+    JsApi::dispatch_cast_member_list_changed(self.number);
   }
 
   fn set_name(&mut self, name: String) {

@@ -13,6 +13,12 @@ pub struct CastManager {
 
 const IS_WEB: bool = false;
 
+#[derive(PartialEq)]
+pub enum CastPreloadReason {
+  MovieLoaded,
+  AfterFrameOne,
+}
+
 impl CastManager {
   pub const fn empty() -> CastManager {
     CastManager { casts: Vec::new() }
@@ -31,7 +37,9 @@ impl CastManager {
         name: cast_entry.name.to_owned(),
         file_name: normalize_cast_lib_path(&net_manager.base_path, &cast_entry.file_path).map_or("".to_string(), |it| it.to_string()),
         number: (index + 1) as u32,
-        is_loading: cast_def.is_none(),
+        is_external: cast_def.is_none(),
+        is_loaded: cast_def.is_some(),
+        is_loading: false,
         lctx: cast_def.and_then(|x| x.lctx.clone()),
         members: HashMap::new(),
         scripts: HashMap::new(),
@@ -45,15 +53,30 @@ impl CastManager {
       casts.push(cast);
     }
     self.casts = casts;
-    self.preload_casts(net_manager, bitmap_manager).await;
+    self.preload_casts(CastPreloadReason::MovieLoaded, net_manager, bitmap_manager).await;
     JsApi::dispatch_cast_list_changed();
   }
 
-  pub async fn preload_casts(&mut self, net_manager: &mut NetManager, bitmap_manager: &mut BitmapManager) {
+  pub async fn preload_casts(&mut self, reason: CastPreloadReason, net_manager: &mut NetManager, bitmap_manager: &mut BitmapManager) {
     for cast in self.casts.iter_mut() {
-      if cast.is_loading && !cast.file_name.is_empty() {
-        // TODO await or not based on preloadMode
-        cast.preload(net_manager, bitmap_manager).await;
+      if cast.is_external && !cast.is_loaded && !cast.is_loading && !cast.file_name.is_empty() {
+        match cast.preload_mode {
+          0 => {
+            // When needed
+          },
+          1 => {
+            if reason == CastPreloadReason::AfterFrameOne {
+              cast.preload(net_manager, bitmap_manager).await;
+            }
+          },
+          2 => {
+            // Before frame one
+            if reason == CastPreloadReason::MovieLoaded {
+              cast.preload(net_manager, bitmap_manager).await;
+            }
+          },
+          _ => {},
+        }
       }
     }
   }
