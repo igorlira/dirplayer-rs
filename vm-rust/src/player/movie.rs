@@ -79,6 +79,7 @@ impl Movie {
       "stageLeft" => Ok(Datum::Int(self.rect.left as i32)),
       "stageTop" => Ok(Datum::Int(self.rect.top as i32)),
       "stageBottom" => Ok(Datum::Int(self.rect.bottom as i32)),
+      "traceScript" => Ok(Datum::Int(0)), // TODO
       _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
     }
   }
@@ -111,6 +112,10 @@ impl Movie {
           _ => Err(ScriptError::new("Object or 0 expected for alertHook value".to_string()))
         }
       }
+      "traceScript" => {
+        // TODO
+        return Ok(())
+      },
       _ => {
         return Err(ScriptError::new(format!("Cannot set movie prop {prop}")))
       },
