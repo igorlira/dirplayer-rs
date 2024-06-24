@@ -92,6 +92,12 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
     Datum::Null => {
       format!("<Null>")
     }
+    Datum::PlayerRef => {
+      format!("<_player>")
+    }
+    Datum::MovieRef => {
+      format!("<_movie>")
+    }
   }
 }
 

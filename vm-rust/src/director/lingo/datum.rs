@@ -36,6 +36,8 @@ pub enum DatumType {
   Xtra,
   XtraInstance,
   Matte,
+  PlayerRef,
+  MovieRef,
 }
 
 #[derive(Clone, FromPrimitive)]
@@ -127,6 +129,8 @@ pub enum Datum {
   Xtra(String),
   XtraInstance(String, XtraInstanceId),
   Matte(Arc<BitmapMask>),
+  PlayerRef,
+  MovieRef,
   Null,
 }
 
@@ -162,6 +166,8 @@ impl DatumType {
       DatumType::Xtra => "xtra".to_string(),
       DatumType::XtraInstance => "xtra_instance".to_string(),
       DatumType::Matte => "matte".to_string(),
+      DatumType::PlayerRef => "player_ref".to_string(),
+      DatumType::MovieRef => "movie_ref".to_string(),
     }
   }
 }
@@ -194,6 +200,8 @@ impl Datum {
       Datum::Xtra(_) => DatumType::Xtra,
       Datum::XtraInstance(..) => DatumType::XtraInstance,
       Datum::Matte(..) => DatumType::Matte,
+      Datum::PlayerRef => DatumType::PlayerRef,
+      Datum::MovieRef => DatumType::MovieRef,
       Datum::Null => DatumType::Null,
     }
   }

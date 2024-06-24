@@ -307,6 +307,12 @@ pub async fn player_set_obj_prop(
         Datum::ColorRef(..) => reserve_player_mut(|player| {
             ColorDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
+        Datum::PlayerRef => reserve_player_mut(|player| {
+            player.set_player_prop(prop_name, value_ref)
+        }),
+        Datum::MovieRef => reserve_player_mut(|player| {
+            player.set_movie_prop(prop_name, player.get_datum(value_ref).clone())
+        }),
         _ => reserve_player_ref(|player| {
             Err(ScriptError::new(
                 format!(
@@ -363,6 +369,7 @@ pub fn get_obj_prop(
         Datum::Void => VoidDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::Int(_) => IntDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::ColorRef(_) => ColorDatumHandlers::get_prop(player, obj_ref, &prop_name),
+        Datum::PlayerRef => player.get_player_prop(prop_name),
         _ => {
             if prop_name == "ilk" {
                 let ilk = TypeUtils::get_datum_ilk(&obj_clone)?;

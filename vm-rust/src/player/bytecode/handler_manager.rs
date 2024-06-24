@@ -91,6 +91,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::Mul => Some(ArithmeticsBytecodeHandler::mul),
             OpCode::PushChunkVarRef => Some(StackBytecodeHandler::push_chunk_var_ref),
             OpCode::DeleteChunk => Some(StringBytecodeHandler::delete_chunk),
+            OpCode::GetTopLevelProp => Some(GetSetBytecodeHandler::get_top_level_prop),
             _ => None,
         }
     }

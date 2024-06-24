@@ -323,6 +323,24 @@ impl DirPlayer {
     }
   }
 
+  fn get_player_prop(&mut self, prop: &String) -> Result<DatumRef, ScriptError> {
+    match prop.as_str() {
+      "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
+      "productVersion" => Ok(self.alloc_datum(Datum::String("10.1".to_string()))), // TODO
+      _ => Err(ScriptError::new(format!("Unknown player prop {}", prop)))
+    }
+  }
+
+  fn set_player_prop(&mut self, prop: &String, value: DatumRef) -> Result<(), ScriptError> {
+    match prop.as_str() {
+      "traceScript" => {
+        // TODO
+        Ok(())
+      },
+      _ => Err(ScriptError::new(format!("Cannot set player prop {}", prop)))
+    }
+  }
+
   fn get_anim_prop(&self, prop_id: u16) -> Result<Datum, ScriptError> {
     let prop_name = get_anim_prop_name(prop_id);
     match prop_name.as_str() {

@@ -734,6 +734,12 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
     Datum::Null => {
       map.str_set("type", &JsValue::from_str("null"));
     }
+    Datum::PlayerRef => {
+      map.str_set("type", &JsValue::from_str("playerRef"));
+    }
+    Datum::MovieRef => {
+      map.str_set("type", &JsValue::from_str("movieRef"));
+    }
   }
   return map.to_js_object();
 }

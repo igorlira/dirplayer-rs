@@ -357,4 +357,19 @@ impl GetSetBytecodeHandler {
       Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
     })
   }
+
+  pub fn get_top_level_prop(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+    reserve_player_mut(|player| {
+      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().clone();
+      let result = match prop_name.as_str() {
+        "_player" => Ok(Datum::PlayerRef),
+        "_movie" => Ok(Datum::MovieRef),
+        _ => Err(ScriptError::new(format!("Invalid top level prop: {}", prop_name)))
+      }?;
+      let result_id = player.alloc_datum(result);
+      let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+      scope.stack.push(result_id);
+      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    })
+  }
 }
