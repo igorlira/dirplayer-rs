@@ -301,6 +301,7 @@ impl DirPlayer {
   fn get_movie_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
     match prop.as_str() {
       "stage" => Ok(Datum::Stage),
+      "time" => Ok(Datum::String(Local::now().format("%H:%M %p").to_string())),
       "milliSeconds" => Ok(Datum::Int(chrono::Local::now().signed_duration_since(self.start_time).num_milliseconds() as i32)),
       "keyboardFocusSprite" => Ok(Datum::Int(self.keyboard_focus_sprite as i32)),
       "frameTempo" => Ok(Datum::Int(self.movie.puppet_tempo as i32)),

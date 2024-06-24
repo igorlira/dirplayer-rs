@@ -10,6 +10,10 @@ pub fn get_stage_prop(
     "rect" => {
       Ok(Datum::IntRect((0, 0, player.movie.rect.width(), player.movie.rect.height())))
     },
+    "sourceRect" => {
+      // TODO where does this come from?
+      Ok(Datum::IntRect((0, 0, player.movie.rect.width(), player.movie.rect.height())))
+    }
     "bgColor" => {
       Ok(Datum::ColorRef(player.bg_color.clone()))
     },
