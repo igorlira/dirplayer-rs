@@ -201,6 +201,7 @@ impl BuiltInHandlerManager {
       "getStreamStatus" => NetHandlers::get_stream_status(args),
       "netError" => NetHandlers::net_error(args),
       "netTextresult" => NetHandlers::net_text_result(args),
+      "netTextResult" => NetHandlers::net_text_result(args),
       "rgb" => TypeHandlers::rgb(args),
       "list" => TypeHandlers::list(args),
       "image" => TypeHandlers::image(args),
