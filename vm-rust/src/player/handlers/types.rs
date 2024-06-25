@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::{format_concrete_datum, format_datum}, eval::eval_lingo, geometry::IntRect, get_datum, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DatumRefMap, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::format_datum, eval::eval_lingo, geometry::IntRect, get_datum, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
 
 use super::datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, prop_list::{PropListDatumHandlers, PropListUtils}, rect::RectUtils};
 
@@ -209,6 +209,63 @@ impl TypeHandlers {
     })
   }
 
+  fn integer_impl(input: &str) -> Option<i32> {
+    if input.is_empty() {
+      return None;
+    }
+
+    let special_symbols = ['-', '.'];
+    let numeric_chars = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+
+    // Remove leading and trailing whitespace
+    let trimmed_input = input.trim();
+
+    if trimmed_input.is_empty() {
+      return Some(0);
+    }
+
+    if trimmed_input == "-" {
+      return Some(0);
+    }
+
+    let mut result = String::new();
+    let mut found_valid_digit = false;
+
+    for char in trimmed_input.chars() {
+      if numeric_chars.contains(&char) {
+        result.push(char);
+        found_valid_digit = true;
+      } else if special_symbols.contains(&char) {
+        if char == '.' {
+            return None;
+        } else if char == '-' {
+          if result.is_empty() {
+            result.push(char);
+          } else {
+            return None;
+          }
+        }
+      } else {
+        if found_valid_digit {
+          continue;
+        } else {
+          return None;
+        }
+      }
+    }
+
+    if !found_valid_digit {
+      return None;
+    }
+
+    // Convert result to integer
+    if let Ok(final_result) = result.parse::<i32>() {
+      return Some(final_result);
+    }
+
+    None
+  }
+
   pub fn integer(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let value = player.get_datum(args[0]);
@@ -217,7 +274,12 @@ impl TypeHandlers {
         Datum::Float(f) => Datum::Int(f.round() as i32),
         Datum::SpriteRef(sprite_num) => Datum::Int(*sprite_num as i32),
         Datum::String(s) => {
-          Datum::Int(s.parse::<i32>().unwrap_or(0))
+          let result = Self::integer_impl(&s);
+          if let Some(int_value) = result {
+            Datum::Int(int_value)
+          } else {
+            return Ok(VOID_DATUM_REF);
+          }
         },
         Datum::Void => Datum::Void,
         _ => return Err(ScriptError::new(format!("Cannot convert datum of type {} to integer", value.type_str()))),
