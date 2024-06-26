@@ -17,17 +17,12 @@ use crate::{
 
 pub fn ascii_safe(string: &str) -> String {
   string.chars().map(|c| {
-    let char_code = c as u32;
-    if char_code == 9 {
-      '\t'
-    } else if char_code == 10 {
-      '\n'
-    } else if char_code == 13 {
-      '\r'
-    } else if char_code < 127 && char_code >= 32 {
-      c
-    } else {
-      '?'
+    match c as u32 {
+      9 => '\t',
+      10 => '\n',
+      13 => '\r',
+      32..=126 => c,
+      _ => '?',
     }
   }).collect()
 }
