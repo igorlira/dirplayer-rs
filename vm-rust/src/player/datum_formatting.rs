@@ -8,12 +8,12 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
     Datum::Int(i) => i.to_string(),
     Datum::Float(f) => {
       match player.float_precision {
-        1 => return format!("{:.1}", f),
-        2 => return format!("{:.2}", f),
-        3 => return format!("{:.3}", f),
-        4 => return format!("{:.4}", f),
-        5 => return format!("{:.5}", f),
-        6 => return format!("{:.6}", f),
+        1 => format!("{:.1}", f),
+        2 => format!("{:.2}", f),
+        3 => format!("{:.3}", f),
+        4 => format!("{:.4}", f),
+        5 => format!("{:.5}", f),
+        6 => format!("{:.6}", f),
         _ => f.to_string(),
       }
     },
