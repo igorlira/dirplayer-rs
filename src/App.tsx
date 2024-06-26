@@ -1,17 +1,17 @@
 import './App.css';
 import VMProvider from './components/VMProvider'
 import store from './store';
-import { isDebugSession } from './utils/debug';
+import { isUIShown } from './utils/debug';
 import DirStudio from './views/DirStudio/DirStudio';
 import { Provider as StoreProvider } from 'react-redux'
 
 function App() {
-  const showDebugUi = isDebugSession();
+  const showDebugUi = isUIShown();
   return (
     <div className="App">
       <StoreProvider store={store}>
         <VMProvider>
-          <DirStudio showDebugUi={showDebugUi} autoPlay={!showDebugUi} />
+          <DirStudio showDebugUi={showDebugUi} />
         </VMProvider>
       </StoreProvider>
     </div>

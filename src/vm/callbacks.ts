@@ -1,15 +1,16 @@
 import { ICastMemberRef, JsBridgeBreakpoint, OnScriptErrorData, registerVmCallbacks } from "dirplayer-js-api";
 import store from "../store";
-import { breakpointListChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, frameChanged, globalsChanged, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
+import { breakpointListChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, frameChanged, globalsChanged, movieLoaded, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import { OnMovieLoadedCallbackData, trigger_timeout } from 'vm-rust'
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
-import { isDebugSession } from "../utils/debug";
+import { isUIShown } from "../utils/debug";
 
 export function initVmCallbacks() {
   registerVmCallbacks({
     onMovieLoaded: (result: OnMovieLoadedCallbackData) => {
       console.log('onMovieLoaded called!', result.version, result.test_val)
+      store.dispatch(movieLoaded());
     },
     onCastListChanged: (castList: string[]) => {
       store.dispatch(castListChanged(castList));
@@ -32,7 +33,7 @@ export function initVmCallbacks() {
       }))
     },
     onScriptError: (errorObj: OnScriptErrorData) => {
-      if (!isDebugSession()) {
+      if (!isUIShown()) {
         alert(`Script error: ${errorObj.message}`);
       }
       store.dispatch(onScriptError(errorObj.message))

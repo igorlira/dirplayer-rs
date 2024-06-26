@@ -1,5 +1,3 @@
-import { useEffect, useRef, useState } from "react";
-import { load_movie_file, set_base_path } from "vm-rust";
 import { useAppDispatch, useAppSelector, useMemberSubscriptions } from "../../store/hooks";
 import CastInspector from "../CastInspector";
 import styles from "./styles.module.css";
@@ -11,29 +9,18 @@ import DebugInspector from "../DebugInspector";
 import { selectScriptError } from "../../store/vmSlice";
 import { onMemberSelected, selectSelectedMemberRef } from "../../store/uiSlice";
 import Stage from "../Stage";
-import { player_set_preview_member_ref, play } from "vm-rust";
+import { player_set_preview_member_ref } from "vm-rust";
 import PropertyInspector from "../PropertyInspector";
+import LoadMovie from "../LoadMovie";
+import { useSelector } from "react-redux";
+import { RootState } from "../../store";
 
 interface DirStudioProps {
-  initialMovieFileName?: string;
   showDebugUi?: boolean;
-  autoPlay?: boolean;
-}
-
-function useMountEffect(effect: () => void) {
-  const isMounted = useRef(false);
-  useEffect(() => {
-    if (!isMounted.current) {
-      effect();
-      isMounted.current = true;
-    }
-  }, []);
 }
 
 export default function DirStudio({
-  initialMovieFileName,
   showDebugUi,
-  autoPlay,
 }: DirStudioProps) {
   const castSnapshots = useAppSelector((state) => state.vm.castSnapshots);
   const selectedMemberRef = useAppSelector((state) =>
@@ -51,28 +38,7 @@ export default function DirStudio({
     dispatch(onMemberSelected([memberId.castNumber, memberId.memberNumber]));
   };
 
-  async function loadInitialMovie() {
-    const initialMovieFileName = "dcr/habbo.dcr";
-    if (initialMovieFileName) {
-      console.log("Loading movie", initialMovieFileName);
-      const dir = await load_movie_file(initialMovieFileName);
-      if (autoPlay) {
-        play();
-      }
-      console.log("Loaded movie", dir);
-    }
-  }
-
-  useMountEffect(() => {
-    const pathComponents = window.location.pathname.split("/");
-    if (pathComponents.length > 0) {
-      pathComponents.pop();
-    }
-
-    const basePath = window.location.origin + pathComponents.join("/");
-    set_base_path(basePath);
-    loadInitialMovie();
-  });
+  const isMovieLoaded = useSelector<RootState>((state) => state.vm.isMovieLoaded);
 
   useMemberSubscriptions();
 
@@ -80,6 +46,9 @@ export default function DirStudio({
   const scriptError = useAppSelector((state) => selectScriptError(state.vm));
   const selectedObject = useAppSelector((state) => state.ui.selectedObject);
 
+  if (!isMovieLoaded) {
+    return <LoadMovie />;
+  }
   if (!showDebugUi) {
     return <div style={{ width: '100vw', height: '100vh' }}>
       <Stage />
