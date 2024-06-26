@@ -19,6 +19,7 @@ pub enum LiteralType {
   String = 1,
   Int = 4,
   Float = 9,
+  Unknown1 = 11,
 }
 
 impl LiteralStore {
@@ -33,12 +34,16 @@ impl LiteralStore {
   }
 
   pub fn read_record(reader: &mut BinaryReader, dir_version: u16) -> Result<LiteralStoreRecord, String> {
-    let literal_type: LiteralType;
-    if dir_version >= 500 {
-      literal_type = num::FromPrimitive::from_u32(reader.read_u32().unwrap()).unwrap();
+    let literal_type_id = if dir_version >= 500 {
+      reader.read_u32().unwrap()
     } else {
-      literal_type = num::FromPrimitive::from_u16(reader.read_u16().unwrap()).unwrap();
-    }
+      reader.read_u16().unwrap() as u32
+    };
+    let literal_type: Option<LiteralType> = num::FromPrimitive::from_u32(literal_type_id);
+    let literal_type = match literal_type {
+      Some(literal_type) => literal_type,
+      None => return Err(format!("Invalid literal type: {}", literal_type_id)),
+    };
     let offset = reader.read_u32().unwrap() as usize;
     return Ok(LiteralStoreRecord {
       literal_type,
