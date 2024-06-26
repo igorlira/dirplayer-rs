@@ -15,7 +15,7 @@ impl TypeUtils {
       Datum::Int(..) => Ok(vec!["integer"]),
       Datum::String(..) => Ok(vec!["string"]),
       Datum::Symbol(..) => Ok(vec!["symbol"]),
-      Datum::Void => Ok(vec!["void"]),
+      Datum::Void | Datum::Null => Ok(vec!["void"]),
       Datum::PropList(..) => Ok(vec!["proplist", "list"]),
       Datum::ScriptInstanceRef(..) => Ok(vec!["instance"]),
       Datum::ScriptRef(..) => Ok(vec!["script"]),

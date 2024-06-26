@@ -79,6 +79,7 @@ impl Movie {
       "stageLeft" => Ok(Datum::Int(self.rect.left as i32)),
       "stageTop" => Ok(Datum::Int(self.rect.top as i32)),
       "stageBottom" => Ok(Datum::Int(self.rect.bottom as i32)),
+      "traceLogFile" => Ok(Datum::String("".to_string())), // TODO
       "traceScript" => Ok(Datum::Int(0)), // TODO
       _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
     }
@@ -113,6 +114,10 @@ impl Movie {
         }
       }
       "traceScript" => {
+        // TODO
+        return Ok(())
+      },
+      "traceLogFile" => {
         // TODO
         return Ok(())
       },

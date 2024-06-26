@@ -15,6 +15,9 @@ pub mod point;
 pub mod int;
 pub mod color;
 pub mod cast_member;
+pub mod player;
+
+use player::PlayerDatumHandlers;
 
 use crate::{director::lingo::datum::DatumType, player::{format_datum, reserve_player_ref, xtra::manager::{call_xtra_instance_async_handler, call_xtra_instance_handler, has_xtra_instance_async_handler}, DatumRef, ScriptError, ScriptErrorCode}};
 
@@ -73,6 +76,7 @@ pub async fn player_call_datum_handler(
       }
     }
     DatumType::ColorRef => color::ColorDatumHandlers::call(obj_ref, handler_name, args),
+    DatumType::PlayerRef => PlayerDatumHandlers::call(handler_name, args),
     _ => reserve_player_ref(|player| {
       let formatted_datum = format_datum(obj_ref, &player);
       Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("No handler {handler_name} for datum {}", formatted_datum)))
