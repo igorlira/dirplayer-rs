@@ -114,19 +114,19 @@ impl CastLib {
     // TODO
     match prop.as_str() {
       "preloadMode" => {
-        self.preload_mode = value.int_value(datums)? as u8
+        self.preload_mode = value.int_value(datums)? as u8;
       },
       "name" => {
-        self.set_name(value.string_value(datums)?)
+        self.set_name(value.string_value(datums)?);
       },
       "fileName" => {
         self.file_name = value.string_value(datums)?;
       },
       _ => {
-        return Err(ScriptError::new(format!("Cannot set castLib property {}", prop)))
+        return Err(ScriptError::new(format!("Cannot set castLib property {}", prop)));
       },
-    }
-    return Ok(())
+    };
+    Ok(())
   }
 
   pub fn get_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
@@ -253,16 +253,10 @@ pub async fn player_cast_lib_set_prop(cast_lib: u32, prop_name: &String, value: 
   let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
   let player = player_opt.as_mut().unwrap();
 
-  match prop_name.as_str() {
-    "fileName" => {
-      let cast_lib = player.movie.cast_manager.get_cast_mut(cast_lib as u32);
-      cast_lib.set_prop(&prop_name, value, &player.datums)?;
-      cast_lib.preload(&mut player.net_manager, &mut player.bitmap_manager).await;
-    },
-    _ => {
-      let cast_lib = player.movie.cast_manager.get_cast_mut(cast_lib as u32);
-      cast_lib.set_prop(&prop_name, value, &player.datums)?;
-    }
+  let cast_lib = player.movie.cast_manager.get_cast_mut(cast_lib as u32);
+  cast_lib.set_prop(&prop_name, value, &player.datums)?;
+  if prop_name == "fileName" {
+    cast_lib.preload(&mut player.net_manager, &mut player.bitmap_manager).await;
   }
   // TODO handle preload error
   Ok(())
