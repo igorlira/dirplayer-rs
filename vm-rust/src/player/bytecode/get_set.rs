@@ -239,14 +239,13 @@ impl GetSetBytecodeHandler {
       let arg_index = bytecode.obj as usize;
       let value_ref = scope.stack.pop().unwrap();
 
-      if arg_index < arg_count {
+      if arg_index < scope.args.len() {
         scope.args[arg_index] = value_ref;
         Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
-      } else if arg_index == arg_count {
-        scope.args.push(value_ref);
-        Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
       } else {
-        Err(ScriptError::new(format!("Setting param out of bounds")))
+        scope.args.resize(arg_count.max(arg_index), VOID_DATUM_REF);
+        scope.args.insert(arg_index, value_ref);
+        Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
       }
     })
   }
