@@ -214,9 +214,6 @@ impl TypeHandlers {
       return None;
     }
 
-    let special_symbols = ['-', '.'];
-    let numeric_chars = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-
     // Remove leading and trailing whitespace
     let trimmed_input = input.trim();
 
@@ -232,26 +229,28 @@ impl TypeHandlers {
     let mut found_valid_digit = false;
 
     for char in trimmed_input.chars() {
-      if numeric_chars.contains(&char) {
-        result.push(char);
-        found_valid_digit = true;
-      } else if special_symbols.contains(&char) {
-        if char == '.' {
-            return None;
-        } else if char == '-' {
+      match char {
+        // numeric_chars
+        '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
+          result.push(char);
+          found_valid_digit = true;
+        },
+        // special_symbols
+        '.' => return None,
+        '-' => {
           if result.is_empty() {
             result.push(char);
           } else {
             return None;
           }
+        },
+        // unknown
+        _ => {
+          if !found_valid_digit {
+            return None;
+          }
         }
-      } else {
-        if found_valid_digit {
-          continue;
-        } else {
-          return None;
-        }
-      }
+      };
     }
 
     if !found_valid_digit {
