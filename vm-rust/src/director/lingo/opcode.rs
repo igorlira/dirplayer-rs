@@ -36,6 +36,7 @@ pub enum OpCode {
 	PushList = 0x1e,
 	PushPropList = 0x1f,
 	Swap = 0x21,
+	CallJavaScript = 0x26,
 
 	// multi-byte
 	PushInt8 = 0x41,
@@ -85,6 +86,10 @@ pub enum OpCode {
 
 impl OpCode {
   pub fn from(value: u16) -> OpCode {
-    return num::FromPrimitive::from_u16(value).unwrap();
+    if let Some(result) = num::FromPrimitive::from_u16(value) {
+			result
+		} else {
+			panic!("Invalid OpCode: {}", value)
+		}
   }
 }

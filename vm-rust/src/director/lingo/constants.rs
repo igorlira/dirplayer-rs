@@ -39,6 +39,7 @@ lazy_static! {
     (OpCode::PushList, "pushlist".to_owned()),
     (OpCode::PushPropList, "pushproplist".to_owned()),
     (OpCode::Swap, "swap".to_owned()),
+    (OpCode::CallJavaScript, "calljavascript".to_owned()),
 
     // multi-byte
     (OpCode::PushInt8, "pushint8".to_owned()),
