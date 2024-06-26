@@ -26,7 +26,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
     Datum::Symbol(s) => format!("#{s}"),
     Datum::CastLib(n) => format!("castLib({n})"),
     Datum::Stage => "the stage".to_string(),
-    Datum::PropList(entries) => {
+    Datum::PropList(entries, ..) => {
       if entries.is_empty() {
         return "[:]".to_string();
       }

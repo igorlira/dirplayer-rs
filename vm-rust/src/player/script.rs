@@ -343,7 +343,7 @@ pub fn get_obj_prop(
         Datum::ScriptInstanceRef(script_instance_id) => {
             script_get_prop(player, script_instance_id, &prop_name)
         }
-        Datum::PropList(prop_list) => {
+        Datum::PropList(prop_list, ..) => {
             PropListUtils::get_prop_or_built_in(player, &prop_list, &prop_name)
         }
         Datum::List(_, list, _) => {

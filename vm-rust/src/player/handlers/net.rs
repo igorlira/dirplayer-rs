@@ -57,7 +57,7 @@ impl NetHandlers {
         (player.alloc_datum(Datum::String("bytesSoFar".to_owned())), player.alloc_datum(Datum::Int(if is_ok { 100 } else { 0 }))),
         (player.alloc_datum(Datum::String("bytesTotal".to_owned())), player.alloc_datum(Datum::Int(100))),
         (player.alloc_datum(Datum::String("error".to_owned())), player.alloc_datum(Datum::String(error))),
-      ]);
+      ], false);
       Ok(player.alloc_datum(result_map))
     })
   }

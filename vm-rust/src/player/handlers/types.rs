@@ -43,7 +43,7 @@ impl TypeUtils {
     let datum = player.get_datum(datum_ref);
     let formatted_key = format_datum(prop_key_ref, player);
     let result = match datum {
-      Datum::PropList(prop_list) => {
+      Datum::PropList(prop_list, ..) => {
         PropListUtils::get_prop(prop_list, prop_key_ref, &player.datums, false, formatted_key)?
       },
       Datum::List(_, list, _) => {

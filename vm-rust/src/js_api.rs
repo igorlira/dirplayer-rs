@@ -663,7 +663,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
     Datum::Stage => {
       map.str_set("type", &JsValue::from_str("stage"));
     }
-    Datum::PropList(properties) => {
+    Datum::PropList(properties, sorted) => {
       map.str_set("type", &JsValue::from_str("propList"));
       let props_map = js_sys::Map::new();
       for (k, v) in properties.iter() {
@@ -671,6 +671,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         props_map.set(&JsValue::from_str(&key_str), &v.to_js_value());
       }
       map.str_set("properties", &props_map.to_js_object());
+      map.str_set("sorted", &JsValue::from_bool(*sorted));
     }
     Datum::StringChunk(..) => {
       map.str_set("type", &JsValue::from_str("stringChunk"));

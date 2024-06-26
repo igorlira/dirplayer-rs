@@ -183,7 +183,7 @@ impl BitmapDatumHandlers {
       let param_list = args.get(3).map(|x| player.get_datum(*x));
       let mut param_list_concrete = HashMap::new();
       if let Some(param_list) = param_list {
-        if let Datum::PropList(param_list) = param_list {
+        if let Datum::PropList(param_list, ..) = param_list {
           for (key, value) in param_list {
             let key = player.get_datum(*key).string_value(&player.datums)?;
             let value = player.get_datum(*value).clone();

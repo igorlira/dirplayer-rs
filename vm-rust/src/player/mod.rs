@@ -826,8 +826,9 @@ fn player_duplicate_datum(datum: DatumRef) -> DatumRef {
   });
   let new_datum = match datum_type {
     DatumType::PropList => {
-      let props = reserve_player_mut(|player| {
-        player.get_datum(datum).to_map().unwrap().clone()
+      let (props, sorted) = reserve_player_mut(|player| {
+        let (props, sorted) = player.get_datum(datum).to_map_tuple().unwrap();
+        (props.clone(), sorted)
       });
       let mut new_props = Vec::new();
         for (key, value) in props {
@@ -835,7 +836,7 @@ fn player_duplicate_datum(datum: DatumRef) -> DatumRef {
           let new_value = player_duplicate_datum(value);
           new_props.push((new_key, new_value));
         }
-        Datum::PropList(new_props)
+        Datum::PropList(new_props, sorted)
     },
     DatumType::List => {
       let (list_type, list, sorted) = reserve_player_ref(|player| {

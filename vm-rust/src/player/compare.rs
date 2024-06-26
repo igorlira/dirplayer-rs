@@ -40,7 +40,7 @@ pub fn datum_equals(left: &Datum, right: &Datum, datum: &DatumRefMap) -> Result<
     (Datum::CastMember(member_ref), Datum::Void) => Ok(!member_ref.is_valid()), // TODO return true if member is empty?
     (Datum::ScriptInstanceRef(_), Datum::Int(_)) => Ok(false),
     (Datum::IntPoint(_), Datum::Int(_)) => Ok(false),
-    (Datum::PropList(_), Datum::Int(_)) => Ok(false),
+    (Datum::PropList(..), Datum::Int(_)) => Ok(false),
     (Datum::BitmapRef(_), Datum::Void) => Ok(false),
     (Datum::Symbol(_), Datum::CastMember(_)) => Ok(false),
     (Datum::PaletteRef(_), Datum::CastMember(_)) => Ok(false), // TODO should we compare the cast member?
@@ -76,7 +76,7 @@ pub fn datum_equals(left: &Datum, right: &Datum, datum: &DatumRefMap) -> Result<
     ),
     (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left == right),
     (Datum::Null, Datum::Int(_)) => Ok(false),
-    (Datum::PropList(_), Datum::Void) => Ok(false),
+    (Datum::PropList(..), Datum::Void) => Ok(false),
     (Datum::Symbol(_), Datum::Int(_)) => Ok(false),
     (Datum::PaletteRef(palette_ref), Datum::Symbol(symbol)) => match palette_ref {
       PaletteRef::BuiltIn(palette) => Ok(palette.symbol_string().eq_ignore_ascii_case(&symbol)),

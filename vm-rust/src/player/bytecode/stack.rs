@@ -111,7 +111,7 @@ impl StackBytecodeHandler {
         let value = arg_list[base_index + 1].to_owned();
         (key, value)
       }).collect::<Vec<(DatumRef, DatumRef)>>();
-      let datum_ref = player.alloc_datum(Datum::PropList(entries));
+      let datum_ref = player.alloc_datum(Datum::PropList(entries, false));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(datum_ref);
       Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })

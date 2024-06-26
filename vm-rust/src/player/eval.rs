@@ -41,9 +41,9 @@ pub fn eval_lingo_pair(pair: Pair<Rule>, player: &mut DirPlayer) -> Result<Datum
 
         result_vec.push((key, value));
       }
-      Ok(player.alloc_datum(Datum::PropList(result_vec)))
+      Ok(player.alloc_datum(Datum::PropList(result_vec, false)))
     }
-    Rule::empty_prop_list => Ok(player.alloc_datum(Datum::PropList(vec![]))),
+    Rule::empty_prop_list => Ok(player.alloc_datum(Datum::PropList(vec![], false))),
     Rule::number_int => Ok(player.alloc_datum(Datum::Int(pair.as_str().parse::<i32>().unwrap()))),
     Rule::number_float => Ok(player.alloc_datum(Datum::Float(pair.as_str().parse::<f32>().unwrap()))),
     Rule::rect => {

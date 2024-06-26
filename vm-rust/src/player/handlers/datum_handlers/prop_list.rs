@@ -1,10 +1,28 @@
-use crate::{director::lingo::datum::{datum_bool, Datum, PropListPair}, player::{compare::datum_equals, datum_formatting::{format_concrete_datum, format_datum}, get_datum, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, DatumRef, DatumRefMap, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum, PropListPair}, player::{compare::{datum_equals, datum_less_than}, datum_formatting::{format_concrete_datum, format_datum}, get_datum, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DatumRefMap, DirPlayer, ScriptError, VOID_DATUM_REF}};
 
 pub struct PropListDatumHandlers {}
 
 pub struct PropListUtils {}
 
 impl PropListUtils {
+  fn find_index_to_add(prop_list: &Vec<PropListPair>, item: (DatumRef, DatumRef), datums: &DatumRefMap) -> Result<i32, ScriptError> {
+    let mut low = 0;
+    let mut high = prop_list.len() as i32;
+    let key = get_datum(item.0, datums);
+
+    while low < high {
+      let mid = (low + high) / 2;
+      let left_key = get_datum(prop_list.get(mid as usize).unwrap().0, datums);
+      if datum_less_than(left_key, key)? {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+
+    Ok(low)
+  }
+
   fn get_key_index(prop_list: &Vec<PropListPair>, key: &Datum, datums: &DatumRefMap) -> Result<i32, ScriptError> {
     let mut pos = -1;
     for (i, (k, _)) in prop_list.iter().enumerate() {
@@ -85,14 +103,17 @@ impl PropListUtils {
     formatted_key: String,
   ) -> Result<(), ScriptError> {
     let key = player.datums.get(&key_ref).unwrap();
-    let prop_list = player.get_datum(prop_list_ref).to_map()?;
+    let (prop_list, is_sorted) = player.get_datum(prop_list_ref).to_map_tuple()?;
     let key_index = Self::get_key_index(&prop_list, key, &player.datums)?;
     if is_required && key_index < 0 {
       return Err(ScriptError::new(format!("Prop not found: {}", formatted_key)));
     }
-    let prop_list = player.get_datum_mut(prop_list_ref).to_map_mut()?;
+    let index_to_add = PropListUtils::find_index_to_add(&prop_list, (key_ref, value_ref), &player.datums)?;
+    let (prop_list, ..) = player.get_datum_mut(prop_list_ref).to_map_tuple_mut()?;
     if key_index >= 0 {
       prop_list[key_index as usize].1 = value_ref;
+    } else if is_sorted {
+      prop_list.insert(index_to_add as usize, (key_ref, value_ref));
     } else {
       prop_list.push((key_ref, value_ref));
     }
@@ -204,7 +225,7 @@ impl PropListDatumHandlers {
         let prop_value = player.get_datum(prop_value);
         match prop_value {
           Datum::List(_, list, _) => list.len(),
-          Datum::PropList(list) => list.len(),
+          Datum::PropList(list, ..) => list.len(),
           _ => return Err(ScriptError::new("Cannot get count of non-list".to_string())),
         }
       } else {
@@ -219,7 +240,7 @@ impl PropListDatumHandlers {
       let find = player.get_datum(args[0]);
       let prop_list = player.get_datum(datum);
       let prop_list = match prop_list {
-        Datum::PropList(list) => list,
+        Datum::PropList(list, ..) => list,
         _ => return Err(ScriptError::new("Cannot set prop list at non-prop list".to_string())),
       };
       let position = prop_list.iter()
@@ -237,7 +258,7 @@ impl PropListDatumHandlers {
       let find = player.get_datum(args[0]);
       let prop_list = player.get_datum(datum);
       let prop_list = match prop_list {
-        Datum::PropList(list) => list,
+        Datum::PropList(list, ..) => list,
         _ => return Err(ScriptError::new("Cannot set prop list at non-prop list".to_string())),
       };
       let position = prop_list.iter()
@@ -272,7 +293,7 @@ impl PropListDatumHandlers {
     reserve_player_mut(|player| {
       let prop_list = player.get_datum(datum);
       let prop_list = match prop_list {
-        Datum::PropList(list) => list,
+        Datum::PropList(list, ..) => list,
         _ => return Err(ScriptError::new("Cannot set prop list at non-prop list".to_string())),
       };
       let last = prop_list.last().map(|(_, v)| v).unwrap();
@@ -289,7 +310,7 @@ impl PropListDatumHandlers {
       let key = player.get_datum(args[0]);
       let prop_list = player.get_datum(datum);
       match prop_list {
-        Datum::PropList(prop_list) => {
+        Datum::PropList(prop_list, ..) => {
           let key_index = PropListUtils::get_key_index(prop_list, key, &player.datums)?;
           if key_index >= 0 {
             return Ok(prop_list[key_index as usize].1);
@@ -331,7 +352,7 @@ impl PropListDatumHandlers {
       let formatted_key = format_datum(args[0], &player);
       let prop_list = player.get_datum(datum);
       match prop_list {
-        Datum::PropList(_) => {},
+        Datum::PropList(..) => {},
         _ => return Err(ScriptError::new("Cannot set prop list at non-prop list".to_string())),
       };
       let prop_name_ref = args[0];
@@ -343,13 +364,24 @@ impl PropListDatumHandlers {
   }
 
   fn add_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| {
-      let prop_list = player.get_datum_mut(datum).to_map_mut()?;
-      
+    reserve_player_mut(|player| {      
       let prop_name_ref = args[0];
       let value_ref = args[1];
-      prop_list.push((prop_name_ref, value_ref));
-      
+
+      let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+      let index_to_add = if is_sorted {
+        PropListUtils::find_index_to_add(&prop_list, (prop_name_ref, value_ref), &player.datums)?
+      } else {
+        prop_list.len() as i32
+      };
+
+      let (prop_list, ..) = player.get_datum_mut(datum).to_map_tuple_mut()?;
+      if is_sorted {
+        prop_list.insert(index_to_add as usize, (prop_name_ref, value_ref));
+      } else {
+        prop_list.push((prop_name_ref, value_ref));
+      }
+
       Ok(VOID_DATUM_REF)
     })
   }
@@ -359,7 +391,7 @@ impl PropListDatumHandlers {
       let formatted_key = format_datum(args[0], &player);
       let prop_list = player.get_datum(datum);
       match prop_list {
-        Datum::PropList(_) => {},
+        Datum::PropList(..) => {},
         _ => return Err(ScriptError::new("Cannot set prop list at non-prop list".to_string())),
       };
       let prop_name_ref = args[0];
@@ -375,7 +407,7 @@ impl PropListDatumHandlers {
       let formatted_key = format_datum(args[0], &player);
       let prop_list = player.get_datum(datum);
       match prop_list {
-        Datum::PropList(_) => {},
+        Datum::PropList(..) => {},
         _ => return Err(ScriptError::new("Cannot set prop list at non-prop list".to_string())),
       };
       let prop_name_ref = args[0];
@@ -390,7 +422,7 @@ impl PropListDatumHandlers {
     reserve_player_mut(|player| {
       let prop_list = player.get_datum(datum);
       let prop_list = match prop_list {
-        Datum::PropList(prop_list) => prop_list,
+        Datum::PropList(prop_list, ..) => prop_list,
         _ => return Err(ScriptError::new("Cannot get prop list at non-prop list".to_string())),
       };
       let prop_name_ref = args[0];
@@ -403,7 +435,7 @@ impl PropListDatumHandlers {
       let position = player.get_datum(args[0]).int_value(&player.datums)?;
       let prop_list = player.get_datum_mut(datum);
       match prop_list {
-        Datum::PropList(prop_list) => {
+        Datum::PropList(prop_list, ..) => {
           prop_list.remove((position - 1) as usize);
           Ok(())
         },
@@ -417,7 +449,7 @@ impl PropListDatumHandlers {
     reserve_player_mut(|player| {
       let prop_list = player.get_datum(datum);
       let prop_list = match prop_list {
-        Datum::PropList(prop_list) => prop_list,
+        Datum::PropList(prop_list, ..) => prop_list,
         _ => return Err(ScriptError::new("Cannot get prop list at non-prop list".to_string())),
       };
       let position = player.get_datum(args[0]).int_value(&player.datums)?;
@@ -426,13 +458,33 @@ impl PropListDatumHandlers {
   }
 
   pub fn sort(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    let sorted_prop_list = reserve_player_ref(|player| {
+      let mut sorted_prop_list = player.get_datum(datum).to_map()?.clone();
+      sorted_prop_list.sort_by(|a, b| {
+        let (left_key_ref, _) = a;
+        let (right_key_ref, _) = b;
+
+        let left = player.get_datum(*left_key_ref);
+        let right = player.get_datum(*right_key_ref);
+
+        if datum_equals(left, right, &player.datums).unwrap() {
+          return std::cmp::Ordering::Equal
+        } else if datum_less_than(left, right).unwrap() {
+          std::cmp::Ordering::Less
+        } else {
+          std::cmp::Ordering::Greater
+        }
+      });
+      Ok(sorted_prop_list)
+    })?;
+
     reserve_player_mut(|player| {
-      let prop_list = player.get_datum_mut(datum).to_map()?;
-      if prop_list.len() > 0 {
-        Err(ScriptError::new("Cannot sort non-empty prop list".to_string()))
-      } else {
-        Ok(VOID_DATUM_REF)
-      }
+      let (list_vec, is_sorted) = player.get_datum_mut(datum).to_map_tuple_mut()?;
+      list_vec.clear();
+      list_vec.extend(sorted_prop_list);
+      *is_sorted = true;
+
+      Ok(VOID_DATUM_REF)
     })
   }
 

@@ -197,7 +197,7 @@ impl ScriptInstanceDatumHandlers {
       let prop_value_datum = player.get_datum(prop_value);
       let count = match prop_value_datum {
         Datum::List(_, list, _) => list.len(),
-        Datum::PropList(prop_list) => prop_list.len(),
+        Datum::PropList(prop_list, ..) => prop_list.len(),
         _ => return Err(ScriptError::new("Cannot count non-list property".to_string())),
       };
       Ok(player.alloc_datum(Datum::Int(count as i32)))

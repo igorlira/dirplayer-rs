@@ -111,7 +111,7 @@ pub enum Datum {
   Void,
   VarRef(VarRef),
   List(DatumType, Vec<DatumRef>, bool), // bool is for whether the list is sorted
-  PropList(Vec<PropListPair>),
+  PropList(Vec<PropListPair>, bool), // bool is for whether the map is sorted
   Symbol(String),
   CastLib(u32),
   Stage,
@@ -182,7 +182,7 @@ impl Datum {
       Datum::Void => DatumType::Void,
       Datum::VarRef(_) => DatumType::VarRef,
       Datum::List(_, _, _) => DatumType::List,
-      Datum::PropList(_) => DatumType::PropList,
+      Datum::PropList(..) => DatumType::PropList,
       Datum::Symbol(_) => DatumType::Symbol,
       Datum::CastLib(_) => DatumType::CastLibRef,
       Datum::Stage => DatumType::StageRef,
@@ -341,14 +341,28 @@ impl Datum {
   #[allow(dead_code)]
   pub fn to_map(&self) -> Result<&Vec<(DatumRef, DatumRef)>, ScriptError> {
     match self {
-      Datum::PropList(items) => Ok(items),
+      Datum::PropList(items, ..) => Ok(items),
+      _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
+    }
+  }
+
+  pub fn to_map_tuple(&self) -> Result<(&Vec<(DatumRef, DatumRef)>, bool), ScriptError> {
+    match self {
+      Datum::PropList(items, sorted) => Ok((items, *sorted)),
       _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
     }
   }
 
   pub fn to_map_mut(&mut self) -> Result<&mut Vec<(DatumRef, DatumRef)>, ScriptError> {
     match self {
-      Datum::PropList(items) => Ok(items),
+      Datum::PropList(items, ..) => Ok(items),
+      _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
+    }
+  }
+
+  pub fn to_map_tuple_mut(&mut self) -> Result<(&mut Vec<(DatumRef, DatumRef)>, &mut bool), ScriptError> {
+    match self {
+      Datum::PropList(items, sorted) => Ok((items, sorted)),
       _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
     }
   }

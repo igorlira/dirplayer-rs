@@ -208,7 +208,7 @@ impl MultiuserXtraManager {
                             (subject_key, subject),
                             (content_key, content),
                             (time_stamp_key, time_stamp),
-                        ])))
+                        ], false)))
                     })
                 } else {
                     Ok(VOID_DATUM_REF)

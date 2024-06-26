@@ -18,7 +18,7 @@ impl BuiltInHandlerManager {
       let obj = player.get_datum(args[0]);
       match obj {
         Datum::List(_, list, ..) => Ok(player.alloc_datum(Datum::Int(list.len() as i32))),
-        Datum::PropList(prop_list) => Ok(player.alloc_datum(Datum::Int(prop_list.len() as i32))),
+        Datum::PropList(prop_list, ..) => Ok(player.alloc_datum(Datum::Int(prop_list.len() as i32))),
         _ => Err(ScriptError::new(format!("Cannot get count of non-list")))
       }
     })
@@ -31,7 +31,7 @@ impl BuiltInHandlerManager {
       let index = position - 1;
       match obj {
         Datum::List(_, list, ..) => Ok(list[index as usize]),
-        Datum::PropList(prop_list) => Ok(prop_list[index as usize].1),
+        Datum::PropList(prop_list, ..) => Ok(prop_list[index as usize].1),
         _ => Err(ScriptError::new(format!("Cannot getAt of non-list")))
       }
     })
@@ -98,7 +98,7 @@ impl BuiltInHandlerManager {
       let handler_name = handler_name.string_value(&player.datums)?;
 
       let instance_ids = match receiver_clone {
-        Datum::PropList(prop_list) => {
+        Datum::PropList(prop_list, ..) => {
           let mut instance_ids = vec![];
           for (_, value_ref) in prop_list {
             instance_ids.extend(get_datum_script_instance_ids(value_ref, player)?);
