@@ -83,10 +83,15 @@ impl TypeUtils {
         let position = player.get_datum(prop_key_ref).int_value(&player.datums)?;
         let index = position - 1;
         let (_, list, _) = player.get_datum_mut(datum_ref).to_list_mut().unwrap();
-        if index < 0 || index >= list.len() as i32 {
+        if index < 0 {
           return Err(ScriptError::new(format!("Index out of bounds: {index}")));
+        } else if index < list.len() as i32 {
+          list[index as usize] = value_ref;
+        } else {
+          // FIXME this is not the same as Director, which would fill in the list with zeros
+          list.resize((index as usize + 1).max(list.len()), VOID_DATUM_REF);
+          list[index as usize] = value_ref;
         }
-        list[index as usize] = value_ref;
         Ok(())
       }
       _ => return Err(ScriptError::new(format!("Cannot set sub-prop `{}` on prop of type {}", formatted_key, datum_type.type_str()))),
