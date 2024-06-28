@@ -97,6 +97,9 @@ impl StaticBytecodeHandlerManager {
     }
     pub fn get_async_handler(&self, opcode: &OpCode) -> Option<BytecodeHandlerFunctionAsync> {
         match opcode {
+            OpCode::NewObj => Some(Box::new(|a, b| {
+                Box::pin(StackBytecodeHandler::new_obj(a, b))
+            })),
             OpCode::ExtCall => Some(Box::new(|a, b| {
                 Box::pin(FlowControlBytecodeHandler::ext_call(a, b))
             })),

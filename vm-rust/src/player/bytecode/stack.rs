@@ -1,4 +1,4 @@
-use crate::{director::{chunks::handler::Bytecode, lingo::datum::{Datum, DatumType}}, player::{context_vars::{player_get_context_var, read_context_var_args}, get_datum, reserve_player_mut, script::{get_current_script, get_current_variable_multiplier, get_name}, DatumRef, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK}};
+use crate::{director::{chunks::handler::Bytecode, lingo::datum::{Datum, DatumType}}, player::{context_vars::{player_get_context_var, read_context_var_args}, get_datum, handlers::datum_handlers::script::ScriptDatumHandlers, reserve_player_mut, script::{get_current_script, get_current_variable_multiplier, get_name}, DatumRef, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -159,6 +159,33 @@ impl StackBytecodeHandler {
     
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(value_ref);
+      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    })
+  }
+
+  pub async fn new_obj(bytecode: Bytecode, ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+    let (script_ref, extra_args) = reserve_player_mut(|player| {
+      let obj_type = get_name(player, &ctx, bytecode.obj as u16).unwrap();
+      if obj_type != "script" {
+        return Err(ScriptError::new(format!("Cannot create new instance of non-script: {}", obj_type)));
+      }
+      let arg_list = {
+        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+        scope.stack.pop().unwrap()
+      };
+      let arg_list = player.get_datum(arg_list).to_list()?;
+      let script_name = player.get_datum(arg_list[0]).string_value(&player.datums)?;
+      let extra_args = arg_list[1..].to_vec();
+
+      let script_ref = player.movie.cast_manager.find_member_ref_by_name(&script_name).unwrap();
+      let script_ref = player.alloc_datum(Datum::ScriptRef(script_ref));
+      
+      Ok((script_ref, extra_args))
+    })?;
+    let result = ScriptDatumHandlers::new(script_ref, &extra_args).await?;
+    reserve_player_mut(|player| {
+      let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+      scope.stack.push(result);
       Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
     })
   }
