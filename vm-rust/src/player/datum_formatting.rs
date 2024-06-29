@@ -18,7 +18,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
       }
     },
     Datum::List(_, items, _) => {
-      let formatted_items: Vec<String> = items.iter().map(|x| format_datum(*x, player)).collect();
+      let formatted_items: Vec<String> = items.iter().map(|x| format_datum(x, player)).collect();
       format!("[{}]", formatted_items.join(", "))
     }
     Datum::VarRef(_) => "VarRef".to_string(),
@@ -30,7 +30,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
       if entries.is_empty() {
         return "[:]".to_string();
       }
-      let formatted_entries: Vec<String> = entries.iter().map(|(k, v)| format!("{}: {}", format_datum(*k, player), format_datum(*v, player))).collect();
+      let formatted_entries: Vec<String> = entries.iter().map(|(k, v)| format!("{}: {}", format_datum(k, player), format_datum(v, player))).collect();
       format!("[{}]", formatted_entries.join(", "))
     }
     Datum::StringChunk(..) => format!("\"{}\"", datum.string_value(&player.datums).unwrap_or("!!!ERR!!!".to_string())),
@@ -101,7 +101,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
   }
 }
 
-pub fn format_datum(datum_ref: DatumRef, player: &DirPlayer) -> String {
+pub fn format_datum(datum_ref: &DatumRef, player: &DirPlayer) -> String {
   let datum = get_datum(datum_ref, &player.datums);
   format_concrete_datum(datum, player)
 }

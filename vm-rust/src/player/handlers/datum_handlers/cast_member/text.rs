@@ -8,13 +8,13 @@ use crate::{
 pub struct TextMemberHandlers {}
 
 impl TextMemberHandlers {
-    pub fn call(player: &mut DirPlayer, datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn call(player: &mut DirPlayer, datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let member_ref = player.get_datum(datum).to_member_ref()?;
         let member = player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap();
         let text = member.member_type.as_text().unwrap();
         match handler_name.as_str() {
             "count" => {
-              let count_of = player.get_datum(args[0]).string_value(&player.datums)?;
+              let count_of = player.get_datum(&args[0]).string_value(&player.datums)?;
               if args.len() != 1 {
                 return Err(ScriptError::new("count requires 1 argument".to_string()));
               }
@@ -23,9 +23,9 @@ impl TextMemberHandlers {
               Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-              let prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
-              let start = player.get_datum(args[1]).int_value(&player.datums)?;
-              let end = if args.len() > 2 { player.get_datum(args[2]).int_value(&player.datums)? } else { start };
+              let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+              let start = player.get_datum(&args[1]).int_value(&player.datums)?;
+              let end = if args.len() > 2 { player.get_datum(&args[2]).int_value(&player.datums)? } else { start };
               let chunk_expr = StringChunkType::from(&prop_name);
               let chunk_expr = StringChunkExpr {
                 chunk_type: chunk_expr,
@@ -37,7 +37,7 @@ impl TextMemberHandlers {
               Ok(player.alloc_datum(Datum::StringChunk(StringChunkSource::Member(member_ref), chunk_expr, resolved_str)))
             }
             "locToCharPos" => {
-                let (x, y) = player.get_datum(args[0]).to_int_point()?;
+                let (x, y) = player.get_datum(&args[0]).to_int_point()?;
                 let params = DrawTextParams {
                     font: player.font_manager.get_system_font().unwrap(),
                     line_height: None,
@@ -205,7 +205,7 @@ impl TextMemberHandlers {
                 |player| {
                     let mut item_strings = Vec::new();
                     for x in value.to_list().unwrap() {
-                        item_strings.push(player.get_datum(*x).string_value(&player.datums)?);
+                        item_strings.push(player.get_datum(x).string_value(&player.datums)?);
                     }
                     Ok(item_strings)
                 },

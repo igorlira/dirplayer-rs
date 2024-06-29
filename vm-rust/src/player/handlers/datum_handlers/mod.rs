@@ -24,7 +24,7 @@ use crate::{director::lingo::datum::DatumType, player::{format_datum, reserve_pl
 use self::{bitmap::BitmapDatumHandlers, list_handlers::ListDatumHandlers, point::PointDatumHandlers, prop_list::PropListDatumHandlers, rect::RectDatumHandlers, script::ScriptDatumHandlers, sprite::SpriteDatumHandlers, string::StringDatumHandlers, string_chunk::StringChunkHandlers, timeout::TimeoutDatumHandlers};
 
 pub async fn player_call_datum_handler(
-  obj_ref: DatumRef,
+  obj_ref: &DatumRef,
   handler_name: &String,
   args: &Vec<DatumRef>
 ) -> Result<DatumRef, ScriptError> {
@@ -59,7 +59,7 @@ pub async fn player_call_datum_handler(
     DatumType::BitmapRef => BitmapDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::SpriteRef => {
       if SpriteDatumHandlers::has_async_handler(obj_ref, handler_name)? {
-        SpriteDatumHandlers::call_async(obj_ref, handler_name, args).await
+        SpriteDatumHandlers::call_async(obj_ref.clone(), handler_name, args).await
       } else {
         SpriteDatumHandlers::call(obj_ref, handler_name, args)
       }

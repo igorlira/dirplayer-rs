@@ -14,7 +14,7 @@ pub struct FieldMemberHandlers {}
 impl FieldMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
-        datum: DatumRef,
+        datum: &DatumRef,
         handler_name: &String,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
@@ -27,7 +27,7 @@ impl FieldMemberHandlers {
         let field = member.member_type.as_field().unwrap();
         match handler_name.as_str() {
             "count" => {
-                let count_of = player.get_datum(args[0]).string_value(&player.datums)?;
+                let count_of = player.get_datum(&args[0]).string_value(&player.datums)?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }

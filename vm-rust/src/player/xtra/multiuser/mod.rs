@@ -28,7 +28,7 @@ impl MultiuserXtraInstance {
     pub fn dispatch_message_handler(&self) {
         if let Some((handler_obj_ref, handler_symbol)) = &self.net_message_handler {
             let handler_symbol = handler_symbol.clone();
-            let handler_obj_ref = *handler_obj_ref;
+            let handler_obj_ref = handler_obj_ref.clone();
             player_dispatch_callback_event(handler_obj_ref, &handler_symbol, &vec![]);
         }
     }
@@ -84,13 +84,13 @@ impl MultiuserXtraManager {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
-            "setNetBufferLimits" => Ok(VOID_DATUM_REF),
+            "setNetBufferLimits" => Ok(VOID_DATUM_REF.clone()),
             "setNetMessageHandler" => {
                 let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_mut(|player| {
-                    let handler_symbol = player.get_datum(*args.get(0).unwrap());
-                    let handler_obj_ref = *args.get(1).unwrap();
+                    let handler_symbol = player.get_datum(args.get(0).unwrap());
+                    let handler_obj_ref = args.get(1).unwrap().clone();
                     // TODO subject and sender
                     if handler_symbol.is_void() {
                         instance.net_message_handler = None;
@@ -108,12 +108,12 @@ impl MultiuserXtraManager {
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 if let Some((handler_obj_ref, handler_symbol)) = &instance.net_message_handler {
                     let _handler_symbol = handler_symbol.clone();
-                    let _handler_obj_ref = *handler_obj_ref;
+                    let _handler_obj_ref = handler_obj_ref.clone();
                 }
                 // userNameString, passwordString, serverIDString, portNumber, movieIDString {, mode, encryptionKey
                 let (host, port) = reserve_player_ref(|player| {
-                    let host = player.get_datum(*args.get(2).unwrap()).string_value(&player.datums)?;
-                    let port = player.get_datum(*args.get(3).unwrap()).int_value(&player.datums)?;
+                    let host = player.get_datum(args.get(2).unwrap()).string_value(&player.datums)?;
+                    let port = player.get_datum(args.get(3).unwrap()).int_value(&player.datums)?;
 
                     Ok((host, port))
                 })?;
@@ -176,7 +176,7 @@ impl MultiuserXtraManager {
                 onerror_callback.forget();
                 onopen_callback.forget();
 
-                Ok(VOID_DATUM_REF)
+                Ok(VOID_DATUM_REF.clone())
             },
             "getNetMessage" => {
                 let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
@@ -211,18 +211,18 @@ impl MultiuserXtraManager {
                         ], false)))
                     })
                 } else {
-                    Ok(VOID_DATUM_REF)
+                    Ok(VOID_DATUM_REF.clone())
                 }
             }
             "sendNetMessage" => {
                 let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_ref(|player| {
-                    let msg_string = player.get_datum(*args.get(2).unwrap()).string_value(&player.datums)?;
+                    let msg_string = player.get_datum(args.get(2).unwrap()).string_value(&player.datums)?;
                     console_warn!("sendNetMessage: {:?}", msg_string);
                     if let Some(tx) = &instance.socket_tx {
                         tx.try_send(msg_string).unwrap();
-                        Ok(VOID_DATUM_REF)
+                        Ok(VOID_DATUM_REF.clone())
                     } else {
                         Err(ScriptError::new("Socket not connected".to_string()))
                     }

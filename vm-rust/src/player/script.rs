@@ -35,7 +35,7 @@ impl ScriptInstance {
         let mut properties = HashMap::new();
         for name_id in script_def.chunk.property_name_ids.iter() {
             let name = lctx.names[*name_id as usize].clone();
-            properties.insert(name, VOID_DATUM_REF);
+            properties.insert(name, VOID_DATUM_REF.clone());
         }
         ScriptInstance {
             instance_id,
@@ -81,13 +81,13 @@ pub fn script_get_prop_opt(
         if let Some(ancestor_id) = script_instance.ancestor {
             Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id)))
         } else {
-            Some(VOID_DATUM_REF)
+            Some(VOID_DATUM_REF.clone())
         }
     } else {
         // Try to find the property on the current instance
         let prop_value = script_instance.properties
             .get(prop_name)
-            .map(|x| *x);
+            .map(|x| x.clone());
         if let Some(prop) = prop_value {
             Some(prop)
         } else if script_instance.ancestor.is_some() {
@@ -122,7 +122,7 @@ pub fn script_set_prop(
     player: &mut DirPlayer,
     script_instance_id: ScriptInstanceId,
     prop_name: &String,
-    value_ref: DatumRef,
+    value_ref: &DatumRef,
     required: bool,
 ) -> Result<(), ScriptError> {
     // Try to set the property on the current instance
@@ -133,7 +133,7 @@ pub fn script_set_prop(
             script_instance.ancestor = Some(ancestor_id);
             Ok(())
         } else if let Some(prop) = script_instance.properties.get_mut(prop_name) {
-            *prop = value_ref;
+            *prop = value_ref.clone();
             Ok(())
         } else {
             Err(ScriptError::new(format!(
@@ -162,7 +162,7 @@ pub fn script_set_prop(
                 Err(err)
             } else {
                 let script_instance = player.script_instances.get_mut(&script_instance_id).unwrap();
-                script_instance.properties.insert(prop_name.to_owned(), value_ref);
+                script_instance.properties.insert(prop_name.to_owned(), value_ref.clone());
                 Ok(())
             }
         }
@@ -252,9 +252,9 @@ pub fn get_name<'a>(
 }
 
 pub async fn player_set_obj_prop(
-    obj_ref: DatumRef,
+    obj_ref: &DatumRef,
     prop_name: &String,
-    value_ref: DatumRef,
+    value_ref: &DatumRef,
 ) -> Result<(), ScriptError> {
     let (obj_clone, value_clone) = reserve_player_ref(|player| {
         let obj = get_datum(obj_ref, &player.datums).to_owned();
@@ -296,7 +296,7 @@ pub async fn player_set_obj_prop(
         }),
         Datum::PropList(..) => reserve_player_mut(|player| {
             let key_ref = player.alloc_datum(Datum::String(prop_name.clone()));
-            PropListUtils::set_prop(obj_ref, key_ref, value_ref, player, true, prop_name.clone())
+            PropListUtils::set_prop(obj_ref, &key_ref, value_ref, player, true, prop_name.clone())
         }),
         Datum::IntRect(..) => reserve_player_mut(|player| {
             RectDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
@@ -327,7 +327,7 @@ pub async fn player_set_obj_prop(
 
 pub fn get_obj_prop(
     player: &mut DirPlayer,
-    obj_ref: DatumRef,
+    obj_ref: &DatumRef,
     prop_name: &String,
 ) -> Result<DatumRef, ScriptError> {
     let obj_clone = get_datum(obj_ref, &player.datums).clone();

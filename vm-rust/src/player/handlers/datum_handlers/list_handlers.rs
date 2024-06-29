@@ -4,14 +4,14 @@ pub struct ListDatumHandlers {}
 pub struct ListDatumUtils {}
 
 impl ListDatumUtils {
-  fn find_index_to_add(list_vec: &Vec<DatumRef>, item: DatumRef, datums: &DatumRefMap) -> Result<i32, ScriptError> {
+  fn find_index_to_add(list_vec: &Vec<DatumRef>, item: &DatumRef, datums: &DatumRefMap) -> Result<i32, ScriptError> {
     let mut low = 0;
     let mut high = list_vec.len() as i32;
     let item = get_datum(item, datums);
 
     while low < high {
       let mid = (low + high) / 2;
-      let left = get_datum(*list_vec.get(mid as usize).unwrap(), datums);
+      let left = get_datum(list_vec.get(mid as usize).unwrap(), datums);
       if datum_less_than(left, item)? {
         low = mid + 1;
       } else {
@@ -32,40 +32,40 @@ impl ListDatumUtils {
 }
 
 impl ListDatumHandlers {
-  pub fn get_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let list_vec = player.get_datum(datum).to_list()?;
-      let position = player.get_datum(args[0]).int_value(&player.datums)? - 1;
+      let position = player.get_datum(&args[0]).int_value(&player.datums)? - 1;
       if position < 0 || position >= list_vec.len() as i32 {
         return Err(ScriptError::new(format!("Index out of bounds: {}", position)))
       }
 
-      Ok(list_vec[position as usize])
+      Ok(list_vec[position as usize].clone())
     })
   }
 
-  pub fn set_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let position = player.get_datum(args[0]).int_value(&player.datums)?;
+      let position = player.get_datum(&args[0]).int_value(&player.datums)?;
       let (_, list_vec, ..) = player.get_datum_mut(datum).to_list_mut()?;
       let index = position - 1;
-      let item_ref = args[1];
+      let item_ref = &args[1];
 
       if index < list_vec.len() as i32 {
-        list_vec[index as usize] = item_ref;
+        list_vec[index as usize] = item_ref.clone();
       } else {
         let padding_size = index - list_vec.len() as i32;
         for _ in 0..padding_size {
           // TODO: should this be filled with zeroes instead?
-          list_vec.push(VOID_DATUM_REF);
+          list_vec.push(VOID_DATUM_REF.clone());
         }
-        list_vec.push(item_ref);
+        list_vec.push(item_ref.clone());
       }
-      Ok(VOID_DATUM_REF)
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "count" => Self::count(datum, args),
       "getAt" => Self::get_at(datum, args),
@@ -85,66 +85,66 @@ impl ListDatumHandlers {
     }
   }
 
-  fn count(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  fn count(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let list_vec = player.get_datum(datum).to_list()?;
       Ok(player.alloc_datum(Datum::Int(list_vec.len() as i32)))
     })
   }
 
-  fn get_last(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  fn get_last(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let list_vec = player.get_datum(datum).to_list()?;
-      let last = list_vec.last().map(|x| *x).unwrap_or(VOID_DATUM_REF);
+      let last = list_vec.last().map(|x| x.clone()).unwrap_or(VOID_DATUM_REF.clone());
       Ok(last)
     })
   }
 
-  pub fn get_one(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_one(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let find = player.get_datum(args[0]);
+      let find = player.get_datum(&args[0]);
       let list_vec = player.get_datum(datum).to_list()?;
-      let position = list_vec.iter().position(|&x| datum_equals(player.get_datum(x), find, &player.datums).unwrap()).map(|x| x as i32);
+      let position = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), find, &player.datums).unwrap()).map(|x| x as i32);
 
       Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
     })
   }
 
-  pub fn find_pos(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn find_pos(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     // TODO: why is this exactly the same as get_one?
     reserve_player_mut(|player| {
-      let find = player.get_datum(args[0]);
+      let find = player.get_datum(&args[0]);
       let list_vec = player.get_datum(datum).to_list()?;
-      let position = list_vec.iter().position(|&x| datum_equals(player.get_datum(x), find, &player.datums).unwrap()).map(|x| x as i32);
+      let position = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), find, &player.datums).unwrap()).map(|x| x as i32);
       Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
     })
   }
 
-  pub fn add(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let item = args[0];
+  pub fn add(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    let item = &args[0];
     reserve_player_mut(|player| {
       let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
       let index_to_add = if is_sorted {
-        ListDatumUtils::find_index_to_add(&list_vec, item, &player.datums)?
+        ListDatumUtils::find_index_to_add(&list_vec, &item, &player.datums)?
       } else {
         list_vec.len() as i32
       };
       
       let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
       if is_sorted {
-        list_vec.insert(index_to_add as usize, item);
+        list_vec.insert(index_to_add as usize, item.clone());
       } else {
-        list_vec.push(item);
+        list_vec.push(item.clone());
       }
-      Ok(VOID_DATUM_REF)
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn delete_one(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn delete_one(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let index = reserve_player_ref(|player| {
-      let item = player.get_datum(args[0]);
+      let item = player.get_datum(&args[0]);
       let list_vec = player.get_datum(datum).to_list()?;
-      let index = list_vec.iter().position(|&x| datum_equals(player.get_datum(x), item, &player.datums).unwrap());
+      let index = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), item, &player.datums).unwrap());
       Ok(index)
     })?;
 
@@ -157,47 +157,47 @@ impl ListDatumHandlers {
     })
   }
 
-  pub fn delete_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn delete_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let position = player.get_datum(args[0]).int_value(&player.datums)?;
+      let position = player.get_datum(&args[0]).int_value(&player.datums)?;
       let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
       if position <= list_vec.len() as i32 {
         let index = (position - 1) as usize;
         list_vec.remove(index);
-        Ok(VOID_DATUM_REF)
+        Ok(VOID_DATUM_REF.clone())
       } else {
         Err(ScriptError::new("Index out of bounds".to_string()))
       }
     })
   }
 
-  pub fn add_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn add_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let position = player.get_datum(args[0]).int_value(&player.datums)? - 1;
-      let item_ref = args[1];
+      let position = player.get_datum(&args[0]).int_value(&player.datums)? - 1;
+      let item_ref = &args[1];
 
       let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-      list_vec.insert(position as usize, item_ref);
-      Ok(VOID_DATUM_REF)
+      list_vec.insert(position as usize, item_ref.clone());
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn append(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let item = args[0];
+  pub fn append(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    let item = &args[0];
     reserve_player_mut(|player| {
       let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-      list_vec.push(item);
-      Ok(VOID_DATUM_REF)
+      list_vec.push(item.clone());
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn sort(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn sort(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let sorted_list = reserve_player_ref(|player| {
       let list_vec = player.get_datum(datum).to_list()?;
       let mut sorted_list = list_vec.clone();
       sorted_list.sort_by(|a, b| {
-        let left = player.get_datum(*a);
-        let right = player.get_datum(*b);
+        let left = player.get_datum(a);
+        let right = player.get_datum(b);
 
         if datum_equals(left, right, &player.datums).unwrap() {
           return std::cmp::Ordering::Equal
@@ -217,11 +217,11 @@ impl ListDatumHandlers {
       list_vec.extend(sorted_list);
       *is_sorted = true;
 
-      Ok(VOID_DATUM_REF)
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn duplicate(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn duplicate(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     Ok(player_duplicate_datum(datum))
   }
 }

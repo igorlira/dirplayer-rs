@@ -3,7 +3,7 @@ use crate::{director::lingo::datum::Datum, player::{bitmap::bitmap::{get_system_
 pub struct ColorDatumHandlers {}
 
 impl ColorDatumHandlers {
-  pub fn call(datum: DatumRef, handler_name: &String, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "hexString" => {
         reserve_player_mut(|player| {
@@ -17,7 +17,7 @@ impl ColorDatumHandlers {
     }
   }
 
-  pub fn get_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String) -> Result<DatumRef, ScriptError> {
+  pub fn get_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String) -> Result<DatumRef, ScriptError> {
     let color_ref = player.get_datum(datum).to_color_ref()?;
     match prop.as_str() {
       "red" => {
@@ -59,7 +59,7 @@ impl ColorDatumHandlers {
     }
   }
 
-  pub fn set_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String, value: DatumRef) -> Result<(), ScriptError> {
+  pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
     match prop.as_str() {
       "red" => {
         let r = player.get_datum(value).int_value(&player.datums)?;

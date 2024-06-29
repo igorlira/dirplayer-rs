@@ -25,7 +25,7 @@ impl FlowControlBytecodeHandler {
       let name = get_name(player_cell, &ctx, name_id).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let arg_list_datum_ref = scope.stack.pop().unwrap();
-      let arg_list_datum = get_datum(arg_list_datum_ref, &player.datums);
+      let arg_list_datum = get_datum(&arg_list_datum_ref, &player.datums);
 
       if let Datum::List(list_type, list, _) = arg_list_datum {
         let is_no_ret = match list_type {
@@ -42,7 +42,7 @@ impl FlowControlBytecodeHandler {
     if !is_no_ret {
       reserve_player_mut(|player| {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-        scope.stack.push(scope.return_value);
+        scope.stack.push(scope.return_value.clone());
       });
     }
     return Ok(HandlerExecutionResultContext { result: result_ctx.result });
@@ -57,7 +57,7 @@ impl FlowControlBytecodeHandler {
       let script = get_current_script(&player, &ctx).unwrap();
       let handler_ref = script.get_own_handler_ref_at(bytecode.obj as usize).unwrap();
 
-      let arg_list_datum = player.get_datum(arg_list_id);
+      let arg_list_datum = player.get_datum(&arg_list_id);
       let is_no_ret = match arg_list_datum {
         Datum::List(DatumType::ArgListNoRet, _, _) => true,
         _ => false,
@@ -89,7 +89,7 @@ impl FlowControlBytecodeHandler {
         scope.stack.pop().unwrap()
       };
 
-      let datum = get_datum(value_id, &player.datums);
+      let datum = get_datum(&value_id, &player.datums);
       let offset = bytecode.obj as i32;
 
       if datum_is_zero(datum, &player.datums)? {
@@ -126,21 +126,21 @@ impl FlowControlBytecodeHandler {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
-      let arg_list_datum = player.get_datum(arg_list_id);
+      let arg_list_datum = player.get_datum(&arg_list_id);
       let is_no_ret = match arg_list_datum {
         Datum::List(DatumType::ArgListNoRet, _, _) => true,
         _ => false,
       };
       let arg_list = arg_list_datum.to_list()?;
-      let obj = arg_list[0];
+      let obj = arg_list[0].clone();
       let args = arg_list[1..].to_vec();
       let handler_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().to_owned();
 
       Ok((obj, handler_name, args, is_no_ret))
     })?;
-    let result = player_call_datum_handler(obj_ref, &handler_name, &args).await?;
+    let result = player_call_datum_handler(&obj_ref, &handler_name, &args).await?;
     reserve_player_mut(|player| {
-      player.last_handler_result = result;
+      player.last_handler_result = result.clone();
       if !is_no_ret {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.push(result);

@@ -21,7 +21,7 @@ impl SymbolDatumHandlers {
 
     pub fn get_prop(
         player: &mut DirPlayer,
-        _: DatumRef,
+        _: &DatumRef,
         prop: &String,
     ) -> Result<DatumRef, ScriptError> {
         match prop.as_str() {

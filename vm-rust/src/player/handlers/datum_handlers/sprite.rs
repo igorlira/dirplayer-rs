@@ -10,7 +10,7 @@ pub struct SpriteDatumUtils {}
 
 impl SpriteDatumUtils {
     pub fn get_script_instance_ids(
-        datum: DatumRef,
+        datum: &DatumRef,
         player: &DirPlayer,
     ) -> Result<Vec<u32>, ScriptError> {
         let sprite_num = player.get_datum(datum).to_sprite_ref()?;
@@ -25,7 +25,7 @@ impl SpriteDatumUtils {
 }
 
 impl SpriteDatumHandlers {
-    pub fn has_async_handler(datum: DatumRef, handler_name: &String) -> Result<bool, ScriptError> {
+    pub fn has_async_handler(datum: &DatumRef, handler_name: &String) -> Result<bool, ScriptError> {
         return reserve_player_ref(|player| {
             let sprite_num = player.get_datum(datum).to_sprite_ref()?;
             let sprite = player.movie.score.get_sprite(sprite_num);
@@ -49,7 +49,7 @@ impl SpriteDatumHandlers {
     }
 
     pub fn call(
-        _: DatumRef,
+        _: &DatumRef,
         handler_name: &String,
         _: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
@@ -66,7 +66,7 @@ impl SpriteDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         let instance_ids =
-            reserve_player_ref(|player| SpriteDatumUtils::get_script_instance_ids(datum, player))?;
+            reserve_player_ref(|player| SpriteDatumUtils::get_script_instance_ids(&datum, player))?;
         for instance_id in instance_ids {
             let handler_ref = reserve_player_ref(|player| {
                 ScriptInstanceUtils::get_script_instance_handler(handler_name, instance_id, player)

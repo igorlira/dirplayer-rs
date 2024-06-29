@@ -23,7 +23,7 @@ fn get_next_focus_sprite_id(player: &DirPlayer, after: i16) -> i16 {
 
 pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptError> {
     if !player_is_playing().await {
-        return Ok(VOID_DATUM_REF);
+        return Ok(VOID_DATUM_REF.clone());
     }
     let instance_ids = reserve_player_mut(|player| {
         player.keyboard_manager.key_down(key.clone(), code);
@@ -62,12 +62,12 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
         }
     });
     player_dispatch_targeted_event(&"keyDown".to_string(), &vec![], instance_ids.as_ref());
-    Ok(VOID_DATUM_REF)
+    Ok(VOID_DATUM_REF.clone())
 }
 
 pub async fn player_key_up(key: String, code: u16) -> Result<DatumRef, ScriptError> {
     if !player_is_playing().await {
-        return Ok(VOID_DATUM_REF);
+        return Ok(VOID_DATUM_REF.clone());
     }
     let instance_ids = reserve_player_mut(|player| {
         player.keyboard_manager.key_up(&key, code);
@@ -80,5 +80,5 @@ pub async fn player_key_up(key: String, code: u16) -> Result<DatumRef, ScriptErr
         }
     });
     player_dispatch_targeted_event(&"keyUp".to_string(), &vec![], instance_ids.as_ref());
-    Ok(VOID_DATUM_REF)
+    Ok(VOID_DATUM_REF.clone())
 }

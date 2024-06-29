@@ -10,7 +10,7 @@ impl VoidDatumHandlers {
     }
   }
 
-  pub fn get_prop(player: &mut DirPlayer, _: DatumRef, prop: &String) -> Result<DatumRef, ScriptError> {
+  pub fn get_prop(player: &mut DirPlayer, _: &DatumRef, prop: &String) -> Result<DatumRef, ScriptError> {
     match prop.as_str() {
       "ilk" => {
         Ok(player.alloc_datum(Datum::Symbol("void".to_owned())))

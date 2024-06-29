@@ -11,14 +11,14 @@ impl StringChunkUtils {
   pub fn delete(player: &mut DirPlayer, original_str_src: &StringChunkSource, chunk_expr: &StringChunkExpr) -> Result<(), ScriptError> {
     let new_string = {
       let original_str = match original_str_src {
-        StringChunkSource::Datum(original_str_ref) => player.get_datum(*original_str_ref).string_value(&player.datums)?,
+        StringChunkSource::Datum(original_str_ref) => player.get_datum(original_str_ref).string_value(&player.datums)?,
         StringChunkSource::Member(member_ref) => player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap().member_type.as_field().unwrap().text.clone()
       };
       Self::string_by_deleting_chunk(&original_str, &chunk_expr)
     }?;
     match original_str_src {
       StringChunkSource::Datum(original_str_ref) => {
-        let original_str_value = player.get_datum_mut(*original_str_ref).to_string_mut()?;
+        let original_str_value = player.get_datum_mut(original_str_ref).to_string_mut()?;
         *original_str_value = new_string;
       },
       StringChunkSource::Member(member_ref) => {
@@ -184,22 +184,22 @@ impl StringChunkUtils {
 }
 
 impl StringChunkHandlers {
-  pub fn count(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let value = player.get_datum(datum).string_value(&player.datums)?;
-      let operand = player.get_datum(args[0]).string_value(&player.datums)?;
+      let operand = player.get_datum(&args[0]).string_value(&player.datums)?;
       let delimiter = &player.movie.item_delimiter;
       let count = StringChunkUtils::resolve_chunk_count(&value, StringChunkType::from(&operand), delimiter)?;
       Ok(player.alloc_datum(Datum::Int(count as i32)))
     })
   }
 
-  pub fn get_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let datum = player.get_datum(datum);
-      let prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
-      let start = player.get_datum(args[1]).int_value(&player.datums)?;
-      let end = if args.len() > 2 { player.get_datum(args[2]).int_value(&player.datums)? } else { start };
+      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let start = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let end = if args.len() > 2 { player.get_datum(&args[2]).int_value(&player.datums)? } else { start };
       let chunk_expr = StringChunkExpr {
         chunk_type: StringChunkType::from(&prop_name),
         start,
@@ -212,7 +212,7 @@ impl StringChunkHandlers {
     })
   }
 
-  pub fn set_prop(_: &mut DirPlayer, _: DatumRef, prop: &String, _value_ref: DatumRef) -> Result<(), ScriptError> {
+  pub fn set_prop(_: &mut DirPlayer, _: &DatumRef, prop: &String, _value_ref: &DatumRef) -> Result<(), ScriptError> {
     match prop.as_str() {
       "font" | "fontStyle" => {
         // TODO
@@ -224,15 +224,15 @@ impl StringChunkHandlers {
     Ok(())
   }
 
-  fn delete(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  fn delete(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;
       StringChunkUtils::delete(player, &original_str_ref.clone(), &chunk_expr.clone())?;
-      Ok(VOID_DATUM_REF)
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "count" => Self::count(datum, args),
       "getProp" => Self::get_prop(datum, args),

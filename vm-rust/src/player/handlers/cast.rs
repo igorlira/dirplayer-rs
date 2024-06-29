@@ -6,7 +6,7 @@ pub struct CastHandlers { }
 impl CastHandlers {
   pub fn cast_lib(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let name_or_number = get_datum(args[0], &player.datums);
+      let name_or_number = get_datum(&args[0], &player.datums);
       let cast = match name_or_number {
         Datum::Int(n) => {
           Some(player.movie.cast_manager.get_cast(*n as u32)?)

@@ -7,7 +7,7 @@ use super::prop_list::PropListUtils;
 pub struct BitmapDatumHandlers {}
 
 impl BitmapDatumHandlers {
-  pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "fill" => Self::fill(datum, args),
       "draw" => Self::draw(datum, args),
@@ -21,28 +21,28 @@ impl BitmapDatumHandlers {
     }
   }
 
-  pub fn get_pixel(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_pixel(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let bitmap = player.get_datum(datum).to_bitmap_ref()?;
       let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
-      let x = player.get_datum(args[0]).int_value(&player.datums)?;
-      let y = player.get_datum(args[1]).int_value(&player.datums)?;
+      let x = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let y = player.get_datum(&args[1]).int_value(&player.datums)?;
       let color = bitmap.get_pixel_color_ref(x as u16, y as u16);
       let color_ref = player.alloc_datum(Datum::ColorRef(color));
       Ok(color_ref)
     })
   }
 
-  pub fn trim_whitespace(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn trim_whitespace(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let bitmap = player.get_datum(datum).to_bitmap_ref()?;
       let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap).unwrap();
       bitmap.trim_whitespace(&player.movie.cast_manager.palettes());
-      Ok(datum)
+      Ok(datum.clone())
     })
   }
 
-  pub fn create_matte(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn create_matte(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       // TODO alpha threshold
       if args.len() != 0 {
@@ -56,31 +56,31 @@ impl BitmapDatumHandlers {
     })
   }
 
-  pub fn duplicate(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn duplicate(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     Ok(player_duplicate_datum(datum))
   }
 
-  pub fn draw(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn draw(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let bitmap = player.get_datum(datum);
       let bitmap_ref = match bitmap {
         Datum::BitmapRef(bitmap) => Ok(bitmap),
         _ => Err(ScriptError::new("Cannot draw non-bitmap".to_string())),
       }?;
-      let rect = player.get_datum(args[0]).to_int_rect()?;
-      let draw_map = player.get_datum(args[1]).to_map()?;
+      let rect = player.get_datum(&args[0]).to_int_rect()?;
+      let draw_map = player.get_datum(&args[1]).to_map()?;
       let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
 
       let color_ref = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("color".to_owned()), &player.datums)?;
-      let color_ref = player.get_datum(color_ref).to_color_ref()?;
+      let color_ref = player.get_datum(&color_ref).to_color_ref()?;
       let palettes = player.movie.cast_manager.palettes();
       let color = resolve_color_ref(&palettes, &color_ref, &bitmap.palette_ref);
 
       let shape_type = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("shapeType".to_owned()), &player.datums)?;
-      let shape_type = player.get_datum(shape_type).string_value(&player.datums)?;
+      let shape_type = player.get_datum(&shape_type).string_value(&player.datums)?;
       
       let blend = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("blend".to_owned()), &player.datums)?;
-      let blend = player.get_datum(blend);
+      let blend = player.get_datum(&blend);
       let blend = if blend.is_void() {
         100
       } else {
@@ -97,11 +97,11 @@ impl BitmapDatumHandlers {
           return Err(ScriptError::new("Invalid shapeType for draw".to_string()));
         }
       }
-      Ok(datum)
+      Ok(datum.clone())
     })
   }
 
-  pub fn set_pixel(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn set_pixel(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let bitmap = player.get_datum(datum);
       let bitmap_ref = match bitmap {
@@ -110,9 +110,9 @@ impl BitmapDatumHandlers {
       }?;
       let (x, y, color_obj_or_int, bit_depth, palette_ref) = {
         let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
-        let x = player.get_datum(args[0]).int_value(&player.datums)?;
-        let y = player.get_datum(args[1]).int_value(&player.datums)?;
-        let color_obj_or_int = player.get_datum(args[2]);
+        let x = player.get_datum(&args[0]).int_value(&player.datums)?;
+        let y = player.get_datum(&args[1]).int_value(&player.datums)?;
+        let color_obj_or_int = player.get_datum(&args[2]);
 
         if x < 0 || y < 0 || x >= bitmap.width as i32 || y >= bitmap.height as i32 {
           return Ok(player.alloc_datum(datum_bool(false)));
@@ -138,19 +138,19 @@ impl BitmapDatumHandlers {
     })
   }
 
-  pub fn fill(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn fill(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let bitmap = player.get_datum(datum);
       let (rect, color_ref) = if args.len() == 2 {
-        let rect = player.get_datum(args[0]).to_int_rect()?;
-        let color = player.get_datum(args[1]).to_color_ref()?;
+        let rect = player.get_datum(&args[0]).to_int_rect()?;
+        let color = player.get_datum(&args[1]).to_color_ref()?;
         (rect, color)
       } else if args.len() == 5 {
-        let x = player.get_datum(args[0]).int_value(&player.datums)?;
-        let y = player.get_datum(args[1]).int_value(&player.datums)?;
-        let width = player.get_datum(args[2]).int_value(&player.datums)?;
-        let height = player.get_datum(args[3]).int_value(&player.datums)?;
-        let color = player.get_datum(args[4]).to_color_ref()?;
+        let x = player.get_datum(&args[0]).int_value(&player.datums)?;
+        let y = player.get_datum(&args[1]).int_value(&player.datums)?;
+        let width = player.get_datum(&args[2]).int_value(&player.datums)?;
+        let height = player.get_datum(&args[3]).int_value(&player.datums)?;
+        let color = player.get_datum(&args[4]).to_color_ref()?;
         ((x, y, width, height), color)
       } else {
         return Err(ScriptError::new("Invalid number of arguments for fill".to_string()));
@@ -165,28 +165,28 @@ impl BitmapDatumHandlers {
       let color = resolve_color_ref(&palettes, &color_ref, &bitmap.palette_ref);
       let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
       bitmap.fill_rect(x1, y1, x2, y2, color, &palettes, 1.0);
-      Ok(datum)
+      Ok(datum.clone())
     })
   }
 
-  pub fn copy_pixels(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn copy_pixels(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let dst_bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
-      let src_bitmap_ref = player.get_datum(args[0]);
+      let src_bitmap_ref = player.get_datum(&args[0]);
       let src_bitmap_ref = if src_bitmap_ref.is_void() || (src_bitmap_ref.is_number() && src_bitmap_ref.int_value(&player.datums)? == 0) {
-        return Ok(datum);
+        return Ok(datum.clone());
       } else {
         src_bitmap_ref.to_bitmap_ref()?
       };
-      let dest_rect_or_quad = player.get_datum(args[1]);
-      let src_rect = player.get_datum(args[2]).to_int_rect()?;
-      let param_list = args.get(3).map(|x| player.get_datum(*x));
+      let dest_rect_or_quad = player.get_datum(&args[1]);
+      let src_rect = player.get_datum(&args[2]).to_int_rect()?;
+      let param_list = args.get(3).map(|x| player.get_datum(x));
       let mut param_list_concrete = HashMap::new();
       if let Some(param_list) = param_list {
         if let Datum::PropList(param_list, ..) = param_list {
           for (key, value) in param_list {
-            let key = player.get_datum(*key).string_value(&player.datums)?;
-            let value = player.get_datum(*value).clone();
+            let key = player.get_datum(key).string_value(&player.datums)?;
+            let value = player.get_datum(value).clone();
             param_list_concrete.insert(key, value);
           }
         }
@@ -196,10 +196,10 @@ impl BitmapDatumHandlers {
         Datum::IntRect(rect) => IntRect::from_tuple(*rect),
         Datum::List(_, list_val, _) => {
           IntRect::from_quad(
-            player.get_datum(list_val[0]).to_int_point()?,
-            player.get_datum(list_val[1]).to_int_point()?,
-            player.get_datum(list_val[2]).to_int_point()?,
-            player.get_datum(list_val[3]).to_int_point()?,
+            player.get_datum(&list_val[0]).to_int_point()?,
+            player.get_datum(&list_val[1]).to_int_point()?,
+            player.get_datum(&list_val[2]).to_int_point()?,
+            player.get_datum(&list_val[3]).to_int_point()?,
           )
         }
         _ => return Err(ScriptError::new("Invalid destRect for copyPixels".to_string())),
@@ -208,11 +208,11 @@ impl BitmapDatumHandlers {
       let palettes = player.movie.cast_manager.palettes();
       let dst_bitmap = player.bitmap_manager.get_bitmap_mut(*dst_bitmap_ref).unwrap();
       dst_bitmap.copy_pixels(&palettes, &src_bitmap, dest_rect, IntRect::from_tuple(src_rect), &param_list_concrete);
-      Ok(datum)
+      Ok(datum.clone())
     })
   }
 
-  pub fn get_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String) -> Result<DatumRef, ScriptError> {
+  pub fn get_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String) -> Result<DatumRef, ScriptError> {
     let bitmap = player.get_datum(datum);
     let bitmap = match bitmap {
       Datum::BitmapRef(bitmap) => Ok(bitmap),
@@ -247,7 +247,7 @@ impl BitmapDatumHandlers {
     Ok(player.alloc_datum(result))
   }
 
-  pub fn set_bitmap_ref_prop(player: &mut DirPlayer, bitmap_ref: BitmapRef, prop: &String, value: DatumRef) -> Result<(), ScriptError> {
+  pub fn set_bitmap_ref_prop(player: &mut DirPlayer, bitmap_ref: BitmapRef, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
     let value = player.get_datum(value);
     match prop.as_str() {
       "paletteRef" => match value {

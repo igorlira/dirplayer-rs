@@ -42,14 +42,14 @@ impl StringBytecodeHandler {
         let search_in = scope.stack.pop().unwrap();
         (search_in, search_str)
       };
-      let search_str = player.get_datum(search_str).string_value(&player.datums)?;
-      let search_in = player.get_datum(search_in);
+      let search_str = player.get_datum(&search_str).string_value(&player.datums)?;
+      let search_in = player.get_datum(&search_in);
 
       let contains = if search_in.is_list() {
         let search_list = search_in.to_list()?;
         let mut contains = false;
         for item in search_list {
-          let item = player.get_datum(*item);
+          let item = player.get_datum(item);
           if item.is_string() {
             let item = item.string_value(&player.datums)?;
             if item.contains(search_str.as_str()) {
@@ -83,8 +83,8 @@ impl StringBytecodeHandler {
         let left = scope.stack.pop().unwrap();
         (left, right)
       };
-      let right = player.get_datum(right_id);
-      let left = player.get_datum(left_id);
+      let right = player.get_datum(&right_id);
+      let left = player.get_datum(&left_id);
 
       let right = Self::get_datum_concat_value(right, &player)?;
       let left = Self::get_datum_concat_value(left, &player)?;
@@ -106,8 +106,8 @@ impl StringBytecodeHandler {
         let left = scope.stack.pop().unwrap();
         (left, right)
       };
-      let right = player.get_datum(right_id);
-      let left = player.get_datum(left_id);
+      let right = player.get_datum(&right_id);
+      let left = player.get_datum(&left_id);
 
       let right = Self::get_datum_concat_value(right, &player)?;
       let left = Self::get_datum_concat_value(left, &player)?;
@@ -134,35 +134,35 @@ impl StringBytecodeHandler {
       match put_type {
         PutType::Into => player_set_context_var(
           player, 
-          id_ref, 
-          cast_id_ref, 
+          &id_ref, 
+          cast_id_ref.as_ref(), 
           var_type, 
-          value_ref, 
+          &value_ref, 
           &ctx, 
         )?,
         PutType::Before => {
-          let curr_string_id = player_get_context_var(player, id_ref, cast_id_ref, var_type, &ctx)?;
-          let curr_string = player.get_datum(curr_string_id);
+          let curr_string_id = player_get_context_var(player, &id_ref, cast_id_ref.as_ref(), var_type, &ctx)?;
+          let curr_string = player.get_datum(&curr_string_id);
           let curr_string = curr_string.string_value(&player.datums)?;
-          let value = player.get_datum(value_ref);
+          let value = player.get_datum(&value_ref);
 
           let mut new_string = String::new();
           new_string.push_str(value.string_value(&player.datums)?.as_str());
           new_string.push_str(curr_string.as_str());
           let new_string = player.alloc_datum(Datum::String(new_string));
-          player_set_context_var(player, id_ref, cast_id_ref, var_type, new_string, &ctx)?;
+          player_set_context_var(player, &id_ref, cast_id_ref.as_ref(), var_type, &new_string, &ctx)?;
         }
         PutType::After => {
-          let curr_string_id = player_get_context_var(player, id_ref, cast_id_ref, var_type, &ctx)?;
-          let curr_string = player.get_datum(curr_string_id);
+          let curr_string_id = player_get_context_var(player, &id_ref, cast_id_ref.as_ref(), var_type, &ctx)?;
+          let curr_string = player.get_datum(&curr_string_id);
           let curr_string = curr_string.string_value(&player.datums)?;
-          let value = player.get_datum(value_ref);
+          let value = player.get_datum(&value_ref);
 
           let mut new_string = String::new();
           new_string.push_str(curr_string.as_str());
           new_string.push_str(value.string_value(&player.datums)?.as_str());
           let new_string = player.alloc_datum(Datum::String(new_string));
-          player_set_context_var(player, id_ref, cast_id_ref, var_type, new_string, &ctx)?;
+          player_set_context_var(player, &id_ref, cast_id_ref.as_ref(), var_type, &new_string, &ctx)?;
         }
       }
 
@@ -183,14 +183,14 @@ impl StringBytecodeHandler {
       let first_char = scope.stack.pop().unwrap();
       (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char)
     };
-    let last_line = player.get_datum(last_line).int_value(&player.datums)?;
-    let first_line = player.get_datum(first_line).int_value(&player.datums)?;
-    let last_item = player.get_datum(last_item).int_value(&player.datums)?;
-    let first_item = player.get_datum(first_item).int_value(&player.datums)?;
-    let last_word = player.get_datum(last_word).int_value(&player.datums)?;
-    let first_word = player.get_datum(first_word).int_value(&player.datums)?;
-    let last_char = player.get_datum(last_char).int_value(&player.datums)?;
-    let first_char = player.get_datum(first_char).int_value(&player.datums)?;
+    let last_line = player.get_datum(&last_line).int_value(&player.datums)?;
+    let first_line = player.get_datum(&first_line).int_value(&player.datums)?;
+    let last_item = player.get_datum(&last_item).int_value(&player.datums)?;
+    let first_item = player.get_datum(&first_item).int_value(&player.datums)?;
+    let last_word = player.get_datum(&last_word).int_value(&player.datums)?;
+    let first_word = player.get_datum(&first_word).int_value(&player.datums)?;
+    let last_char = player.get_datum(&last_char).int_value(&player.datums)?;
+    let first_char = player.get_datum(&first_char).int_value(&player.datums)?;
 
     if first_line != 0 || last_line != 0 {
       Ok(StringChunkExpr { 
@@ -232,7 +232,7 @@ impl StringBytecodeHandler {
         scope.stack.pop().unwrap()
       };
       let chunk_expr = Self::read_chunk_ref(player, ctx)?;
-      let string_value = player.get_datum(string).string_value(&player.datums)?;
+      let string_value = player.get_datum(&string).string_value(&player.datums)?;
       let resolved_str = StringChunkUtils::resolve_chunk_expr_string(&string_value, &chunk_expr)?;
 
       let result = Datum::String(resolved_str);
@@ -246,7 +246,7 @@ impl StringBytecodeHandler {
   pub fn delete_chunk(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (id_ref, cast_id_ref) = read_context_var_args(player, bytecode.obj as u32, ctx.scope_ref);
-      let string_ref = player_get_context_var(player, id_ref, cast_id_ref, bytecode.obj as u32, ctx)?;
+      let string_ref = player_get_context_var(player, &id_ref, cast_id_ref.as_ref(), bytecode.obj as u32, ctx)?;
       // let string = player.get_datum(string_ref);
       let chunk_expr = Self::read_chunk_ref(player, ctx)?;
 
@@ -264,11 +264,11 @@ impl StringBytecodeHandler {
         let search_in_ref = scope.stack.pop().unwrap();
         (search_str_ref, search_in_ref)
       };
-      let search_in = player.get_datum(search_in_ref);
+      let search_in = player.get_datum(&search_in_ref);
       let result = if search_in.is_void() {
         false
       } else {
-        let search_str = player.get_datum(search_str_ref).string_value(&player.datums)?;
+        let search_str = player.get_datum(&search_str_ref).string_value(&player.datums)?;
         let search_in = search_in.string_value(&player.datums)?;
         search_in.starts_with(search_str.as_str())
       };

@@ -32,7 +32,7 @@ impl CastMemberRefHandlers {
     }
   }
 
-  pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "duplicate" => Self::duplicate(datum, args),
       "erase" => Self::erase(datum, args),
@@ -44,7 +44,7 @@ impl CastMemberRefHandlers {
           };
           let cast_member = player.movie.cast_manager.find_member_by_ref(&cast_member_ref).unwrap();
           let text_data = cast_member.member_type.as_text().unwrap();
-          let char_pos = player.get_datum(args[0]).int_value(&player.datums)? as u16;
+          let char_pos = player.get_datum(&args[0]).int_value(&player.datums)? as u16;
           let char_width: u16 = 7; // TODO: Implement char width
           let line_height = get_text_member_line_height(&text_data);
           let result = if text_data.text.is_empty() || char_pos <= 0 {
@@ -64,13 +64,13 @@ impl CastMemberRefHandlers {
             Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
             _ => return Err(ScriptError::new("Cannot call getProp on non-cast-member".to_string())),
           };
-          let prop = player.get_datum(args[0]).string_value(&player.datums)?;
+          let prop = player.get_datum(&args[0]).string_value(&player.datums)?;
           let result = Self::get_prop(player, &cast_member_ref, &prop)?;
           Ok(player.alloc_datum(result))
         })?;
         if args.len() > 1 {
           reserve_player_mut(|player| {
-            TypeUtils::get_sub_prop(result_ref, args[1], player)
+            TypeUtils::get_sub_prop(&result_ref, &args[1], player)
           })
         } else {
           Ok(result_ref)
@@ -80,7 +80,7 @@ impl CastMemberRefHandlers {
     }
   }
 
-  fn call_member_type(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  fn call_member_type(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let member_ref = match player.get_datum(datum) {
         Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
@@ -99,25 +99,25 @@ impl CastMemberRefHandlers {
     })
   }
 
-  fn erase(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  fn erase(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let cast_member_ref = match player.get_datum(datum) {
         Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
         _ => return Err(ScriptError::new("Cannot erase non-cast-member".to_string())),
       };
       player.movie.cast_manager.remove_member_with_ref(&cast_member_ref)?;
-      Ok(VOID_DATUM_REF)
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  fn duplicate(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  fn duplicate(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let cast_member_ref = match player.get_datum(datum) {
         Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
         _ => return Err(ScriptError::new("Cannot duplicate non-cast-member".to_string())),
       };
       let dest_slot_number = args.get(0)
-        .map(|x| player.get_datum(*x).int_value(&player.datums));
+        .map(|x| player.get_datum(x).int_value(&player.datums));
 
       if dest_slot_number.is_none() {
         return Err(ScriptError::new("Cannot duplicate cast member without destination slot number".to_string()));

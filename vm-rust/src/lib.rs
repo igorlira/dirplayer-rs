@@ -108,8 +108,8 @@ pub fn key_up(key: String, code: u16) {
 }
 
 #[wasm_bindgen]
-pub fn request_datum(datum_ref: DatumRef) {
-  player_dispatch(PlayerVMCommand::RequestDatum(datum_ref));
+pub fn request_datum(datum_id: u32) {
+  player_dispatch(PlayerVMCommand::RequestDatum(datum_id));
 }
 
 #[wasm_bindgen]

@@ -10,23 +10,23 @@ impl ScriptDatumHandlers {
     }
   }
 
-  pub async fn call_async(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub async fn call_async(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "new" => Self::new(datum, &args).await,
       _ => Err(ScriptError::new(format!("No async handler {handler_name} for script datum")))
     }
   }
 
-  pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "handler" => Self::handler(datum, args),
       _ => Err(ScriptError::new(format!("No handler {handler_name} for script datum")))
     }
   }
 
-  pub fn handler(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn handler(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let name = player.get_datum(args[0]).string_value(&player.datums)?;
+      let name = player.get_datum(&args[0]).string_value(&player.datums)?;
       let script_ref = match player.get_datum(datum) {
         Datum::ScriptRef(script_ref) => script_ref,
         _ => return Err(ScriptError::new("Cannot create new instance of non-script".to_string())),
@@ -37,7 +37,7 @@ impl ScriptDatumHandlers {
     })
   }
 
-  pub async fn new(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub async fn new(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     if !args.is_empty() {
       return Err(ScriptError::new("new handler does not take arguments".to_string()));
     }

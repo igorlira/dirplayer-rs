@@ -23,7 +23,7 @@ impl RectUtils {
 
 impl RectDatumHandlers {
   #[allow(dead_code, unused_variables)]
-  pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "getAt" => Self::get_at(datum, args),
       "setAt" => Self::set_at(datum, args),
@@ -32,16 +32,16 @@ impl RectDatumHandlers {
     }
   }
 
-  pub fn intersect(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn intersect(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let rect1 = player.get_datum(datum).to_int_rect()?;
-      let rect2 = player.get_datum(args[0]).to_int_rect()?;
+      let rect2 = player.get_datum(&args[0]).to_int_rect()?;
       let (left, top, right, bottom) = RectUtils::intersect(rect1, rect2);
       Ok(player.alloc_datum(Datum::IntRect((left, top, right, bottom))))
     })
   }
 
-  pub fn get_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let rect = player.get_datum(datum);
       let rect = match rect {
@@ -49,15 +49,15 @@ impl RectDatumHandlers {
         _ => Err(ScriptError::new("Cannot get prop of non-rect".to_string())),
       }?;
       let list_val = [rect.0, rect.1, rect.2, rect.3];
-      let index = player.get_datum(args[0]).int_value(&player.datums)?;
+      let index = player.get_datum(&args[0]).int_value(&player.datums)?;
       Ok(player.alloc_datum(Datum::Int(list_val[(index - 1) as usize] as i32)))
     })
   }
 
-  pub fn set_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let pos = player.get_datum(args[0]).int_value(&player.datums)?;
-      let value = player.get_datum(args[1]).int_value(&player.datums)?;
+      let pos = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let value = player.get_datum(&args[1]).int_value(&player.datums)?;
 
       let rect = player.get_datum_mut(datum);
       let rect = match rect {
@@ -71,11 +71,11 @@ impl RectDatumHandlers {
         4 => rect.3 = value,
         _ => return Err(ScriptError::new("Invalid index for rect".to_string())),
       }
-      Ok(VOID_DATUM_REF)
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn get_prop(player: &DirPlayer, datum: DatumRef, prop: &String) -> Result<Datum, ScriptError> {
+  pub fn get_prop(player: &DirPlayer, datum: &DatumRef, prop: &String) -> Result<Datum, ScriptError> {
     let rect = player.get_datum(datum);
     let (left, top, right, bottom) = match rect {
       Datum::IntRect(rect_vec) => Ok(rect_vec),
@@ -106,7 +106,7 @@ impl RectDatumHandlers {
     }
   }
 
-  pub fn set_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String, value_ref: DatumRef) -> Result<(), ScriptError> {
+  pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String, value_ref: &DatumRef) -> Result<(), ScriptError> {
     match prop.as_str() {
       "left" => {
         let value = player.get_datum(value_ref).int_value(&player.datums)?;

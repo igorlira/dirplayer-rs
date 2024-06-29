@@ -7,7 +7,7 @@ impl NetHandlers {
   pub fn net_done(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let task_id = if let Some(task_id_ref) = &args.get(0) {
-        let task_id_datum = get_datum(**task_id_ref, &player.datums);
+        let task_id_datum = get_datum(task_id_ref, &player.datums);
         Some(task_id_datum.int_value(&player.datums)? as u32)
       } else {
         None
@@ -20,7 +20,7 @@ impl NetHandlers {
   
   pub fn preload_net_thing(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let url = player.get_datum(args[0]).string_value(&player.datums)?;
+      let url = player.get_datum(&args[0]).string_value(&player.datums)?;
       let task_id = player.net_manager.preload_net_thing(url);
       Ok(player.alloc_datum(Datum::Int(task_id as i32)))
     })
@@ -28,7 +28,7 @@ impl NetHandlers {
 
   pub fn get_net_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let url = player.get_datum(args[0]).string_value(&player.datums)?;
+      let url = player.get_datum(&args[0]).string_value(&player.datums)?;
       let task_id = player.net_manager.preload_net_thing(url);
       // TODO should the task be tagged as a text task?
       Ok(player.alloc_datum(Datum::Int(task_id as i32)))
@@ -38,7 +38,7 @@ impl NetHandlers {
   pub fn get_stream_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let (state, error, url, is_ok) = {
-        let task_id = player.get_datum(args[0]).int_value(&player.datums)? as u32;
+        let task_id = player.get_datum(&args[0]).int_value(&player.datums)? as u32;
         let task = player.net_manager.get_task(task_id).unwrap();
         let task_state = &player.net_manager.get_task_state(Some(task_id)).unwrap();
         let (state, error) = if task_state.is_done() && task_state.result.as_ref().unwrap().is_ok() {
@@ -64,7 +64,7 @@ impl NetHandlers {
 
   pub fn net_error(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let task_id = args.get(0).map(|datum_ref| get_datum(*datum_ref, &player.datums).int_value(&player.datums).unwrap() as u32);
+      let task_id = args.get(0).map(|datum_ref| get_datum(datum_ref, &player.datums).int_value(&player.datums).unwrap() as u32);
       let task_state = player.net_manager.get_task_state(task_id).unwrap();
       let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
       let error = if is_ok {
@@ -80,7 +80,7 @@ impl NetHandlers {
 
   pub fn net_text_result(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let task_id = args.get(0).map(|datum_ref| get_datum(*datum_ref, &player.datums).int_value(&player.datums).unwrap() as u32);
+      let task_id = args.get(0).map(|datum_ref| get_datum(datum_ref, &player.datums).int_value(&player.datums).unwrap() as u32);
       let task_state = player.net_manager.get_task_state(task_id).unwrap();
       let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
       let text = if is_ok {

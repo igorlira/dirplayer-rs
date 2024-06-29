@@ -459,7 +459,7 @@ pub fn sprite_set_prop(
         } else if value.is_list() {
           let mut cursor_ids = vec![];
           for cursor_id in value.to_list()? {
-            cursor_ids.push(player.get_datum(*cursor_id).int_value(&player.datums)?);
+            cursor_ids.push(player.get_datum(cursor_id).int_value(&player.datums)?);
           }
           Ok(CursorRef::Member(cursor_ids))
         } else {
@@ -523,7 +523,7 @@ pub fn sprite_set_prop(
         |player| {
           let mut instance_ids = vec![];
           for ref_id in ref_list {
-            let datum = player.get_datum(*ref_id);
+            let datum = player.get_datum(ref_id);
             match datum {
               Datum::ScriptInstanceRef(instance_id) => {
                 instance_ids.push(instance_id.clone());
@@ -548,7 +548,7 @@ pub fn sprite_set_prop(
             player, 
             instance_id, 
             &"spriteNum".to_string(),
-            value_ref, 
+            &value_ref, 
             false
           )?
         }

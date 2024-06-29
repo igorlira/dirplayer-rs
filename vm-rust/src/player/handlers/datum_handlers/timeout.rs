@@ -4,7 +4,7 @@ pub struct TimeoutDatumHandlers {}
 
 impl TimeoutDatumHandlers {
   #[allow(dead_code, unused_variables)]
-  pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "new" => Self::new(datum, args),
       "forget" => Self::forget(datum, args),
@@ -12,12 +12,12 @@ impl TimeoutDatumHandlers {
     }
   }
 
-  pub fn new(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn new(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let timeout_period = player.get_datum(args[0]).int_value(&player.datums)?;
-      let timeout_handler = player.get_datum(args[1]).string_value(&player.datums)?;
-      let target_ref = args[2];
-      let timeout_datum = player.get_datum(datum);
+      let timeout_period = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let timeout_handler = player.get_datum(&args[1]).string_value(&player.datums)?;
+      let target_ref = args[2].clone();
+      let timeout_datum = player.get_datum(&datum);
       let timeout_name = match timeout_datum {
         Datum::TimeoutRef(timeout_name) => timeout_name,
         _ => return Err(ScriptError::new("Cannot create timeout from non-timeout".to_string())),
@@ -32,11 +32,11 @@ impl TimeoutDatumHandlers {
       };
       timeout.schedule();
       player.timeout_manager.add_timeout(timeout);
-      Ok(datum)
+      Ok(datum.clone())
     })
   }
 
-  fn forget(datum: DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  fn forget(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let timeout_name = {
         let timeout_ref = player.get_datum(datum);
@@ -46,11 +46,11 @@ impl TimeoutDatumHandlers {
         }?
       };
       player.timeout_manager.forget_timeout(&timeout_name);
-      Ok(VOID_DATUM_REF)
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn get_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String) -> Result<DatumRef, ScriptError> {
+  pub fn get_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String) -> Result<DatumRef, ScriptError> {
     let timeout_ref = player.get_datum(datum);
     let _timeout_name = match timeout_ref {
       Datum::TimeoutRef(timeout_name) => Ok(timeout_name),
@@ -62,7 +62,7 @@ impl TimeoutDatumHandlers {
         Ok(player.alloc_datum(Datum::String(_timeout_name.to_owned())))
       },
       "target" => {
-        Ok(timeout.map_or(VOID_DATUM_REF, |x| x.target_ref))
+        Ok(timeout.map_or(VOID_DATUM_REF.clone(), |x| x.target_ref.clone()))
       }
       _ => {
         Err(ScriptError::new(format!("Cannot get timeout property {}", prop)))
@@ -70,7 +70,7 @@ impl TimeoutDatumHandlers {
     }
   }
 
-  pub fn set_prop(player: &mut DirPlayer, datum: DatumRef, prop: &String, value: DatumRef) -> Result<(), ScriptError> {
+  pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
     let timeout_ref = player.get_datum(datum);
     let _timeout_name = {
       match timeout_ref {
@@ -83,7 +83,7 @@ impl TimeoutDatumHandlers {
       "target" => {
         let new_target = value;
         if let Some(timeout) = timeout {
-          timeout.target_ref = new_target;
+          timeout.target_ref = new_target.clone();
         } else {
           return Err(ScriptError::new("Cannot set target of unscheduled timeout".to_string()));
         }

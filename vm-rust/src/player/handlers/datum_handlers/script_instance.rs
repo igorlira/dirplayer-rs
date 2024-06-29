@@ -6,7 +6,7 @@ pub struct ScriptInstanceDatumHandlers {}
 pub struct ScriptInstanceUtils {}
 
 impl ScriptInstanceUtils {
-  pub fn get_script(datum: DatumRef, player: &DirPlayer) -> Result<(ScriptInstanceId, &Script), ScriptError> {
+  pub fn get_script<'a>(datum: &DatumRef, player: &'a DirPlayer) -> Result<(ScriptInstanceId, &'a Script), ScriptError> {
     let datum = player.get_datum(datum);
     match datum {
       Datum::ScriptInstanceRef(instance_id) => {
@@ -25,7 +25,7 @@ impl ScriptInstanceUtils {
     script
   }
 
-  pub fn get_handler(name: &String, datum: DatumRef, player: &DirPlayer) -> Result<Option<ScriptHandlerRef>, ScriptError> {
+  pub fn get_handler(name: &String, datum: &DatumRef, player: &DirPlayer) -> Result<Option<ScriptHandlerRef>, ScriptError> {
     // let script = ScriptInstanceUtils::get_script(datum, player)?;
     // Self::get_script_instance_handler(name, script, player)
     let datum = player.get_datum(datum);
@@ -53,7 +53,7 @@ impl ScriptInstanceUtils {
     }
   }
 
-  pub fn set_at(datum: DatumRef, key: &String, value: DatumRef, player: &mut DirPlayer) -> Result<(), ScriptError> {
+  pub fn set_at(datum: &DatumRef, key: &String, value: &DatumRef, player: &mut DirPlayer) -> Result<(), ScriptError> {
     let self_instance_id = match player.get_datum(datum) {
       Datum::ScriptInstanceRef(instance_id) => *instance_id,
       _ => return Err(ScriptError::new("Cannot set ancestor on non-script instance".to_string())),
@@ -80,14 +80,14 @@ impl ScriptInstanceUtils {
 }
 
 impl ScriptInstanceDatumHandlers {
-  pub fn has_async_handler(datum: DatumRef, name: &String) -> Result<bool, ScriptError> {
+  pub fn has_async_handler(datum: &DatumRef, name: &String) -> Result<bool, ScriptError> {
     return reserve_player_ref(|player| {
-      let handler_ref = ScriptInstanceUtils::get_handler(name, datum, player)?;
+      let handler_ref = ScriptInstanceUtils::get_handler(name, &datum, player)?;
       Ok(handler_ref.is_some())
     });
   }
 
-  pub async fn call_async(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub async fn call_async(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let (instance_id, handler_ref) = reserve_player_ref(|player| {
       let handler_ref = ScriptInstanceUtils::get_handler(handler_name, datum, player);
       let datum = player.get_datum(datum);
@@ -106,9 +106,9 @@ impl ScriptInstanceDatumHandlers {
     }
   }
 
-  fn get_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let key = player.get_datum(args[0]).string_value(&player.datums)?;
+      let key = player.get_datum(&args[0]).string_value(&player.datums)?;
       match key.as_str() {
         "ancestor" => {
           let datum = player.get_datum(datum);
@@ -120,81 +120,81 @@ impl ScriptInstanceDatumHandlers {
     })
   }
 
-  fn set_at(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let key = player.get_datum(args[0]).string_value(&player.datums)?;
-      let value_ref = args[1];
+      let key = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let value_ref = &args[1];
 
-      ScriptInstanceUtils::set_at(datum, &key, value_ref, player)?;
-      Ok(VOID_DATUM_REF)
+      ScriptInstanceUtils::set_at(datum, &key, &value_ref, player)?;
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn set_a_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn set_a_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
-      let value_ref = args[1];
+      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let value_ref = &args[1];
 
       let instance_id = match player.get_datum(datum) {
         Datum::ScriptInstanceRef(instance_id) => *instance_id,
         _ => return Err(ScriptError::new("Cannot set property on non-script instance".to_string())),
       };
-      script_set_prop(player, instance_id, &prop_name, value_ref, false).map(|_| VOID_DATUM_REF)
+      script_set_prop(player, instance_id, &prop_name, &value_ref, false).map(|_| VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn get_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let list_prop_name_ref = args[1];
+      let list_prop_name_ref = &args[1];
 
-      let local_prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
+      let local_prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
       let instance_id = match player.get_datum(datum) {
         Datum::ScriptInstanceRef(instance_id) => *instance_id,
         _ => return Err(ScriptError::new("Cannot get property on non-script instance".to_string())),
       };
 
       let local_prop_ref = script_get_prop(player, instance_id, &local_prop_name)?;
-      let result = TypeUtils::get_sub_prop(local_prop_ref, list_prop_name_ref, player)?;
+      let result = TypeUtils::get_sub_prop(&local_prop_ref, &list_prop_name_ref, player)?;
       Ok(result)
     })
   }
 
-  pub fn set_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn set_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let list_prop_name_ref = args[1];
-      let value_ref = args[2];
+      let list_prop_name_ref = &args[1];
+      let value_ref = &args[2];
 
-      let local_prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
+      let local_prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
       let instance_id = match player.get_datum(datum) {
         Datum::ScriptInstanceRef(instance_id) => *instance_id,
         _ => return Err(ScriptError::new("Cannot set property on non-script instance".to_string())),
       };
 
       let local_prop_ref = script_get_prop(player, instance_id, &local_prop_name)?;
-      TypeUtils::set_sub_prop(local_prop_ref, list_prop_name_ref, value_ref, player)?;
+      TypeUtils::set_sub_prop(&local_prop_ref, &list_prop_name_ref, &value_ref, player)?;
 
-      Ok(VOID_DATUM_REF)
+      Ok(VOID_DATUM_REF.clone())
     })
   }
 
-  pub fn handler(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn handler(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let name = player.get_datum(args[0]).string_value(&player.datums)?;
+      let name = player.get_datum(&args[0]).string_value(&player.datums)?;
       let (_, script) = ScriptInstanceUtils::get_script(datum, player)?;
       let own_handler = script.get_own_handler(&name);
       Ok(player.alloc_datum(datum_bool(own_handler.is_some())))
     })
   }
 
-  pub fn count(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let instance_id = match player.get_datum(datum) {
         Datum::ScriptInstanceRef(instance_id) => *instance_id,
         _ => return Err(ScriptError::new("Cannot count non-script instance".to_string())),
       };
-      let prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
+      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
       let prop_value = script_get_prop(player, instance_id, &prop_name)?;
-      let prop_value_datum = player.get_datum(prop_value);
+      let prop_value_datum = player.get_datum(&prop_value);
       let count = match prop_value_datum {
         Datum::List(_, list, _) => list.len(),
         Datum::PropList(prop_list, ..) => prop_list.len(),
@@ -204,9 +204,9 @@ impl ScriptInstanceDatumHandlers {
     })
   }
 
-  pub fn get_a_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_a_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
+      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
       let instance_id = match player.get_datum(datum) {
         Datum::ScriptInstanceRef(instance_id) => *instance_id,
         _ => return Err(ScriptError::new("Cannot get property on non-script instance".to_string())),
@@ -216,7 +216,7 @@ impl ScriptInstanceDatumHandlers {
     })
   }
 
-  pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "setAt" => Self::set_at(datum, args),
       "handler" => Self::handler(datum, args),

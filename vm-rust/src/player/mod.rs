@@ -29,7 +29,7 @@ pub mod keyboard;
 pub mod keyboard_map;
 pub mod keyboard_events;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt::Display, sync::Arc, time::Duration};
 
 use async_std::{channel::{self, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
@@ -37,7 +37,7 @@ use chrono::Local;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use lazy_static::lazy_static;
-use nohash_hasher::IntMap;
+use nohash_hasher::{BuildNoHashHasher, IntMap};
 
 use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
 
@@ -97,9 +97,26 @@ pub struct DirPlayer {
   pub timer_tick_start: u32,
 }
 
-pub type DatumRef = u32;
-pub type DatumRefMap = IntMap<DatumRef, Datum>;
-pub static VOID_DATUM_REF: DatumRef = 0;
+pub type DatumId = u32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatumRef {
+  pub id: u32,
+}
+pub type DatumRefMap = IntMap<DatumId, Datum>;
+pub static VOID_DATUM_REF: DatumRef = DatumRef { id: 0 };
+
+impl Drop for DatumRef {
+  fn drop(&mut self) {
+    // console_warn!("dropping datum ref {}", self.id);
+  }
+}
+
+impl Display for DatumRef {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "DatumRef({})", self.id)
+  }
+}
 
 impl DirPlayer {
   pub fn new<'a>(tx: Sender<PlayerVMExecutionItem>) -> DirPlayer {
@@ -153,7 +170,7 @@ impl DirPlayer {
       text_selection_start: 0,
       text_selection_end: 0,
       float_precision: 4,
-      last_handler_result: VOID_DATUM_REF,
+      last_handler_result: VOID_DATUM_REF.clone(),
       hovered_sprite: None,
       timer_tick_start: get_ticks(),
     }
@@ -213,7 +230,7 @@ impl DirPlayer {
     }
   }
 
-  pub fn get_datum(&self, id: DatumRef) -> &Datum {
+  pub fn get_datum(&self, id: &DatumRef) -> &Datum {
     get_datum(id, &self.datums)
   }
 
@@ -223,8 +240,8 @@ impl DirPlayer {
     id
   }
 
-  pub fn get_datum_mut(&mut self, id: DatumRef) -> &mut Datum {
-    self.datums.get_mut(&id).unwrap()
+  pub fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
+    self.datums.get_mut(&id.id).unwrap()
   }
 
   pub fn get_fps(&self) -> u32 {
@@ -232,12 +249,12 @@ impl DirPlayer {
   }
 
   pub fn get_hydrated_globals(&self) -> HashMap<String, &Datum> {
-    self.globals.iter().map(|(k, v)| (k.to_owned(), self.datums.get(v).unwrap())).collect()
+    self.globals.iter().map(|(k, v)| (k.to_owned(), self.datums.get(&v.id).unwrap())).collect()
   }
 
   #[allow(dead_code)]
   pub fn get_global(&self, name: &String) -> Option<&Datum> {
-    self.globals.get(name).map(|datum_ref| get_datum(*datum_ref, &self.datums))
+    self.globals.get(name).map(|datum_ref| get_datum(datum_ref, &self.datums))
   }
 
   pub fn advance_frame(&mut self) {
@@ -289,13 +306,13 @@ impl DirPlayer {
 
   pub fn alloc_datum(&mut self, datum: Datum) -> DatumRef {
     if datum.is_void() {
-      return VOID_DATUM_REF;
+      return VOID_DATUM_REF.clone();
     }
     
     self.datum_id_counter += 1;
     let id = self.datum_id_counter;
     self.datums.insert(id, datum);
-    id
+    DatumRef { id }
   }
 
   fn get_movie_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
@@ -333,7 +350,7 @@ impl DirPlayer {
     }
   }
 
-  fn set_player_prop(&mut self, prop: &String, value: DatumRef) -> Result<(), ScriptError> {
+  fn set_player_prop(&mut self, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
     match prop.as_str() {
       "traceScript" => {
         // TODO
@@ -522,7 +539,7 @@ pub async fn player_call_script_handler_raw_args(
         new_args.push(player.alloc_datum(receiver_arg));
       }
     }
-    new_args.extend(arg_list);
+    new_args.extend(arg_list.clone());
     new_args
   });
 
@@ -598,7 +615,7 @@ pub async fn player_call_script_handler_raw_args(
 
   let scope = reserve_player_mut(|player| {
     let result = player.scopes.pop().unwrap();
-    player.last_handler_result = result.return_value;
+    player.last_handler_result = result.return_value.clone();
     result
   });
 
@@ -770,11 +787,11 @@ fn get_active_scripts<'a>(
   return active_scripts;
 }
 
-pub fn get_datum(id: DatumRef, datums: &DatumRefMap) -> &Datum {
-  if id == VOID_DATUM_REF {
+pub fn get_datum<'a>(id: &DatumRef, datums: &'a DatumRefMap) -> &'a Datum {
+  if id.id == 0 {
     return &Datum::Void;
   }
-  datums.get(&id).unwrap()
+  datums.get(&id.id).unwrap()
 }
 
 async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: ScopeRef) -> HandlerExecutionResultContext {
@@ -786,7 +803,7 @@ async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: Scop
     "return" => {
       if let Some(return_value) = args.first() {
         reserve_player_mut(|player| {
-          player.scopes.get_mut(scope_ref).unwrap().return_value = *return_value;
+          player.scopes.get_mut(scope_ref).unwrap().return_value = return_value.clone();
         });
       }
 
@@ -798,7 +815,7 @@ async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: Scop
       match result {
         Ok(result) => {
           reserve_player_mut(|player| {
-            player.last_handler_result = result;
+            player.last_handler_result = result.clone();
             player.scopes.get_mut(scope_ref).unwrap().return_value = result;
           });
           HandlerExecutionResultContext { result: HandlerExecutionResult::Advance }
@@ -820,7 +837,7 @@ fn get_ticks() -> u32 {
   (millis as f32 / (1000.0 / 60.0)) as u32
 }
 
-fn player_duplicate_datum(datum: DatumRef) -> DatumRef {
+fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
   let datum_type = reserve_player_ref(|player| {
     player.get_datum(datum).type_enum()
   });
@@ -832,8 +849,8 @@ fn player_duplicate_datum(datum: DatumRef) -> DatumRef {
       });
       let mut new_props = Vec::new();
         for (key, value) in props {
-          let new_key = player_duplicate_datum(key);
-          let new_value = player_duplicate_datum(value);
+          let new_key = player_duplicate_datum(&key);
+          let new_value = player_duplicate_datum(&value);
           new_props.push((new_key, new_value));
         }
         Datum::PropList(new_props, sorted)
@@ -845,7 +862,7 @@ fn player_duplicate_datum(datum: DatumRef) -> DatumRef {
       });
       let mut new_list = Vec::new();
       for item in list {
-        let new_item = player_duplicate_datum(item);
+        let new_item = player_duplicate_datum(&item);
         new_list.push(new_item);
       }
       Datum::List(list_type.clone(), new_list, sorted)

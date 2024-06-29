@@ -13,8 +13,8 @@ impl ArithmeticsBytecodeHandler {
         let left = scope.stack.pop().unwrap();
         (left, right)
       };
-      let right = player.get_datum(right);
-      let left = player.get_datum(left);
+      let right = player.get_datum(&right);
+      let left = player.get_datum(&left);
 
       let result_id = {
         let result = add_datums(left.to_owned(), right.to_owned(), player)?;
@@ -34,8 +34,8 @@ impl ArithmeticsBytecodeHandler {
         let left = scope.stack.pop().unwrap();
         (left, right)
       };
-      let right = player.get_datum(right);
-      let left = player.get_datum(left);
+      let right = player.get_datum(&right);
+      let left = player.get_datum(&left);
 
       let result = subtract_datums(left.to_owned(), right.to_owned(), player)?;
       let result_id = player.alloc_datum(result);
@@ -69,8 +69,8 @@ impl ArithmeticsBytecodeHandler {
         let left = scope.stack.pop().unwrap();
         (left, right)
       };
-      let right = player.get_datum(right);
-      let left = player.get_datum(left);
+      let right = player.get_datum(&right);
+      let left = player.get_datum(&left);
 
       let result = match (left, right) {
         (Datum::Int(left), Datum::Int(right)) => Datum::Int(Self::safe_mod_int(*left, *right)),
@@ -80,11 +80,11 @@ impl ArithmeticsBytecodeHandler {
         (Datum::List(_, list, _), Datum::Float(right)) => {
           let mut new_list = vec![];
           for item in list {
-            let item_datum = player.get_datum(*item);
+            let item_datum = player.get_datum(item);
             let result_datum = match item_datum {
               Datum::Int(n) => Datum::Int(Self::safe_mod_float(*n as f32, *right) as i32),
               Datum::Float(n) => Datum::Int(Self::safe_mod_float(*n, *right) as i32),
-              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(*item, player)))),
+              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, player)))),
             };
             new_list.push(result_datum);
           }
@@ -97,11 +97,11 @@ impl ArithmeticsBytecodeHandler {
         (Datum::List(_, list, _), Datum::Int(right)) => {
           let mut new_list = vec![];
           for item in list {
-            let item_datum = player.get_datum(*item);
+            let item_datum = player.get_datum(item);
             let result_datum = match item_datum {
               Datum::Int(n) => Datum::Int(Self::safe_mod_int(*n, *right)),
               Datum::Float(n) => Datum::Int(Self::safe_mod_float(*n, *right as f32) as i32),
-              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(*item, player)))),
+              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, player)))),
             };
             new_list.push(result_datum);
           }
@@ -128,8 +128,8 @@ impl ArithmeticsBytecodeHandler {
         let left = scope.stack.pop().unwrap();
         (left, right)
       };
-      let right = player.get_datum(right);
-      let left = player.get_datum(left);
+      let right = player.get_datum(&right);
+      let left = player.get_datum(&left);
 
       let result = match (left, right) {
         (Datum::Int(left), Datum::Int(right)) => Datum::Int(left / right),
@@ -162,8 +162,8 @@ impl ArithmeticsBytecodeHandler {
         let left = scope.stack.pop().unwrap();
         (left, right)
       };
-      let right = player.get_datum(right_ref);
-      let left = player.get_datum(left_ref);
+      let right = player.get_datum(&right_ref);
+      let left = player.get_datum(&left_ref);
 
       let result = match (left, right) {
         (Datum::Int(left), Datum::Int(right)) => Datum::Int(left * right),
@@ -175,11 +175,11 @@ impl ArithmeticsBytecodeHandler {
         (Datum::List(_, list, _), Datum::Float(right)) => {
           let mut new_list = vec![];
           for item in list {
-            let item_datum = player.get_datum(*item);
+            let item_datum = player.get_datum(item);
             let result_datum = match item_datum {
               Datum::Int(n) => Datum::Float((*n as f32) * right),
               Datum::Float(n) => Datum::Float(n * right),
-              _ => return Err(ScriptError::new(format!("Mul operator in list only works with ints and floats. Given: {}", format_datum(*item, player)))),
+              _ => return Err(ScriptError::new(format!("Mul operator in list only works with ints and floats. Given: {}", format_datum(item, player)))),
             };
             new_list.push(result_datum);
           }
@@ -189,7 +189,7 @@ impl ArithmeticsBytecodeHandler {
           }
           Datum::List(DatumType::List, ref_list, false)
         }
-        _ => return Err(ScriptError::new(format!("Mul operator only works with ints and floats. Given: {}, {}", format_datum(left_ref, player), format_datum(right_ref, player)))),
+        _ => return Err(ScriptError::new(format!("Mul operator only works with ints and floats. Given: {}, {}", format_datum(&left_ref, player), format_datum(&right_ref, player)))),
       };
       let result_id = player.alloc_datum(result);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -204,7 +204,7 @@ impl ArithmeticsBytecodeHandler {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
-      let value = player.get_datum(value_id);
+      let value = player.get_datum(&value_id);
       let result = match value {
         Datum::Int(n) => Datum::Int(-n),
         Datum::Float(n) => Datum::Float(-n),

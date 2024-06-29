@@ -14,7 +14,7 @@ impl GetSetUtils {
   ) -> Result<DatumRef, ScriptError> {
       match prop_name.as_str() {
         "paramCount" => Ok(player.alloc_datum(Datum::Int(player.scopes.get(ctx.scope_ref).unwrap().args.len() as i32))),
-        "result" => Ok(player.last_handler_result),
+        "result" => Ok(player.last_handler_result.clone()),
         _ => Ok(player.alloc_datum(player.get_movie_prop(prop_name)?))
       }
   }
@@ -64,7 +64,7 @@ impl GetSetBytecodeHandler {
       match receiver {
         Some(0) => Err(ScriptError::new(format!("Can't set prop {} of Void", prop_name))),
         Some(instance_id) => {
-          script_set_prop(player, instance_id, &prop_name.to_owned(), value_ref, false)?;
+          script_set_prop(player, instance_id, &prop_name.to_owned(), &value_ref, false)?;
           Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
         },
         None => Err(ScriptError::new(format!("No receiver to set prop {}", prop_name)))
@@ -80,7 +80,7 @@ impl GetSetBytecodeHandler {
       let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().to_owned();
       Ok((value, obj_datum_ref, prop_name))
     })?;
-    player_set_obj_prop(obj_datum_ref, &prop_name, value).await?;
+    player_set_obj_prop(&obj_datum_ref, &prop_name, &value).await?;
     Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
   }
 
@@ -91,7 +91,7 @@ impl GetSetBytecodeHandler {
     })?;
     reserve_player_mut(|player| {
       let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
-      let result_ref = get_obj_prop(player, obj_datum_ref, &prop_name.to_owned())?;
+      let result_ref = get_obj_prop(player, &obj_datum_ref, &prop_name.to_owned())?;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_ref);
       Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
@@ -113,9 +113,9 @@ impl GetSetBytecodeHandler {
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let property_id_ref = scope.stack.pop().unwrap();
-      let property_id = get_datum(property_id_ref, &player.datums).int_value(&player.datums)?;
+      let property_id = get_datum(&property_id_ref, &player.datums).int_value(&player.datums)?;
       let value_ref = scope.stack.pop().unwrap();
-      let value = get_datum(value_ref, &player.datums).clone();
+      let value = get_datum(&value_ref, &player.datums).clone();
 
       let property_type = bytecode.obj;
       match property_type {
@@ -144,7 +144,7 @@ impl GetSetBytecodeHandler {
     reserve_player_mut(|player| {
       let value_ref = {
         let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
-        *player.globals.get(prop_name).unwrap_or(&VOID_DATUM_REF)
+        player.globals.get(prop_name).unwrap_or(&VOID_DATUM_REF).clone()
       };
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(value_ref);
@@ -169,7 +169,7 @@ impl GetSetBytecodeHandler {
           let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
           scope.stack.pop().unwrap()
         };
-        get_datum(cast_id_ref, &player.datums)
+        get_datum(&cast_id_ref, &player.datums)
       } else {
         &Datum::Int(0)
       };
@@ -177,7 +177,7 @@ impl GetSetBytecodeHandler {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
-      let field_name_or_num = get_datum(field_name_or_num_ref, &player.datums);
+      let field_name_or_num = get_datum(&field_name_or_num_ref, &player.datums);
       let field_value = player.movie.cast_manager.get_field_value_by_identifiers(field_name_or_num, Some(cast_id), &player.datums)?;
       let result_id = player.alloc_datum(Datum::String(field_value));
 
@@ -196,7 +196,7 @@ impl GetSetBytecodeHandler {
       let var_name = get_name(&player, &ctx, name_id).unwrap();
 
       let scope = player.scopes.get(ctx.scope_ref).unwrap();
-      let value_ref = *scope.locals.get(var_name).unwrap_or(&VOID_DATUM_REF);
+      let value_ref = scope.locals.get(var_name).unwrap_or(&VOID_DATUM_REF).clone();
 
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(value_ref);
@@ -226,8 +226,8 @@ impl GetSetBytecodeHandler {
     let param_number = bytecode.obj as usize;
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      let result = scope.args.get(param_number).unwrap_or(&VOID_DATUM_REF);
-      scope.stack.push(*result);
+      let result = scope.args.get(param_number).unwrap_or(&VOID_DATUM_REF).clone();
+      scope.stack.push(result);
     });
     Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
   }
@@ -243,7 +243,7 @@ impl GetSetBytecodeHandler {
         scope.args[arg_index] = value_ref;
         Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
       } else {
-        scope.args.resize(arg_count.max(arg_index), VOID_DATUM_REF);
+        scope.args.resize(arg_count.max(arg_index), VOID_DATUM_REF.clone());
         scope.args.insert(arg_index, value_ref);
         Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
       }
@@ -255,7 +255,7 @@ impl GetSetBytecodeHandler {
       let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let value_ref = scope.stack.pop().unwrap();
-      let value = get_datum(value_ref, &player.datums).clone();
+      let value = get_datum(&value_ref, &player.datums).clone();
       player.set_movie_prop(&prop_name, value)?;
       Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
     })
@@ -280,7 +280,7 @@ impl GetSetBytecodeHandler {
         scope.stack.pop().unwrap()
       };
       let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
-      let result_ref = get_obj_prop(player, obj_ref, &prop_name.to_owned())?;
+      let result_ref = get_obj_prop(player, &obj_ref, &prop_name.to_owned())?;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_ref);
       Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
@@ -293,7 +293,7 @@ impl GetSetBytecodeHandler {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
-      let prop_id = player.get_datum(prop_id).int_value(&player.datums)?;
+      let prop_id = player.get_datum(&prop_id).int_value(&player.datums)?;
       let prop_type = bytecode.obj;
       let max_movie_prop_id = *MOVIE_PROP_NAMES.keys().max().unwrap();
 
@@ -307,7 +307,7 @@ impl GetSetBytecodeHandler {
           let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
           scope.stack.pop().unwrap()
         };
-        let string = player.get_datum(string_id).string_value(&player.datums)?;
+        let string = player.get_datum(&string_id).string_value(&player.datums)?;
         let chunk_type = StringChunkType::from(&(prop_id - 0x0b));
         let last_chunk = StringChunkUtils::resolve_last_chunk(&string, chunk_type, &player.movie.item_delimiter)?;
 
@@ -323,7 +323,7 @@ impl GetSetBytecodeHandler {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.pop().unwrap()
           };
-          let cast_lib_id = player.get_datum(cast_lib_id);
+          let cast_lib_id = player.get_datum(&cast_lib_id);
           let cast = if cast_lib_id.is_string() {
             player.movie.cast_manager.get_cast_by_name(&cast_lib_id.string_value(&player.datums)?)
           } else {
@@ -343,7 +343,7 @@ impl GetSetBytecodeHandler {
           let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
           scope.stack.pop().unwrap()
         };
-        let string = player.get_datum(string_id).string_value(&player.datums)?;
+        let string = player.get_datum(&string_id).string_value(&player.datums)?;
         let chunk_type = StringChunkType::from(&prop_id);
         let chunks = StringChunkUtils::resolve_chunk_list(&string, chunk_type, &player.movie.item_delimiter)?;
         Ok(player.alloc_datum(Datum::Int(chunks.len() as i32)))

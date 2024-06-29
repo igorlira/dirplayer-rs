@@ -58,8 +58,8 @@ pub fn datum_equals(left: &Datum, right: &Datum, datum: &DatumRefMap) -> Result<
         return Ok(false);
       }
       for (left_item, right_item) in left.iter().zip(right.iter()) {
-        let left_item = get_datum(*left_item, datum);
-        let right_item = get_datum(*right_item, datum);
+        let left_item = get_datum(left_item, datum);
+        let right_item = get_datum(right_item, datum);
         if !datum_equals(left_item, right_item, datum)? {
           return Ok(false);
         }
@@ -167,8 +167,8 @@ pub fn datum_is_zero(datum: &Datum, datums: &DatumRefMap) -> Result<bool, Script
 pub fn sort_datums(datums: &Vec<DatumRef>, all_datums: &DatumRefMap) -> Result<Vec<DatumRef>, ScriptError> {
   let mut sorted_list = datums.clone();
   sorted_list.sort_by(|a, b| {
-    let left = get_datum(*a, all_datums);
-    let right = get_datum(*b, all_datums);
+    let left = get_datum(a, all_datums);
+    let right = get_datum(b, all_datums);
 
     if datum_equals(left, right, &all_datums).unwrap() {
       return std::cmp::Ordering::Equal

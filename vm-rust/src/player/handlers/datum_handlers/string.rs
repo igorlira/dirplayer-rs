@@ -6,14 +6,14 @@ pub struct StringDatumHandlers {}
 pub struct StringDatumUtils {}
 
 impl StringDatumUtils {
-  pub fn get_prop_ref(player: &DirPlayer, datum_ref: DatumRef, prop_name: &String, start: i32, end: i32) -> Result<Datum, ScriptError> {
+  pub fn get_prop_ref(player: &DirPlayer, datum_ref: &DatumRef, prop_name: &String, start: i32, end: i32) -> Result<Datum, ScriptError> {
     let datum = player.get_datum(datum_ref);
     if let Datum::String(str_val) = datum {
       match prop_name.as_str() {
         "item" | "word" | "char" | "line" => {
           let chunk_expr = StringChunkExpr { chunk_type: StringChunkType::from(prop_name), start, end, item_delimiter: player.movie.item_delimiter.to_owned() };
           let resolved_str = StringChunkUtils::resolve_chunk_expr_string(str_val, &chunk_expr)?;
-          Ok(Datum::StringChunk(StringChunkSource::Datum(datum_ref), chunk_expr, resolved_str))
+          Ok(Datum::StringChunk(StringChunkSource::Datum(datum_ref.clone()), chunk_expr, resolved_str))
         },
         _ => Err(ScriptError::new(format!("getPropRef: invalid prop_name {prop_name} for string")))
       }
@@ -33,39 +33,39 @@ impl StringDatumUtils {
 }
 
 impl StringDatumHandlers {
-  pub fn count(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let value = player.get_datum(datum).string_value(&player.datums)?;
-      let operand = player.get_datum(args[0]).string_value(&player.datums)?;
+      let operand = player.get_datum(&args[0]).string_value(&player.datums)?;
       let delimiter = &player.movie.item_delimiter;
       let count = string_get_count(&value, &operand, delimiter)?;
       Ok(player.alloc_datum(Datum::Int(count as i32)))
     })
   }
 
-  pub fn get_chunk_prop_ref(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_chunk_prop_ref(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
-      let start = player.get_datum(args[1]).int_value(&player.datums)?;
-      let end = if args.len() > 2 { player.get_datum(args[2]).int_value(&player.datums)? } else { start };
+      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let start = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let end = if args.len() > 2 { player.get_datum(&args[2]).int_value(&player.datums)? } else { start };
 
       let prop_ref = StringDatumUtils::get_prop_ref(player, datum, &prop_name, start, end)?;
       Ok(player.alloc_datum(prop_ref))
     })
   }
 
-  pub fn get_chunk_prop(datum: DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_chunk_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = player.get_datum(args[0]).string_value(&player.datums)?;
-      let start = player.get_datum(args[1]).int_value(&player.datums)?;
-      let end = if args.len() > 2 { player.get_datum(args[2]).int_value(&player.datums)? } else { start };
+      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let start = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let end = if args.len() > 2 { player.get_datum(&args[2]).int_value(&player.datums)? } else { start };
 
       let str_value = StringDatumUtils::get_prop_ref(player, datum, &prop_name, start, end)?.string_value(&player.datums)?;
       Ok(player.alloc_datum(Datum::String(str_value)))
     })
   }
 
-  pub fn call(datum: DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "count" => Self::count(datum, args),
       "getPropRef" => Self::get_chunk_prop_ref(datum, args),

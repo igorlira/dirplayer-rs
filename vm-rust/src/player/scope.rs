@@ -44,7 +44,7 @@ impl Scope {
       bytecode_index: 0,
       locals: HashMap::new(),
       loop_return_indices: vec![],
-      return_value: VOID_DATUM_REF,
+      return_value: VOID_DATUM_REF.clone(),
       stack: vec![],
       passed: false,
     }

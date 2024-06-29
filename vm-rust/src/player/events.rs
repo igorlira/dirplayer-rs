@@ -166,7 +166,7 @@ async fn player_invoke_targeted_event(
     if !handled {
         player_invoke_static_event(handler_name, args).await?;
     }
-    Ok(VOID_DATUM_REF)
+    Ok(VOID_DATUM_REF.clone())
 }
 
 pub async fn player_invoke_global_event(
@@ -200,11 +200,11 @@ pub async fn player_invoke_global_event(
     let handled =
         player_invoke_event_to_instances(handler_name, args, &active_instance_scripts).await?;
     if handled {
-        return Ok(VOID_DATUM_REF);
+        return Ok(VOID_DATUM_REF.clone());
     }
     player_invoke_static_event(handler_name, args).await?;
 
-    Ok(VOID_DATUM_REF)
+    Ok(VOID_DATUM_REF.clone())
 }
 
 pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
@@ -221,7 +221,7 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
                 player_invoke_targeted_event(&name, &args, instances.as_ref()).await
             }
             PlayerVMEvent::Callback(receiver, name, args) => {
-                player_call_datum_handler(receiver, &name, &args).await
+                player_call_datum_handler(&receiver, &name, &args).await
             }
         };
         match result {
@@ -241,7 +241,7 @@ pub fn player_unwrap_result(result: Result<DatumRef, ScriptError>) -> DatumRef {
         Ok(result) => result,
         Err(err) => {
             reserve_player_mut(|player| player.on_script_error(&err));
-            VOID_DATUM_REF
+            VOID_DATUM_REF.clone()
         }
     }
 }

@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    cast_lib::CastMemberRef, cast_member::CastMemberType, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, DatumRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX, VOID_DATUM_REF
+    cast_lib::CastMemberRef, cast_member::CastMemberType, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, DatumId, DatumRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX, VOID_DATUM_REF
 };
 
 #[allow(dead_code)]
@@ -37,7 +37,7 @@ pub enum PlayerVMCommand {
     MouseMove((i32, i32)),
     KeyDown(String, u16),
     KeyUp(String, u16),
-    RequestDatum(DatumRef),
+    RequestDatum(DatumId),
     RequestScriptInstanceSnapshot(ScriptInstanceId),
     SubscribeToMember(CastMemberRef),
     UnsubscribeFromMember(CastMemberRef),
@@ -219,7 +219,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                             true,
                             is_playing,
                             is_script_paused,
-                            timeout.target_ref,
+                            timeout.target_ref.clone(),
                             timeout.handler.to_owned(),
                             timeout.name.to_owned(),
                         )
@@ -228,7 +228,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                             false,
                             false,
                             false,
-                            VOID_DATUM_REF,
+                            VOID_DATUM_REF.clone(),
                             "".to_string(),
                             "".to_string(),
                         )
@@ -236,12 +236,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 });
             if !is_found {
                 console_warn!("Timeout triggered but not found: {}", timeout_ref);
-                return Ok(VOID_DATUM_REF);
+                return Ok(VOID_DATUM_REF.clone());
             }
             if !is_playing || is_script_paused {
                 // TODO how to handle is_script_paused?
                 console_warn!("Timeout triggered but not playing");
-                return Ok(VOID_DATUM_REF);
+                return Ok(VOID_DATUM_REF.clone());
             }
             let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name));
             let args = vec![ref_datum];
@@ -266,7 +266,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         }
         PlayerVMCommand::MouseDown((x, y)) => {
             if !player_is_playing().await {
-                return Ok(VOID_DATUM_REF);
+                return Ok(VOID_DATUM_REF.clone());
             }
             let instance_ids = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
@@ -298,11 +298,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 &vec![],
                 instance_ids.as_ref(),
             );
-            return Ok(VOID_DATUM_REF);
+            return Ok(VOID_DATUM_REF.clone());
         }
         PlayerVMCommand::MouseUp((x, y)) => {
             if !player_is_playing().await {
-                return Ok(VOID_DATUM_REF);
+                return Ok(VOID_DATUM_REF.clone());
             }
             let result = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
@@ -323,11 +323,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let instance_ids = result.as_ref().map(|x| &x.0);
             let event_name = if is_inside { "mouseUp" } else { "mouseUpOutSide" };
             player_dispatch_targeted_event(&event_name.to_string(), &vec![], instance_ids);
-            return Ok(VOID_DATUM_REF);
+            return Ok(VOID_DATUM_REF.clone());
         }
         PlayerVMCommand::MouseMove((x, y)) => {
             if !player_is_playing().await {
-                return Ok(VOID_DATUM_REF);
+                return Ok(VOID_DATUM_REF.clone());
             }
             let (sprite_num, hovered_sprite) = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
@@ -357,9 +357,9 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         PlayerVMCommand::KeyUp(key, code) => {
             return player_key_up(key, code).await;
         }
-        PlayerVMCommand::RequestDatum(datum_ref) => {
+        PlayerVMCommand::RequestDatum(datum_id) => {
             reserve_player_ref(|player| {
-                JsApi::dispatch_datum_snapshot(datum_ref, player);
+                JsApi::dispatch_datum_snapshot(&DatumRef { id: datum_id }, player);
             });
         }
         PlayerVMCommand::RequestScriptInstanceSnapshot(script_instance_id) => {
@@ -430,5 +430,5 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             panic!("Unknown VM command");
         }
     }
-    Ok(VOID_DATUM_REF)
+    Ok(VOID_DATUM_REF.clone())
 }

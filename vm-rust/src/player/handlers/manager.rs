@@ -8,14 +8,14 @@ pub struct BuiltInHandlerManager { }
 impl BuiltInHandlerManager {
   fn param(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_ref(|player| {
-      let param_number = player.get_datum(args[0]).int_value(&player.datums)?;
-      Ok(player.scopes.last().unwrap().args[(param_number - 1) as usize])
+      let param_number = player.get_datum(&args[0]).int_value(&player.datums)?;
+      Ok(player.scopes.last().unwrap().args[(param_number - 1) as usize].clone())
     })
   }
 
   fn count(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let obj = player.get_datum(args[0]);
+      let obj = player.get_datum(&args[0]);
       match obj {
         Datum::List(_, list, ..) => Ok(player.alloc_datum(Datum::Int(list.len() as i32))),
         Datum::PropList(prop_list, ..) => Ok(player.alloc_datum(Datum::Int(prop_list.len() as i32))),
@@ -26,12 +26,12 @@ impl BuiltInHandlerManager {
 
   fn get_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_ref(|player| {
-      let obj = player.get_datum(args[0]);
-      let position = player.get_datum(args[1]).int_value(&player.datums)?;
+      let obj = player.get_datum(&args[0]);
+      let position = player.get_datum(&args[1]).int_value(&player.datums)?;
       let index = position - 1;
       match obj {
-        Datum::List(_, list, ..) => Ok(list[index as usize]),
-        Datum::PropList(prop_list, ..) => Ok(prop_list[index as usize].1),
+        Datum::List(_, list, ..) => Ok(list[index as usize].clone()),
+        Datum::PropList(prop_list, ..) => Ok(prop_list[index as usize].1.clone()),
         _ => Err(ScriptError::new(format!("Cannot getAt of non-list")))
       }
     })
@@ -45,20 +45,20 @@ impl BuiltInHandlerManager {
         if i > 0 {
           line.push_str(" ");
         }
-        let arg = player.get_datum(*arg);
+        let arg = player.get_datum(arg);
         line.push_str(&format_concrete_datum(&arg, player));
         i += 1;
       }
       JsApi::dispatch_debug_message(line.as_str());
       Ok(())
     })?;
-    Ok(VOID_DATUM_REF)
+    Ok(VOID_DATUM_REF.clone())
   }
 
   fn random(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let min: i32 = 1;
-      let max = player.get_datum(args[0]).int_value(&player.datums)? - 1;
+      let max = player.get_datum(&args[0]).int_value(&player.datums)? - 1;
       if max < 0 {
         return Err(ScriptError::new("random: max must be greater than or equal to 0".to_string()));
       }
@@ -72,24 +72,24 @@ impl BuiltInHandlerManager {
 
   fn bit_and(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let a = player.get_datum(args[0]).int_value(&player.datums)?;
-      let b = player.get_datum(args[1]).int_value(&player.datums)?;
+      let a = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let b = player.get_datum(&args[1]).int_value(&player.datums)?;
       Ok(player.alloc_datum(Datum::Int(a & b)))
     })
   }
 
   fn bit_or(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let a = player.get_datum(args[0]).int_value(&player.datums)?;
-      let b = player.get_datum(args[1]).int_value(&player.datums)?;
+      let a = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let b = player.get_datum(&args[1]).int_value(&player.datums)?;
       Ok(player.alloc_datum(Datum::Int(a | b)))
     })
   }
 
   async fn call(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let receiver_ref = args[1];
+    let receiver_ref = &args[1];
     let (handler_name, args, instance_ids) = reserve_player_mut(|player| {
-      let handler_name = player.get_datum(args[0]);
+      let handler_name = player.get_datum(&args[0]);
       let receiver_clone = player.get_datum(receiver_ref).clone();
       let args = args[2..].to_vec();
       if !handler_name.is_symbol() {
@@ -101,14 +101,14 @@ impl BuiltInHandlerManager {
         Datum::PropList(prop_list, ..) => {
           let mut instance_ids = vec![];
           for (_, value_ref) in prop_list {
-            instance_ids.extend(get_datum_script_instance_ids(value_ref, player)?);
+            instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
           }
           Ok(Some(instance_ids))
         },
         Datum::List(_, list, _) => {
           let mut instance_ids = vec![];
           for value_ref in list {
-            instance_ids.extend(get_datum_script_instance_ids(value_ref, player)?);
+            instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
           }
           Ok(Some(instance_ids))
         },
@@ -119,7 +119,7 @@ impl BuiltInHandlerManager {
     })?;
 
     if instance_ids.is_none() {
-      return player_call_datum_handler(receiver_ref, &handler_name, &args).await;
+      return player_call_datum_handler(&receiver_ref, &handler_name, &args).await;
     }
     let instance_ids = instance_ids.unwrap();
 
@@ -159,7 +159,7 @@ impl BuiltInHandlerManager {
       "castLib" => CastHandlers::cast_lib(args),
       "preloadNetThing" => NetHandlers::preload_net_thing(args),
       "netDone" => NetHandlers::net_done(args),
-      "moveToFront" => Ok(VOID_DATUM_REF),
+      "moveToFront" => Ok(VOID_DATUM_REF.clone()),
       "puppetTempo" => MovieHandlers::puppet_tempo(args),
       "objectp" => TypeHandlers::objectp(args),
       "voidp" => TypeHandlers::voidp(args),
@@ -227,7 +227,7 @@ impl BuiltInHandlerManager {
       "intersect" => TypeHandlers::intersect(args),
       "rollover" => MovieHandlers::rollover(args),
       "getPropAt" => TypeHandlers::get_prop_at(args),
-      "puppetSound" => Ok(VOID_DATUM_REF), // TODO
+      "puppetSound" => Ok(VOID_DATUM_REF.clone()), // TODO
       "pi" => TypeHandlers::pi(args),
       "sin" => TypeHandlers::sin(args),
       "cos" => TypeHandlers::cos(args),
@@ -238,7 +238,7 @@ impl BuiltInHandlerManager {
             if !formatted_args.is_empty() {
               formatted_args.push_str(", ");
             }
-            formatted_args.push_str(&format_concrete_datum(&player.get_datum(*arg), player));
+            formatted_args.push_str(&format_concrete_datum(&player.get_datum(arg), player));
           }
           Ok(formatted_args)
         })?;
@@ -250,7 +250,7 @@ impl BuiltInHandlerManager {
   }
 }
 
-fn get_datum_script_instance_ids(value_ref: DatumRef, player: &DirPlayer) -> Result<Vec<ScriptInstanceId>, ScriptError> {
+fn get_datum_script_instance_ids(value_ref: &DatumRef, player: &DirPlayer) -> Result<Vec<ScriptInstanceId>, ScriptError> {
   let value = player.get_datum(value_ref);
   let mut instance_ids = vec![];
   match value {

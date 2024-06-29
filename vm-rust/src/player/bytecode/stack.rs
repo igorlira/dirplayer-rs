@@ -100,7 +100,7 @@ impl StackBytecodeHandler {
       scope.stack.pop().unwrap()
     });
     reserve_player_mut(|player| {
-      let arg_list = get_datum(arg_list_ref, &player.datums).to_list()?;
+      let arg_list = get_datum(&arg_list_ref, &player.datums).to_list()?;
       if arg_list.len() % 2 != 0 {
         return Err(ScriptError::new("argList length must be even".to_string()));
       }
@@ -124,7 +124,7 @@ impl StackBytecodeHandler {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
-      let list = player.get_datum(list_id).to_list()?.clone();
+      let list = player.get_datum(&list_id).to_list()?.clone();
       let result_id = player.alloc_datum(Datum::List(DatumType::List, list, false));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_id);
@@ -137,7 +137,7 @@ impl StackBytecodeHandler {
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let stack_index = scope.stack.len() - 1 - offset as usize;
-      let datum_ref = *scope.stack.get(stack_index).unwrap();  
+      let datum_ref = scope.stack.get(stack_index).unwrap().clone();  
       scope.stack.push(datum_ref);
       Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
     })
@@ -155,7 +155,7 @@ impl StackBytecodeHandler {
   pub fn push_chunk_var_ref(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (id_ref, cast_id_ref) = read_context_var_args(player, bytecode.obj as u32, ctx.scope_ref);
-      let value_ref = player_get_context_var(player, id_ref, cast_id_ref, bytecode.obj as u32, ctx)?;
+      let value_ref = player_get_context_var(player, &id_ref, cast_id_ref.as_ref(), bytecode.obj as u32, ctx)?;
     
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(value_ref);
@@ -173,8 +173,8 @@ impl StackBytecodeHandler {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
-      let arg_list = player.get_datum(arg_list).to_list()?;
-      let script_name = player.get_datum(arg_list[0]).string_value(&player.datums)?;
+      let arg_list = player.get_datum(&arg_list).to_list()?;
+      let script_name = player.get_datum(&arg_list[0]).string_value(&player.datums)?;
       let extra_args = arg_list[1..].to_vec();
 
       let script_ref = player.movie.cast_manager.find_member_ref_by_name(&script_name).unwrap();
@@ -182,7 +182,7 @@ impl StackBytecodeHandler {
       
       Ok((script_ref, extra_args))
     })?;
-    let result = ScriptDatumHandlers::new(script_ref, &extra_args).await?;
+    let result = ScriptDatumHandlers::new(&script_ref, &extra_args).await?;
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result);

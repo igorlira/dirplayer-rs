@@ -37,7 +37,7 @@ pub fn get_stage_prop(
 pub fn set_stage_prop(
   player: &mut DirPlayer,
   prop: &str,
-  _value: DatumRef,
+  _value: &DatumRef,
 ) -> Result<(), ScriptError> {
   match prop {
     "title" => {

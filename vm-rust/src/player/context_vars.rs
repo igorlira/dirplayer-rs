@@ -14,8 +14,8 @@ pub fn read_context_var_args(player: &mut DirPlayer, var_type: u32, scope_ref: S
 
 pub fn player_get_context_var(
   player: &mut DirPlayer, 
-  id_ref: DatumRef,
-  _cast_id_ref: Option<DatumRef>,
+  id_ref: &DatumRef,
+  _cast_id_ref: Option<&DatumRef>,
   var_type: u32, 
   ctx: &BytecodeHandlerContext,
 ) -> Result<DatumRef, ScriptError> {
@@ -32,7 +32,7 @@ pub fn player_get_context_var(
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let arg_val_ref = scope.args.get(arg_index).unwrap();
       // let arg_name = get_name(&player, ctx.to_owned(), arg_name_ids[arg_index]).unwrap();
-      Ok(*arg_val_ref)
+      Ok(arg_val_ref.clone())
     }
     0x5 => {
       // local
@@ -40,7 +40,7 @@ pub fn player_get_context_var(
       let local_name = get_name(player, &ctx, local_name_ids[id.int_value(&player.datums)? as usize]).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let local = scope.locals.get(&local_name).unwrap_or(&VOID_DATUM_REF);
-      Ok(*local)
+      Ok(local.clone())
     }
     0x6 => {
       // field
@@ -52,10 +52,10 @@ pub fn player_get_context_var(
 
 pub fn player_set_context_var(
   player: &mut DirPlayer, 
-  id_ref: DatumRef,
-  _cast_id_ref: Option<DatumRef>,
+  id_ref: &DatumRef,
+  _cast_id_ref: Option<&DatumRef>,
   var_type: u32, 
-  value_ref: DatumRef, 
+  value_ref: &DatumRef, 
   ctx: &BytecodeHandlerContext, 
 ) -> Result<(), ScriptError> {
   let variable_multiplier = get_current_variable_multiplier(player, ctx);
@@ -70,7 +70,7 @@ pub fn player_set_context_var(
       let arg_index = (id.int_value(&player.datums)? / variable_multiplier as i32) as usize;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let arg_val_ref = scope.args.get_mut(arg_index).unwrap();
-      *arg_val_ref = value_ref;
+      *arg_val_ref = value_ref.clone();
       Ok(())
     }
     0x5 => {
@@ -78,7 +78,7 @@ pub fn player_set_context_var(
       let local_name_ids = &handler.local_name_ids;
       let local_name = get_name(player, &ctx, local_name_ids[id.int_value(&player.datums)? as usize]).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      scope.locals.insert(local_name, value_ref);
+      scope.locals.insert(local_name, value_ref.clone());
       Ok(())
     }
     0x6 => {
