@@ -28,6 +28,7 @@ pub mod events;
 pub mod keyboard;
 pub mod keyboard_map;
 pub mod keyboard_events;
+pub mod allocator;
 
 use std::{collections::HashMap, fmt::Display, sync::Arc, time::Duration};
 
@@ -99,16 +100,38 @@ pub struct DirPlayer {
 
 pub type DatumId = u32;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct DatumRef {
   pub id: u32,
 }
 pub type DatumRefMap = IntMap<DatumId, Datum>;
 pub static VOID_DATUM_REF: DatumRef = DatumRef { id: 0 };
 
+impl DatumRef {
+  fn from_id(id: DatumId) -> DatumRef {
+    if id != 0 {
+      reserve_allocator_mut(|allocator| {
+        allocator.on_datum_ref_added(id);
+      });
+    }
+    DatumRef { id }
+  }
+}
+
+impl Clone for DatumRef {
+  fn clone(&self) -> Self {
+    DatumRef::from_id(self.id)
+  }
+}
+
 impl Drop for DatumRef {
   fn drop(&mut self) {
-    // console_warn!("dropping datum ref {}", self.id);
+    if self.id == 0 {
+      return;
+    }
+    reserve_allocator_mut(|allocator| {
+      allocator.on_datum_ref_dropped(self.id);
+    });
   }
 }
 
@@ -298,6 +321,8 @@ impl DirPlayer {
     self.current_breakpoint = None;
     // notifyListeners();
 
+    reserve_allocator_mut(|it| it.reset());
+
     JsApi::dispatch_frame_changed(self.movie.current_frame);
     JsApi::dispatch_scope_list(self);
     JsApi::dispatch_script_error_cleared();
@@ -312,7 +337,7 @@ impl DirPlayer {
     self.datum_id_counter += 1;
     let id = self.datum_id_counter;
     self.datums.insert(id, datum);
-    DatumRef { id }
+    DatumRef::from_id(id)
   }
 
   fn get_movie_prop(&self, prop: &String) -> Result<Datum, ScriptError> {

@@ -359,7 +359,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         }
         PlayerVMCommand::RequestDatum(datum_id) => {
             reserve_player_ref(|player| {
-                JsApi::dispatch_datum_snapshot(&DatumRef { id: datum_id }, player);
+                JsApi::dispatch_datum_snapshot(&DatumRef::from_id(datum_id), player);
             });
         }
         PlayerVMCommand::RequestScriptInstanceSnapshot(script_instance_id) => {
