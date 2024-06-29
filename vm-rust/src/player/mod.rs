@@ -32,6 +32,7 @@ pub mod allocator;
 
 use std::{collections::HashMap, fmt::Display, sync::Arc, time::Duration};
 
+use allocator::reserve_allocator_mut;
 use async_std::{channel::{self, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
 use chrono::Local;
