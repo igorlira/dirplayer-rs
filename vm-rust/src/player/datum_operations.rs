@@ -2,7 +2,7 @@ use std::cmp::min;
 
 use crate::director::lingo::datum::{Datum, DatumType};
 
-use super::{get_datum, sprite::ColorRef, DirPlayer, ScriptError};
+use super::{sprite::ColorRef, DirPlayer, ScriptError};
 
 pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<Datum, ScriptError> {
   match (&left, &right) {
@@ -17,7 +17,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
       if ref_list.len() == 4 {
         let b = ref_list.iter()
           .map(|r|
-            get_datum(r, &player.datums).int_value()
+            player.get_datum(r).int_value()
               .map(|x| x as i32)
           ).collect::<Result<Vec<i32>, ScriptError>>()?;
         Ok(Datum::IntRect((a.0 + b[0], a.1 + b[1], a.2 + b[2], a.3 + b[3])))
@@ -29,8 +29,8 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
       let intersection_count = min(list_a.len(), list_b.len());
       let mut result = Vec::with_capacity(intersection_count);
       for i in 0..intersection_count {
-        let a = get_datum(&list_a[i], &player.datums).clone();
-        let b = get_datum(&list_b[i], &player.datums).clone();
+        let a = player.get_datum(&list_a[i]).clone();
+        let b = player.get_datum(&list_b[i]).clone();
         let result_datum = add_datums(a, b, player)?;
         result.push(player.alloc_datum(result_datum));
       }
@@ -39,7 +39,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
     (Datum::List(_, list, _), Datum::Int(i)) => {
       let mut result_refs = vec![];
       for r in list {
-        let datum = get_datum(r, &player.datums);
+        let datum = player.get_datum(r);
         let result_datum = match datum {
           Datum::Int(n) => Datum::Int(n + i),
           Datum::Float(n) => Datum::Float(n + *i as f32),
@@ -54,7 +54,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
       if ref_list.len() == 2 {
         let b = ref_list.iter()
           .map(|r| 
-            get_datum(r, &player.datums).int_value()
+            player.get_datum(r).int_value()
               .map(|x| x as i32)
           )
           .collect::<Result<Vec<i32>, ScriptError>>()?;
@@ -86,7 +86,7 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
       if ref_list.len() == 4 {
         let b = ref_list.iter()
           .map(|r| 
-            get_datum(r, &player.datums).int_value()
+            player.get_datum(r).int_value()
               .map(|x| x as i32)
           )
           .collect::<Result<Vec<i32>, ScriptError>>()?;
@@ -99,8 +99,8 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
       let intersection_count = min(list_a.len(), list_b.len());
       let mut result = Vec::with_capacity(intersection_count);
       for i in 0..intersection_count {
-        let a = get_datum(&list_a[i], &player.datums).clone();
-        let b = get_datum(&list_b[i], &player.datums).clone();
+        let a = player.get_datum(&list_a[i]).clone();
+        let b = player.get_datum(&list_b[i]).clone();
         let result_datum = subtract_datums(a, b, player)?;
         result.push(player.alloc_datum(result_datum));
       }
@@ -110,7 +110,7 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
     (Datum::IntPoint(a), Datum::List(_, ref_list, _)) => {
       if ref_list.len() == 2 {
         let b = ref_list.iter()
-          .map(|r| get_datum(r, &player.datums).int_value().map(|x| x as i32)).collect::<Result<Vec<i32>, ScriptError>>()?;
+          .map(|r| player.get_datum(r).int_value().map(|x| x as i32)).collect::<Result<Vec<i32>, ScriptError>>()?;
         Ok(Datum::IntPoint((a.0.wrapping_sub(b[0]), a.1.wrapping_sub(b[1]))))
       } else {
         Err(ScriptError::new(format!("Invalid list length for subtract_datums: {}", ref_list.len())))

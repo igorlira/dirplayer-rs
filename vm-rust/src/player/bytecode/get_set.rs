@@ -1,4 +1,4 @@
-use crate::{director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, MOVIE_PROP_NAMES}, datum::{Datum, StringChunkType}}}, player::{get_datum, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK, VOID_DATUM_REF}};
+use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, MOVIE_PROP_NAMES}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK, VOID_DATUM_REF}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -113,9 +113,9 @@ impl GetSetBytecodeHandler {
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let property_id_ref = scope.stack.pop().unwrap();
-      let property_id = get_datum(&property_id_ref, &player.datums).int_value()?;
+      let property_id = player.allocator.get_datum(&property_id_ref).int_value()?;
       let value_ref = scope.stack.pop().unwrap();
-      let value = get_datum(&value_ref, &player.datums).clone();
+      let value = player.get_datum(&value_ref).clone();
 
       let property_type = bytecode.obj;
       match property_type {
@@ -164,21 +164,27 @@ impl GetSetBytecodeHandler {
 
   pub fn get_field(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
-      let cast_id = if player.movie.dir_version >= 500 {
+      let cast_id_ref = if player.movie.dir_version >= 500 {
         let cast_id_ref = {
           let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
           scope.stack.pop().unwrap()
         };
-        get_datum(&cast_id_ref, &player.datums)
+        Some(cast_id_ref)
       } else {
-        &Datum::Int(0)
+        None
       };
       let field_name_or_num_ref = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
-      let field_name_or_num = get_datum(&field_name_or_num_ref, &player.datums);
-      let field_value = player.movie.cast_manager.get_field_value_by_identifiers(field_name_or_num, Some(cast_id), &player.datums)?;
+      let cast_id = if let Some(cast_id_ref) = cast_id_ref {
+        player.get_datum(&cast_id_ref)
+      } else {
+        &Datum::Int(0)
+      };
+      let field_name_or_num = player.get_datum(&field_name_or_num_ref);
+
+      let field_value = player.movie.cast_manager.get_field_value_by_identifiers(field_name_or_num, Some(cast_id), &player.allocator)?;
       let result_id = player.alloc_datum(Datum::String(field_value));
 
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -255,7 +261,7 @@ impl GetSetBytecodeHandler {
       let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let value_ref = scope.stack.pop().unwrap();
-      let value = get_datum(&value_ref, &player.datums).clone();
+      let value = player.get_datum(&value_ref).clone();
       player.set_movie_prop(&prop_name, value)?;
       Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
     })

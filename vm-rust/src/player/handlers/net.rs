@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{get_datum, reserve_player_mut, DatumRef, ScriptError}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{reserve_player_mut, DatumRef, ScriptError}};
 
 
 pub struct NetHandlers { }
@@ -7,7 +7,7 @@ impl NetHandlers {
   pub fn net_done(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let task_id = if let Some(task_id_ref) = &args.get(0) {
-        let task_id_datum = get_datum(task_id_ref, &player.datums);
+        let task_id_datum = player.get_datum(task_id_ref);
         Some(task_id_datum.int_value()? as u32)
       } else {
         None
@@ -64,7 +64,7 @@ impl NetHandlers {
 
   pub fn net_error(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let task_id = args.get(0).map(|datum_ref| get_datum(datum_ref, &player.datums).int_value().unwrap() as u32);
+      let task_id = args.get(0).map(|datum_ref| player.get_datum(datum_ref).int_value().unwrap() as u32);
       let task_state = player.net_manager.get_task_state(task_id).unwrap();
       let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
       let error = if is_ok {
@@ -80,7 +80,7 @@ impl NetHandlers {
 
   pub fn net_text_result(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let task_id = args.get(0).map(|datum_ref| get_datum(datum_ref, &player.datums).int_value().unwrap() as u32);
+      let task_id = args.get(0).map(|datum_ref| player.get_datum(datum_ref).int_value().unwrap() as u32);
       let task_state = player.net_manager.get_task_state(task_id).unwrap();
       let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
       let text = if is_ok {

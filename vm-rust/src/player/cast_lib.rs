@@ -4,7 +4,7 @@ use url::Url;
 
 use crate::{director::{cast::CastDef, file::{read_director_file_bytes, DirectorFile}, lingo::{datum::Datum, script::ScriptContext}}, js_api::{self, JsApi}, utils::{get_base_url, get_basename_no_extension, log_i}};
 
-use super::{bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, manager::BitmapManager}, cast_member::{BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, net_task::NetResult, script::Script, DatumRefMap, ScriptError, PLAYER_LOCK};
+use super::{allocator::DatumAllocator, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, manager::BitmapManager}, cast_member::{BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, net_task::NetResult, script::Script, ScriptError, PLAYER_LOCK};
 
 pub struct CastLib {
   pub name: String,
@@ -110,7 +110,7 @@ impl CastLib {
     }
   }
 
-  pub fn set_prop(&mut self, prop: &String, value: Datum, datums: &DatumRefMap) -> Result<(), ScriptError> {
+  pub fn set_prop(&mut self, prop: &String, value: Datum, datums: &DatumAllocator) -> Result<(), ScriptError> {
     // TODO
     match prop.as_str() {
       "preloadMode" => {
@@ -254,7 +254,7 @@ pub async fn player_cast_lib_set_prop(cast_lib: u32, prop_name: &String, value: 
   let player = player_opt.as_mut().unwrap();
 
   let cast_lib = player.movie.cast_manager.get_cast_mut(cast_lib as u32);
-  cast_lib.set_prop(&prop_name, value, &player.datums)?;
+  cast_lib.set_prop(&prop_name, value, &player.allocator)?;
   if prop_name == "fileName" {
     cast_lib.preload(&mut player.net_manager, &mut player.bitmap_manager).await;
   }

@@ -5,7 +5,7 @@ use url::Url;
 
 use crate::{director::{enums::ScriptType, file::DirectorFile, lingo::datum::Datum}, js_api::JsApi, player::cast_lib::CastLib};
 
-use super::{bitmap::{manager::BitmapManager, palette_map::PaletteMap}, cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF}, cast_member::{CastMember, CastMemberType}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, script::Script, DatumRefMap, ScriptError};
+use super::{allocator::DatumAllocator, bitmap::{manager::BitmapManager, palette_map::PaletteMap}, cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF}, cast_member::{CastMember, CastMemberType}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, script::Script, ScriptError};
 
 pub struct CastManager {
   pub casts: Vec<CastLib>,
@@ -133,7 +133,7 @@ impl CastManager {
     None
   }
 
-  pub fn find_member_ref_by_identifiers(&self, member_name_or_num: &Datum, cast_name_or_num: Option<&Datum>, datums: &DatumRefMap) -> Result<Option<CastMemberRef>, ScriptError> {
+  pub fn find_member_ref_by_identifiers(&self, member_name_or_num: &Datum, cast_name_or_num: Option<&Datum>, datums: &DatumAllocator) -> Result<Option<CastMemberRef>, ScriptError> {
     let cast_lib = if cast_name_or_num.is_some_and(|x| x.is_string()) {
       self.get_cast_by_name(&cast_name_or_num.unwrap().string_value().unwrap())
     } else if cast_name_or_num.is_some_and(|x| x.is_number()) {
@@ -190,7 +190,7 @@ impl CastManager {
     }
   }
 
-  pub fn find_member_by_identifiers(&self, member_name_or_num: &Datum, cast_name_or_num: Option<&Datum>, datums: &DatumRefMap) -> Result<Option<&CastMember>, ScriptError> {
+  pub fn find_member_by_identifiers(&self, member_name_or_num: &Datum, cast_name_or_num: Option<&Datum>, datums: &DatumAllocator) -> Result<Option<&CastMember>, ScriptError> {
     let member_ref = self.find_member_ref_by_identifiers(member_name_or_num, cast_name_or_num, datums)?;
     Ok(member_ref.and_then(|member_ref| self.find_member_by_ref(&member_ref)))
   }
@@ -239,7 +239,7 @@ impl CastManager {
     }
   }
 
-  pub fn get_field_value_by_identifiers(&self, member_name_or_num: &Datum, cast_name_or_num: Option<&Datum>, datums: &DatumRefMap) -> Result<String, ScriptError> {
+  pub fn get_field_value_by_identifiers(&self, member_name_or_num: &Datum, cast_name_or_num: Option<&Datum>, datums: &DatumAllocator) -> Result<String, ScriptError> {
     let member = self.find_member_by_identifiers(member_name_or_num, cast_name_or_num, datums)?;
     match member {
       Some(member) => {

@@ -1,4 +1,4 @@
-use crate::{director::{chunks::handler::Bytecode, lingo::datum::{Datum, DatumType}}, player::{compare::datum_is_zero, get_datum, handlers::datum_handlers::player_call_datum_handler, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK}};
+use crate::{director::{chunks::handler::Bytecode, lingo::datum::{Datum, DatumType}}, player::{compare::datum_is_zero, handlers::datum_handlers::player_call_datum_handler, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -25,7 +25,7 @@ impl FlowControlBytecodeHandler {
       let name = get_name(player_cell, &ctx, name_id).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let arg_list_datum_ref = scope.stack.pop().unwrap();
-      let arg_list_datum = get_datum(&arg_list_datum_ref, &player.datums);
+      let arg_list_datum = player.get_datum(&arg_list_datum_ref);
 
       if let Datum::List(list_type, list, _) = arg_list_datum {
         let is_no_ret = match list_type {
@@ -89,10 +89,10 @@ impl FlowControlBytecodeHandler {
         scope.stack.pop().unwrap()
       };
 
-      let datum = get_datum(&value_id, &player.datums);
+      let datum = player.get_datum(&value_id);
       let offset = bytecode.obj as i32;
 
-      if datum_is_zero(datum, &player.datums)? {
+      if datum_is_zero(datum, &player.allocator)? {
         let new_bytecode_index = {
           let (_, handler) = get_current_handler_def(&player, &ctx).unwrap();
           let dest_pos = (bytecode.pos as i32 + offset) as usize;

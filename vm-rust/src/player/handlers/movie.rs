@@ -1,11 +1,11 @@
-use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, get_datum, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError, VOID_DATUM_REF}};
 
 pub struct MovieHandlers {}
 
 impl MovieHandlers {
   pub fn puppet_tempo(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      player.movie.puppet_tempo = get_datum(&args[0], &player.datums).int_value()? as u32;
+      player.movie.puppet_tempo = player.get_datum(&args[0]).int_value()? as u32;
       Ok(VOID_DATUM_REF.clone())
     })
   }
@@ -46,7 +46,7 @@ impl MovieHandlers {
         return Ok(member_name_or_num_ref.clone());
       }
       let cast_name_or_num = args.get(1).map(|x| player.get_datum(x));
-      let member = player.movie.cast_manager.find_member_ref_by_identifiers(member_name_or_num, cast_name_or_num, &player.datums)?;
+      let member = player.movie.cast_manager.find_member_ref_by_identifiers(member_name_or_num, cast_name_or_num, &player.allocator)?;
       if let Some(member) = member {
         Ok(player.alloc_datum(Datum::CastMember(member.to_owned())))
       } else {
@@ -57,7 +57,7 @@ impl MovieHandlers {
 
   pub fn go(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      player.next_frame = Some(get_datum(&args[0], &player.datums).int_value()? as u32);
+      player.next_frame = Some(player.get_datum(&args[0]).int_value()? as u32);
       Ok(VOID_DATUM_REF.clone())
     })
   }

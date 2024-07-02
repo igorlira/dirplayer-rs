@@ -32,14 +32,14 @@ pub mod allocator;
 
 use std::{collections::HashMap, fmt::Display, sync::Arc, time::Duration};
 
-use allocator::reserve_allocator_mut;
+use allocator::{DatumAllocator, DatumAllocatorTrait};
 use async_std::{channel::{self, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
 use chrono::Local;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use lazy_static::lazy_static;
-use nohash_hasher::{BuildNoHashHasher, IntMap};
+use nohash_hasher::IntMap;
 
 use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
 
@@ -73,8 +73,6 @@ pub struct DirPlayer {
   pub script_id_counter: u32,
   pub scopes: Vec<Scope>,
   pub bytecode_handler_manager: StaticBytecodeHandlerManager,
-  pub datums: DatumRefMap,
-  datum_id_counter: u32,
   pub breakpoint_manager: BreakpointManager,
   pub current_breakpoint: Option<BreakpointContext>,
   pub stage_size: (u32, u32),
@@ -97,48 +95,63 @@ pub struct DirPlayer {
   pub last_handler_result: DatumRef,
   pub hovered_sprite: Option<i16>,
   pub timer_tick_start: u32,
+  pub allocator: DatumAllocator,
 }
 
 pub type DatumId = u32;
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct DatumRef {
-  pub id: u32,
+pub enum DatumRef {
+  Void,
+  Ref(DatumId),
 }
-pub type DatumRefMap = IntMap<DatumId, Datum>;
-pub static VOID_DATUM_REF: DatumRef = DatumRef { id: 0 };
+pub static VOID_DATUM_REF: DatumRef = DatumRef::Void; //DatumRef { id: 0 };
 
 impl DatumRef {
   fn from_id(id: DatumId) -> DatumRef {
     if id != 0 {
-      reserve_allocator_mut(|allocator| {
-        allocator.on_datum_ref_added(id);
-      });
+      // reserve_allocator_mut(|allocator| {
+      //   allocator.on_datum_ref_added(id);
+      // });
     }
-    DatumRef { id }
+    DatumRef::Ref(id)
+  }
+
+  pub fn unwrap(&self) -> DatumId {
+    match self {
+      DatumRef::Void => 0,
+      DatumRef::Ref(id) => *id
+    }
   }
 }
 
 impl Clone for DatumRef {
   fn clone(&self) -> Self {
-    DatumRef::from_id(self.id)
+    match self {
+      DatumRef::Void => DatumRef::Void,
+      DatumRef::Ref(id) => {
+        DatumRef::from_id(*id)
+      }
+    }
   }
 }
 
 impl Drop for DatumRef {
   fn drop(&mut self) {
-    if self.id == 0 {
-      return;
+    if let DatumRef::Ref(id) = self {
+      // reserve_allocator_mut(|allocator| {
+      //   allocator.on_datum_ref_dropped(*id);
+      // });
     }
-    reserve_allocator_mut(|allocator| {
-      allocator.on_datum_ref_dropped(self.id);
-    });
   }
 }
 
 impl Display for DatumRef {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "DatumRef({})", self.id)
+    match self {
+      DatumRef::Void => write!(f, "DatumRef(Void)"),
+      DatumRef::Ref(id) => write!(f, "DatumRef({})", id)
+    }
   }
 }
 
@@ -173,8 +186,8 @@ impl DirPlayer {
       script_id_counter: 0,
       scopes: vec![],
       bytecode_handler_manager: StaticBytecodeHandlerManager {},
-      datums: IntMap::default(),
-      datum_id_counter: 0,
+      // datums: IntMap::default(),
+      // datum_id_counter: 0,
       breakpoint_manager: BreakpointManager::new(),
       current_breakpoint: None,
       stage_size: (100, 100),
@@ -197,6 +210,7 @@ impl DirPlayer {
       last_handler_result: VOID_DATUM_REF.clone(),
       hovered_sprite: None,
       timer_tick_start: get_ticks(),
+      allocator: DatumAllocator::default(),
     }
   }
 
@@ -255,7 +269,7 @@ impl DirPlayer {
   }
 
   pub fn get_datum(&self, id: &DatumRef) -> &Datum {
-    get_datum(id, &self.datums)
+    self.allocator.get_datum(id)
   }
 
   pub fn reserve_script_instance_id(&mut self) -> ScriptInstanceId {
@@ -265,7 +279,7 @@ impl DirPlayer {
   }
 
   pub fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
-    self.datums.get_mut(&id.id).unwrap()
+    self.allocator.get_datum_mut(id)
   }
 
   pub fn get_fps(&self) -> u32 {
@@ -273,12 +287,12 @@ impl DirPlayer {
   }
 
   pub fn get_hydrated_globals(&self) -> HashMap<String, &Datum> {
-    self.globals.iter().map(|(k, v)| (k.to_owned(), self.datums.get(&v.id).unwrap())).collect()
+    self.globals.iter().map(|(k, v)| (k.to_owned(), self.get_datum(v))).collect()
   }
 
   #[allow(dead_code)]
   pub fn get_global(&self, name: &String) -> Option<&Datum> {
-    self.globals.get(name).map(|datum_ref| get_datum(datum_ref, &self.datums))
+    self.globals.get(name).map(|datum_ref| self.get_datum(datum_ref))
   }
 
   pub fn advance_frame(&mut self) {
@@ -312,7 +326,7 @@ impl DirPlayer {
     self.stop();
     self.scopes.clear();
     self.globals.clear();
-    self.datums.clear();
+    self.allocator.reset();
     self.script_instances.clear();
     self.timeout_manager.clear();
     // netManager.clear();
@@ -322,8 +336,6 @@ impl DirPlayer {
     self.current_breakpoint = None;
     // notifyListeners();
 
-    reserve_allocator_mut(|it| it.reset());
-
     JsApi::dispatch_frame_changed(self.movie.current_frame);
     JsApi::dispatch_scope_list(self);
     JsApi::dispatch_script_error_cleared();
@@ -331,14 +343,7 @@ impl DirPlayer {
   }
 
   pub fn alloc_datum(&mut self, datum: Datum) -> DatumRef {
-    if datum.is_void() {
-      return VOID_DATUM_REF.clone();
-    }
-    
-    self.datum_id_counter += 1;
-    let id = self.datum_id_counter;
-    self.datums.insert(id, datum);
-    DatumRef::from_id(id)
+    return self.allocator.alloc_datum(datum).unwrap()
   }
 
   fn get_movie_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
@@ -427,7 +432,7 @@ impl DirPlayer {
         Ok(())
       },
       _ => {
-        self.movie.set_prop(prop, value, &self.datums)
+        self.movie.set_prop(prop, value, &self.allocator)
       }
     }
   }
@@ -811,13 +816,6 @@ fn get_active_scripts<'a>(
     }
   }
   return active_scripts;
-}
-
-pub fn get_datum<'a>(id: &DatumRef, datums: &'a DatumRefMap) -> &'a Datum {
-  if id.id == 0 {
-    return &Datum::Void;
-  }
-  datums.get(&id.id).unwrap()
 }
 
 async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: ScopeRef) -> HandlerExecutionResultContext {

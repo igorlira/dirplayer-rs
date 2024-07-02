@@ -7,7 +7,7 @@ use crate::director::{
 };
 
 use super::{
-    bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, get_datum, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, score::{sprite_get_prop, sprite_set_prop}, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF
+    allocator::DatumAllocatorTrait, bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, score::{sprite_get_prop, sprite_set_prop}, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF
 };
 
 #[derive(Clone)]
@@ -129,7 +129,7 @@ pub fn script_set_prop(
     let result = {
         let script_instance = player.script_instances.get_mut(&script_instance_id).unwrap();
         if prop_name == "ancestor" {
-            let ancestor_id = get_datum(value_ref, &player.datums).to_script_instance_id()?;
+            let ancestor_id = player.allocator.get_datum(value_ref).to_script_instance_id()?;
             script_instance.ancestor = Some(ancestor_id);
             Ok(())
         } else if let Some(prop) = script_instance.properties.get_mut(prop_name) {
@@ -257,8 +257,8 @@ pub async fn player_set_obj_prop(
     value_ref: &DatumRef,
 ) -> Result<(), ScriptError> {
     let (obj_clone, value_clone) = reserve_player_ref(|player| {
-        let obj = get_datum(obj_ref, &player.datums).to_owned();
-        let value = get_datum(value_ref, &player.datums).to_owned();
+        let obj = player.get_datum(obj_ref).to_owned();
+        let value = player.get_datum(value_ref).to_owned();
         (obj, value)
     });
     match obj_clone {
@@ -330,7 +330,7 @@ pub fn get_obj_prop(
     obj_ref: &DatumRef,
     prop_name: &String,
 ) -> Result<DatumRef, ScriptError> {
-    let obj_clone = get_datum(obj_ref, &player.datums).clone();
+    let obj_clone = player.get_datum(obj_ref).clone();
     match obj_clone {
         Datum::CastLib(cast_lib) => {
             let cast_lib = player.movie.cast_manager.get_cast(cast_lib as u32)?;
@@ -347,7 +347,7 @@ pub fn get_obj_prop(
             PropListUtils::get_prop_or_built_in(player, &prop_list, &prop_name)
         }
         Datum::List(_, list, _) => {
-            Ok(player.alloc_datum(ListDatumUtils::get_prop(&list, &prop_name, &player.datums)?))
+            Ok(player.alloc_datum(ListDatumUtils::get_prop(&list, &prop_name, &player.allocator)?))
         }
         Datum::Stage => {
             let result = get_stage_prop(player, &prop_name)?;

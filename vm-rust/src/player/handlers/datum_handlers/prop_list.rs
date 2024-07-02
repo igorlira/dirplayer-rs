@@ -1,18 +1,18 @@
-use crate::{director::lingo::datum::{datum_bool, Datum, PropListPair}, player::{compare::{datum_equals, datum_less_than}, datum_formatting::{format_concrete_datum, format_datum}, get_datum, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DatumRefMap, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum, PropListPair}, player::{allocator::{DatumAllocator, DatumAllocatorTrait}, compare::{datum_equals, datum_less_than}, datum_formatting::{format_concrete_datum, format_datum}, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
 
 pub struct PropListDatumHandlers {}
 
 pub struct PropListUtils {}
 
 impl PropListUtils {
-  fn find_index_to_add(prop_list: &Vec<PropListPair>, item: (&DatumRef, &DatumRef), datums: &DatumRefMap) -> Result<i32, ScriptError> {
+  fn find_index_to_add(prop_list: &Vec<PropListPair>, item: (&DatumRef, &DatumRef), allocator: &DatumAllocator) -> Result<i32, ScriptError> {
     let mut low = 0;
     let mut high = prop_list.len() as i32;
-    let key = get_datum(item.0, datums);
+    let key = allocator.get_datum(item.0);
 
     while low < high {
       let mid = (low + high) / 2;
-      let left_key = get_datum(&prop_list.get(mid as usize).unwrap().0, datums);
+      let left_key = allocator.get_datum(&prop_list.get(mid as usize).unwrap().0);
       if datum_less_than(left_key, key)? {
         low = mid + 1;
       } else {
@@ -23,14 +23,14 @@ impl PropListUtils {
     Ok(low)
   }
 
-  fn get_key_index(prop_list: &Vec<PropListPair>, key: &Datum, datums: &DatumRefMap) -> Result<i32, ScriptError> {
+  fn get_key_index(prop_list: &Vec<PropListPair>, key: &Datum, allocator: &DatumAllocator) -> Result<i32, ScriptError> {
     let mut pos = -1;
     for (i, (k, _)) in prop_list.iter().enumerate() {
-      let k_datum = get_datum(k, datums);
+      let k_datum = allocator.get_datum(k);
       if ((key.is_string() && k_datum.is_symbol()) || (key.is_symbol() && k_datum.is_string())) && key.string_value()? == k_datum.string_value()? {
         pos = i as i32;
         break;
-      } else if datum_equals(k_datum, key, datums)? {
+      } else if datum_equals(k_datum, key, allocator)? {
         pos = i as i32;
         break;
       }
@@ -43,11 +43,11 @@ impl PropListUtils {
     prop_list: &Vec<PropListPair>, 
     key: &String,
   ) -> Result<DatumRef, ScriptError> {
-    let key_index = Self::get_key_index(prop_list, &Datum::String(key.to_owned()), &player.datums)?;
+    let key_index = Self::get_key_index(prop_list, &Datum::String(key.to_owned()), &player.allocator)?;
     if key_index >= 0 {
       return Ok(prop_list[key_index as usize].1.clone())
     }
-    let key_index = Self::get_key_index(prop_list, &Datum::Symbol(key.to_owned()), &player.datums)?;
+    let key_index = Self::get_key_index(prop_list, &Datum::Symbol(key.to_owned()), &player.allocator)?;
     if key_index >= 0 {
       return Ok(prop_list[key_index as usize].1.clone())
     }
@@ -70,11 +70,11 @@ impl PropListUtils {
   pub fn get_prop(
     prop_list: &Vec<PropListPair>, 
     key_ref: &DatumRef, 
-    datums: &DatumRefMap,
+    allocator: &DatumAllocator,
     is_required: bool,
     formatted_key: String,
   ) -> Result<DatumRef, ScriptError> {
-    let key = datums.get(&key_ref.id).unwrap();
+    let key = allocator.get_datum(&key_ref);
     if let Datum::Int(position) = key {
       let index = *position - 1;
       if index >= 0 && index < prop_list.len() as i32 {
@@ -83,7 +83,7 @@ impl PropListUtils {
         return Err(ScriptError::new(format!("Index out of range: {}", index)));
       }
     }
-    let key_index = Self::get_key_index(prop_list, key, &datums)?;
+    let key_index = Self::get_key_index(prop_list, key, &allocator)?;
     if is_required && key_index < 0 {
       return Err(ScriptError::new(format!("Prop not found: {}", formatted_key)));
     }
@@ -104,11 +104,11 @@ impl PropListUtils {
   ) -> Result<(), ScriptError> {
     let key = player.get_datum(key_ref);
     let (prop_list, is_sorted) = player.get_datum(prop_list_ref).to_map_tuple()?;
-    let key_index = Self::get_key_index(&prop_list, key, &player.datums)?;
+    let key_index = Self::get_key_index(&prop_list, key, &player.allocator)?;
     if is_required && key_index < 0 {
       return Err(ScriptError::new(format!("Prop not found: {}", formatted_key)));
     }
-    let index_to_add = PropListUtils::find_index_to_add(&prop_list, (key_ref, value_ref), &player.datums)?;
+    let index_to_add = PropListUtils::find_index_to_add(&prop_list, (key_ref, value_ref), &player.allocator)?;
     let (prop_list, ..) = player.get_datum_mut(prop_list_ref).to_map_tuple_mut()?;
     if key_index >= 0 {
       prop_list[key_index as usize].1 = value_ref.clone();
@@ -123,9 +123,9 @@ impl PropListUtils {
   pub fn get_at(
     prop_list: &Vec<PropListPair>, 
     key_ref: &DatumRef, 
-    datums: &DatumRefMap,
+    allocator: &DatumAllocator,
   ) -> Result<DatumRef, ScriptError> {
-    let key = get_datum(key_ref, datums);
+    let key = allocator.get_datum(key_ref);
     match key {
       // TODO do same for float
       Datum::Int(index) => {
@@ -137,7 +137,7 @@ impl PropListUtils {
         }
       }
       _ => {
-        Self::get_by_key(prop_list, key_ref, &datums)
+        Self::get_by_key(prop_list, key_ref, &allocator)
       }
     }
   }
@@ -145,18 +145,18 @@ impl PropListUtils {
   pub fn get_by_key(
     prop_list: &Vec<PropListPair>, 
     key_ref: &DatumRef, 
-    datums: &DatumRefMap,
+    allocator: &DatumAllocator,
   ) -> Result<DatumRef, ScriptError> {
-    let key = get_datum(key_ref, datums);
-    Self::get_by_concrete_key(prop_list, key, datums)
+    let key = allocator.get_datum(key_ref);
+    Self::get_by_concrete_key(prop_list, key, allocator)
   }
 
   pub fn get_by_concrete_key(
     prop_list: &Vec<PropListPair>, 
     key: &Datum, 
-    datums: &DatumRefMap,
+    allocator: &DatumAllocator,
   ) -> Result<DatumRef, ScriptError> {
-    let key_index = Self::get_key_index(prop_list, key, &datums)?;
+    let key_index = Self::get_key_index(prop_list, key, &allocator)?;
     if key_index < 0 {
       return Ok(VOID_DATUM_REF.clone());
     }
@@ -221,7 +221,7 @@ impl PropListDatumHandlers {
         prop_list.len()
       } else if args.len() == 1 {
         let prop_name = &args[0];
-        let prop_value = PropListUtils::get_by_key(prop_list, prop_name, &player.datums)?;
+        let prop_value = PropListUtils::get_by_key(prop_list, prop_name, &player.allocator)?;
         let prop_value = player.get_datum(&prop_value);
         match prop_value {
           Datum::List(_, list, _) => list.len(),
@@ -245,7 +245,7 @@ impl PropListDatumHandlers {
       };
       let position = prop_list.iter()
         .position(|(_, v)| 
-          datum_equals(player.get_datum(&v), find, &player.datums).unwrap()
+          datum_equals(player.get_datum(&v), find, &player.allocator).unwrap()
         )
         .map(|x| x as i32);
 
@@ -263,7 +263,7 @@ impl PropListDatumHandlers {
       };
       let position = prop_list.iter()
         .position(|(k, _)| 
-          datum_equals(player.get_datum(&k), find, &player.datums).unwrap()
+          datum_equals(player.get_datum(&k), find, &player.allocator).unwrap()
         )
         .map(|x| x as i32);
       if let Some(position) = position {
@@ -281,7 +281,7 @@ impl PropListDatumHandlers {
       let prop_list = player.get_datum(datum).to_map()?;
       let position = prop_list.iter()
         .position(|(_, v)| 
-          datum_equals(player.get_datum(&v), find, &player.datums).unwrap()
+          datum_equals(player.get_datum(&v), find, &player.allocator).unwrap()
         )
         .map(|x| x as i32)
         .unwrap_or(-1);
@@ -311,7 +311,7 @@ impl PropListDatumHandlers {
       let prop_list = player.get_datum(datum);
       match prop_list {
         Datum::PropList(prop_list, ..) => {
-          let key_index = PropListUtils::get_key_index(prop_list, key, &player.datums)?;
+          let key_index = PropListUtils::get_key_index(prop_list, key, &player.allocator)?;
           if key_index >= 0 {
             return Ok(prop_list[key_index as usize].1.clone());
           } else {
@@ -327,7 +327,7 @@ impl PropListDatumHandlers {
     let base_prop_ref = reserve_player_mut(|player| {
       let key = player.get_datum(&args[0]);
       let prop_list = player.get_datum(datum).to_map()?;
-      let key_index = PropListUtils::get_key_index(prop_list, key, &player.datums)?;
+      let key_index = PropListUtils::get_key_index(prop_list, key, &player.allocator)?;
       if key_index >= 0 {
         Ok(prop_list[key_index as usize].1.clone())
       } else {
@@ -370,7 +370,7 @@ impl PropListDatumHandlers {
 
       let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
       let index_to_add = if is_sorted {
-        PropListUtils::find_index_to_add(&prop_list, (&prop_name_ref, &value_ref), &player.datums)?
+        PropListUtils::find_index_to_add(&prop_list, (&prop_name_ref, &value_ref), &player.allocator)?
       } else {
         prop_list.len() as i32
       };
@@ -426,7 +426,7 @@ impl PropListDatumHandlers {
         _ => return Err(ScriptError::new("Cannot get prop list at non-prop list".to_string())),
       };
       let prop_name_ref = &args[0];
-      PropListUtils::get_at(&prop_list, &prop_name_ref, &player.datums)
+      PropListUtils::get_at(&prop_list, &prop_name_ref, &player.allocator)
     })
   }
 
@@ -467,7 +467,7 @@ impl PropListDatumHandlers {
         let left = player.get_datum(left_key_ref);
         let right = player.get_datum(right_key_ref);
 
-        if datum_equals(left, right, &player.datums).unwrap() {
+        if datum_equals(left, right, &player.allocator).unwrap() {
           return std::cmp::Ordering::Equal
         } else if datum_less_than(left, right).unwrap() {
           std::cmp::Ordering::Less
@@ -494,7 +494,7 @@ impl PropListDatumHandlers {
       if prop_name.is_string() || prop_name.is_symbol() {
         // let prop_name = prop_name.string_value()?;
         let prop_list = player.get_datum(datum).to_map()?;
-        let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.datums)?;
+        let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
         if index >= 0  {
           let prop_list = player.get_datum_mut(datum).to_map_mut()?;
           prop_list.remove(index as usize);

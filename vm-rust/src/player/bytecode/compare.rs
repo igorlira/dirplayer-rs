@@ -59,7 +59,7 @@ impl CompareBytecodeHandler {
       let left = player.get_datum(&left);
 
       let is_lt = datum_less_than(left, right)?;
-      let is_eq = datum_equals(left, right, &player.datums)?;
+      let is_eq = datum_equals(left, right, &player.allocator)?;
 
       let result_id = player.alloc_datum(datum_bool(is_lt || is_eq));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -80,7 +80,7 @@ impl CompareBytecodeHandler {
       let left = player.get_datum(&left);
 
       let is_gt = datum_greater_than(left, right)?;
-      let is_eq = datum_equals(left, right, &player.datums)?;
+      let is_eq = datum_equals(left, right, &player.allocator)?;
 
       let result_id = player.alloc_datum(datum_bool(is_gt || is_eq));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -121,7 +121,7 @@ impl CompareBytecodeHandler {
       let right = player.get_datum(&right);
       let left = player.get_datum(&left);
 
-      let is_eq = datum_equals(left, right, &player.datums)?;
+      let is_eq = datum_equals(left, right, &player.allocator)?;
 
       let result_id = player.alloc_datum(datum_bool(!is_eq));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -182,7 +182,7 @@ impl CompareBytecodeHandler {
       let right = player.get_datum(&right);
       let left = player.get_datum(&left);
 
-      let is_eq = datum_equals(left, right, &player.datums)?;
+      let is_eq = datum_equals(left, right, &player.allocator)?;
 
       let result_id = player.alloc_datum(datum_bool(is_eq));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();

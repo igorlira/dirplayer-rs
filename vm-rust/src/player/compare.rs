@@ -1,8 +1,8 @@
 use crate::{console_warn, director::lingo::datum::Datum};
 
-use super::{bitmap::bitmap::PaletteRef, get_datum, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, DatumRef, DatumRefMap, ScriptError};
+use super::{allocator::{DatumAllocator, DatumAllocatorTrait}, bitmap::bitmap::PaletteRef, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, DatumRef, ScriptError};
 
-pub fn datum_equals(left: &Datum, right: &Datum, datum: &DatumRefMap) -> Result<bool, ScriptError> {
+pub fn datum_equals(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
   match (left, right) {
     (Datum::Int(left), Datum::Int(right)) => Ok(*left == *right),
     (Datum::Int(left), Datum::Float(right)) => Ok((*left as f32) == *right), // TODO: is this correct? Flutter compares ints instead
@@ -58,9 +58,9 @@ pub fn datum_equals(left: &Datum, right: &Datum, datum: &DatumRefMap) -> Result<
         return Ok(false);
       }
       for (left_item, right_item) in left.iter().zip(right.iter()) {
-        let left_item = get_datum(left_item, datum);
-        let right_item = get_datum(right_item, datum);
-        if !datum_equals(left_item, right_item, datum)? {
+        let left_item = allocator.get_datum(left_item);
+        let right_item = allocator.get_datum(right_item);
+        if !datum_equals(left_item, right_item, allocator)? {
           return Ok(false);
         }
       }
@@ -142,6 +142,7 @@ pub fn datum_less_than(left: &Datum, right: &Datum) -> Result<bool, ScriptError>
     (Datum::Float(left), Datum::Int(right)) => Ok(*left < (*right as f32)),
     (Datum::Float(left), Datum::Float(right)) => Ok(*left < *right),
     (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left.0 < right.0 && left.1 < right.1),
+    (Datum::String(..), Datum::String(..)) => Ok(false),
     _ => {
       console_warn!("datum_less_than not supported for types: {} and {}", left.type_str(), right.type_str());
       Ok(false)
@@ -149,7 +150,7 @@ pub fn datum_less_than(left: &Datum, right: &Datum) -> Result<bool, ScriptError>
   }
 }
 
-pub fn datum_is_zero(datum: &Datum, datums: &DatumRefMap) -> Result<bool, ScriptError>{
+pub fn datum_is_zero(datum: &Datum, datums: &DatumAllocator) -> Result<bool, ScriptError>{
   Ok(match datum {
     Datum::Int(value) => *value == 0,
     Datum::Float(value) => *value == 0.0,
@@ -164,13 +165,13 @@ pub fn datum_is_zero(datum: &Datum, datums: &DatumRefMap) -> Result<bool, Script
   })
 }
 
-pub fn sort_datums(datums: &Vec<DatumRef>, all_datums: &DatumRefMap) -> Result<Vec<DatumRef>, ScriptError> {
+pub fn sort_datums(datums: &Vec<DatumRef>, allocator: &DatumAllocator) -> Result<Vec<DatumRef>, ScriptError> {
   let mut sorted_list = datums.clone();
   sorted_list.sort_by(|a, b| {
-    let left = get_datum(a, all_datums);
-    let right = get_datum(b, all_datums);
+    let left = allocator.get_datum(a);
+    let right = allocator.get_datum(b);
 
-    if datum_equals(left, right, &all_datums).unwrap() {
+    if datum_equals(left, right, allocator).unwrap() {
       return std::cmp::Ordering::Equal
     } else if datum_less_than(left, right).unwrap() {
       std::cmp::Ordering::Less

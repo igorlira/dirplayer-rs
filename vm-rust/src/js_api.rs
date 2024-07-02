@@ -97,19 +97,19 @@ impl Into<js_sys::Map> for JsBridgeScope {
     
     let locals = js_sys::Map::new();
     for (k, v) in self.locals {
-      locals.set(&JsValue::from_str(&k), &v.id.to_js_value());
+      locals.set(&JsValue::from_str(&k), &v.unwrap().to_js_value());
     }
     map.str_set("locals", &locals.to_js_object());
 
     let stack = js_sys::Array::new();
     for item in self.stack {
-      stack.push(&item.id.to_js_value());
+      stack.push(&item.unwrap().to_js_value());
     }
     map.str_set("stack", &stack);
 
     let args = js_sys::Array::new();
     for item in self.args {
-      args.push(&item.id.to_js_value());
+      args.push(&item.unwrap().to_js_value());
     }
     map.str_set("args", &args);
 
@@ -171,7 +171,7 @@ pub struct JsApi {}
 impl JsApi {
   pub fn dispatch_datum_snapshot(datum_ref: &DatumRef, player: &DirPlayer) {
     let snapshot = datum_to_js_bridge(datum_ref, player, 0);
-    onDatumSnapshot(datum_ref.id, snapshot);
+    onDatumSnapshot(datum_ref.unwrap(), snapshot);
   }
   pub fn dispatch_script_instance_snapshot(script_ref: ScriptInstanceId, player: &DirPlayer) {
     let datum = if script_ref == 0 {
@@ -540,7 +540,7 @@ impl JsApi {
     for (k, v) in player.globals.iter() {
       globals.set(
         &JsValue::from_str(&k.to_string()),
-        &v.id.to_js_value(),
+        &v.unwrap().to_js_value(),
       );
     }
     onGlobalListChanged(globals.to_js_object());
@@ -639,7 +639,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
     }
     Datum::List(_, item_refs, _) => {
       map.str_set("type", &JsValue::from_str("list"));
-      map.str_set("items", &item_refs.iter().map(|x| x.id).collect_vec().to_js_value());
+      map.str_set("items", &item_refs.iter().map(|x| x.unwrap()).collect_vec().to_js_value());
     }
     Datum::VarRef(_) => {
       map.str_set("type", &JsValue::from_str("var_ref"));
@@ -663,7 +663,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
       let props_map = js_sys::Map::new();
       for (k, v) in properties.iter() {
         let key_str = format_datum(k, player);
-        props_map.set(&JsValue::from_str(&key_str), &v.id.to_js_value());
+        props_map.set(&JsValue::from_str(&key_str), &v.unwrap().to_js_value());
       }
       map.str_set("properties", &props_map.to_js_object());
       map.str_set("sorted", &JsValue::from_bool(*sorted));
@@ -687,7 +687,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
 
       let props_map = js_sys::Map::new();
       for (k, v) in instance.properties.iter() {
-        props_map.set(&JsValue::from_str(k), &v.id.to_js_value());
+        props_map.set(&JsValue::from_str(k), &v.unwrap().to_js_value());
       }
       map.str_set("properties", &props_map.to_js_object());
     }

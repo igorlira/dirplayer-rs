@@ -1,6 +1,6 @@
 use crate::{director::lingo::datum::Datum, player::sprite::ColorRef};
 
-use super::{get_datum, DatumRef, DirPlayer};
+use super::{DatumRef, DirPlayer};
 
 pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
   match datum {
@@ -102,6 +102,6 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
 }
 
 pub fn format_datum(datum_ref: &DatumRef, player: &DirPlayer) -> String {
-  let datum = get_datum(datum_ref, &player.datums);
+  let datum = player.get_datum(datum_ref);
   format_concrete_datum(datum, player)
 }

@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::format_datum, eval::eval_lingo, geometry::IntRect, get_datum, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::format_datum, eval::eval_lingo, geometry::IntRect, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
 
 use super::datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, prop_list::{PropListDatumHandlers, PropListUtils}, rect::RectUtils};
 
@@ -44,7 +44,7 @@ impl TypeUtils {
     let formatted_key = format_datum(prop_key_ref, player);
     let result = match datum {
       Datum::PropList(prop_list, ..) => {
-        PropListUtils::get_prop(prop_list, prop_key_ref, &player.datums, false, formatted_key)?
+        PropListUtils::get_prop(prop_list, prop_key_ref, &player.allocator, false, formatted_key)?
       },
       Datum::List(_, list, _) => {
         let position = player.get_datum(prop_key_ref).int_value()?;
@@ -102,7 +102,7 @@ impl TypeUtils {
 impl TypeHandlers {
   pub fn objectp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let obj = get_datum(&args[0], &player.datums);
+      let obj = player.get_datum(&args[0]);
       let is_object = match obj {
         Datum::Void => false,
         Datum::Float(_) => false,
@@ -117,7 +117,7 @@ impl TypeHandlers {
 
   pub fn voidp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let obj = get_datum(&args[0], &player.datums);
+      let obj = player.get_datum(&args[0]);
       let is_void = match obj {
         Datum::Void => true,
         _ => false,
@@ -128,7 +128,7 @@ impl TypeHandlers {
 
   pub fn listp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let obj = get_datum(&args[0], &player.datums);
+      let obj = player.get_datum(&args[0]);
       let is_list = match obj {
         Datum::List(..) => true,
         Datum::PropList(..) => true,
@@ -140,7 +140,7 @@ impl TypeHandlers {
 
   pub fn symbolp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let obj = get_datum(&args[0], &player.datums);
+      let obj = player.get_datum(&args[0]);
       let is_symbol = match obj {
         Datum::Symbol(_) => true,
         _ => false,
@@ -151,7 +151,7 @@ impl TypeHandlers {
 
   pub fn stringp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let obj = get_datum(&args[0], &player.datums);
+      let obj = player.get_datum(&args[0]);
       let is_string = match obj {
         Datum::String(_) => true,
         Datum::StringChunk(..) => true,
@@ -163,7 +163,7 @@ impl TypeHandlers {
 
   pub fn integerp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let obj = get_datum(&args[0], &player.datums);
+      let obj = player.get_datum(&args[0]);
       let is_integer = match obj {
         Datum::Int(_) => true,
         _ => false,
@@ -174,7 +174,7 @@ impl TypeHandlers {
 
   pub fn floatp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let obj = get_datum(&args[0], &player.datums);
+      let obj = player.get_datum(&args[0]);
       let is_float = match obj {
         Datum::Float(_) => true,
         _ => false,
@@ -185,7 +185,7 @@ impl TypeHandlers {
 
   pub fn value(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let expr = get_datum(&args[0], &player.datums);
+      let expr = player.get_datum(&args[0]);
       match expr {
         Datum::String(s) => eval_lingo(s.to_owned(), player),
         _ => Ok(args[0].clone()),
@@ -199,10 +199,10 @@ impl TypeHandlers {
 
   pub fn ilk(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let obj = get_datum(&args[0], &player.datums);
+      let obj = player.get_datum(&args[0]);
       let ilk_type = args
         .get(1)
-        .map(|d| get_datum(d, &player.datums));
+        .map(|d| player.get_datum(d));
 
       let result_datum = if let Some(query) = ilk_type {
         let query = query.string_value()?;
@@ -376,7 +376,8 @@ impl TypeHandlers {
           Ok(VOID_DATUM_REF.clone())
         } else if arg.is_list() {
           let list = arg.to_list()?;
-          let members = list.clone().iter().map(|x| x.id as i32).collect_vec();
+          // TODO why not: let members = list.clone().iter().map(|x| player.get_datum(x).int_value()).collect_vec();
+          let members = list.clone().iter().map(|x| x.unwrap() as i32).collect_vec();
           player.cursor = CursorRef::Member(members);
           Ok(VOID_DATUM_REF.clone())
         } else {
@@ -392,7 +393,7 @@ impl TypeHandlers {
 
   pub async fn new(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let obj_type = reserve_player_mut(|player| {
-      let obj = get_datum(&args[0], &player.datums);
+      let obj = player.get_datum(&args[0]);
       obj.type_enum()
     });
     let result = match obj_type {
@@ -608,7 +609,7 @@ impl TypeHandlers {
         return Ok(player.alloc_datum(Datum::Int(0)))
       }
 
-      let sorted_list = sort_datums(args, &player.datums)?;
+      let sorted_list = sort_datums(args, &player.allocator)?;
       return Ok(sorted_list.first().unwrap().clone())
     })
   }
@@ -628,7 +629,7 @@ impl TypeHandlers {
         return Ok(player.alloc_datum(Datum::Int(0)))
       }
 
-      let sorted_list = sort_datums(args, &player.datums)?;
+      let sorted_list = sort_datums(args, &player.allocator)?;
       return Ok(sorted_list.last().unwrap().clone())
     })
   }

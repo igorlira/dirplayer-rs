@@ -1,4 +1,4 @@
-use crate::{director::{chunks::handler::Bytecode, lingo::datum::{Datum, DatumType}}, player::{context_vars::{player_get_context_var, read_context_var_args}, get_datum, handlers::datum_handlers::script::ScriptDatumHandlers, reserve_player_mut, script::{get_current_script, get_current_variable_multiplier, get_name}, DatumRef, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK}};
+use crate::{director::{chunks::handler::Bytecode, lingo::datum::{Datum, DatumType}}, player::{context_vars::{player_get_context_var, read_context_var_args}, handlers::datum_handlers::script::ScriptDatumHandlers, reserve_player_mut, script::{get_current_script, get_current_variable_multiplier, get_name}, DatumRef, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -100,7 +100,7 @@ impl StackBytecodeHandler {
       scope.stack.pop().unwrap()
     });
     reserve_player_mut(|player| {
-      let arg_list = get_datum(&arg_list_ref, &player.datums).to_list()?;
+      let arg_list = player.get_datum(&arg_list_ref).to_list()?;
       if arg_list.len() % 2 != 0 {
         return Err(ScriptError::new("argList length must be even".to_string()));
       }

@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
 use chrono::Local;
 
 use crate::{director::{file::DirectorFile, lingo::datum::{datum_bool, Datum}}, utils::PATH_SEPARATOR};
 
-use super::{bitmap::manager::BitmapManager, cast_manager::CastManager, geometry::IntRect, net_manager::NetManager, score::Score, DatumRef, DatumRefMap, ScriptError, ScriptReceiver};
+use super::{allocator::DatumAllocator, bitmap::manager::BitmapManager, cast_manager::CastManager, geometry::IntRect, net_manager::NetManager, score::Score, ScriptError, ScriptReceiver};
 
 pub struct Movie {
   pub rect: IntRect,
@@ -85,7 +83,7 @@ impl Movie {
     }
   }
 
-  pub fn set_prop(&mut self, prop: &String, value: Datum, datums: &DatumRefMap) -> Result<(), ScriptError> {
+  pub fn set_prop(&mut self, prop: &String, value: Datum, datums: &DatumAllocator) -> Result<(), ScriptError> {
     match prop.as_str() {
       "exitLock" => {
         self.exit_lock = value.int_value()? == 1;

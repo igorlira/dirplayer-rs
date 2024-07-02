@@ -71,15 +71,15 @@ impl BitmapDatumHandlers {
       let draw_map = player.get_datum(&args[1]).to_map()?;
       let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
 
-      let color_ref = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("color".to_owned()), &player.datums)?;
+      let color_ref = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("color".to_owned()), &player.allocator)?;
       let color_ref = player.get_datum(&color_ref).to_color_ref()?;
       let palettes = player.movie.cast_manager.palettes();
       let color = resolve_color_ref(&palettes, &color_ref, &bitmap.palette_ref);
 
-      let shape_type = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("shapeType".to_owned()), &player.datums)?;
+      let shape_type = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("shapeType".to_owned()), &player.allocator)?;
       let shape_type = player.get_datum(&shape_type).string_value()?;
       
-      let blend = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("blend".to_owned()), &player.datums)?;
+      let blend = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("blend".to_owned()), &player.allocator)?;
       let blend = player.get_datum(&blend);
       let blend = if blend.is_void() {
         100

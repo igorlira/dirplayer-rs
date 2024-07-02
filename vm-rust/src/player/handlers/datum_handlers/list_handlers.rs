@@ -1,17 +1,17 @@
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{compare::{datum_equals, datum_less_than}, get_datum, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DatumRefMap, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::{DatumAllocator, DatumAllocatorTrait}, compare::{datum_equals, datum_less_than}, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, ScriptError, VOID_DATUM_REF}};
 
 pub struct ListDatumHandlers {}
 pub struct ListDatumUtils {}
 
 impl ListDatumUtils {
-  fn find_index_to_add(list_vec: &Vec<DatumRef>, item: &DatumRef, datums: &DatumRefMap) -> Result<i32, ScriptError> {
+  fn find_index_to_add(list_vec: &Vec<DatumRef>, item: &DatumRef, allocator: &DatumAllocator) -> Result<i32, ScriptError> {
     let mut low = 0;
     let mut high = list_vec.len() as i32;
-    let item = get_datum(item, datums);
+    let item = allocator.get_datum(item);
 
     while low < high {
       let mid = (low + high) / 2;
-      let left = get_datum(list_vec.get(mid as usize).unwrap(), datums);
+      let left = allocator.get_datum(list_vec.get(mid as usize).unwrap());
       if datum_less_than(left, item)? {
         low = mid + 1;
       } else {
@@ -22,7 +22,7 @@ impl ListDatumUtils {
     Ok(low)
   }
 
-  pub fn get_prop(list_vec: &Vec<DatumRef>, prop_name: &String, _datums: &DatumRefMap) -> Result<Datum, ScriptError> {
+  pub fn get_prop(list_vec: &Vec<DatumRef>, prop_name: &String, _datums: &DatumAllocator) -> Result<Datum, ScriptError> {
     match prop_name.as_str() {
       "count" => Ok(Datum::Int(list_vec.len() as i32)),
       "ilk" => Ok(Datum::Symbol("list".to_string())),
@@ -104,7 +104,7 @@ impl ListDatumHandlers {
     reserve_player_mut(|player| {
       let find = player.get_datum(&args[0]);
       let list_vec = player.get_datum(datum).to_list()?;
-      let position = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), find, &player.datums).unwrap()).map(|x| x as i32);
+      let position = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap()).map(|x| x as i32);
 
       Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
     })
@@ -115,7 +115,7 @@ impl ListDatumHandlers {
     reserve_player_mut(|player| {
       let find = player.get_datum(&args[0]);
       let list_vec = player.get_datum(datum).to_list()?;
-      let position = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), find, &player.datums).unwrap()).map(|x| x as i32);
+      let position = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap()).map(|x| x as i32);
       Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
     })
   }
@@ -125,7 +125,7 @@ impl ListDatumHandlers {
     reserve_player_mut(|player| {
       let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
       let index_to_add = if is_sorted {
-        ListDatumUtils::find_index_to_add(&list_vec, &item, &player.datums)?
+        ListDatumUtils::find_index_to_add(&list_vec, &item, &player.allocator)?
       } else {
         list_vec.len() as i32
       };
@@ -144,7 +144,7 @@ impl ListDatumHandlers {
     let index = reserve_player_ref(|player| {
       let item = player.get_datum(&args[0]);
       let list_vec = player.get_datum(datum).to_list()?;
-      let index = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), item, &player.datums).unwrap());
+      let index = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), item, &player.allocator).unwrap());
       Ok(index)
     })?;
 
@@ -199,7 +199,7 @@ impl ListDatumHandlers {
         let left = player.get_datum(a);
         let right = player.get_datum(b);
 
-        if datum_equals(left, right, &player.datums).unwrap() {
+        if datum_equals(left, right, &player.allocator).unwrap() {
           return std::cmp::Ordering::Equal
         } else if datum_less_than(left, right).unwrap() {
           std::cmp::Ordering::Less
