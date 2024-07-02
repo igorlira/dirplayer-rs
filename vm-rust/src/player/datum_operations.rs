@@ -17,7 +17,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
       if ref_list.len() == 4 {
         let b = ref_list.iter()
           .map(|r|
-            get_datum(r, &player.datums).int_value(&player.datums)
+            get_datum(r, &player.datums).int_value()
               .map(|x| x as i32)
           ).collect::<Result<Vec<i32>, ScriptError>>()?;
         Ok(Datum::IntRect((a.0 + b[0], a.1 + b[1], a.2 + b[2], a.3 + b[3])))
@@ -54,7 +54,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
       if ref_list.len() == 2 {
         let b = ref_list.iter()
           .map(|r| 
-            get_datum(r, &player.datums).int_value(&player.datums)
+            get_datum(r, &player.datums).int_value()
               .map(|x| x as i32)
           )
           .collect::<Result<Vec<i32>, ScriptError>>()?;
@@ -86,7 +86,7 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
       if ref_list.len() == 4 {
         let b = ref_list.iter()
           .map(|r| 
-            get_datum(r, &player.datums).int_value(&player.datums)
+            get_datum(r, &player.datums).int_value()
               .map(|x| x as i32)
           )
           .collect::<Result<Vec<i32>, ScriptError>>()?;
@@ -110,7 +110,7 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
     (Datum::IntPoint(a), Datum::List(_, ref_list, _)) => {
       if ref_list.len() == 2 {
         let b = ref_list.iter()
-          .map(|r| get_datum(r, &player.datums).int_value(&player.datums).map(|x| x as i32)).collect::<Result<Vec<i32>, ScriptError>>()?;
+          .map(|r| get_datum(r, &player.datums).int_value().map(|x| x as i32)).collect::<Result<Vec<i32>, ScriptError>>()?;
         Ok(Datum::IntPoint((a.0.wrapping_sub(b[0]), a.1.wrapping_sub(b[1]))))
       } else {
         Err(ScriptError::new(format!("Invalid list length for subtract_datums: {}", ref_list.len())))

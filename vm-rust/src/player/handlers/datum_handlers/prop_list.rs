@@ -27,7 +27,7 @@ impl PropListUtils {
     let mut pos = -1;
     for (i, (k, _)) in prop_list.iter().enumerate() {
       let k_datum = get_datum(k, datums);
-      if ((key.is_string() && k_datum.is_symbol()) || (key.is_symbol() && k_datum.is_string())) && key.string_value(datums)? == k_datum.string_value(datums)? {
+      if ((key.is_string() && k_datum.is_symbol()) || (key.is_symbol() && k_datum.is_string())) && key.string_value()? == k_datum.string_value()? {
         pos = i as i32;
         break;
       } else if datum_equals(k_datum, key, datums)? {
@@ -432,7 +432,7 @@ impl PropListDatumHandlers {
 
   pub fn delete_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let position = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let position = player.get_datum(&args[0]).int_value()?;
       let prop_list = player.get_datum_mut(datum);
       match prop_list {
         Datum::PropList(prop_list, ..) => {
@@ -452,7 +452,7 @@ impl PropListDatumHandlers {
         Datum::PropList(prop_list, ..) => prop_list,
         _ => return Err(ScriptError::new("Cannot get prop list at non-prop list".to_string())),
       };
-      let position = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let position = player.get_datum(&args[0]).int_value()?;
       Ok(prop_list.get((position - 1) as usize).unwrap().0.clone())
     })
   }
@@ -492,7 +492,7 @@ impl PropListDatumHandlers {
     reserve_player_mut(|player| {
       let prop_name = player.get_datum(&args[0]);
       if prop_name.is_string() || prop_name.is_symbol() {
-        // let prop_name = prop_name.string_value(&player.datums)?;
+        // let prop_name = prop_name.string_value()?;
         let prop_list = player.get_datum(datum).to_map()?;
         let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.datums)?;
         if index >= 0  {
@@ -503,7 +503,7 @@ impl PropListDatumHandlers {
           Ok(player.alloc_datum(datum_bool(false)))
         }
       } else if prop_name.is_int() {
-        let position = player.get_datum(&args[0]).int_value(&player.datums)?;
+        let position = player.get_datum(&args[0]).int_value()?;
         let prop_list = player.get_datum_mut(datum).to_map_mut()?;
         if position >= 1 && position <= prop_list.len() as i32 {
           prop_list.remove((position - 1) as usize);

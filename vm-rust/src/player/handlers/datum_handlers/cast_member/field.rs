@@ -27,7 +27,7 @@ impl FieldMemberHandlers {
         let field = member.member_type.as_field().unwrap();
         match handler_name.as_str() {
             "count" => {
-                let count_of = player.get_datum(&args[0]).string_value(&player.datums)?;
+                let count_of = player.get_datum(&args[0]).string_value()?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
@@ -73,7 +73,7 @@ impl FieldMemberHandlers {
         match prop.as_str() {
             "text" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(&player.datums),
+                |player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().text = value?;
                     Ok(())
@@ -91,7 +91,7 @@ impl FieldMemberHandlers {
             ),
             "alignment" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(&player.datums),
+                |player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().alignment = value?;
                     Ok(())
@@ -99,7 +99,7 @@ impl FieldMemberHandlers {
             ),
             "wordWrap" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(&player.datums),
+                |player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().word_wrap = value?;
                     Ok(())
@@ -107,7 +107,7 @@ impl FieldMemberHandlers {
             ),
             "width" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(&player.datums),
+                |player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().width = value? as u16;
                     Ok(())
@@ -115,7 +115,7 @@ impl FieldMemberHandlers {
             ),
             "font" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(&player.datums),
+                |player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().font = value?;
                     Ok(())
@@ -123,7 +123,7 @@ impl FieldMemberHandlers {
             ),
             "fontSize" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(&player.datums),
+                |player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().font_size = value? as u16;
                     Ok(())
@@ -131,7 +131,7 @@ impl FieldMemberHandlers {
             ),
             "fontStyle" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(&player.datums),
+                |player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().font_style = value?;
                     Ok(())
@@ -139,7 +139,7 @@ impl FieldMemberHandlers {
             ),
             "fixedLineSpace" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(&player.datums),
+                |player| value.bool_value(),
                 |cast_member, value| {
                     cast_member
                         .member_type
@@ -151,7 +151,7 @@ impl FieldMemberHandlers {
             ),
             "topSpacing" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(&player.datums),
+                |player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().top_spacing = value? as i16;
                     Ok(())
@@ -159,7 +159,7 @@ impl FieldMemberHandlers {
             ),
             "boxType" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(&player.datums),
+                |player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().box_type = value?;
                     Ok(())
@@ -167,7 +167,7 @@ impl FieldMemberHandlers {
             ),
             "antialias" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(&player.datums),
+                |player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().anti_alias = value?;
                     Ok(())
@@ -175,7 +175,7 @@ impl FieldMemberHandlers {
             ),
             "autoTab" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(&player.datums),
+                |player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().auto_tab = value?;
                     Ok(())
@@ -183,7 +183,7 @@ impl FieldMemberHandlers {
             ),
             "editable" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(&player.datums),
+                |player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().editable = value?;
                     Ok(())
@@ -191,7 +191,7 @@ impl FieldMemberHandlers {
             ),
             "border" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(&player.datums),
+                |player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().border = value? as u16;
                     Ok(())

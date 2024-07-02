@@ -8,7 +8,7 @@ pub struct BuiltInHandlerManager { }
 impl BuiltInHandlerManager {
   fn param(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_ref(|player| {
-      let param_number = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let param_number = player.get_datum(&args[0]).int_value()?;
       Ok(player.scopes.last().unwrap().args[(param_number - 1) as usize].clone())
     })
   }
@@ -27,7 +27,7 @@ impl BuiltInHandlerManager {
   fn get_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_ref(|player| {
       let obj = player.get_datum(&args[0]);
-      let position = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let position = player.get_datum(&args[1]).int_value()?;
       let index = position - 1;
       match obj {
         Datum::List(_, list, ..) => Ok(list[index as usize].clone()),
@@ -58,7 +58,7 @@ impl BuiltInHandlerManager {
   fn random(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let min: i32 = 1;
-      let max = player.get_datum(&args[0]).int_value(&player.datums)? - 1;
+      let max = player.get_datum(&args[0]).int_value()? - 1;
       if max < 0 {
         return Err(ScriptError::new("random: max must be greater than or equal to 0".to_string()));
       }
@@ -72,16 +72,16 @@ impl BuiltInHandlerManager {
 
   fn bit_and(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let a = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let b = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let a = player.get_datum(&args[0]).int_value()?;
+      let b = player.get_datum(&args[1]).int_value()?;
       Ok(player.alloc_datum(Datum::Int(a & b)))
     })
   }
 
   fn bit_or(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let a = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let b = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let a = player.get_datum(&args[0]).int_value()?;
+      let b = player.get_datum(&args[1]).int_value()?;
       Ok(player.alloc_datum(Datum::Int(a | b)))
     })
   }
@@ -95,7 +95,7 @@ impl BuiltInHandlerManager {
       if !handler_name.is_symbol() {
         return Err(ScriptError::new("Handler name must be a symbol".to_string()));
       }
-      let handler_name = handler_name.string_value(&player.datums)?;
+      let handler_name = handler_name.string_value()?;
 
       let instance_ids = match receiver_clone {
         Datum::PropList(prop_list, ..) => {

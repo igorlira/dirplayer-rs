@@ -406,11 +406,11 @@ impl Bitmap {
         param_list: &HashMap<String, Datum>,
     ) {
         let blend = param_list.get("blend")
-            .map(|x| x.int_value(&IntMap::default()).unwrap())
+            .map(|x| x.int_value().unwrap())
             .unwrap_or(100);
         let ink = param_list.get("ink");
         let ink = if let Some(ink) = ink {
-            ink.int_value(&IntMap::default()).unwrap() as u32
+            ink.int_value().unwrap() as u32
         } else {
             0
         };

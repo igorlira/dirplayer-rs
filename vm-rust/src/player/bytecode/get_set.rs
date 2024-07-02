@@ -113,7 +113,7 @@ impl GetSetBytecodeHandler {
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let property_id_ref = scope.stack.pop().unwrap();
-      let property_id = get_datum(&property_id_ref, &player.datums).int_value(&player.datums)?;
+      let property_id = get_datum(&property_id_ref, &player.datums).int_value()?;
       let value_ref = scope.stack.pop().unwrap();
       let value = get_datum(&value_ref, &player.datums).clone();
 
@@ -293,7 +293,7 @@ impl GetSetBytecodeHandler {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
-      let prop_id = player.get_datum(&prop_id).int_value(&player.datums)?;
+      let prop_id = player.get_datum(&prop_id).int_value()?;
       let prop_type = bytecode.obj;
       let max_movie_prop_id = *MOVIE_PROP_NAMES.keys().max().unwrap();
 
@@ -307,7 +307,7 @@ impl GetSetBytecodeHandler {
           let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
           scope.stack.pop().unwrap()
         };
-        let string = player.get_datum(&string_id).string_value(&player.datums)?;
+        let string = player.get_datum(&string_id).string_value()?;
         let chunk_type = StringChunkType::from(&(prop_id - 0x0b));
         let last_chunk = StringChunkUtils::resolve_last_chunk(&string, chunk_type, &player.movie.item_delimiter)?;
 
@@ -325,9 +325,9 @@ impl GetSetBytecodeHandler {
           };
           let cast_lib_id = player.get_datum(&cast_lib_id);
           let cast = if cast_lib_id.is_string() {
-            player.movie.cast_manager.get_cast_by_name(&cast_lib_id.string_value(&player.datums)?)
+            player.movie.cast_manager.get_cast_by_name(&cast_lib_id.string_value()?)
           } else {
-            player.movie.cast_manager.get_cast_or_null(cast_lib_id.int_value(&player.datums)? as u32)
+            player.movie.cast_manager.get_cast_or_null(cast_lib_id.int_value()? as u32)
           };
           match cast {
             Some(cast) => Ok(Datum::Int(cast.max_member_id() as i32)),
@@ -343,7 +343,7 @@ impl GetSetBytecodeHandler {
           let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
           scope.stack.pop().unwrap()
         };
-        let string = player.get_datum(&string_id).string_value(&player.datums)?;
+        let string = player.get_datum(&string_id).string_value()?;
         let chunk_type = StringChunkType::from(&prop_id);
         let chunks = StringChunkUtils::resolve_chunk_list(&string, chunk_type, &player.movie.item_delimiter)?;
         Ok(player.alloc_datum(Datum::Int(chunks.len() as i32)))

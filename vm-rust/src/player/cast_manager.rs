@@ -135,9 +135,9 @@ impl CastManager {
 
   pub fn find_member_ref_by_identifiers(&self, member_name_or_num: &Datum, cast_name_or_num: Option<&Datum>, datums: &DatumRefMap) -> Result<Option<CastMemberRef>, ScriptError> {
     let cast_lib = if cast_name_or_num.is_some_and(|x| x.is_string()) {
-      self.get_cast_by_name(&cast_name_or_num.unwrap().string_value(datums).unwrap())
+      self.get_cast_by_name(&cast_name_or_num.unwrap().string_value().unwrap())
     } else if cast_name_or_num.is_some_and(|x| x.is_number()) {
-      let int_val = cast_name_or_num.unwrap().int_value(datums).unwrap();
+      let int_val = cast_name_or_num.unwrap().int_value().unwrap();
       if int_val > 0 {
         self.get_cast_or_null(int_val as u32)
       } else {

@@ -5,7 +5,7 @@ pub struct MovieHandlers {}
 impl MovieHandlers {
   pub fn puppet_tempo(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      player.movie.puppet_tempo = get_datum(&args[0], &player.datums).int_value(&player.datums)? as u32;
+      player.movie.puppet_tempo = get_datum(&args[0], &player.datums).int_value()? as u32;
       Ok(VOID_DATUM_REF.clone())
     })
   }
@@ -57,15 +57,15 @@ impl MovieHandlers {
 
   pub fn go(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      player.next_frame = Some(get_datum(&args[0], &player.datums).int_value(&player.datums)? as u32);
+      player.next_frame = Some(get_datum(&args[0], &player.datums).int_value()? as u32);
       Ok(VOID_DATUM_REF.clone())
     })
   }
 
   pub fn puppet_sprite(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let sprite_number = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let is_puppet = player.get_datum(&args[1]).int_value(&player.datums)? == 1;
+      let sprite_number = player.get_datum(&args[0]).int_value()?;
+      let is_puppet = player.get_datum(&args[1]).int_value()? == 1;
       let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
       sprite.puppet = is_puppet;
       Ok(VOID_DATUM_REF.clone())
@@ -74,7 +74,7 @@ impl MovieHandlers {
 
   pub fn sprite(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let sprite_number = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let sprite_number = player.get_datum(&args[0]).int_value()?;
       Ok(player.alloc_datum(Datum::SpriteRef(sprite_number as i16)))
     })
   }

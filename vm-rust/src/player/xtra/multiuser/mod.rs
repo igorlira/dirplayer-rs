@@ -112,8 +112,8 @@ impl MultiuserXtraManager {
                 }
                 // userNameString, passwordString, serverIDString, portNumber, movieIDString {, mode, encryptionKey
                 let (host, port) = reserve_player_ref(|player| {
-                    let host = player.get_datum(args.get(2).unwrap()).string_value(&player.datums)?;
-                    let port = player.get_datum(args.get(3).unwrap()).int_value(&player.datums)?;
+                    let host = player.get_datum(args.get(2).unwrap()).string_value()?;
+                    let port = player.get_datum(args.get(3).unwrap()).int_value()?;
 
                     Ok((host, port))
                 })?;
@@ -218,7 +218,7 @@ impl MultiuserXtraManager {
                 let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_ref(|player| {
-                    let msg_string = player.get_datum(args.get(2).unwrap()).string_value(&player.datums)?;
+                    let msg_string = player.get_datum(args.get(2).unwrap()).string_value()?;
                     console_warn!("sendNetMessage: {:?}", msg_string);
                     if let Some(tx) = &instance.socket_tx {
                         tx.try_send(msg_string).unwrap();

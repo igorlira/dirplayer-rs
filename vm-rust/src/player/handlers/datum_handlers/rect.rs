@@ -49,15 +49,15 @@ impl RectDatumHandlers {
         _ => Err(ScriptError::new("Cannot get prop of non-rect".to_string())),
       }?;
       let list_val = [rect.0, rect.1, rect.2, rect.3];
-      let index = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let index = player.get_datum(&args[0]).int_value()?;
       Ok(player.alloc_datum(Datum::Int(list_val[(index - 1) as usize] as i32)))
     })
   }
 
   pub fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let pos = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let value = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let pos = player.get_datum(&args[0]).int_value()?;
+      let value = player.get_datum(&args[1]).int_value()?;
 
       let rect = player.get_datum_mut(datum);
       let rect = match rect {
@@ -109,25 +109,25 @@ impl RectDatumHandlers {
   pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String, value_ref: &DatumRef) -> Result<(), ScriptError> {
     match prop.as_str() {
       "left" => {
-        let value = player.get_datum(value_ref).int_value(&player.datums)?;
+        let value = player.get_datum(value_ref).int_value()?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
         rect.0 = value;
         Ok(())
       },
       "top" => {
-        let value = player.get_datum(value_ref).int_value(&player.datums)?;
+        let value = player.get_datum(value_ref).int_value()?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
         rect.1 = value;
         Ok(())
       },
       "right" => {
-        let value = player.get_datum(value_ref).int_value(&player.datums)?;
+        let value = player.get_datum(value_ref).int_value()?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
         rect.1 = value;
         Ok(())
       },
       "bottom" => {
-        let value = player.get_datum(value_ref).int_value(&player.datums)?;
+        let value = player.get_datum(value_ref).int_value()?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
         rect.1 = value;
         Ok(())

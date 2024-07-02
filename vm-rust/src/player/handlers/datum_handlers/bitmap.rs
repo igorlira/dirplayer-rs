@@ -25,8 +25,8 @@ impl BitmapDatumHandlers {
     reserve_player_mut(|player| {
       let bitmap = player.get_datum(datum).to_bitmap_ref()?;
       let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
-      let x = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let y = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let x = player.get_datum(&args[0]).int_value()?;
+      let y = player.get_datum(&args[1]).int_value()?;
       let color = bitmap.get_pixel_color_ref(x as u16, y as u16);
       let color_ref = player.alloc_datum(Datum::ColorRef(color));
       Ok(color_ref)
@@ -77,14 +77,14 @@ impl BitmapDatumHandlers {
       let color = resolve_color_ref(&palettes, &color_ref, &bitmap.palette_ref);
 
       let shape_type = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("shapeType".to_owned()), &player.datums)?;
-      let shape_type = player.get_datum(&shape_type).string_value(&player.datums)?;
+      let shape_type = player.get_datum(&shape_type).string_value()?;
       
       let blend = PropListUtils::get_by_concrete_key(&draw_map, &Datum::Symbol("blend".to_owned()), &player.datums)?;
       let blend = player.get_datum(&blend);
       let blend = if blend.is_void() {
         100
       } else {
-        blend.int_value(&player.datums)?
+        blend.int_value()?
       };
 
       let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
@@ -110,8 +110,8 @@ impl BitmapDatumHandlers {
       }?;
       let (x, y, color_obj_or_int, bit_depth, palette_ref) = {
         let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
-        let x = player.get_datum(&args[0]).int_value(&player.datums)?;
-        let y = player.get_datum(&args[1]).int_value(&player.datums)?;
+        let x = player.get_datum(&args[0]).int_value()?;
+        let y = player.get_datum(&args[1]).int_value()?;
         let color_obj_or_int = player.get_datum(&args[2]);
 
         if x < 0 || y < 0 || x >= bitmap.width as i32 || y >= bitmap.height as i32 {
@@ -123,7 +123,7 @@ impl BitmapDatumHandlers {
         if bit_depth != 8 {
           return Err(ScriptError::new("Cannot set pixel with int color on non-8-bit bitmap".to_string()));
         }
-        let int_value = color_obj_or_int.int_value(&player.datums)? as u8;
+        let int_value = color_obj_or_int.int_value()? as u8;
         let palettes = player.movie.cast_manager.palettes();
         let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
         bitmap.set_pixel(x, y, (int_value, int_value, int_value), &palettes);
@@ -146,10 +146,10 @@ impl BitmapDatumHandlers {
         let color = player.get_datum(&args[1]).to_color_ref()?;
         (rect, color)
       } else if args.len() == 5 {
-        let x = player.get_datum(&args[0]).int_value(&player.datums)?;
-        let y = player.get_datum(&args[1]).int_value(&player.datums)?;
-        let width = player.get_datum(&args[2]).int_value(&player.datums)?;
-        let height = player.get_datum(&args[3]).int_value(&player.datums)?;
+        let x = player.get_datum(&args[0]).int_value()?;
+        let y = player.get_datum(&args[1]).int_value()?;
+        let width = player.get_datum(&args[2]).int_value()?;
+        let height = player.get_datum(&args[3]).int_value()?;
         let color = player.get_datum(&args[4]).to_color_ref()?;
         ((x, y, width, height), color)
       } else {
@@ -173,7 +173,7 @@ impl BitmapDatumHandlers {
     reserve_player_mut(|player| {
       let dst_bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
       let src_bitmap_ref = player.get_datum(&args[0]);
-      let src_bitmap_ref = if src_bitmap_ref.is_void() || (src_bitmap_ref.is_number() && src_bitmap_ref.int_value(&player.datums)? == 0) {
+      let src_bitmap_ref = if src_bitmap_ref.is_void() || (src_bitmap_ref.is_number() && src_bitmap_ref.int_value()? == 0) {
         return Ok(datum.clone());
       } else {
         src_bitmap_ref.to_bitmap_ref()?
@@ -185,7 +185,7 @@ impl BitmapDatumHandlers {
       if let Some(param_list) = param_list {
         if let Datum::PropList(param_list, ..) = param_list {
           for (key, value) in param_list {
-            let key = player.get_datum(key).string_value(&player.datums)?;
+            let key = player.get_datum(key).string_value()?;
             let value = player.get_datum(value).clone();
             param_list_concrete.insert(key, value);
           }

@@ -14,8 +14,8 @@ impl TimeoutDatumHandlers {
 
   pub fn new(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let timeout_period = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let timeout_handler = player.get_datum(&args[1]).string_value(&player.datums)?;
+      let timeout_period = player.get_datum(&args[0]).int_value()?;
+      let timeout_handler = player.get_datum(&args[1]).string_value()?;
       let target_ref = args[2].clone();
       let timeout_datum = player.get_datum(&datum);
       let timeout_name = match timeout_datum {

@@ -210,7 +210,7 @@ impl Datum {
     self.type_enum().type_str()
   }
   
-  pub fn string_value(&self, _datums: &DatumRefMap) -> Result<String, ScriptError> {
+  pub fn string_value(&self) -> Result<String, ScriptError> {
     match self {
       Datum::String(s) => Ok(s.clone()),
       Datum::StringChunk(_, _, str_value) => Ok(str_value.to_owned()),
@@ -228,7 +228,7 @@ impl Datum {
     }
   }
 
-  pub fn int_value(&self, _datums: &DatumRefMap) -> Result<i32, ScriptError> {
+  pub fn int_value(&self) -> Result<i32, ScriptError> {
     match self {
       Datum::Int(n) => Ok(*n),
       Datum::Float(n) => Ok(*n as i32),
@@ -242,7 +242,7 @@ impl Datum {
     }
   }
 
-  pub fn bool_value(&self, _datums: &DatumRefMap) -> Result<bool, ScriptError> {
+  pub fn bool_value(&self) -> Result<bool, ScriptError> {
     match self {
       Datum::Int(n) => Ok(*n != 0),
       Datum::Float(n) => Ok(*n != 0.0),

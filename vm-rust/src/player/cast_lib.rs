@@ -114,13 +114,13 @@ impl CastLib {
     // TODO
     match prop.as_str() {
       "preloadMode" => {
-        self.preload_mode = value.int_value(datums)? as u8;
+        self.preload_mode = value.int_value()? as u8;
       },
       "name" => {
-        self.set_name(value.string_value(datums)?);
+        self.set_name(value.string_value()?);
       },
       "fileName" => {
-        self.file_name = value.string_value(datums)?;
+        self.file_name = value.string_value()?;
       },
       _ => {
         return Err(ScriptError::new(format!("Cannot set castLib property {}", prop)));

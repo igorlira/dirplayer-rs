@@ -88,10 +88,10 @@ impl Movie {
   pub fn set_prop(&mut self, prop: &String, value: Datum, datums: &DatumRefMap) -> Result<(), ScriptError> {
     match prop.as_str() {
       "exitLock" => {
-        self.exit_lock = value.int_value(datums)? == 1;
+        self.exit_lock = value.int_value()? == 1;
       },
       "itemDelimiter" => {
-        self.item_delimiter = value.string_value(datums)?;
+        self.item_delimiter = value.string_value()?;
       },
       "debugPlaybackEnabled" => {
         // TODO

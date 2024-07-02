@@ -35,8 +35,8 @@ impl StringDatumUtils {
 impl StringDatumHandlers {
   pub fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let value = player.get_datum(datum).string_value(&player.datums)?;
-      let operand = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let value = player.get_datum(datum).string_value()?;
+      let operand = player.get_datum(&args[0]).string_value()?;
       let delimiter = &player.movie.item_delimiter;
       let count = string_get_count(&value, &operand, delimiter)?;
       Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -45,9 +45,9 @@ impl StringDatumHandlers {
 
   pub fn get_chunk_prop_ref(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
-      let start = player.get_datum(&args[1]).int_value(&player.datums)?;
-      let end = if args.len() > 2 { player.get_datum(&args[2]).int_value(&player.datums)? } else { start };
+      let prop_name = player.get_datum(&args[0]).string_value()?;
+      let start = player.get_datum(&args[1]).int_value()?;
+      let end = if args.len() > 2 { player.get_datum(&args[2]).int_value()? } else { start };
 
       let prop_ref = StringDatumUtils::get_prop_ref(player, datum, &prop_name, start, end)?;
       Ok(player.alloc_datum(prop_ref))
@@ -56,11 +56,11 @@ impl StringDatumHandlers {
 
   pub fn get_chunk_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
-      let start = player.get_datum(&args[1]).int_value(&player.datums)?;
-      let end = if args.len() > 2 { player.get_datum(&args[2]).int_value(&player.datums)? } else { start };
+      let prop_name = player.get_datum(&args[0]).string_value()?;
+      let start = player.get_datum(&args[1]).int_value()?;
+      let end = if args.len() > 2 { player.get_datum(&args[2]).int_value()? } else { start };
 
-      let str_value = StringDatumUtils::get_prop_ref(player, datum, &prop_name, start, end)?.string_value(&player.datums)?;
+      let str_value = StringDatumUtils::get_prop_ref(player, datum, &prop_name, start, end)?.string_value()?;
       Ok(player.alloc_datum(Datum::String(str_value)))
     })
   }

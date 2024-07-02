@@ -242,7 +242,7 @@ pub fn sprite_set_prop(
     ),
     "stretch" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         sprite.stretch = value?;
         Ok(())
@@ -250,7 +250,7 @@ pub fn sprite_set_prop(
     ),
     "locH" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         sprite.loc_h = value?;
         Ok(())
@@ -258,7 +258,7 @@ pub fn sprite_set_prop(
     ),
     "locV" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         sprite.loc_v = value?;
         Ok(())
@@ -266,7 +266,7 @@ pub fn sprite_set_prop(
     ),
     "locZ" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         sprite.loc_z = value?;
         Ok(())
@@ -274,7 +274,7 @@ pub fn sprite_set_prop(
     ),
     "width" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         sprite.width = value?;
         Ok(())
@@ -282,7 +282,7 @@ pub fn sprite_set_prop(
     ),
     "height" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         sprite.height = value?;
         Ok(())
@@ -290,7 +290,7 @@ pub fn sprite_set_prop(
     ),
     "ink" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         sprite.ink = value?;
         Ok(())
@@ -298,7 +298,7 @@ pub fn sprite_set_prop(
     ),
     "blend" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         sprite.blend = value?;
         Ok(())
@@ -356,7 +356,7 @@ pub fn sprite_set_prop(
       sprite_id,
       |player| {
         if value.is_int() {
-          value.int_value(&player.datums)
+          value.int_value()
         } else {
           Ok(0)
         }
@@ -389,10 +389,10 @@ pub fn sprite_set_prop(
         let mem_ref = if let Datum::CastMember(cast_member) = value {
           Some(cast_member)
         } else if value.is_string() {
-          let member = player.movie.cast_manager.find_member_ref_by_name(&value.string_value(&player.datums)?);
+          let member = player.movie.cast_manager.find_member_ref_by_name(&value.string_value()?);
           member
         } else if value.is_number() {
-          let member = player.movie.cast_manager.find_member_ref_by_number(value.int_value(&player.datums)? as u32);
+          let member = player.movie.cast_manager.find_member_ref_by_number(value.int_value()? as u32);
           member
         } else {
           None
@@ -428,7 +428,7 @@ pub fn sprite_set_prop(
     ),
     "memberNum" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         let value = value?;
         let new_member_ref = match &sprite.member {
@@ -442,7 +442,7 @@ pub fn sprite_set_prop(
     ),
     "castNum" => borrow_sprite_mut(
       sprite_id, 
-      |player| value.int_value(&player.datums),
+      |player| value.int_value(),
       |sprite, value| {
         let value = value?;
         let new_member_ref = CastMemberRefHandlers::member_ref_from_slot_number(value as u32);  
@@ -455,11 +455,11 @@ pub fn sprite_set_prop(
       sprite_id,
       |player| {
         if value.is_int() {
-          Ok(CursorRef::System(value.int_value(&player.datums)?))
+          Ok(CursorRef::System(value.int_value()?))
         } else if value.is_list() {
           let mut cursor_ids = vec![];
           for cursor_id in value.to_list()? {
-            cursor_ids.push(player.get_datum(cursor_id).int_value(&player.datums)?);
+            cursor_ids.push(player.get_datum(cursor_id).int_value()?);
           }
           Ok(CursorRef::Member(cursor_ids))
         } else {

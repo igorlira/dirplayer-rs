@@ -18,16 +18,16 @@ pub fn datum_equals(left: &Datum, right: &Datum, datum: &DatumRefMap) -> Result<
     (Datum::Float(left), Datum::Float(right)) => Ok(*left == *right),
     (Datum::String(left), Datum::String(right)) => Ok(left == right),
     (Datum::String(left), Datum::StringChunk(..)) => {
-      let right = right.string_value(datum)?;
+      let right = right.string_value()?;
       Ok(left.eq(&right))
     },
     (Datum::StringChunk(..), Datum::String(right)) => {
-      let left = left.string_value(datum)?;
+      let left = left.string_value()?;
       Ok(left.eq(right))
     },
     (Datum::StringChunk(..), Datum::StringChunk(..)) => {
-      let left = left.string_value(datum)?;
-      let right = right.string_value(datum)?;
+      let left = left.string_value()?;
+      let right = right.string_value()?;
       Ok(left == right)
     },
     (Datum::ScriptInstanceRef(left), Datum::ScriptInstanceRef(right)) => Ok(*left == *right),
@@ -159,7 +159,7 @@ pub fn datum_is_zero(datum: &Datum, datums: &DatumRefMap) -> Result<bool, Script
     Datum::IntPoint(_) => false,
     _ => {
       console_warn!("datum_is_zero not supported for type: {}", datum.type_str());
-      datum.int_value(&datums)? == 0
+      datum.int_value()? == 0
     }
   })
 }

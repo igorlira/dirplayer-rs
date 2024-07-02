@@ -47,7 +47,7 @@ impl TypeUtils {
         PropListUtils::get_prop(prop_list, prop_key_ref, &player.datums, false, formatted_key)?
       },
       Datum::List(_, list, _) => {
-        let position = player.get_datum(prop_key_ref).int_value(&player.datums)?;
+        let position = player.get_datum(prop_key_ref).int_value()?;
         let index = position - 1;
         if index < 0 || index >= list.len() as i32 {
           return Err(ScriptError::new(format!("Index out of bounds: {index}")));
@@ -80,7 +80,7 @@ impl TypeUtils {
         PropListUtils::set_prop(datum_ref, prop_key_ref, value_ref, player, false, formatted_key)
       }
       DatumType::List => {
-        let position = player.get_datum(prop_key_ref).int_value(&player.datums)?;
+        let position = player.get_datum(prop_key_ref).int_value()?;
         let index = position - 1;
         let (_, list, _) = player.get_datum_mut(datum_ref).to_list_mut().unwrap();
         if index < 0 {
@@ -205,7 +205,7 @@ impl TypeHandlers {
         .map(|d| get_datum(d, &player.datums));
 
       let result_datum = if let Some(query) = ilk_type {
-        let query = query.string_value(&player.datums)?;
+        let query = query.string_value()?;
         datum_bool(TypeUtils::is_datum_ilk(&obj, &query)?)
       } else {
         Datum::Symbol(TypeUtils::get_datum_ilk(&obj)?.to_string())
@@ -298,7 +298,7 @@ impl TypeHandlers {
       let result = if value.is_number() {
         Ok(Datum::Float(value.to_float()?))
       } else if value.is_string() {
-        if let Ok(float_value) = value.string_value(&player.datums)?.parse::<f32>() {
+        if let Ok(float_value) = value.string_value()?.parse::<f32>() {
           Ok(Datum::Float(float_value))
         } else {
           Ok(value.to_owned())
@@ -318,7 +318,7 @@ impl TypeHandlers {
       let result = if let Datum::Symbol(_) = symbol_name {
         symbol_name.clone()
       } else if symbol_name.is_string() {
-        let str_value = symbol_name.string_value(&player.datums)?;
+        let str_value = symbol_name.string_value()?;
         if str_value.is_empty() {
           Datum::Symbol("".to_string())
         } else if str_value.starts_with("#") {
@@ -335,8 +335,8 @@ impl TypeHandlers {
 
   pub fn point(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let x = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let y = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let x = player.get_datum(&args[0]).int_value()?;
+      let y = player.get_datum(&args[1]).int_value()?;
       Ok(player.alloc_datum(Datum::IntPoint((x, y))))
     })
   }
@@ -345,10 +345,10 @@ impl TypeHandlers {
     reserve_player_mut(|player| {
       let first_arg_is_num = player.get_datum(&args[0]).is_number();
       let (left, top, right, bottom) = if args.len() == 4 && first_arg_is_num {
-        let left = player.get_datum(&args[0]).int_value(&player.datums)?;
-        let top = player.get_datum(&args[1]).int_value(&player.datums)?;
-        let right = player.get_datum(&args[2]).int_value(&player.datums)?;
-        let bottom = player.get_datum(&args[3]).int_value(&player.datums)?;
+        let left = player.get_datum(&args[0]).int_value()?;
+        let top = player.get_datum(&args[1]).int_value()?;
+        let right = player.get_datum(&args[2]).int_value()?;
+        let bottom = player.get_datum(&args[3]).int_value()?;
         (left, top, right, bottom)
       } else if args.len() == 4 && !first_arg_is_num {
         let top_left = player.get_datum(&args[0]).to_int_point()?;
@@ -372,7 +372,7 @@ impl TypeHandlers {
       if args.len() == 1 {
         let arg = player.get_datum(&args[0]);
         if arg.is_int() {
-          player.cursor = CursorRef::System(arg.int_value(&player.datums)?);
+          player.cursor = CursorRef::System(arg.int_value()?);
           Ok(VOID_DATUM_REF.clone())
         } else if arg.is_list() {
           let list = arg.to_list()?;
@@ -400,7 +400,7 @@ impl TypeHandlers {
         let location = player.get_datum(&args[1]);
         match location {
           Datum::CastLib(cast_num) => {
-            let s = player.get_datum(&args[0]).string_value(&player.datums)?;
+            let s = player.get_datum(&args[0]).string_value()?;
             let cast = player.movie.cast_manager.get_cast_mut(*cast_num);
             let member_ref = cast.create_member_at(cast.first_free_member_id(), &s, &mut player.bitmap_manager)?;
             Ok(player.alloc_datum(Datum::CastMember(member_ref)))
@@ -429,7 +429,7 @@ impl TypeHandlers {
 
   pub fn timeout(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let name = player.get_datum(&args[0]).string_value()?;
       Ok(player.alloc_datum(Datum::TimeoutRef(name)))
     })
   }
@@ -437,14 +437,14 @@ impl TypeHandlers {
   pub fn rgb(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       if args.len() == 3 {
-        let r = player.get_datum(&args[0]).int_value(&player.datums)? as u8;
-        let g = player.get_datum(&args[1]).int_value(&player.datums)? as u8;
-        let b = player.get_datum(&args[2]).int_value(&player.datums)? as u8;
+        let r = player.get_datum(&args[0]).int_value()? as u8;
+        let g = player.get_datum(&args[1]).int_value()? as u8;
+        let b = player.get_datum(&args[2]).int_value()? as u8;
         Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
       } else {
         let first_arg = player.get_datum(&args[0]);
         if first_arg.is_string() {
-          let hex_str = first_arg.string_value(&player.datums)?.replace("#", "");
+          let hex_str = first_arg.string_value()?.replace("#", "");
           let r = u8::from_str_radix(&hex_str[0..2], 16).unwrap();
           let g = u8::from_str_radix(&hex_str[2..4], 16).unwrap();
           let b = u8::from_str_radix(&hex_str[4..6], 16).unwrap();
@@ -458,7 +458,7 @@ impl TypeHandlers {
 
   pub fn palette_index(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let color = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let color = player.get_datum(&args[0]).int_value()?;
       Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(color as u8))))
     })
   }
@@ -471,9 +471,9 @@ impl TypeHandlers {
 
   pub fn image(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let width = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let height = player.get_datum(&args[1]).int_value(&player.datums)?;
-      let bit_depth = player.get_datum(&args[2]).int_value(&player.datums)?;
+      let width = player.get_datum(&args[0]).int_value()?;
+      let height = player.get_datum(&args[1]).int_value()?;
+      let bit_depth = player.get_datum(&args[2]).int_value()?;
       let palette_ref = match args.get(3) {
         Some(palette_ref) => {
           let palette_ref = player.get_datum(palette_ref);
@@ -507,7 +507,7 @@ impl TypeHandlers {
 
   pub fn xtra(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let xtra_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let xtra_name = player.get_datum(&args[0]).string_value()?;
       if is_xtra_registered(&xtra_name) {
         Ok(player.alloc_datum(Datum::Xtra(xtra_name)))
       } else {
@@ -533,8 +533,8 @@ impl TypeHandlers {
       if args.len() != 2 {
         return Err(ScriptError::new("Bitwise XOR requires 2 arguments".to_string()));
       }
-      let left = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let right = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let left = player.get_datum(&args[0]).int_value()?;
+      let right = player.get_datum(&args[1]).int_value()?;
 
       Ok(player.alloc_datum(Datum::Int(left ^ right)))
     })

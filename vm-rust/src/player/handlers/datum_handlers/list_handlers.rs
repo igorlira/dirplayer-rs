@@ -35,7 +35,7 @@ impl ListDatumHandlers {
   pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let list_vec = player.get_datum(datum).to_list()?;
-      let position = player.get_datum(&args[0]).int_value(&player.datums)? - 1;
+      let position = player.get_datum(&args[0]).int_value()? - 1;
       if position < 0 || position >= list_vec.len() as i32 {
         return Err(ScriptError::new(format!("Index out of bounds: {}", position)))
       }
@@ -46,7 +46,7 @@ impl ListDatumHandlers {
 
   pub fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let position = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let position = player.get_datum(&args[0]).int_value()?;
       let (_, list_vec, ..) = player.get_datum_mut(datum).to_list_mut()?;
       let index = position - 1;
       let item_ref = &args[1];
@@ -159,7 +159,7 @@ impl ListDatumHandlers {
 
   pub fn delete_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let position = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let position = player.get_datum(&args[0]).int_value()?;
       let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
       if position <= list_vec.len() as i32 {
         let index = (position - 1) as usize;
@@ -173,7 +173,7 @@ impl ListDatumHandlers {
 
   pub fn add_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let position = player.get_datum(&args[0]).int_value(&player.datums)? - 1;
+      let position = player.get_datum(&args[0]).int_value()? - 1;
       let item_ref = &args[1];
 
       let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;

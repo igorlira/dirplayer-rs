@@ -108,7 +108,7 @@ impl ScriptInstanceDatumHandlers {
 
   fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let key = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let key = player.get_datum(&args[0]).string_value()?;
       match key.as_str() {
         "ancestor" => {
           let datum = player.get_datum(datum);
@@ -122,7 +122,7 @@ impl ScriptInstanceDatumHandlers {
 
   fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let key = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let key = player.get_datum(&args[0]).string_value()?;
       let value_ref = &args[1];
 
       ScriptInstanceUtils::set_at(datum, &key, &value_ref, player)?;
@@ -132,7 +132,7 @@ impl ScriptInstanceDatumHandlers {
 
   pub fn set_a_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let prop_name = player.get_datum(&args[0]).string_value()?;
       let value_ref = &args[1];
 
       let instance_id = match player.get_datum(datum) {
@@ -147,7 +147,7 @@ impl ScriptInstanceDatumHandlers {
     reserve_player_mut(|player| {
       let list_prop_name_ref = &args[1];
 
-      let local_prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let local_prop_name = player.get_datum(&args[0]).string_value()?;
       let instance_id = match player.get_datum(datum) {
         Datum::ScriptInstanceRef(instance_id) => *instance_id,
         _ => return Err(ScriptError::new("Cannot get property on non-script instance".to_string())),
@@ -164,7 +164,7 @@ impl ScriptInstanceDatumHandlers {
       let list_prop_name_ref = &args[1];
       let value_ref = &args[2];
 
-      let local_prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let local_prop_name = player.get_datum(&args[0]).string_value()?;
       let instance_id = match player.get_datum(datum) {
         Datum::ScriptInstanceRef(instance_id) => *instance_id,
         _ => return Err(ScriptError::new("Cannot set property on non-script instance".to_string())),
@@ -179,7 +179,7 @@ impl ScriptInstanceDatumHandlers {
 
   pub fn handler(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let name = player.get_datum(&args[0]).string_value()?;
       let (_, script) = ScriptInstanceUtils::get_script(datum, player)?;
       let own_handler = script.get_own_handler(&name);
       Ok(player.alloc_datum(datum_bool(own_handler.is_some())))
@@ -192,7 +192,7 @@ impl ScriptInstanceDatumHandlers {
         Datum::ScriptInstanceRef(instance_id) => *instance_id,
         _ => return Err(ScriptError::new("Cannot count non-script instance".to_string())),
       };
-      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let prop_name = player.get_datum(&args[0]).string_value()?;
       let prop_value = script_get_prop(player, instance_id, &prop_name)?;
       let prop_value_datum = player.get_datum(&prop_value);
       let count = match prop_value_datum {
@@ -206,7 +206,7 @@ impl ScriptInstanceDatumHandlers {
 
   pub fn get_a_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let prop_name = player.get_datum(&args[0]).string_value()?;
       let instance_id = match player.get_datum(datum) {
         Datum::ScriptInstanceRef(instance_id) => *instance_id,
         _ => return Err(ScriptError::new("Cannot get property on non-script instance".to_string())),

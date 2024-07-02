@@ -33,7 +33,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
       let formatted_entries: Vec<String> = entries.iter().map(|(k, v)| format!("{}: {}", format_datum(k, player), format_datum(v, player))).collect();
       format!("[{}]", formatted_entries.join(", "))
     }
-    Datum::StringChunk(..) => format!("\"{}\"", datum.string_value(&player.datums).unwrap_or("!!!ERR!!!".to_string())),
+    Datum::StringChunk(..) => format!("\"{}\"", datum.string_value().unwrap_or("!!!ERR!!!".to_string())),
     Datum::ScriptRef(member_ref) => {
       let script = player.movie.cast_manager.get_script_by_ref(&member_ref).unwrap();
       format!("(script {})", script.name)

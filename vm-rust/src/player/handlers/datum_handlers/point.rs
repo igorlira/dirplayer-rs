@@ -29,15 +29,15 @@ impl PointDatumHandlers {
         _ => Err(ScriptError::new("Cannot get prop of non-point".to_string())),
       }?;
       let list_val = [rect.0, rect.1];
-      let index = player.get_datum(&args[0]).int_value(&player.datums)?;
+      let index = player.get_datum(&args[0]).int_value()?;
       Ok(player.alloc_datum(Datum::Int(list_val[(index - 1) as usize] as i32)))
     })
   }
 
   pub fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let pos = player.get_datum(&args[0]).int_value(&player.datums)?;
-      let value = player.get_datum(&args[1]).int_value(&player.datums)?;
+      let pos = player.get_datum(&args[0]).int_value()?;
+      let value = player.get_datum(&args[1]).int_value()?;
 
       let point = player.get_datum_mut(datum);
       let point = match point {
@@ -73,13 +73,13 @@ impl PointDatumHandlers {
     let value = player.get_datum(value_ref);
     match prop.as_str() {
       "locH" => {
-        let value = value.int_value(&player.datums)?;
+        let value = value.int_value()?;
         let point = player.get_datum_mut(datum).to_int_point_mut()?;
         point.0 = value;
         Ok(())
       },
       "locV" => {
-        let value = value.int_value(&player.datums)?;
+        let value = value.int_value()?;
         let point = player.get_datum_mut(datum).to_int_point_mut()?;
         point.1 = value;
         Ok(())

@@ -62,7 +62,7 @@ impl ColorDatumHandlers {
   pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
     match prop.as_str() {
       "red" => {
-        let r = player.get_datum(value).int_value(&player.datums)?;
+        let r = player.get_datum(value).int_value()?;
         let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;
         match color_ref {
           ColorRef::Rgb(_, g, b) => {
@@ -76,7 +76,7 @@ impl ColorDatumHandlers {
         }
       },
       "green" => {
-        let g = player.get_datum(value).int_value(&player.datums)?;
+        let g = player.get_datum(value).int_value()?;
         let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;
         match color_ref {
           ColorRef::Rgb(r, _, b) => {
@@ -90,7 +90,7 @@ impl ColorDatumHandlers {
         }
       },
       "blue" => {
-        let b = player.get_datum(value).int_value(&player.datums)?;
+        let b = player.get_datum(value).int_value()?;
         let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;
         match color_ref {
           ColorRef::Rgb(r, g, _) => {

@@ -407,19 +407,19 @@ impl DirPlayer {
     match prop.as_str() {
       "keyboardFocusSprite" => {
         // TODO switch focus
-        self.keyboard_focus_sprite = value.int_value(&self.datums)? as i16;
+        self.keyboard_focus_sprite = value.int_value()? as i16;
         Ok(())
       },
       "selStart" => {
-        self.text_selection_start = value.int_value(&self.datums)? as u16;
+        self.text_selection_start = value.int_value()? as u16;
         Ok(())
       },
       "selEnd" => {
-        self.text_selection_end = value.int_value(&self.datums)? as u16;
+        self.text_selection_end = value.int_value()? as u16;
         Ok(())
       },
       "floatPrecision" => {
-        self.float_precision = value.int_value(&self.datums)? as u8;
+        self.float_precision = value.int_value()? as u8;
         Ok(())
       },
       "centerStage" => {

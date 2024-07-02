@@ -28,7 +28,7 @@ pub fn player_get_context_var(
     0x1 | 0x2 | 0x3 => Err(ScriptError::new("readVar global/prop/instance not implemented".to_string())),
     0x4 => {
       // arg
-      let arg_index = (id.int_value(&player.datums)? / variable_multiplier as i32) as usize;
+      let arg_index = (id.int_value()? / variable_multiplier as i32) as usize;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let arg_val_ref = scope.args.get(arg_index).unwrap();
       // let arg_name = get_name(&player, ctx.to_owned(), arg_name_ids[arg_index]).unwrap();
@@ -37,7 +37,7 @@ pub fn player_get_context_var(
     0x5 => {
       // local
       let local_name_ids = &handler.local_name_ids;
-      let local_name = get_name(player, &ctx, local_name_ids[id.int_value(&player.datums)? as usize]).unwrap().to_owned();
+      let local_name = get_name(player, &ctx, local_name_ids[id.int_value()? as usize]).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let local = scope.locals.get(&local_name).unwrap_or(&VOID_DATUM_REF);
       Ok(local.clone())
@@ -67,7 +67,7 @@ pub fn player_set_context_var(
     0x1 | 0x2 | 0x3 => Err(ScriptError::new("set readVar global/prop/instance not implemented".to_string())),
     0x4 => {
       // arg
-      let arg_index = (id.int_value(&player.datums)? / variable_multiplier as i32) as usize;
+      let arg_index = (id.int_value()? / variable_multiplier as i32) as usize;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let arg_val_ref = scope.args.get_mut(arg_index).unwrap();
       *arg_val_ref = value_ref.clone();
@@ -76,7 +76,7 @@ pub fn player_set_context_var(
     0x5 => {
       // local
       let local_name_ids = &handler.local_name_ids;
-      let local_name = get_name(player, &ctx, local_name_ids[id.int_value(&player.datums)? as usize]).unwrap().to_owned();
+      let local_name = get_name(player, &ctx, local_name_ids[id.int_value()? as usize]).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.locals.insert(local_name, value_ref.clone());
       Ok(())

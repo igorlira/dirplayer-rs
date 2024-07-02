@@ -363,7 +363,7 @@ pub fn get_obj_prop(
         }
         Datum::BitmapRef(_) => BitmapDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::String(s) => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(&s, &prop_name)?)),
-        Datum::StringChunk(..) => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(&obj_clone.string_value(&player.datums)?, &prop_name)?)),
+        Datum::StringChunk(..) => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(&obj_clone.string_value()?, &prop_name)?)),
         Datum::TimeoutRef(_) => Ok(TimeoutDatumHandlers::get_prop(player, obj_ref, &prop_name)?),
         Datum::Symbol(_) => SymbolDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::Void => VoidDatumHandlers::get_prop(player, obj_ref, &prop_name),

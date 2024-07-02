@@ -14,7 +14,7 @@ impl TextMemberHandlers {
         let text = member.member_type.as_text().unwrap();
         match handler_name.as_str() {
             "count" => {
-              let count_of = player.get_datum(&args[0]).string_value(&player.datums)?;
+              let count_of = player.get_datum(&args[0]).string_value()?;
               if args.len() != 1 {
                 return Err(ScriptError::new("count requires 1 argument".to_string()));
               }
@@ -23,9 +23,9 @@ impl TextMemberHandlers {
               Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-              let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
-              let start = player.get_datum(&args[1]).int_value(&player.datums)?;
-              let end = if args.len() > 2 { player.get_datum(&args[2]).int_value(&player.datums)? } else { start };
+              let prop_name = player.get_datum(&args[0]).string_value()?;
+              let start = player.get_datum(&args[1]).int_value()?;
+              let end = if args.len() > 2 { player.get_datum(&args[2]).int_value()? } else { start };
               let chunk_expr = StringChunkType::from(&prop_name);
               let chunk_expr = StringChunkExpr {
                 chunk_type: chunk_expr,
@@ -154,7 +154,7 @@ impl TextMemberHandlers {
         match prop.as_str() {
             "text" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(&player.datums),
+                |player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().text = value?;
                     Ok(())
@@ -162,7 +162,7 @@ impl TextMemberHandlers {
             ),
             "alignment" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(&player.datums),
+                |player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().alignment = value?;
                     Ok(())
@@ -170,7 +170,7 @@ impl TextMemberHandlers {
             ),
             "wordWrap" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(&player.datums),
+                |player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().word_wrap = value?;
                     Ok(())
@@ -178,7 +178,7 @@ impl TextMemberHandlers {
             ),
             "width" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(&player.datums),
+                |player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().width = value? as u16;
                     Ok(())
@@ -186,7 +186,7 @@ impl TextMemberHandlers {
             ),
             "font" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(&player.datums),
+                |player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().font = value?;
                     Ok(())
@@ -194,7 +194,7 @@ impl TextMemberHandlers {
             ),
             "fontSize" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(&player.datums),
+                |player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().font_size = value? as u16;
                     Ok(())
@@ -205,7 +205,7 @@ impl TextMemberHandlers {
                 |player| {
                     let mut item_strings = Vec::new();
                     for x in value.to_list().unwrap() {
-                        item_strings.push(player.get_datum(x).string_value(&player.datums)?);
+                        item_strings.push(player.get_datum(x).string_value()?);
                     }
                     Ok(item_strings)
                 },
@@ -216,7 +216,7 @@ impl TextMemberHandlers {
             ),
             "fixedLineSpace" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(&player.datums),
+                |player| value.int_value(),
                 |cast_member, value| {
                     cast_member
                         .member_type
@@ -228,7 +228,7 @@ impl TextMemberHandlers {
             ),
             "topSpacing" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(&player.datums),
+                |player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().top_spacing = value? as i16;
                     Ok(())
@@ -236,7 +236,7 @@ impl TextMemberHandlers {
             ),
             "boxType" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(&player.datums),
+                |player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().box_type = value?;
                     Ok(())
@@ -244,7 +244,7 @@ impl TextMemberHandlers {
             ),
             "antialias" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(&player.datums),
+                |player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().anti_alias = value?;
                     Ok(())

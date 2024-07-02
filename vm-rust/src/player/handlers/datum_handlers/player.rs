@@ -14,7 +14,7 @@ impl PlayerDatumHandlers {
 
   fn count(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let subject = player.get_datum(&args[0]).string_value(&player.datums).unwrap();
+      let subject = player.get_datum(&args[0]).string_value().unwrap();
       match subject.as_str() {
         "windowList" => Ok(player.alloc_datum(Datum::Int(0))),
         _ => Err(ScriptError::new(format!("Invalid call _player.count({subject})").to_string())),

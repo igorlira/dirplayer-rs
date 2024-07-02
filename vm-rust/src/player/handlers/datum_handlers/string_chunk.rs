@@ -11,7 +11,7 @@ impl StringChunkUtils {
   pub fn delete(player: &mut DirPlayer, original_str_src: &StringChunkSource, chunk_expr: &StringChunkExpr) -> Result<(), ScriptError> {
     let new_string = {
       let original_str = match original_str_src {
-        StringChunkSource::Datum(original_str_ref) => player.get_datum(original_str_ref).string_value(&player.datums)?,
+        StringChunkSource::Datum(original_str_ref) => player.get_datum(original_str_ref).string_value()?,
         StringChunkSource::Member(member_ref) => player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap().member_type.as_field().unwrap().text.clone()
       };
       Self::string_by_deleting_chunk(&original_str, &chunk_expr)
@@ -186,8 +186,8 @@ impl StringChunkUtils {
 impl StringChunkHandlers {
   pub fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let value = player.get_datum(datum).string_value(&player.datums)?;
-      let operand = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let value = player.get_datum(datum).string_value()?;
+      let operand = player.get_datum(&args[0]).string_value()?;
       let delimiter = &player.movie.item_delimiter;
       let count = StringChunkUtils::resolve_chunk_count(&value, StringChunkType::from(&operand), delimiter)?;
       Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -197,9 +197,9 @@ impl StringChunkHandlers {
   pub fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let datum = player.get_datum(datum);
-      let prop_name = player.get_datum(&args[0]).string_value(&player.datums)?;
-      let start = player.get_datum(&args[1]).int_value(&player.datums)?;
-      let end = if args.len() > 2 { player.get_datum(&args[2]).int_value(&player.datums)? } else { start };
+      let prop_name = player.get_datum(&args[0]).string_value()?;
+      let start = player.get_datum(&args[1]).int_value()?;
+      let end = if args.len() > 2 { player.get_datum(&args[2]).int_value()? } else { start };
       let chunk_expr = StringChunkExpr {
         chunk_type: StringChunkType::from(&prop_name),
         start,
@@ -207,7 +207,7 @@ impl StringChunkHandlers {
         item_delimiter: player.movie.item_delimiter.clone(),
       };
 
-      let str_value = StringChunkUtils::resolve_chunk_expr_string(&datum.string_value(&player.datums)?, &chunk_expr)?;
+      let str_value = StringChunkUtils::resolve_chunk_expr_string(&datum.string_value()?, &chunk_expr)?;
       Ok(player.alloc_datum(Datum::String(str_value)))
     })
   }

@@ -26,7 +26,7 @@ impl ScriptDatumHandlers {
 
   pub fn handler(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let name = player.get_datum(&args[0]).string_value(&player.datums)?;
+      let name = player.get_datum(&args[0]).string_value()?;
       let script_ref = match player.get_datum(datum) {
         Datum::ScriptRef(script_ref) => script_ref,
         _ => return Err(ScriptError::new("Cannot create new instance of non-script".to_string())),

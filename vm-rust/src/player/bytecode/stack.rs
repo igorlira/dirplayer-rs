@@ -174,7 +174,7 @@ impl StackBytecodeHandler {
         scope.stack.pop().unwrap()
       };
       let arg_list = player.get_datum(&arg_list).to_list()?;
-      let script_name = player.get_datum(&arg_list[0]).string_value(&player.datums)?;
+      let script_name = player.get_datum(&arg_list[0]).string_value()?;
       let extra_args = arg_list[1..].to_vec();
 
       let script_ref = player.movie.cast_manager.find_member_ref_by_name(&script_name).unwrap();
