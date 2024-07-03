@@ -15,7 +15,7 @@ extern crate pest_derive;
 
 mod director;
 
-use player::{cast_lib::{cast_member_ref, CastMemberRef}, commands::{player_dispatch, PlayerVMCommand}, init_player, DatumRef, PLAYER_LOCK};
+use player::{cast_lib::{cast_member_ref, CastMemberRef}, commands::{player_dispatch, PlayerVMCommand}, init_player, DatumId, PLAYER_LOCK};
 
 #[wasm_bindgen]
 extern "C" {
@@ -109,7 +109,7 @@ pub fn key_up(key: String, code: u16) {
 
 #[wasm_bindgen]
 pub fn request_datum(datum_id: u32) {
-  player_dispatch(PlayerVMCommand::RequestDatum(datum_id));
+  player_dispatch(PlayerVMCommand::RequestDatum(datum_id as DatumId));
 }
 
 #[wasm_bindgen]

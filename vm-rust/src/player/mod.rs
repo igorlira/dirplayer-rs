@@ -32,7 +32,7 @@ pub mod allocator;
 
 use std::{collections::HashMap, fmt::Display, sync::Arc, time::Duration};
 
-use allocator::{DatumAllocator, DatumAllocatorTrait};
+use allocator::{run_allocator_loop, DatumAllocator, DatumAllocatorEvent, DatumAllocatorTrait};
 use async_std::{channel::{self, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
 use chrono::Local;
@@ -98,29 +98,49 @@ pub struct DirPlayer {
   pub allocator: DatumAllocator,
 }
 
-pub type DatumId = u32;
+pub type DatumId = usize;
 
-#[derive(Debug, PartialEq, Eq)]
 pub enum DatumRef {
   Void,
-  Ref(DatumId),
+  Ref(DatumId, Sender<DatumAllocatorEvent>),
 }
-pub static VOID_DATUM_REF: DatumRef = DatumRef::Void; //DatumRef { id: 0 };
+pub static VOID_DATUM_REF: DatumRef = DatumRef::Void;
 
 impl DatumRef {
-  fn from_id(id: DatumId) -> DatumRef {
+  fn from_id(id: DatumId, allocator_tx: Sender<DatumAllocatorEvent>) -> DatumRef {
     if id != 0 {
-      // reserve_allocator_mut(|allocator| {
-      //   allocator.on_datum_ref_added(id);
-      // });
+      allocator_tx.try_send(DatumAllocatorEvent::RefAdded(id)).unwrap();
+      DatumRef::Ref(id, allocator_tx)
+    } else {
+      DatumRef::Void
     }
-    DatumRef::Ref(id)
   }
 
   pub fn unwrap(&self) -> DatumId {
     match self {
       DatumRef::Void => 0,
-      DatumRef::Ref(id) => *id
+      DatumRef::Ref(id, ..) => *id
+    }
+  }
+}
+
+impl PartialEq for DatumRef {
+  fn eq(&self, other: &Self) -> bool {
+    match (self, other) {
+      (DatumRef::Void, DatumRef::Void) => true,
+      (DatumRef::Ref(id1, ..), DatumRef::Void) => *id1 == 0,
+      (DatumRef::Void, DatumRef::Ref(id2, ..)) => *id2 == 0,
+      (DatumRef::Ref(id1, ..), DatumRef::Ref(id2, ..)) => id1 == id2,
+      _ => false
+    }
+  }
+}
+
+impl core::fmt::Debug for DatumRef {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      DatumRef::Void => write!(f, "DatumRef(Void)"),
+      DatumRef::Ref(id, ..) => write!(f, "DatumRef({})", id)
     }
   }
 }
@@ -129,8 +149,8 @@ impl Clone for DatumRef {
   fn clone(&self) -> Self {
     match self {
       DatumRef::Void => DatumRef::Void,
-      DatumRef::Ref(id) => {
-        DatumRef::from_id(*id)
+      DatumRef::Ref(id, allocator_tx) => {
+        DatumRef::from_id(*id, allocator_tx.clone())
       }
     }
   }
@@ -138,10 +158,8 @@ impl Clone for DatumRef {
 
 impl Drop for DatumRef {
   fn drop(&mut self) {
-    if let DatumRef::Ref(id) = self {
-      // reserve_allocator_mut(|allocator| {
-      //   allocator.on_datum_ref_dropped(*id);
-      // });
+    if let DatumRef::Ref(id, allocator_tx) = self {
+      allocator_tx.try_send(DatumAllocatorEvent::RefDropped(*id)).unwrap();
     }
   }
 }
@@ -150,13 +168,13 @@ impl Display for DatumRef {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       DatumRef::Void => write!(f, "DatumRef(Void)"),
-      DatumRef::Ref(id) => write!(f, "DatumRef({})", id)
+      DatumRef::Ref(id, ..) => write!(f, "DatumRef({})", id)
     }
   }
 }
 
 impl DirPlayer {
-  pub fn new<'a>(tx: Sender<PlayerVMExecutionItem>) -> DirPlayer {
+  pub fn new<'a>(tx: Sender<PlayerVMExecutionItem>, allocator_tx: Sender<DatumAllocatorEvent>) -> DirPlayer {
     DirPlayer {
       movie: Movie { 
         rect: IntRect::from(0, 0, 0, 0),
@@ -210,7 +228,7 @@ impl DirPlayer {
       last_handler_result: VOID_DATUM_REF.clone(),
       hovered_sprite: None,
       timer_tick_start: get_ticks(),
-      allocator: DatumAllocator::default(),
+      allocator: DatumAllocator::default(allocator_tx),
     }
   }
 
@@ -749,13 +767,14 @@ lazy_static! {
 pub fn init_player() {
   let (tx, rx) = channel::unbounded();
   let (event_tx, event_rx) = channel::unbounded();
+  let (allocator_tx, allocator_rx) = channel::unbounded();
   unsafe { 
     PLAYER_TX = Some(tx.clone()); 
     PLAYER_EVENT_TX = Some(event_tx.clone());
   }
 
   let mut player = PLAYER_LOCK.try_lock().unwrap();
-  *player = Some(DirPlayer::new(tx));
+  *player = Some(DirPlayer::new(tx, allocator_tx));
 
   async_std::task::spawn_local(async move {
     player_load_system_font().await;
@@ -764,6 +783,9 @@ pub fn init_player() {
     });
     async_std::task::spawn_local(async move {
       run_event_loop(event_rx).await;
+    });
+    async_std::task::spawn_local(async move {
+      run_allocator_loop(allocator_rx).await;
     });
   });
 }

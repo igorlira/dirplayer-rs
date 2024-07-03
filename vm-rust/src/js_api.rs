@@ -137,6 +137,16 @@ impl ToJsValue for Vec<u32> {
   }
 }
 
+impl ToJsValue for Vec<usize> {
+  fn to_js_value(&self) -> JsValue {
+    let array = js_sys::Array::new();
+    for item in self {
+      array.push(&JsValue::from_f64(*item as f64));
+    }
+    array.into()
+  }
+}
+
 impl CastMemberRef {
   pub fn to_js(&self) -> JsBridgeMemberRef {
     vec![self.cast_lib, self.cast_member]
@@ -751,6 +761,12 @@ impl ToJsValue for String {
 }
 
 impl ToJsValue for u32 {
+  fn to_js_value(&self) -> JsValue {
+    JsValue::from_f64(*self as f64)
+  }
+}
+
+impl ToJsValue for usize {
   fn to_js_value(&self) -> JsValue {
     JsValue::from_f64(*self as f64)
   }
