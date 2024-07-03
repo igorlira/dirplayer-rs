@@ -89,7 +89,7 @@ impl DatumAllocatorTrait for DatumAllocator {
       } else {
         self.datums[id] = Some(entry);
       }
-      Ok(DatumRef::from_id(id, self.tx.clone()))
+      Ok(DatumRef::from_id(id))
     } else {
       Err(ScriptError::new("Failed to allocate datum".to_string()))
     }

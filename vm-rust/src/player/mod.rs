@@ -102,15 +102,17 @@ pub type DatumId = usize;
 
 pub enum DatumRef {
   Void,
-  Ref(DatumId, Sender<DatumAllocatorEvent>),
+  Ref(DatumId),
 }
 pub static VOID_DATUM_REF: DatumRef = DatumRef::Void;
 
 impl DatumRef {
-  fn from_id(id: DatumId, allocator_tx: Sender<DatumAllocatorEvent>) -> DatumRef {
+  fn from_id(id: DatumId) -> DatumRef {
     if id != 0 {
-      allocator_tx.try_send(DatumAllocatorEvent::RefAdded(id)).unwrap();
-      DatumRef::Ref(id, allocator_tx)
+      unsafe {
+        ALLOCATOR_TX.as_ref().unwrap().try_send(DatumAllocatorEvent::RefAdded(id)).unwrap();
+      }
+      DatumRef::Ref(id)
     } else {
       DatumRef::Void
     }
@@ -149,8 +151,8 @@ impl Clone for DatumRef {
   fn clone(&self) -> Self {
     match self {
       DatumRef::Void => DatumRef::Void,
-      DatumRef::Ref(id, allocator_tx) => {
-        DatumRef::from_id(*id, allocator_tx.clone())
+      DatumRef::Ref(id) => {
+        DatumRef::from_id(*id)
       }
     }
   }
@@ -158,8 +160,10 @@ impl Clone for DatumRef {
 
 impl Drop for DatumRef {
   fn drop(&mut self) {
-    if let DatumRef::Ref(id, allocator_tx) = self {
-      allocator_tx.try_send(DatumAllocatorEvent::RefDropped(*id)).unwrap();
+    if let DatumRef::Ref(id) = self {
+      unsafe {
+        ALLOCATOR_TX.as_ref().unwrap().try_send(DatumAllocatorEvent::RefDropped(*id)).unwrap();
+      }
     }
   }
 }
@@ -759,6 +763,7 @@ pub async fn player_is_playing() -> bool {
 
 static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
 static mut PLAYER_EVENT_TX: Option<Sender<PlayerVMEvent>> = None;
+static mut ALLOCATOR_TX: Option<Sender<DatumAllocatorEvent>> = None;
 lazy_static! {
   pub static ref PLAYER_LOCK: Arc<Mutex<Option<DirPlayer>>> = Arc::new(Mutex::new(None));
   pub static ref PLAYER_SEMAPHONE: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
@@ -771,6 +776,7 @@ pub fn init_player() {
   unsafe { 
     PLAYER_TX = Some(tx.clone()); 
     PLAYER_EVENT_TX = Some(event_tx.clone());
+    ALLOCATOR_TX = Some(allocator_tx.clone());
   }
 
   let mut player = PLAYER_LOCK.try_lock().unwrap();
