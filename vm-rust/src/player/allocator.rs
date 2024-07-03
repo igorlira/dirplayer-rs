@@ -3,7 +3,7 @@ use nohash_hasher::IntMap;
 
 use crate::{console_warn, director::lingo::datum::Datum};
 
-use super::{DatumId, DatumRef, ScriptError, PLAYER_LOCK, VOID_DATUM_REF};
+use super::{datum_ref::{DatumId, DatumRef}, ScriptError, PLAYER_LOCK, VOID_DATUM_REF};
 
 
 pub struct DatumRefEntry {

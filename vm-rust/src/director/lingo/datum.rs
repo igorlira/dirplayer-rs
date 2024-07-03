@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use num_derive::FromPrimitive;
 
-use crate::player::{bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, script::ScriptInstanceId, sprite::{ColorRef, CursorRef}, DatumRef, ScriptError};
+use crate::player::{bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, datum_ref::DatumRef, script::ScriptInstanceId, sprite::{ColorRef, CursorRef}, ScriptError};
 
 #[allow(dead_code)]
 #[derive(Clone)]

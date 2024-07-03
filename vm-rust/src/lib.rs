@@ -15,7 +15,7 @@ extern crate pest_derive;
 
 mod director;
 
-use player::{cast_lib::{cast_member_ref, CastMemberRef}, commands::{player_dispatch, PlayerVMCommand}, init_player, DatumId, PLAYER_LOCK};
+use player::{cast_lib::{cast_member_ref, CastMemberRef}, commands::{player_dispatch, PlayerVMCommand}, datum_ref::DatumId, init_player, PLAYER_LOCK};
 
 #[wasm_bindgen]
 extern "C" {
