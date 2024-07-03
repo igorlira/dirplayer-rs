@@ -1,4 +1,5 @@
 use async_std::{channel::Sender, channel::Receiver};
+use nohash_hasher::IntMap;
 
 use crate::{console_warn, director::lingo::datum::Datum};
 
@@ -26,7 +27,7 @@ pub enum DatumAllocatorEvent {
 }
 
 pub struct DatumAllocator {
-  pub datums: Vec<Option<DatumRefEntry>>,
+  pub datums: IntMap<DatumId, DatumRefEntry>,
   datum_id_counter: DatumId,
   void_datum: Datum,
   pub tx: Sender<DatumAllocatorEvent>,
@@ -37,10 +38,8 @@ const MAX_DATUM_ID: DatumId = 0xFFFFFF;
 
 impl DatumAllocator {
   pub fn default(tx: Sender<DatumAllocatorEvent>) -> Self {
-    let mut vector = Vec::with_capacity(MAX_DATUM_ID);
-    vector.resize_with(MAX_DATUM_ID, || None);
     DatumAllocator {
-      datums: vector,
+      datums: IntMap::default(),
       datum_id_counter: 1,
       datum_count: 0,
       void_datum: Datum::Void,
@@ -49,7 +48,7 @@ impl DatumAllocator {
   }
 
   fn contains_datum(&self, id: DatumId) -> bool {
-    self.datums.get(id).is_some_and(|x| x.is_some())
+    self.datums.contains_key(&id)
   }
 
   fn get_free_id(&self) -> Option<DatumId> {
@@ -66,7 +65,7 @@ impl DatumAllocator {
 
   fn dealloc_datum(&mut self, id: DatumId) {
     self.datum_count -= 1;
-    self.datums[id] = None;
+    self.datums.remove(&id);
   }
 }
 
@@ -84,11 +83,7 @@ impl DatumAllocatorTrait for DatumAllocator {
       };
       self.datum_id_counter += 1;
       self.datum_count += 1;
-      if id >= self.datums.len() {
-        self.datums.insert(id, Some(entry))
-      } else {
-        self.datums[id] = Some(entry);
-      }
+      self.datums.insert(id, entry);
       Ok(DatumRef::from_id(id))
     } else {
       Err(ScriptError::new("Failed to allocate datum".to_string()))
@@ -98,7 +93,7 @@ impl DatumAllocatorTrait for DatumAllocator {
   fn get_datum(&self, id: &DatumRef) -> &Datum {
     match id {
       DatumRef::Ref(id, ..) => {
-        let entry = self.datums.get(*id).unwrap().as_ref().unwrap();
+        let entry = self.datums.get(id).unwrap();
         &entry.datum
       }
       DatumRef::Void => &Datum::Void,
@@ -108,7 +103,7 @@ impl DatumAllocatorTrait for DatumAllocator {
   fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
     match id {
       DatumRef::Ref(id, ..) => {
-        let entry = self.datums.get_mut(*id).unwrap().as_mut().unwrap();
+        let entry = self.datums.get_mut(id).unwrap();
         &mut entry.datum
       }
       DatumRef::Void => &mut self.void_datum,
@@ -116,12 +111,12 @@ impl DatumAllocatorTrait for DatumAllocator {
   }
 
   fn on_datum_ref_added(&mut self, id: DatumId) {
-    let entry = self.datums.get_mut(id).unwrap().as_mut().unwrap();
+    let entry = self.datums.get_mut(&id).unwrap();
     entry.ref_count += 1;
   }
 
   fn on_datum_ref_dropped(&mut self, id: DatumId) {
-    let entry = self.datums.get_mut(id).unwrap().as_mut().unwrap();
+    let entry = self.datums.get_mut(&id).unwrap();
     entry.ref_count -= 1;
     if entry.ref_count <= 0 {
       self.dealloc_datum(id);
