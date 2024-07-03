@@ -360,6 +360,21 @@ impl PlayerCanvasRenderer {
         );
         render_stage_to_bitmap(player, &mut bitmap, self.debug_selected_channel_num);
 
+        let font = player.font_manager.get_system_font().unwrap();
+        let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+        let txt = format_args!("Datum count: {}\nScript count: {}", player.allocator.datum_count, player.script_instances.len()).to_string();
+        bitmap.draw_text(
+            txt.as_str(),
+            font, 
+            font_bitmap, 
+            0, 
+            0, 
+            36, 
+            bitmap.get_bg_color_ref(),
+            &player.movie.cast_manager.palettes(), 
+            0, 
+            0
+        );
         let slice_data = Clamped(bitmap.data.as_slice());
         let image_data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
             slice_data,
