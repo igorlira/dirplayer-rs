@@ -30,7 +30,7 @@ pub fn datum_equals(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> 
       let right = right.string_value()?;
       Ok(left == right)
     },
-    (Datum::ScriptInstanceRef(left), Datum::ScriptInstanceRef(right)) => Ok(*left == *right),
+    (Datum::ScriptInstanceRef(left), Datum::ScriptInstanceRef(right)) => Ok(**left == **right),
     (Datum::Symbol(left), Datum::Symbol(right)) => Ok(left.eq_ignore_ascii_case(right)),
     (Datum::Void, Datum::Void) => Ok(true),
     (Datum::ColorRef(left), Datum::ColorRef(right)) => Ok(*left == *right),

@@ -364,7 +364,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         }
         PlayerVMCommand::RequestScriptInstanceSnapshot(script_instance_id) => {
             reserve_player_ref(|player| {
-                JsApi::dispatch_script_instance_snapshot(if script_instance_id > 0 { Some(ScriptInstanceRef::from_id(script_instance_id)) } else { None }, player);
+                JsApi::dispatch_script_instance_snapshot(if script_instance_id > 0 { Some(ScriptInstanceRef::from(script_instance_id)) } else { None }, player);
             });
         }
         PlayerVMCommand::SubscribeToMember(member_ref) => {

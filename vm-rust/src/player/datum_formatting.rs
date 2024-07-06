@@ -42,7 +42,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
       let instance = player.allocator.get_script_instance(instance_ref);
       let script = player.movie.cast_manager.get_script_by_ref(&instance.script).unwrap();
 
-      format!("<offspring {} {} _>", script.name, instance_ref.id)
+      format!("<offspring {} {} _>", script.name, instance_ref)
     }
     Datum::CastMember(member_ref) => {
       format!("(member {} of castLib {})", member_ref.cast_member, member_ref.cast_lib)
