@@ -1,4 +1,4 @@
-use super::{cast_lib::CastMemberRef, script::ScriptInstanceId};
+use super::{cast_lib::CastMemberRef, script_ref::ScriptInstanceRef};
 
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, Debug)]
@@ -54,7 +54,7 @@ pub struct Sprite {
   pub color: ColorRef,
   pub bg_color: ColorRef,
   pub member: Option<CastMemberRef>,
-  pub script_instance_list: Vec<ScriptInstanceId>,
+  pub script_instance_list: Vec<ScriptInstanceRef>,
   pub cursor_ref: Option<CursorRef>,
   pub editable: bool,
 }

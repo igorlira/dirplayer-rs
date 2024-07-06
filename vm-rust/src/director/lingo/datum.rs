@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use num_derive::FromPrimitive;
 
-use crate::player::{bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, datum_ref::DatumRef, script::ScriptInstanceId, sprite::{ColorRef, CursorRef}, ScriptError};
+use crate::player::{bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, datum_ref::DatumRef, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}, ScriptError};
 
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -116,7 +116,7 @@ pub enum Datum {
   CastLib(u32),
   Stage,
   ScriptRef(CastMemberRef),
-  ScriptInstanceRef(ScriptInstanceId),
+  ScriptInstanceRef(ScriptInstanceRef),
   CastMember(CastMemberRef),
   SpriteRef(i16),
   IntRect((i32, i32, i32, i32)),
@@ -458,9 +458,9 @@ impl Datum {
     }
   }
 
-  pub fn to_script_instance_id(&self) -> Result<ScriptInstanceId, ScriptError> {
+  pub fn to_script_instance_ref(&self) -> Result<&ScriptInstanceRef, ScriptError> {
     match self {
-      Datum::ScriptInstanceRef(id) => Ok(*id),
+      Datum::ScriptInstanceRef(id) => Ok(id),
       _ => Err(ScriptError::new("Cannot convert datum to script instance id".to_string())),
     }
   }
@@ -488,5 +488,5 @@ pub const DATUM_FALSE: Datum = Datum::Int(0);
 #[derive(Clone)]
 pub enum VarRef {
   Script(CastMemberRef),
-  ScriptInstance(ScriptInstanceId)
+  ScriptInstance(ScriptInstanceRef)
 }

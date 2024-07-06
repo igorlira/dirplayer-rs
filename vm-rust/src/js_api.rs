@@ -11,7 +11,7 @@ use crate::{
         file::DirectorFile,
         lingo::{datum::Datum, script::ScriptContext},
     }, player::{
-        bitmap::bitmap::PaletteRef, cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, ScriptMember}, datum_formatting::{format_concrete_datum, format_datum}, datum_ref::{DatumId, DatumRef}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_ref, score::Score, script::ScriptInstanceId, DirPlayer, ScriptError, PLAYER_LOCK
+        allocator::ScriptInstanceAllocatorTrait, bitmap::bitmap::PaletteRef, cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, ScriptMember}, datum_formatting::{format_concrete_datum, format_datum}, datum_ref::{DatumId, DatumRef}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_ref, score::Score, script::ScriptInstanceId, script_ref::ScriptInstanceRef, DirPlayer, ScriptError, PLAYER_LOCK
     }, rendering::RENDERER_LOCK
 };
 
@@ -183,14 +183,14 @@ impl JsApi {
     let snapshot = datum_to_js_bridge(datum_ref, player, 0);
     onDatumSnapshot(datum_ref.unwrap(), snapshot);
   }
-  pub fn dispatch_script_instance_snapshot(script_ref: ScriptInstanceId, player: &DirPlayer) {
-    let datum = if script_ref == 0 {
+  pub fn dispatch_script_instance_snapshot(script_ref: Option<ScriptInstanceRef>, player: &DirPlayer) {
+    let datum = if script_ref.is_none() {
       Datum::Void
     } else {
-      Datum::ScriptInstanceRef(script_ref)
+      Datum::ScriptInstanceRef(script_ref.clone().unwrap())
     };
     let snapshot = concrete_datum_to_js_bridge(&datum, player, 0);
-    onScriptInstanceSnapshot(script_ref, snapshot);
+    onScriptInstanceSnapshot(script_ref.unwrap().id, snapshot);
   }
   pub fn dispatch_schedule_timeout(timeout_name: &str, interval: u32) {
     onScheduleTimeout(timeout_name, interval);
@@ -457,7 +457,7 @@ impl JsApi {
 
     let script_instance_array = js_sys::Array::new();
     for script_instance in &channel.sprite.script_instance_list {
-      script_instance_array.push(&JsValue::from_f64(*script_instance as f64));
+      script_instance_array.push(&JsValue::from_f64(script_instance.id as f64));
     }
 
     let sprite_map = js_sys::Map::new();
@@ -686,11 +686,11 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
     }
     Datum::ScriptInstanceRef(instance_id) => {
       map.str_set("type", &JsValue::from_str("scriptInstance"));
-      let instance = player.script_instances.get(&instance_id).unwrap();
-      let ancestor_id = instance.ancestor;
+      let instance = player.allocator.get_script_instance(&instance_id);
+      let ancestor_id = &instance.ancestor;
       match ancestor_id {
         Some(ancestor_id) => {
-          map.str_set("ancestor", &ancestor_id.to_js_value());
+          map.str_set("ancestor", &ancestor_id.id.to_js_value());
         }
         None => map.str_set("ancestor", &JsValue::NULL)
       }

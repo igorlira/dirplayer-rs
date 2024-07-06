@@ -37,12 +37,12 @@ impl GetSetBytecodeHandler {
     let player = player_opt.as_mut().unwrap();
     let receiver ={
       let scope = player.scopes.get(ctx.scope_ref).unwrap();
-      scope.receiver
+      scope.receiver.clone()
     };
     let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().clone();
     
-    if let Some(instance_id) = receiver {
-      let result = script_get_prop(player, instance_id, &prop_name)?;
+    if let Some(instance_ref) = receiver {
+      let result = script_get_prop(player, &instance_ref, &prop_name)?;
       
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result);
@@ -57,14 +57,16 @@ impl GetSetBytecodeHandler {
       let (value_ref, receiver) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         let value_red = scope.stack.pop().unwrap();
-        (value_red, scope.receiver)
+        (value_red, scope.receiver.clone())
       };
       let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
       
       match receiver {
-        Some(0) => Err(ScriptError::new(format!("Can't set prop {} of Void", prop_name))),
-        Some(instance_id) => {
-          script_set_prop(player, instance_id, &prop_name.to_owned(), &value_ref, false)?;
+        Some(instance_ref) => {
+          if instance_ref.id == 0 {
+            return Err(ScriptError::new(format!("Can't set prop {} of Void", prop_name)));
+          }
+          script_set_prop(player, &instance_ref, &prop_name.to_owned(), &value_ref, false)?;
           Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
         },
         None => Err(ScriptError::new(format!("No receiver to set prop {}", prop_name)))

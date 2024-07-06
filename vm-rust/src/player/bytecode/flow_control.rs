@@ -67,7 +67,7 @@ impl FlowControlBytecodeHandler {
     })?;
     let receiver = reserve_player_ref(|player| {
       let scope = player.scopes.get(ctx.scope_ref).unwrap();
-      scope.receiver
+      scope.receiver.clone()
     });
     let scope = player_call_script_handler_raw_args(receiver, handler_ref, &args, true).await?;
     player_handle_scope_return(&scope);

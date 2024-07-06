@@ -30,18 +30,19 @@ pub mod keyboard_map;
 pub mod keyboard_events;
 pub mod allocator;
 pub mod datum_ref;
+pub mod script_ref;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use allocator::{run_allocator_loop, DatumAllocator, DatumAllocatorEvent, DatumAllocatorTrait};
+use allocator::{DatumAllocator, DatumAllocatorEvent, DatumAllocatorTrait, ResetableAllocator};
 use datum_ref::{DatumRef, VOID_DATUM_REF};
-use async_std::{channel::{self, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
+use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
 use chrono::Local;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use lazy_static::lazy_static;
-use nohash_hasher::IntMap;
+use script_ref::ScriptInstanceRef;
 
 use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
 
@@ -71,8 +72,6 @@ pub struct DirPlayer {
   pub next_frame: Option<u32>,
   pub queue_tx: Sender<PlayerVMExecutionItem>,
   pub globals: HashMap<String, DatumRef>,
-  pub script_instances: IntMap<ScriptInstanceId, ScriptInstance>,
-  pub script_id_counter: u32,
   pub scopes: Vec<Scope>,
   pub bytecode_handler_manager: StaticBytecodeHandlerManager,
   pub breakpoint_manager: BreakpointManager,
@@ -101,7 +100,11 @@ pub struct DirPlayer {
 }
 
 impl DirPlayer {
-  pub fn new<'a>(tx: Sender<PlayerVMExecutionItem>, allocator_tx: Sender<DatumAllocatorEvent>) -> DirPlayer {
+  pub fn new<'a>(
+    tx: Sender<PlayerVMExecutionItem>, 
+    allocator_rx: Receiver<DatumAllocatorEvent>,
+    allocator_tx: Sender<DatumAllocatorEvent>
+  ) -> DirPlayer {
     DirPlayer {
       movie: Movie { 
         rect: IntRect::from(0, 0, 0, 0),
@@ -127,12 +130,8 @@ impl DirPlayer {
       next_frame: None,
       queue_tx: tx,
       globals: HashMap::new(),
-      script_instances: IntMap::default(),
-      script_id_counter: 0,
       scopes: vec![],
       bytecode_handler_manager: StaticBytecodeHandlerManager {},
-      // datums: IntMap::default(),
-      // datum_id_counter: 0,
       breakpoint_manager: BreakpointManager::new(),
       current_breakpoint: None,
       stage_size: (100, 100),
@@ -155,7 +154,7 @@ impl DirPlayer {
       last_handler_result: VOID_DATUM_REF.clone(),
       hovered_sprite: None,
       timer_tick_start: get_ticks(),
-      allocator: DatumAllocator::default(allocator_tx),
+      allocator: DatumAllocator::default(allocator_rx, allocator_tx),
     }
   }
 
@@ -217,12 +216,6 @@ impl DirPlayer {
     self.allocator.get_datum(id)
   }
 
-  pub fn reserve_script_instance_id(&mut self) -> ScriptInstanceId {
-    self.script_id_counter += 1;
-    let id = self.script_id_counter;
-    id
-  }
-
   pub fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
     self.allocator.get_datum_mut(id)
   }
@@ -272,7 +265,6 @@ impl DirPlayer {
     self.scopes.clear();
     self.globals.clear();
     self.allocator.reset();
-    self.script_instances.clear();
     self.timeout_manager.clear();
     // netManager.clear();
     self.movie.score.reset();
@@ -477,11 +469,11 @@ pub fn reserve_player_mut<T, F>(callback: F) -> T where F: FnOnce(&mut DirPlayer
 #[derive(Clone)]
 pub enum ScriptReceiver {
   Script(CastMemberRef),
-  ScriptInstance(ScriptInstanceId),
+  ScriptInstance(ScriptInstanceRef),
 }
 
 pub async fn player_call_script_handler(
-  receiver: Option<ScriptInstanceId>, 
+  receiver: Option<ScriptInstanceRef>, 
   handler_ref: ScriptHandlerRef,
   arg_list: &Vec<DatumRef>,
 ) -> Result<Scope, ScriptError> {
@@ -489,7 +481,7 @@ pub async fn player_call_script_handler(
 }
 
 pub async fn player_call_script_handler_raw_args(
-  receiver: Option<ScriptInstanceId>, 
+  receiver: Option<ScriptInstanceRef>, 
   handler_ref: ScriptHandlerRef,
   arg_list: &Vec<DatumRef>,
   use_raw_arg_list: bool,
@@ -502,8 +494,8 @@ pub async fn player_call_script_handler_raw_args(
   });
   let new_args = reserve_player_mut(|player| {
     let mut new_args = vec![];
-    let receiver_arg = if let Some(script_instance_id) = receiver {
-      Some(Datum::ScriptInstanceRef(script_instance_id))
+    let receiver_arg = if let Some(script_instance_ref) = receiver.as_ref() {
+      Some(Datum::ScriptInstanceRef(script_instance_ref.clone()))
     } else if script_type != ScriptType::Movie {
       // TODO: check if this is right
       Some(Datum::ScriptRef(handler_ref.0.clone()))
@@ -703,7 +695,7 @@ pub fn init_player() {
   }
 
   let mut player = PLAYER_LOCK.try_lock().unwrap();
-  *player = Some(DirPlayer::new(tx, allocator_tx));
+  *player = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));
 
   async_std::task::spawn_local(async move {
     player_load_system_font().await;
@@ -712,9 +704,6 @@ pub fn init_player() {
     });
     async_std::task::spawn_local(async move {
       run_event_loop(event_rx).await;
-    });
-    async_std::task::spawn_local(async move {
-      run_allocator_loop(allocator_rx).await;
     });
   });
 }

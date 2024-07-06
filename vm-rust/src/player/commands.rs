@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    datum_ref::{DatumId, DatumRef}, cast_lib::CastMemberRef, cast_member::CastMemberType, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX, VOID_DATUM_REF
+    allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::{DatumId, DatumRef}, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, script_ref::ScriptInstanceRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX, VOID_DATUM_REF
 };
 
 #[allow(dead_code)]
@@ -364,7 +364,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         }
         PlayerVMCommand::RequestScriptInstanceSnapshot(script_instance_id) => {
             reserve_player_ref(|player| {
-                JsApi::dispatch_script_instance_snapshot(script_instance_id, player);
+                JsApi::dispatch_script_instance_snapshot(if script_instance_id > 0 { Some(ScriptInstanceRef::from_id(script_instance_id)) } else { None }, player);
             });
         }
         PlayerVMCommand::SubscribeToMember(member_ref) => {
@@ -389,9 +389,9 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 ];
                 if let Some(alert_hook) = &player.movie.alert_hook {
                     match alert_hook {
-                        ScriptReceiver::ScriptInstance(instance_id) => {
+                        ScriptReceiver::ScriptInstance(instance_ref) => {
                             let script_instance =
-                                player.script_instances.get(&instance_id).unwrap();
+                                player.allocator.get_script_instance(&instance_ref);
                             let script = player
                                 .movie
                                 .cast_manager
@@ -399,7 +399,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                                 .unwrap();
                             let handler = script.get_own_handler_ref(&"alertHook".to_string());
                             if let Some(handler) = handler {
-                                Some((Some(*instance_id), handler, arg_list))
+                                Some((Some(instance_ref.clone()), handler, arg_list))
                             } else {
                                 None
                             }

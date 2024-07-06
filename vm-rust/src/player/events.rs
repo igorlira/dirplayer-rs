@@ -7,12 +7,12 @@ use crate::{
 };
 
 use super::{
-    cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils, player_call_script_handler, reserve_player_ref, script::ScriptInstanceId, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX, PLAYER_SEMAPHONE, VOID_DATUM_REF
+    cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils, player_call_script_handler, reserve_player_ref, script::ScriptInstanceId, script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX, PLAYER_SEMAPHONE, VOID_DATUM_REF
 };
 
 pub enum PlayerVMEvent {
     Global(String, Vec<DatumRef>),
-    Targeted(String, Vec<DatumRef>, Option<Vec<ScriptInstanceId>>),
+    Targeted(String, Vec<DatumRef>, Option<Vec<ScriptInstanceRef>>),
     Callback(DatumRef, String, Vec<DatumRef>),
 }
 
@@ -38,7 +38,7 @@ pub fn player_dispatch_callback_event(receiver: DatumRef, handler_name: &String,
 pub fn player_dispatch_targeted_event(
     handler_name: &String,
     args: &Vec<DatumRef>,
-    instance_ids: Option<&Vec<ScriptInstanceId>>,
+    instance_ids: Option<&Vec<ScriptInstanceRef>>,
 ) {
     let tx = unsafe { PLAYER_EVENT_TX.clone() }.unwrap();
     tx.try_send(PlayerVMEvent::Targeted(
@@ -79,22 +79,22 @@ pub fn player_dispatch_event_to_sprite(
 pub async fn player_invoke_event_to_instances(
     handler_name: &String,
     args: &Vec<DatumRef>,
-    instance_ids: &Vec<ScriptInstanceId>,
+    instance_refs: &Vec<ScriptInstanceRef>,
 ) -> Result<bool, ScriptError> {
     let recv_instance_handlers = reserve_player_ref(|player| {
         // let receiver_refs = get_active_scripts(&player.movie, &player.get_hydrated_globals());
         let mut result = vec![];
-        for instance_id in instance_ids {
-            let handler_pair = ScriptInstanceUtils::get_script_instance_handler(&handler_name, *instance_id, player)?;
+        for instance_ref in instance_refs {
+            let handler_pair = ScriptInstanceUtils::get_script_instance_handler(&handler_name, instance_ref, player)?;
             if let Some(handler_pair) = handler_pair {
-                result.push((instance_id, handler_pair));
+                result.push((instance_ref.clone(), handler_pair));
             }
         }
         Ok(result)
     })?;
     let mut handled = false;
-    for (script_instance_id, handler_ref) in recv_instance_handlers {
-        let scope = player_call_script_handler(Some(*script_instance_id), handler_ref, args).await?;
+    for (script_instance_ref, handler_ref) in recv_instance_handlers {
+        let scope = player_call_script_handler(Some(script_instance_ref), handler_ref, args).await?;
         if !scope.passed {
             handled = true;
             break;
@@ -155,11 +155,11 @@ async fn player_invoke_static_event(
 async fn player_invoke_targeted_event(
     handler_name: &String,
     args: &Vec<DatumRef>,
-    instance_ids: Option<&Vec<ScriptInstanceId>>,
+    instance_refs: Option<&Vec<ScriptInstanceRef>>,
 ) -> Result<DatumRef, ScriptError> {
-    let handled = match instance_ids {
-        Some(instance_ids) => {
-            player_invoke_event_to_instances(handler_name, args, instance_ids).await?
+    let handled = match instance_refs {
+        Some(instance_refs) => {
+            player_invoke_event_to_instances(handler_name, args, instance_refs).await?
         }
         None => false,
     };
@@ -180,15 +180,15 @@ pub async fn player_invoke_global_event(
     // TODO find stage behaviors first
 
     let active_instance_scripts = reserve_player_mut(|player| {
-        let mut active_instance_scripts: Vec<ScriptInstanceId> = vec![];
+        let mut active_instance_scripts: Vec<ScriptInstanceRef> = vec![];
         active_instance_scripts.extend(player.movie.score.get_active_script_instance_list());
         for global in player.get_hydrated_globals().values() {
             match global {
-                Datum::VarRef(VarRef::ScriptInstance(script_instance_id)) => {
-                    active_instance_scripts.push(*script_instance_id);
+                Datum::VarRef(VarRef::ScriptInstance(script_instance_ref)) => {
+                    active_instance_scripts.push(script_instance_ref.clone());
                 }
-                Datum::ScriptInstanceRef(script_instance_id) => {
-                    active_instance_scripts.push(*script_instance_id);
+                Datum::ScriptInstanceRef(script_instance_ref) => {
+                    active_instance_scripts.push(script_instance_ref.clone());
                 }
                 _ => {}
             }

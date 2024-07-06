@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{player_call_script_handler, player_handle_scope_return, reserve_player_mut, script::{get_lctx_for_script, ScriptInstance}, DatumRef, ScriptError}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::ScriptInstanceAllocatorTrait, player_call_script_handler, player_handle_scope_return, reserve_player_mut, script::{get_lctx_for_script, ScriptInstance}, DatumRef, ScriptError}};
 
 pub struct ScriptDatumHandlers {}
 
@@ -51,15 +51,15 @@ impl ScriptDatumHandlers {
       Ok((script_ref.clone(), new_handler_ref))
     })?;
     let (instance_datum_ref, instance_id, new_handler_ref) = reserve_player_mut(|player| {
-      let instance_id = player.reserve_script_instance_id();
+      let instance_id = player.allocator.get_free_script_instance_id();
       let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
       let lctx = get_lctx_for_script(player, script).unwrap();
       let instance = ScriptInstance::new(instance_id, script_ref.to_owned(), script, lctx);
 
-      player.script_instances.insert(instance_id, instance);
+      let instance_ref = player.allocator.alloc_script_instance(instance);
       
-      let instance_datum_ref = player.alloc_datum(Datum::ScriptInstanceRef(instance_id));
-      Ok((instance_datum_ref, instance_id, new_handler_ref))
+      let instance_datum_ref = player.alloc_datum(Datum::ScriptInstanceRef(instance_ref.clone()));
+      Ok((instance_datum_ref, instance_ref, new_handler_ref))
     })?;
 
     if let Some(new_handler_ref) = new_handler_ref {

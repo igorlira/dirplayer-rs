@@ -1,5 +1,5 @@
 use crate::player::{
-    player_call_script_handler, player_handle_scope_return, reserve_player_ref, DatumRef, DirPlayer, ScriptError, ScriptErrorCode
+    player_call_script_handler, player_handle_scope_return, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode
 };
 
 use super::script_instance::ScriptInstanceUtils;
@@ -12,7 +12,7 @@ impl SpriteDatumUtils {
     pub fn get_script_instance_ids(
         datum: &DatumRef,
         player: &DirPlayer,
-    ) -> Result<Vec<u32>, ScriptError> {
+    ) -> Result<Vec<ScriptInstanceRef>, ScriptError> {
         let sprite_num = player.get_datum(datum).to_sprite_ref()?;
         let sprite = player.movie.score.get_sprite(sprite_num);
         if sprite.is_none() {
@@ -37,7 +37,7 @@ impl SpriteDatumHandlers {
             for instance in instances {
                 let handler = ScriptInstanceUtils::get_script_instance_handler(
                     handler_name,
-                    *instance,
+                    instance,
                     player,
                 )?;
                 if handler.is_some() {
@@ -65,14 +65,14 @@ impl SpriteDatumHandlers {
         handler_name: &String,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        let instance_ids =
+        let instance_refs =
             reserve_player_ref(|player| SpriteDatumUtils::get_script_instance_ids(&datum, player))?;
-        for instance_id in instance_ids {
+        for instance_ref in instance_refs {
             let handler_ref = reserve_player_ref(|player| {
-                ScriptInstanceUtils::get_script_instance_handler(handler_name, instance_id, player)
+                ScriptInstanceUtils::get_script_instance_handler(handler_name, &instance_ref, player)
             })?;
             if let Some(handler_ref) = handler_ref {
-                let result_scope = player_call_script_handler(Some(instance_id), handler_ref, args).await?;
+                let result_scope = player_call_script_handler(Some(instance_ref), handler_ref, args).await?;
                 player_handle_scope_return(&result_scope);
                 return Ok(result_scope.return_value);
             }

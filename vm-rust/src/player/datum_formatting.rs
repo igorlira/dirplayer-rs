@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::Datum, player::sprite::ColorRef};
+use crate::{director::lingo::datum::Datum, player::{allocator::ScriptInstanceAllocatorTrait, sprite::ColorRef}};
 
 use super::{DatumRef, DirPlayer};
 
@@ -38,11 +38,11 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
       let script = player.movie.cast_manager.get_script_by_ref(&member_ref).unwrap();
       format!("(script {})", script.name)
     }
-    Datum::ScriptInstanceRef(instance_id) => {
-      let instance = player.script_instances.get(instance_id).unwrap();
+    Datum::ScriptInstanceRef(instance_ref) => {
+      let instance = player.allocator.get_script_instance(instance_ref);
       let script = player.movie.cast_manager.get_script_by_ref(&instance.script).unwrap();
 
-      format!("<offspring {} {} _>", script.name, instance_id)
+      format!("<offspring {} {} _>", script.name, instance_ref.id)
     }
     Datum::CastMember(member_ref) => {
       format!("(member {} of castLib {})", member_ref.cast_member, member_ref.cast_lib)

@@ -7,7 +7,7 @@ use crate::director::{
 };
 
 use super::{
-    allocator::DatumAllocatorTrait, bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, score::{sprite_get_prop, sprite_set_prop}, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF
+    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, score::{sprite_get_prop, sprite_set_prop}, script_ref::ScriptInstanceRef, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF
 };
 
 #[derive(Clone)]
@@ -26,7 +26,7 @@ pub type ScriptHandlerRefDef<'a> = (CastMemberRef, &'a HandlerDef);
 pub struct ScriptInstance {
     pub instance_id: ScriptInstanceId,
     pub script: CastMemberRef,
-    pub ancestor: Option<ScriptInstanceId>,
+    pub ancestor: Option<ScriptInstanceRef>,
     pub properties: HashMap<String, DatumRef>,
 }
 
@@ -72,14 +72,14 @@ pub type ScriptHandlerRef = (CastMemberRef, String);
 
 pub fn script_get_prop_opt(
     player: &mut DirPlayer,
-    script_instance_id: ScriptInstanceId,
+    script_instance_ref: &ScriptInstanceRef,
     prop_name: &String,
 ) -> Option<DatumRef> {
-    let script_instance = player.script_instances.get(&script_instance_id).unwrap();
+    let script_instance = player.allocator.get_script_instance(&script_instance_ref);
     if prop_name == "ancestor" {
-        let script_instance = player.script_instances.get(&script_instance_id).unwrap();
-        if let Some(ancestor_id) = script_instance.ancestor {
-            Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id)))
+        let script_instance = player.allocator.get_script_instance(&script_instance_ref);
+        if let Some(ancestor_id) = &script_instance.ancestor {
+            Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())))
         } else {
             Some(VOID_DATUM_REF.clone())
         }
@@ -91,8 +91,8 @@ pub fn script_get_prop_opt(
         if let Some(prop) = prop_value {
             Some(prop)
         } else if script_instance.ancestor.is_some() {
-            let ancestor_id = script_instance.ancestor.unwrap();
-            script_get_prop_opt(player, ancestor_id, prop_name)
+            let ancestor_ref = script_instance.ancestor.as_ref().unwrap().clone();
+            script_get_prop_opt(player, &ancestor_ref, prop_name)
         } else {
             None
         }
@@ -101,18 +101,18 @@ pub fn script_get_prop_opt(
 
 pub fn script_get_prop(
     player: &mut DirPlayer,
-    script_instance_id: ScriptInstanceId,
+    script_instance_ref: &ScriptInstanceRef,
     prop_name: &String,
 ) -> Result<DatumRef, ScriptError> {
-    if let Some(prop) = script_get_prop_opt(player, script_instance_id, prop_name) {
+    if let Some(prop) = script_get_prop_opt(player, script_instance_ref, prop_name) {
         Ok(prop)
     } else {
-        let script_instance = player.script_instances.get(&script_instance_id).unwrap();
+        let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         let valid_props = script_instance.properties.keys().collect_vec();
         Err(ScriptError::new(format!(
             "Cannot get property {} found on script instance {}. Valid properties are: {}",
             prop_name, 
-            format_concrete_datum(&Datum::ScriptInstanceRef(script_instance_id), player),
+            format_concrete_datum(&Datum::ScriptInstanceRef(script_instance_ref.clone()), player),
             valid_props.iter().join(", ")
         )))
     }
@@ -120,36 +120,39 @@ pub fn script_get_prop(
 
 pub fn script_set_prop(
     player: &mut DirPlayer,
-    script_instance_id: ScriptInstanceId,
+    script_instance_ref: &ScriptInstanceRef,
     prop_name: &String,
     value_ref: &DatumRef,
     required: bool,
 ) -> Result<(), ScriptError> {
     // Try to set the property on the current instance
     let result = {
-        let script_instance = player.script_instances.get_mut(&script_instance_id).unwrap();
         if prop_name == "ancestor" {
-            let ancestor_id = player.allocator.get_datum(value_ref).to_script_instance_id()?;
+            let ancestor_id = player.allocator.get_datum(value_ref).to_script_instance_ref()?.clone();
+            let script_instance = player.allocator.get_script_instance_mut(&script_instance_ref);
             script_instance.ancestor = Some(ancestor_id);
             Ok(())
-        } else if let Some(prop) = script_instance.properties.get_mut(prop_name) {
-            *prop = value_ref.clone();
-            Ok(())
         } else {
-            Err(ScriptError::new(format!(
-                "Cannot set property {} found on script instance {}",
-                prop_name, 
-                format_concrete_datum(&Datum::ScriptInstanceRef(script_instance_id), player)
-            )))
+            let script_instance = player.allocator.get_script_instance_mut(&script_instance_ref);
+            if let Some(prop) = script_instance.properties.get_mut(prop_name) {
+                *prop = value_ref.clone();
+                Ok(())
+            } else {
+                Err(ScriptError::new(format!(
+                    "Cannot set property {} found on script instance {}",
+                    prop_name, 
+                    format_concrete_datum(&Datum::ScriptInstanceRef(script_instance_ref.clone()), player)
+                )))
+            }
         }
     };
     // If the property was not found on the current instance, try to set it on the ancestor
     let result = match result {
         Ok(_) => Ok(()),
         Err(_) => {
-            let script_instance = player.script_instances.get(&script_instance_id).unwrap();
-            if let Some(ancestor_id) = script_instance.ancestor {
-                script_set_prop(player, ancestor_id, prop_name, value_ref, true)
+            let script_instance = player.allocator.get_script_instance(&script_instance_ref);
+            if let Some(ancestor_id) = &script_instance.ancestor {
+                script_set_prop(player, &ancestor_id.clone(), prop_name, value_ref, true)
             } else {
                 Err(ScriptError::new("No ancestor found".to_string()))
             }
@@ -161,7 +164,7 @@ pub fn script_set_prop(
             if required {
                 Err(err)
             } else {
-                let script_instance = player.script_instances.get_mut(&script_instance_id).unwrap();
+                let script_instance = player.allocator.get_script_instance_mut(&script_instance_ref);
                 script_instance.properties.insert(prop_name.to_owned(), value_ref.clone());
                 Ok(())
             }
@@ -172,7 +175,7 @@ pub fn script_set_prop(
         ScriptError::new(format!(
             "Error setting property {} on script instance {}: {}",
             prop_name, 
-            format_concrete_datum(&Datum::ScriptInstanceRef(script_instance_id), player),
+            format_concrete_datum(&Datum::ScriptInstanceRef(script_instance_ref.clone()), player),
             err.message
         ))
     })
@@ -266,9 +269,9 @@ pub async fn player_set_obj_prop(
             player_cast_lib_set_prop(cast_lib, prop_name, value_clone).await?;
             Ok(())
         }
-        Datum::ScriptInstanceRef(script_instance_id) => {
+        Datum::ScriptInstanceRef(script_instance_ref) => {
             reserve_player_mut(|player| {
-                script_set_prop(player, script_instance_id, &prop_name, value_ref, false)
+                script_set_prop(player, &script_instance_ref, &prop_name, value_ref, false)
             })
         }
         Datum::SpriteRef(sprite_id) => {
@@ -341,7 +344,7 @@ pub fn get_obj_prop(
             Ok(player.alloc_datum(result))
         }
         Datum::ScriptInstanceRef(script_instance_id) => {
-            script_get_prop(player, script_instance_id, &prop_name)
+            script_get_prop(player, &script_instance_id, &prop_name)
         }
         Datum::PropList(prop_list, ..) => {
             PropListUtils::get_prop_or_built_in(player, &prop_list, &prop_name)

@@ -1,4 +1,4 @@
-use crate::{console_warn, director::lingo::datum::Datum, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script::ScriptInstanceId, DatumRef, DirPlayer, ScriptError, ScriptErrorCode, VOID_DATUM_REF}};
+use crate::{console_warn, director::lingo::datum::Datum, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
 
 use super::{cast::CastHandlers, datum_handlers::{player_call_datum_handler, script_instance::ScriptInstanceUtils}, movie::MovieHandlers, net::NetHandlers, string::StringHandlers, types::TypeHandlers};
 
@@ -121,13 +121,13 @@ impl BuiltInHandlerManager {
     if instance_ids.is_none() {
       return player_call_datum_handler(&receiver_ref, &handler_name, &args).await;
     }
-    let instance_ids = instance_ids.unwrap();
+    let instance_refs = instance_ids.unwrap();
 
     let mut result = player_alloc_datum(Datum::Null);
-    for instance_id in instance_ids {
-      let handler = reserve_player_ref(|player| ScriptInstanceUtils::get_script_instance_handler(&handler_name, instance_id, player))?;
+    for instance_ref in instance_refs {
+      let handler = reserve_player_ref(|player| ScriptInstanceUtils::get_script_instance_handler(&handler_name, &instance_ref, player))?;
       if let Some(handler) = handler {
-        let scope = player_call_script_handler(Some(instance_id), handler, &args).await?;
+        let scope = player_call_script_handler(Some(instance_ref), handler, &args).await?;
         result = scope.return_value;
       }
     }
@@ -250,21 +250,21 @@ impl BuiltInHandlerManager {
   }
 }
 
-fn get_datum_script_instance_ids(value_ref: &DatumRef, player: &DirPlayer) -> Result<Vec<ScriptInstanceId>, ScriptError> {
+fn get_datum_script_instance_ids(value_ref: &DatumRef, player: &DirPlayer) -> Result<Vec<ScriptInstanceRef>, ScriptError> {
   let value = player.get_datum(value_ref);
-  let mut instance_ids = vec![];
+  let mut instance_refs = vec![];
   match value {
     Datum::ScriptInstanceRef(instance_id) => {
-      instance_ids.push(*instance_id);
+      instance_refs.push(instance_id.clone());
     },
     Datum::SpriteRef(sprite_id) => {
       let sprite = player.movie.score.get_sprite(*sprite_id).unwrap();
-      instance_ids.extend(sprite.script_instance_list.clone());
+      instance_refs.extend(sprite.script_instance_list.clone());
     },
     Datum::Int(_) => {},
     _ => {
       return Err(ScriptError::new(format!("Cannot get script instance ids from datum of type: {}", value.type_str())));
     }
   }
-  Ok(instance_ids)
+  Ok(instance_refs)
 }

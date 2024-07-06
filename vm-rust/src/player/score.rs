@@ -4,7 +4,7 @@ use itertools::Itertools;
 
 use crate::{director::{file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi};
 
-use super::{cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
+use super::{cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 
 #[allow(dead_code)]
 pub struct SpriteChannel {
@@ -146,11 +146,11 @@ impl Score {
       .collect_vec();
   }
 
-  pub fn get_active_script_instance_list(&self) -> Vec<u32> {
+  pub fn get_active_script_instance_list(&self) -> Vec<ScriptInstanceRef> {
     let mut instance_list = vec![];
     for channel in &self.channels {
-      for instance_id in &channel.sprite.script_instance_list {
-        instance_list.push(*instance_id);
+      for instance_ref in &channel.sprite.script_instance_list {
+        instance_list.push(instance_ref.clone());
       }
     }
     return instance_list;
@@ -207,7 +207,7 @@ pub fn sprite_get_prop(
     "rotation" => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.rotation))),
     "scriptInstanceList" => {
       let instance_ids = sprite.map_or(vec![], |x| x.script_instance_list.clone());
-      let instance_ids = instance_ids.iter().map(|x| player.alloc_datum(Datum::ScriptInstanceRef(*x))).collect();
+      let instance_ids = instance_ids.iter().map(|x| player.alloc_datum(Datum::ScriptInstanceRef(x.clone()))).collect();
       Ok(Datum::List(DatumType::List, instance_ids, false))
     }
     _ => Err(ScriptError::new(format!("Cannot get prop {} of sprite", prop_name))),
@@ -518,7 +518,7 @@ pub fn sprite_set_prop(
     ),
     "scriptInstanceList" => {
       let ref_list = value.to_list()?;
-      let instance_ids = borrow_sprite_mut(
+      let instance_refs = borrow_sprite_mut(
         sprite_id, 
         |player| {
           let mut instance_ids = vec![];
@@ -543,10 +543,10 @@ pub fn sprite_set_prop(
       )?;
       reserve_player_mut(|player| {
         let value_ref = player.alloc_datum(Datum::Int(sprite_id as i32));
-        for instance_id in instance_ids {
+        for instance_ref in instance_refs {
           script_set_prop(
             player, 
-            instance_id, 
+            &instance_ref, 
             &"spriteNum".to_string(),
             &value_ref, 
             false

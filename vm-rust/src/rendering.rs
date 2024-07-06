@@ -362,7 +362,7 @@ impl PlayerCanvasRenderer {
 
         let font = player.font_manager.get_system_font().unwrap();
         let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
-        let txt = format_args!("Datum count: {}\nScript count: {}", player.allocator.datum_count, player.script_instances.len()).to_string();
+        let txt = format_args!("Datum count: {}\nScript count: {}", player.allocator.datum_count(), player.allocator.script_instance_count()).to_string();
         bitmap.draw_text(
             txt.as_str(),
             font, 

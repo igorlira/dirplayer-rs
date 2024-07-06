@@ -6,12 +6,10 @@ use crate::{
         lingo::{constants::get_opcode_name, opcode::OpCode},
     },
     player::{
-        bytecode::{
+        allocator::player_run_allocator_cycle, bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
-        },
-        scope::ScopeRef,
-        HandlerExecutionResultContext, ScriptError, PLAYER_LOCK,
+        }, scope::ScopeRef, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK
     },
 };
 
@@ -135,10 +133,10 @@ pub async fn player_execute_bytecode<'a>(
         (sync_handler_opt, async_handler_opt)
     };
 
-    if let Some(sync_handler) = sync_opt {
-        return sync_handler(bytecode, ctx);
+    let result = if let Some(sync_handler) = sync_opt {
+        sync_handler(bytecode, ctx)
     } else if let Some(async_handler) = async_opt {
-        return async_handler(bytecode.to_owned(), ctx.to_owned()).await;
+        async_handler(bytecode.to_owned(), ctx.to_owned()).await
     } else {
         return Err(ScriptError::new(
             format_args!(
@@ -147,6 +145,9 @@ pub async fn player_execute_bytecode<'a>(
                 num::ToPrimitive::to_u16(&bytecode.opcode).unwrap()
             )
             .to_string(),
-        ));
-    }
+        ))
+    };
+
+    player_run_allocator_cycle();
+    result
 }

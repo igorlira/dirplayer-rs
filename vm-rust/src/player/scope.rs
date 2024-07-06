@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{cast_lib::CastMemberRef, script::{ScriptHandlerRef, ScriptInstanceId}, DatumRef, VOID_DATUM_REF};
+use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef, script_ref::ScriptInstanceRef, DatumRef, VOID_DATUM_REF};
 
 pub type ScopeRef = usize;
 
@@ -8,7 +8,7 @@ pub type ScopeRef = usize;
 pub struct Scope {
   pub scope_ref: ScopeRef,
   pub script_ref: CastMemberRef,
-  pub receiver: Option<ScriptInstanceId>,
+  pub receiver: Option<ScriptInstanceRef>,
   pub handler_ref: ScriptHandlerRef,
   pub args: Vec<DatumRef>,
   pub bytecode_index: usize,
@@ -31,7 +31,7 @@ impl Scope {
   pub fn new(
     scope_ref: ScopeRef,
     script_ref: CastMemberRef, 
-    receiver: Option<ScriptInstanceId>, 
+    receiver: Option<ScriptInstanceRef>, 
     handler_ref: ScriptHandlerRef, 
     args: Vec<DatumRef>
   ) -> Scope {
