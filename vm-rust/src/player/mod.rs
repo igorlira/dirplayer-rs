@@ -530,7 +530,7 @@ pub async fn player_call_script_handler_raw_args(
         new_args.push(player.alloc_datum(receiver_arg));
       }
     }
-    new_args.extend(arg_list.clone());
+    new_args.extend_from_slice(arg_list);
     new_args
   });
 

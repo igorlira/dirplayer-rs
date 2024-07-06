@@ -126,7 +126,7 @@ async fn player_invoke_static_event(
         for movie_script in movie_scripts {
             active_static_scripts.push(movie_script.member_ref.to_owned());
         }
-        active_static_scripts.to_owned()
+        active_static_scripts
     });
 
     let mut handled = false;

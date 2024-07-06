@@ -3,7 +3,7 @@ use std::{future::Future, pin::Pin};
 use crate::{
     director::lingo::{constants::get_opcode_name, opcode::OpCode},
     player::{
-        allocator::player_run_allocator_cycle, bytecode::{
+        bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
         }, scope::ScopeRef, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK
@@ -25,7 +25,8 @@ pub type BytecodeHandlerFunctionAsync = Box<
 >;
 pub struct StaticBytecodeHandlerManager {}
 impl StaticBytecodeHandlerManager {
-    pub fn get_sync_handler(&self, opcode: &OpCode) -> Option<BytecodeHandlerFunctionSync> {
+    #[inline(always)]
+    pub const fn get_sync_handler(&self, opcode: &OpCode) -> Option<BytecodeHandlerFunctionSync> {
         match opcode {
             OpCode::Add => Some(ArithmeticsBytecodeHandler::add),
             OpCode::PushInt8 => Some(StackBytecodeHandler::push_int),
@@ -87,6 +88,8 @@ impl StaticBytecodeHandlerManager {
             _ => None,
         }
     }
+    
+    #[inline(always)]
     pub fn get_async_handler(&self, opcode: &OpCode) -> Option<BytecodeHandlerFunctionAsync> {
         match opcode {
             OpCode::NewObj => Some(Box::new(|a| {
@@ -109,11 +112,16 @@ impl StaticBytecodeHandlerManager {
     }
 }
 
+#[inline(always)]
 pub async fn player_execute_bytecode<'a>(
     ctx: &BytecodeHandlerContext,
 ) -> Result<HandlerExecutionResultContext, ScriptError> {
     let (sync_opt, async_opt, opcode) = {
-        let player_opt = PLAYER_LOCK.try_lock().unwrap();
+        let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+        {
+            let mut_player = player_opt.as_mut().unwrap();
+            mut_player.allocator.run_cycle();
+        }
         let player = player_opt.as_ref().unwrap();
         let scope = player.scopes.get(ctx.scope_ref).unwrap();
         let script_member_ref = &scope.script_ref;
@@ -123,18 +131,20 @@ pub async fn player_execute_bytecode<'a>(
         let handler_manager = &player.bytecode_handler_manager;
         let bytecode = player.get_bytecode_ref(script_member_ref, handler_name_id, bytecode_index);
 
-        let sync_handler_opt = handler_manager.get_sync_handler(&bytecode.opcode);
-        let async_handler_opt = handler_manager.get_async_handler(&bytecode.opcode);
-
-        (sync_handler_opt, async_handler_opt, bytecode.opcode)
+        if let Some(async_handler) = handler_manager.get_async_handler(&bytecode.opcode) {
+            (None, Some(async_handler), bytecode.opcode)
+        } else {
+            let sync_handler_opt = handler_manager.get_sync_handler(&bytecode.opcode);
+            (sync_handler_opt, None, bytecode.opcode)
+        }
     };
 
-    let result = if let Some(sync_handler) = sync_opt {
+    if let Some(sync_handler) = sync_opt {
         sync_handler(ctx)
     } else if let Some(async_handler) = async_opt {
         async_handler(ctx.to_owned()).await
     } else {
-        return Err(ScriptError::new(
+        Err(ScriptError::new(
             format_args!(
                 "No handler for opcode {} ({:#04x})",
                 get_opcode_name(&opcode),
@@ -142,8 +152,5 @@ pub async fn player_execute_bytecode<'a>(
             )
             .to_string(),
         ))
-    };
-
-    player_run_allocator_cycle();
-    result
+    }
 }

@@ -129,6 +129,26 @@ impl DatumAllocator {
   fn dealloc_script_instance(&mut self, id: ScriptInstanceId) {
     self.script_instances.remove(&id);
   }
+
+  pub fn run_cycle(&mut self) {
+    for _ in 0..self.rx.len() {
+      let item = self.rx.try_recv().unwrap();
+      match item {
+        DatumAllocatorEvent::RefAdded(id) => {
+          self.on_datum_ref_added(id);
+        }
+        DatumAllocatorEvent::RefDropped(id) => {
+          self.on_datum_ref_dropped(id);
+        }
+        DatumAllocatorEvent::ScriptInstanceRefAdded(id) => {
+          self.on_script_instance_ref_added(id);
+        }
+        DatumAllocatorEvent::ScriptInstanceRefDropped(id) => {
+          self.on_script_instance_ref_dropped(id);
+        }
+      }
+    }
+  }
 }
 
 impl DatumAllocatorTrait for DatumAllocator {
@@ -230,34 +250,4 @@ impl ResetableAllocator for DatumAllocator {
     self.script_instances.clear();
     self.script_instance_counter = 1;
   }
-}
-
-pub fn player_run_allocator_cycle() {
-  let queue = reserve_player_ref(|player| {
-    let rx = &player.allocator.rx;
-    let mut result = vec![];
-    while !rx.is_empty() {
-      let item = rx.try_recv().unwrap();
-      result.push(item);
-    }
-    result
-  });
-  reserve_player_mut(|player| {
-    for item in queue {
-      match item {
-        DatumAllocatorEvent::RefAdded(id) => {
-          player.allocator.on_datum_ref_added(id);
-        }
-        DatumAllocatorEvent::RefDropped(id) => {
-          player.allocator.on_datum_ref_dropped(id);
-        }
-        DatumAllocatorEvent::ScriptInstanceRefAdded(id) => {
-          player.allocator.on_script_instance_ref_added(id);
-        }
-        DatumAllocatorEvent::ScriptInstanceRefDropped(id) => {
-          player.allocator.on_script_instance_ref_dropped(id);
-        }
-      }
-    }
-  });
 }
