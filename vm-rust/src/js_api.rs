@@ -190,7 +190,7 @@ impl JsApi {
       Datum::ScriptInstanceRef(script_ref.clone().unwrap())
     };
     let snapshot = concrete_datum_to_js_bridge(&datum, player, 0);
-    onScriptInstanceSnapshot(script_ref.unwrap().id, snapshot);
+    onScriptInstanceSnapshot(*script_ref.unwrap(), snapshot);
   }
   pub fn dispatch_schedule_timeout(timeout_name: &str, interval: u32) {
     onScheduleTimeout(timeout_name, interval);
@@ -457,7 +457,7 @@ impl JsApi {
 
     let script_instance_array = js_sys::Array::new();
     for script_instance in &channel.sprite.script_instance_list {
-      script_instance_array.push(&JsValue::from_f64(script_instance.id as f64));
+      script_instance_array.push(&JsValue::from_f64(**script_instance as f64));
     }
 
     let sprite_map = js_sys::Map::new();
@@ -690,7 +690,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
       let ancestor_id = &instance.ancestor;
       match ancestor_id {
         Some(ancestor_id) => {
-          map.str_set("ancestor", &ancestor_id.id.to_js_value());
+          map.str_set("ancestor", &(**ancestor_id).to_js_value());
         }
         None => map.str_set("ancestor", &JsValue::NULL)
       }

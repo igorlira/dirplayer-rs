@@ -194,19 +194,19 @@ impl ScriptInstanceAllocatorTrait for DatumAllocator {
       ref_count: 0,
       script_instance,
     });
-    ScriptInstanceRef::from_id(id)
+    ScriptInstanceRef::from(id)
   }
 
   fn get_script_instance(&self, instance_ref: &ScriptInstanceRef) -> &ScriptInstance {
-    &self.script_instances.get(&instance_ref.id).unwrap().script_instance
+    &self.script_instances.get(instance_ref).unwrap().script_instance
   }
 
   fn get_script_instance_opt(&self, instance_ref: &ScriptInstanceRef) -> Option<&ScriptInstance> {
-    self.script_instances.get(&instance_ref.id).map(|entry| &entry.script_instance)
+    self.script_instances.get(instance_ref).map(|entry| &entry.script_instance)
   }
 
   fn get_script_instance_mut(&mut self, instance_ref: &ScriptInstanceRef) -> &mut ScriptInstance {
-    &mut self.script_instances.get_mut(&instance_ref.id).unwrap().script_instance
+    &mut self.script_instances.get_mut(instance_ref).unwrap().script_instance
   }
 
   fn on_script_instance_ref_added(&mut self, id: ScriptInstanceId) {

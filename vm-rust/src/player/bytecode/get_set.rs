@@ -63,7 +63,7 @@ impl GetSetBytecodeHandler {
       
       match receiver {
         Some(instance_ref) => {
-          if instance_ref.id == 0 {
+          if *instance_ref == 0 {
             return Err(ScriptError::new(format!("Can't set prop {} of Void", prop_name)));
           }
           script_set_prop(player, &instance_ref, &prop_name.to_owned(), &value_ref, false)?;

@@ -8,7 +8,7 @@ impl ScriptInstanceUtils {
     let datum = player.get_datum(datum);
     match datum {
       Datum::ScriptInstanceRef(instance_ref) => {
-        let instance_id = instance_ref.id;
+        let instance_id = **instance_ref;
         let instance = player.allocator.get_script_instance_opt(&instance_ref).ok_or(ScriptError::new(format!("Script instance {instance_id} not found")))?;
         let script = player.movie.cast_manager.get_script_by_ref(&instance.script).ok_or(ScriptError::new(format!("Script not found")))?;
         Ok((instance_ref.clone(), script))
