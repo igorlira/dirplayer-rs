@@ -258,6 +258,8 @@ impl DirPlayer {
     // currentBreakpoint = null;
     self.timeout_manager.clear();
     //notifyListeners();
+
+    console_warn!("Profiler report: {}", get_profiler_report());
   }
 
   pub fn reset(&mut self) {
@@ -376,7 +378,6 @@ impl DirPlayer {
 
   fn on_script_error(&mut self, err: &ScriptError) {
     console_warn!("[!!] play failed with error: {}", err.message);
-    console_warn!("Profiler report: {}", get_profiler_report());
     self.stop();
 
     JsApi::dispatch_script_error(self, &err);
