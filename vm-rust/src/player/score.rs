@@ -106,7 +106,11 @@ impl Score {
 
     for i in 0..score_chunk.frame_interval_primaries.len() {
       let primary = &score_chunk.frame_interval_primaries[i];
-      let secondary = &score_chunk.frame_interval_secondaries[i];
+      let secondary = if i < score_chunk.frame_interval_secondaries.len() {
+        &score_chunk.frame_interval_secondaries[i]
+      } else {
+        continue;
+      };
 
       self.script_references.push(
         ScoreFrameScriptReference {
