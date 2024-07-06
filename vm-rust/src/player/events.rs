@@ -132,8 +132,8 @@ async fn player_invoke_static_event(
     let mut handled = false;
     for script_member_ref in active_static_scripts {
         let has_handler = reserve_player_ref(|player| {
-            let script = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
-            let handler = script.get_handler(handler_name);
+            let script = player.movie.cast_manager.get_script_by_ref(&script_member_ref);
+            let handler = script.and_then(|x| x.get_handler(handler_name));
             handler.is_some()
         });
         if !has_handler {
