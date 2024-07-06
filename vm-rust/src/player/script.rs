@@ -55,6 +55,10 @@ impl Script {
         self.handlers.get(name) // TODO make case insenitive
     }
 
+    pub fn get_own_handler_by_name_id(&self, name_id: u16) -> Option<&HandlerDef> {
+        self.handlers.iter().find(|x| x.1.name_id == name_id).map(|x| x.1)
+    }
+
     pub fn get_handler(&self, name: &String) -> Option<ScriptHandlerRefDef> {
         return self
             .get_own_handler(name)

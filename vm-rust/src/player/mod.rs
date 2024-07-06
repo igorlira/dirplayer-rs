@@ -42,9 +42,10 @@ use chrono::Local;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use lazy_static::lazy_static;
+use profiling::{end_profiling, start_profiling};
 use script_ref::ScriptInstanceRef;
 
-use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
+use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name, get_opcode_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
 
 use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef, ScriptInstance, ScriptInstanceId}, sprite::{ColorRef, CursorRef}, timeout::TimeoutManager};
 
@@ -382,6 +383,29 @@ impl DirPlayer {
 
     JsApi::dispatch_script_error(self, &err);
   }
+
+  fn get_bytecode_ref<'a>(
+    &'a self,
+    script_member_ref: &CastMemberRef,
+    handler_name_id: u16,
+    bytecode_index: usize,
+  ) -> &'a Bytecode {
+    let script = self.movie.cast_manager.get_script_by_ref(script_member_ref).unwrap();
+    let handler = script.get_own_handler_by_name_id(handler_name_id).unwrap();
+    let bytecode = handler.bytecode_array.get(bytecode_index).unwrap();
+    bytecode
+  }
+
+  fn get_ctx_current_bytecode<'a>(
+    &'a self,
+    ctx: &BytecodeHandlerContext,
+  ) -> &'a Bytecode {
+    let scope = self.scopes.get(ctx.scope_ref).unwrap();
+    let script_member_ref = &scope.script_ref;
+    let handler_name_id = scope.handler_name_id;
+    let bytecode_index = scope.bytecode_index;
+    self.get_bytecode_ref(script_member_ref, handler_name_id, bytecode_index)
+  }
 }
 
 pub fn player_alloc_datum(datum: Datum) -> DatumRef {
@@ -487,13 +511,11 @@ pub async fn player_call_script_handler_raw_args(
   arg_list: &Vec<DatumRef>,
   use_raw_arg_list: bool,
 ) -> Result<Scope, ScriptError> {
-  let handler_ref_clone = handler_ref.clone();
-  let (script_member_ref, handler_name) = handler_ref.to_owned();
-  let script_type = reserve_player_ref(|player| {
-    let script = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
-    script.script_type
-  });
+  let (script_member_ref, handler_name) = &handler_ref;
   let new_args = reserve_player_mut(|player| {
+    let script = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
+    let script_type = script.script_type;
+
     let mut new_args = vec![];
     let receiver_arg = if let Some(script_instance_ref) = receiver.as_ref() {
       Some(Datum::ScriptInstanceRef(script_instance_ref.clone()))
@@ -512,7 +534,7 @@ pub async fn player_call_script_handler_raw_args(
     new_args
   });
 
-  let (bytecode_array, scope_ref, script_name) = reserve_player_mut(|player| {
+  let (scope_ref, script_name) = reserve_player_mut(|player| {
     let script = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
     let handler = script.get_own_handler(&handler_name);
     if let Some(handler) = handler {
@@ -522,7 +544,8 @@ pub async fn player_call_script_handler_raw_args(
         scope_ref,
         script_member_ref.clone(), 
         receiver, 
-        handler_ref_clone, 
+        handler_ref.clone(), 
+        handler.name_id,
         new_args,
       );
       if player.scopes.len() >= 50 {
@@ -531,7 +554,7 @@ pub async fn player_call_script_handler_raw_args(
       // player.scope_id_counter += 1;
       player.scopes.push(scope);
   
-      Ok((handler.bytecode_array.to_owned(), scope_ref, script.name.to_owned()))
+      Ok((scope_ref, script.name.to_owned()))
     } else {
       Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("Handler {handler_name} not found for script {}", script.name)))
     }
@@ -547,7 +570,6 @@ pub async fn player_call_script_handler_raw_args(
 
   loop {
     let bytecode_index = reserve_player_ref(|player| player.scopes.get(scope_ref).unwrap().bytecode_index);
-    let bytecode = bytecode_array.get(bytecode_index).unwrap();
     // let profile_token = start_profiling(get_opcode_name(&bytecode.opcode));
     // TODO breakpoint
     if let Some(breakpoint) = reserve_player_ref(|player| {
@@ -555,9 +577,14 @@ pub async fn player_call_script_handler_raw_args(
         .find_breakpoint_for_bytecode(&script_name, &handler_name, bytecode_index)
         .cloned()
     }) {
-      player_trigger_breakpoint(breakpoint, script_member_ref.to_owned(), handler_ref.to_owned(), bytecode.to_owned()).await;
+      player_trigger_breakpoint(
+        breakpoint, 
+        script_member_ref.to_owned(), 
+        handler_ref.to_owned(), 
+        bytecode_index,
+      ).await;
     }
-    let context = player_execute_bytecode(&bytecode, &ctx).await?; // TODO catch error
+    let context = player_execute_bytecode(&ctx).await?; // TODO catch error
     let result = context.result;
 
     match result {
@@ -651,13 +678,13 @@ pub async fn run_frame_loop(player_arc: Arc<Mutex<Option<DirPlayer>>>) {
   }
 }
 
-pub async fn player_trigger_breakpoint(breakpoint: Breakpoint, script_ref: CastMemberRef, handler_ref: ScriptHandlerRef, bytecode: Bytecode) {
+pub async fn player_trigger_breakpoint(breakpoint: Breakpoint, script_ref: CastMemberRef, handler_ref: ScriptHandlerRef, bytecode_index: usize) {
   let (future, completer) = ManualFuture::new();
   let breakpoint_ctx = BreakpointContext {
     breakpoint,
     script_ref,
     handler_ref,
-    bytecode,
+    bytecode_index,
     completer,
   };
   reserve_player_mut(|player| {

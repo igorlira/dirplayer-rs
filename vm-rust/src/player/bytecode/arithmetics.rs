@@ -1,11 +1,11 @@
-use crate::{director::{chunks::handler::Bytecode, lingo::datum::{Datum, DatumType}}, player::{datum_formatting::format_datum, datum_operations::{add_datums, subtract_datums}, reserve_player_mut, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError}};
+use crate::{director::lingo::datum::{Datum, DatumType}, player::{datum_formatting::format_datum, datum_operations::{add_datums, subtract_datums}, reserve_player_mut, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
 pub struct ArithmeticsBytecodeHandler { }
 
 impl ArithmeticsBytecodeHandler {
-  pub fn add(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn add(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -26,7 +26,7 @@ impl ArithmeticsBytecodeHandler {
     })
   }
 
-  pub fn sub(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn sub(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -61,7 +61,7 @@ impl ArithmeticsBytecodeHandler {
     }
   }
 
-  pub fn mod_handler(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn mod_handler(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -120,7 +120,7 @@ impl ArithmeticsBytecodeHandler {
     })
   }
 
-  pub fn div(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn div(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -162,7 +162,7 @@ impl ArithmeticsBytecodeHandler {
     })
   }
 
-  pub fn mul(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn mul(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left_ref, right_ref) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -222,7 +222,7 @@ impl ArithmeticsBytecodeHandler {
     })
   }
 
-  pub fn inv(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn inv(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let value_id = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();

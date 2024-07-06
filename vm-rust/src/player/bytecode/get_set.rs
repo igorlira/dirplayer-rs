@@ -32,14 +32,14 @@ impl GetSetUtils {
 }
 
 impl GetSetBytecodeHandler {
-  pub fn get_prop(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
     let player = player_opt.as_mut().unwrap();
     let receiver ={
       let scope = player.scopes.get(ctx.scope_ref).unwrap();
       scope.receiver.clone()
     };
-    let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().clone();
+    let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap().clone();
     
     if let Some(instance_ref) = receiver {
       let result = script_get_prop(player, &instance_ref, &prop_name)?;
@@ -52,14 +52,14 @@ impl GetSetBytecodeHandler {
     }
   }
 
-  pub fn set_prop(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn set_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (value_ref, receiver) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         let value_red = scope.stack.pop().unwrap();
         (value_red, scope.receiver.clone())
       };
-      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
       
       match receiver {
         Some(instance_ref) => {
@@ -74,25 +74,25 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub async fn set_obj_prop(bytecode: Bytecode, ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub async fn set_obj_prop(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     let (value, obj_datum_ref, prop_name) = reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let value = scope.stack.pop().unwrap();
       let obj_datum_ref = scope.stack.pop().unwrap();
-      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().to_owned();
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(&ctx).obj as u16).unwrap().to_owned();
       Ok((value, obj_datum_ref, prop_name))
     })?;
     player_set_obj_prop(&obj_datum_ref, &prop_name, &value).await?;
     Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
   }
 
-  pub fn get_obj_prop(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get_obj_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     let obj_datum_ref = reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       Ok(scope.stack.pop().unwrap())
     })?;
     reserve_player_mut(|player| {
-      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
       let result_ref = get_obj_prop(player, &obj_datum_ref, &prop_name.to_owned())?;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_ref);
@@ -100,9 +100,9 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn get_movie_prop(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get_movie_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
       let value = player.get_movie_prop(&prop_name)?;
       let result_id = player.alloc_datum(value);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -111,7 +111,7 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn set(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn set(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let property_id_ref = scope.stack.pop().unwrap();
@@ -119,7 +119,7 @@ impl GetSetBytecodeHandler {
       let value_ref = scope.stack.pop().unwrap();
       let value = player.get_datum(&value_ref).clone();
 
-      let property_type = bytecode.obj;
+      let property_type = player.get_ctx_current_bytecode(ctx).obj;
       match property_type {
         0x00 => {
           if property_id <= 0x0b { 
@@ -142,10 +142,10 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn get_global(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get_global(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let value_ref = {
-        let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
+        let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
         player.globals.get(prop_name).unwrap_or(&VOID_DATUM_REF).clone()
       };
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -154,17 +154,17 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn set_global(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn set_global(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let value_ref = scope.stack.pop().unwrap();
-      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
       player.globals.insert(prop_name.to_owned(), value_ref);
       Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
     })
   }
 
-  pub fn get_field(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get_field(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let cast_id_ref = if player.movie.dir_version >= 500 {
         let cast_id_ref = {
@@ -195,9 +195,9 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn get_local(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
-      let name_int = bytecode.obj as u32 / get_current_variable_multiplier(player, &ctx);
+      let name_int = player.get_ctx_current_bytecode(ctx).obj as u32 / get_current_variable_multiplier(player, &ctx);
       let (_, handler) = get_current_handler_def(&player, &ctx).unwrap();
       let name_id = handler.local_name_ids[name_int as usize];
       
@@ -212,9 +212,9 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn set_local(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn set_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
-      let name_int = bytecode.obj as u32 / get_current_variable_multiplier(player, &ctx);
+      let name_int = player.get_ctx_current_bytecode(ctx).obj as u32 / get_current_variable_multiplier(player, &ctx);
       let (_, handler) = get_current_handler_def(&player, &ctx).unwrap();
       let name_id = handler.local_name_ids[name_int as usize];
       let var_name = get_name(&player, &ctx, name_id).unwrap().to_owned();
@@ -230,9 +230,9 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn get_param(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
-    let param_number = bytecode.obj as usize;
+  pub fn get_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
+      let param_number = player.get_ctx_current_bytecode(ctx).obj as usize;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let result = scope.args.get(param_number).unwrap_or(&VOID_DATUM_REF).clone();
       scope.stack.push(result);
@@ -240,11 +240,12 @@ impl GetSetBytecodeHandler {
     Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
   }
 
-  pub fn set_param(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn set_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
+      let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as usize;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let arg_count = scope.args.len();
-      let arg_index = bytecode.obj as usize;
+      let arg_index = bytecode_obj;
       let value_ref = scope.stack.pop().unwrap();
 
       if arg_index < scope.args.len() {
@@ -258,9 +259,9 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn set_movie_prop(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn set_movie_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().to_owned();
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let value_ref = scope.stack.pop().unwrap();
       let value = player.get_datum(&value_ref).clone();
@@ -269,9 +270,9 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn the_built_in(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn the_built_in(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
       let result_id = GetSetUtils::get_the_built_in_prop(player, ctx, &prop_name.clone())?;
 
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -281,13 +282,13 @@ impl GetSetBytecodeHandler {
     })
   }
   
-  pub fn get_chained_prop(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get_chained_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let obj_ref = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
-      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap();
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
       let result_ref = get_obj_prop(player, &obj_ref, &prop_name.to_owned())?;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_ref);
@@ -295,14 +296,14 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn get(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let prop_id = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
       let prop_id = player.get_datum(&prop_id).int_value()?;
-      let prop_type = bytecode.obj;
+      let prop_type = player.get_ctx_current_bytecode(ctx).obj;
       let max_movie_prop_id = *MOVIE_PROP_NAMES.keys().max().unwrap();
 
       let result = if prop_type == 0 && prop_id <= max_movie_prop_id as i32 {
@@ -365,9 +366,9 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub fn get_top_level_prop(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get_top_level_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = get_name(&player, &ctx, bytecode.obj as u16).unwrap().clone();
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap().clone();
       let result = match prop_name.as_str() {
         "_player" => Ok(Datum::PlayerRef),
         "_movie" => Ok(Datum::MovieRef),

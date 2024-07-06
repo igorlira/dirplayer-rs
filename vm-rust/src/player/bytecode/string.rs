@@ -34,7 +34,7 @@ impl StringBytecodeHandler {
     }
   }
 
-  pub fn contains_str(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn contains_str(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (search_in, search_str) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -75,7 +75,7 @@ impl StringBytecodeHandler {
     })
   }
 
-  pub fn join_pad_str(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn join_pad_str(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left_id, right_id) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -98,7 +98,7 @@ impl StringBytecodeHandler {
     })
   }
 
-  pub fn join_str(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn join_str(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left_id, right_id) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -121,8 +121,9 @@ impl StringBytecodeHandler {
     })
   }
 
-  pub fn put(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn put(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
+      let bytecode = player.get_ctx_current_bytecode(ctx);
       let put_type = PutType::from(((bytecode.obj >> 4) & 0xF) as u8); 
       let var_type = (bytecode.obj & 0xF) as u32;  
       let (id_ref, cast_id_ref) = read_context_var_args(player, var_type, ctx.scope_ref);
@@ -225,7 +226,7 @@ impl StringBytecodeHandler {
     }
   }
 
-  pub fn get_chunk(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn get_chunk(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let string = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -243,10 +244,11 @@ impl StringBytecodeHandler {
     })
   }
 
-  pub fn delete_chunk(bytecode: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn delete_chunk(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
-      let (id_ref, cast_id_ref) = read_context_var_args(player, bytecode.obj as u32, ctx.scope_ref);
-      let string_ref = player_get_context_var(player, &id_ref, cast_id_ref.as_ref(), bytecode.obj as u32, ctx)?;
+      let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj;
+      let (id_ref, cast_id_ref) = read_context_var_args(player, bytecode_obj as u32, ctx.scope_ref);
+      let string_ref = player_get_context_var(player, &id_ref, cast_id_ref.as_ref(), bytecode_obj as u32, ctx)?;
       // let string = player.get_datum(string_ref);
       let chunk_expr = Self::read_chunk_ref(player, ctx)?;
 
@@ -256,7 +258,7 @@ impl StringBytecodeHandler {
     })
   }
 
-  pub fn contains_0str(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn contains_0str(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (search_str_ref, search_in_ref) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();

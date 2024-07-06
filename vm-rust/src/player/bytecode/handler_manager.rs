@@ -1,10 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use crate::{
-    director::{
-        chunks::handler::Bytecode,
-        lingo::{constants::get_opcode_name, opcode::OpCode},
-    },
+    director::lingo::{constants::get_opcode_name, opcode::OpCode},
     player::{
         allocator::player_run_allocator_cycle, bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
@@ -21,12 +18,9 @@ pub struct BytecodeHandlerContext {
     // pub player: RefCell<&'a DirPlayer>,
 }
 pub type BytecodeHandlerFunctionSync =
-    fn(&Bytecode, &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError>;
+    fn(&BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError>;
 pub type BytecodeHandlerFunctionAsync = Box<
-    dyn Fn(
-        Bytecode,
-        BytecodeHandlerContext,
-    )
+    dyn Fn(BytecodeHandlerContext)
         -> Pin<Box<dyn Future<Output = Result<HandlerExecutionResultContext, ScriptError>>>>,
 >;
 pub struct StaticBytecodeHandlerManager {}
@@ -95,20 +89,20 @@ impl StaticBytecodeHandlerManager {
     }
     pub fn get_async_handler(&self, opcode: &OpCode) -> Option<BytecodeHandlerFunctionAsync> {
         match opcode {
-            OpCode::NewObj => Some(Box::new(|a, b| {
-                Box::pin(StackBytecodeHandler::new_obj(a, b))
+            OpCode::NewObj => Some(Box::new(|a| {
+                Box::pin(StackBytecodeHandler::new_obj(a))
             })),
-            OpCode::ExtCall => Some(Box::new(|a, b| {
-                Box::pin(FlowControlBytecodeHandler::ext_call(a, b))
+            OpCode::ExtCall => Some(Box::new(|a| {
+                Box::pin(FlowControlBytecodeHandler::ext_call(a))
             })),
-            OpCode::ObjCall => Some(Box::new(|a, b| {
-                Box::pin(FlowControlBytecodeHandler::obj_call(a, b))
+            OpCode::ObjCall => Some(Box::new(|a| {
+                Box::pin(FlowControlBytecodeHandler::obj_call(a))
             })),
-            OpCode::LocalCall => Some(Box::new(|a, b| {
-                Box::pin(FlowControlBytecodeHandler::local_call(a, b))
+            OpCode::LocalCall => Some(Box::new(|a| {
+                Box::pin(FlowControlBytecodeHandler::local_call(a))
             })),
-            OpCode::SetObjProp => Some(Box::new(|a, b| {
-                Box::pin(GetSetBytecodeHandler::set_obj_prop(a, b))
+            OpCode::SetObjProp => Some(Box::new(|a| {
+                Box::pin(GetSetBytecodeHandler::set_obj_prop(a))
             })),
             _ => None,
         }
@@ -116,33 +110,35 @@ impl StaticBytecodeHandlerManager {
 }
 
 pub async fn player_execute_bytecode<'a>(
-    // handler_manager: &'a BytecodeHandlerManager<'a>,
-    // player: RefCell<&'a DirPlayer<'a>>,
-    // player: &mut DirPlayer,
-    bytecode: &Bytecode,
     ctx: &BytecodeHandlerContext,
 ) -> Result<HandlerExecutionResultContext, ScriptError> {
-    let (sync_opt, async_opt) = {
+    let (sync_opt, async_opt, opcode) = {
         let player_opt = PLAYER_LOCK.try_lock().unwrap();
         let player = player_opt.as_ref().unwrap();
+        let scope = player.scopes.get(ctx.scope_ref).unwrap();
+        let script_member_ref = &scope.script_ref;
+        let handler_name_id = scope.handler_name_id;
+        let bytecode_index = scope.bytecode_index;
+
         let handler_manager = &player.bytecode_handler_manager;
+        let bytecode = player.get_bytecode_ref(script_member_ref, handler_name_id, bytecode_index);
 
         let sync_handler_opt = handler_manager.get_sync_handler(&bytecode.opcode);
         let async_handler_opt = handler_manager.get_async_handler(&bytecode.opcode);
 
-        (sync_handler_opt, async_handler_opt)
+        (sync_handler_opt, async_handler_opt, bytecode.opcode)
     };
 
     let result = if let Some(sync_handler) = sync_opt {
-        sync_handler(bytecode, ctx)
+        sync_handler(ctx)
     } else if let Some(async_handler) = async_opt {
-        async_handler(bytecode.to_owned(), ctx.to_owned()).await
+        async_handler(ctx.to_owned()).await
     } else {
         return Err(ScriptError::new(
             format_args!(
                 "No handler for opcode {} ({:#04x})",
-                get_opcode_name(&bytecode.opcode),
-                num::ToPrimitive::to_u16(&bytecode.opcode).unwrap()
+                get_opcode_name(&opcode),
+                num::ToPrimitive::to_u16(&opcode).unwrap()
             )
             .to_string(),
         ))

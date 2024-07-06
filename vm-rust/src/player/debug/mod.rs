@@ -1,6 +1,6 @@
 use manual_future::ManualFutureCompleter;
 
-use crate::{director::chunks::handler::Bytecode, js_api::JsApi};
+use crate::js_api::JsApi;
 
 use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef};
 
@@ -15,7 +15,7 @@ pub struct BreakpointContext {
   pub breakpoint: Breakpoint,
   pub script_ref: CastMemberRef,
   pub handler_ref: ScriptHandlerRef,
-  pub bytecode: Bytecode,
+  pub bytecode_index: usize,
   pub completer: ManualFutureCompleter<()>,
 }
 

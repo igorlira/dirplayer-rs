@@ -10,6 +10,7 @@ pub struct Scope {
   pub script_ref: CastMemberRef,
   pub receiver: Option<ScriptInstanceRef>,
   pub handler_ref: ScriptHandlerRef,
+  pub handler_name_id: u16,
   pub args: Vec<DatumRef>,
   pub bytecode_index: usize,
   pub locals: HashMap<String, DatumRef>,
@@ -33,6 +34,7 @@ impl Scope {
     script_ref: CastMemberRef, 
     receiver: Option<ScriptInstanceRef>, 
     handler_ref: ScriptHandlerRef, 
+    handler_name_id: u16,
     args: Vec<DatumRef>
   ) -> Scope {
     Scope {
@@ -40,6 +42,7 @@ impl Scope {
       script_ref,
       receiver,
       handler_ref,
+      handler_name_id,
       args,
       bytecode_index: 0,
       locals: HashMap::new(),

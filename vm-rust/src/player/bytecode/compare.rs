@@ -1,13 +1,13 @@
 use num::ToPrimitive;
 
-use crate::{director::{chunks::handler::Bytecode, lingo::datum::{datum_bool, Datum}}, player::{compare::{datum_equals, datum_greater_than, datum_less_than}, reserve_player_mut, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{compare::{datum_equals, datum_greater_than, datum_less_than}, reserve_player_mut, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
 pub struct CompareBytecodeHandler { }
 
 impl CompareBytecodeHandler {
-  pub fn gt(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn gt(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -27,7 +27,7 @@ impl CompareBytecodeHandler {
     })
   }
 
-  pub fn lt(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn lt(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -47,7 +47,7 @@ impl CompareBytecodeHandler {
     })
   }
 
-  pub fn lt_eq(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn lt_eq(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -68,7 +68,7 @@ impl CompareBytecodeHandler {
     })
   }
 
-  pub fn gt_eq(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn gt_eq(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -90,7 +90,7 @@ impl CompareBytecodeHandler {
     })
   }
 
-  pub fn not(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn not(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let obj_id = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -110,7 +110,7 @@ impl CompareBytecodeHandler {
     })
   }
 
-  pub fn nt_eq(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn nt_eq(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -130,7 +130,7 @@ impl CompareBytecodeHandler {
     })
   }
 
-  pub fn and(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn and(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -151,7 +151,7 @@ impl CompareBytecodeHandler {
     })
   }
 
-  pub fn or(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn or(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -171,7 +171,7 @@ impl CompareBytecodeHandler {
     })
   }
 
-  pub fn eq(_: &Bytecode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn eq(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
