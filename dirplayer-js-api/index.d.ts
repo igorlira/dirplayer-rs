@@ -17,6 +17,7 @@ type JsBridgeBreakpoint = {
 type TVmCallbacks = {
   onMovieLoaded: Function,
   onCastListChanged: Function,
+  onCastLibNameChanged: (castLib: number, name: string) => void,
   onCastMemberListChanged: Function,
   onCastMemberChanged: (memberRef: ICastMemberRef, snapshot: MemberSnapshot) => void,
   onScoreChanged: Function,

@@ -11,6 +11,10 @@ export function onCastListChanged(castList) {
   vmCallbacks.onCastListChanged(castList)
 }
 
+export function onCastLibNameChanged(castId, name) {
+  vmCallbacks.onCastLibNameChanged(castId, name)
+}
+
 export function onCastMemberListChanged(castNumber, members) {
   vmCallbacks.onCastMemberListChanged(castNumber, members)
 }

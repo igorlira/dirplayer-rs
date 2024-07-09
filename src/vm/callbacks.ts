@@ -1,6 +1,6 @@
 import { ICastMemberRef, JsBridgeBreakpoint, OnScriptErrorData, registerVmCallbacks } from "dirplayer-js-api";
 import store from "../store";
-import { breakpointListChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, frameChanged, globalsChanged, movieLoaded, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
+import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, frameChanged, globalsChanged, movieLoaded, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import { OnMovieLoadedCallbackData, trigger_timeout } from 'vm-rust'
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
@@ -14,6 +14,9 @@ export function initVmCallbacks() {
     },
     onCastListChanged: (castList: string[]) => {
       store.dispatch(castListChanged(castList));
+    },
+    onCastLibNameChanged: (castNumber: number, name: string) => {
+      store.dispatch(castLibNameChanged({ castNumber, name }))
     },
     onCastMemberListChanged: (castNumber: number, members: any) => {
       store.dispatch(castMemberListChanged({ 

@@ -157,6 +157,7 @@ impl CastMemberRef {
 extern "C" {
   pub fn onMovieLoaded(test: OnMovieLoadedCallbackData);
   pub fn onCastListChanged(names: Array);
+  pub fn onCastLibNameChanged(cast_number: u32, name: &str);
   pub fn onCastMemberListChanged(cast_number: u32, members: js_sys::Object);
   pub fn onCastMemberChanged(member_ref: JsValue, member: js_sys::Object);
   pub fn onScoreChanged(snapshot: js_sys::Object);
@@ -213,6 +214,18 @@ impl JsApi {
     onMovieLoaded(OnMovieLoadedCallbackData {
       version: dir_file.version,
       test_val: test,
+    });
+  }
+
+  pub fn dispatch_cast_name_changed(cast_number: u32) {
+    async_std::task::spawn_local(async move {
+      let player_mutex = PLAYER_LOCK.read().await;
+      let player = player_mutex.as_ref().unwrap();
+      let cast = player.movie.cast_manager.get_cast(cast_number).unwrap();
+      onCastLibNameChanged(
+        cast_number,
+        &cast.name,
+      );
     });
   }
 

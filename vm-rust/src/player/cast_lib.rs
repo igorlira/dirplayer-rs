@@ -106,7 +106,7 @@ impl CastLib {
   fn set_name(&mut self, name: String) {
     if name != self.name {
       self.name = name;
-      JsApi::dispatch_cast_list_changed();
+      JsApi::dispatch_cast_name_changed(self.number);
     }
   }
 
