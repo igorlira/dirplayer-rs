@@ -135,7 +135,7 @@ pub fn trigger_alert_hook() {
 #[wasm_bindgen]
 pub fn subscribe_to_channel_names() {
   spawn_local(async {
-    let mut player_mutex = PLAYER_LOCK.lock().await;
+    let mut player_mutex = PLAYER_LOCK.write().await;
     let player = player_mutex.as_mut().unwrap();
 
     player.is_subscribed_to_channel_names = true;
@@ -148,7 +148,7 @@ pub fn subscribe_to_channel_names() {
 #[wasm_bindgen]
 pub fn unsubscribe_from_channel_names() {
   spawn_local(async {
-    let mut player_mutex = PLAYER_LOCK.lock().await;
+    let mut player_mutex = PLAYER_LOCK.write().await;
     let player = player_mutex.as_mut().unwrap();
 
     player.is_subscribed_to_channel_names = false;

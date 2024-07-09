@@ -16,7 +16,7 @@ impl FlowControlBytecodeHandler {
   pub async fn ext_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     // let script = get_current_script(player.to_owned(), ctx.to_owned());
     let (name, arg_ref_list, is_no_ret) = {
-      let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+      let mut player_opt = PLAYER_LOCK.try_write().unwrap();
       let player = player_opt.as_mut().unwrap();
       let player_cell = &player;
 

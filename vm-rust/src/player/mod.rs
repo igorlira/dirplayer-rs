@@ -36,7 +36,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use allocator::{DatumAllocator, DatumAllocatorEvent, DatumAllocatorTrait, ResetableAllocator};
 use datum_ref::{DatumRef, VOID_DATUM_REF};
-use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
+use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::{Mutex, RwLock}, task::spawn_local};
 use cast_manager::CastPreloadReason;
 use chrono::Local;
 use manual_future::{ManualFutureCompleter, ManualFuture};
@@ -193,7 +193,7 @@ impl DirPlayer {
         reserve_player_mut(|player| player.on_script_error(&err));
         return;
       }
-      run_frame_loop(PLAYER_LOCK.clone()).await;
+      run_frame_loop().await;
     });
   }
 
@@ -409,7 +409,7 @@ impl DirPlayer {
 }
 
 pub fn player_alloc_datum(datum: Datum) -> DatumRef {
-  let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+  let mut player_opt = PLAYER_LOCK.try_write().unwrap();
   let player = player_opt.as_mut().unwrap();
   player.alloc_datum(datum)
 }
@@ -449,7 +449,7 @@ pub fn player_handle_scope_return(scope: &Scope) {
 
 async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
   let receiver_handlers: Vec<ScriptHandlerRef> = {
-    let player_opt = PLAYER_LOCK.try_lock().unwrap();
+    let player_opt = PLAYER_LOCK.try_read().unwrap();
     let player = player_opt.as_ref().unwrap();
   
     let receiver_refs = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals());
@@ -479,13 +479,13 @@ async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>)
 }
 
 pub fn reserve_player_ref<T, F>(callback: F) -> T where F: FnOnce(&DirPlayer) -> T {
-  let player_opt = PLAYER_LOCK.try_lock().unwrap();
+  let player_opt = PLAYER_LOCK.try_read().unwrap();
   let player = player_opt.as_ref().unwrap();
   callback(player)
 }
 
 pub fn reserve_player_mut<T, F>(callback: F) -> T where F: FnOnce(&mut DirPlayer) -> T {
-  let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+  let mut player_opt = PLAYER_LOCK.try_write().unwrap();
   let player = player_opt.as_mut().unwrap();
   callback(player)
 }
@@ -618,10 +618,11 @@ pub async fn player_call_script_handler_raw_args(
   return Ok(scope);
 }
 
-pub async fn run_frame_loop(player_arc: Arc<Mutex<Option<DirPlayer>>>) {
+pub async fn run_frame_loop() {
+  let player_arc = &PLAYER_LOCK;
   let mut fps: u32;
   {
-    let player_opt = player_arc.try_lock().unwrap();
+    let player_opt = player_arc.try_read().unwrap();
     let player = player_opt.as_ref().unwrap();
     if !player.is_playing {
       return;
@@ -659,7 +660,7 @@ pub async fn run_frame_loop(player_arc: Arc<Mutex<Option<DirPlayer>>>) {
       return;
     }
     if new_frame > 1 && prev_frame <= 1 {
-      let mut player = player_arc.lock().await;
+      let mut player = player_arc.write().await;
       let player = player.as_mut().unwrap();
       player.movie.cast_manager.preload_casts(CastPreloadReason::AfterFrameOne, &mut player.net_manager, &mut player.bitmap_manager).await;
     }
@@ -699,7 +700,7 @@ pub async fn player_trigger_breakpoint(breakpoint: Breakpoint, script_ref: CastM
 }
 
 pub async fn player_is_playing() -> bool {
-  let player_opt = PLAYER_LOCK.lock().await;
+  let player_opt = PLAYER_LOCK.read().await;
   let player = player_opt.as_ref().unwrap();
   player.is_playing
 }
@@ -708,7 +709,7 @@ static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
 static mut PLAYER_EVENT_TX: Option<Sender<PlayerVMEvent>> = None;
 static mut ALLOCATOR_TX: Option<Sender<DatumAllocatorEvent>> = None;
 lazy_static! {
-  pub static ref PLAYER_LOCK: Arc<Mutex<Option<DirPlayer>>> = Arc::new(Mutex::new(None));
+  pub static ref PLAYER_LOCK: RwLock<Option<DirPlayer>> = RwLock::new(None);
   pub static ref PLAYER_SEMAPHONE: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 }
 
@@ -722,7 +723,7 @@ pub fn init_player() {
     ALLOCATOR_TX = Some(allocator_tx.clone());
   }
 
-  let mut player = PLAYER_LOCK.try_lock().unwrap();
+  let mut player = PLAYER_LOCK.try_write().unwrap();
   *player = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));
 
   async_std::task::spawn_local(async move {

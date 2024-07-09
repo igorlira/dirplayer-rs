@@ -217,9 +217,9 @@ impl JsApi {
   }
 
   pub fn dispatch_cast_list_changed() {
-    let player_arc = Arc::clone(&PLAYER_LOCK);
+    let player_arc = &PLAYER_LOCK;
     async_std::task::spawn_local(async move {
-      let player_mutex = player_arc.lock().await;
+      let player_mutex = player_arc.read().await;
       let player = player_mutex.as_ref().unwrap();
       let names = player
         .movie
@@ -239,9 +239,9 @@ impl JsApi {
   }
 
   pub fn dispatch_cast_member_list_changed(cast_number: u32) {
-    let player_arc = Arc::clone(&PLAYER_LOCK);
+    let player_arc = &PLAYER_LOCK;
     async_std::task::spawn_local(async move {
-      let player_mutex = player_arc.lock().await;
+      let player_mutex = player_arc.read().await;
       let player = player_mutex.as_ref().unwrap();
       let cast = player.movie.cast_manager.get_cast(cast_number).unwrap();
       let members_iter = cast.members.values().into_iter();
@@ -257,9 +257,9 @@ impl JsApi {
   }
 
   pub fn dispatch_cast_member_changed(member_ref: CastMemberRef) {
-    let player_arc = Arc::clone(&PLAYER_LOCK);
+    let player_arc = &PLAYER_LOCK;
     async_std::task::spawn_local(async move {
-      let player_mutex = player_arc.lock().await;
+      let player_mutex = player_arc.read().await;
       let player = player_mutex.as_ref().unwrap();
       let subscribed_members = &player.subscribed_member_refs;
       if !subscribed_members.contains(&member_ref) {
@@ -275,9 +275,9 @@ impl JsApi {
   }
 
   pub fn on_cast_member_name_changed(slot_number: u32) {
-    let player_arc = Arc::clone(&PLAYER_LOCK);
+    let player_arc = &PLAYER_LOCK;
     async_std::task::spawn_local(async move {
-      let player_mutex = player_arc.lock().await;
+      let player_mutex = player_arc.read().await;
       let player = player_mutex.as_ref().unwrap();
 
       if player.is_subscribed_to_channel_names {
@@ -295,9 +295,8 @@ impl JsApi {
   }
 
   pub fn dispatch_score_changed() {
-    let player_arc = Arc::clone(&PLAYER_LOCK);
     async_std::task::spawn_local(async move {
-      let player_mutex = player_arc.lock().await;
+      let player_mutex = PLAYER_LOCK.read().await;
       let player = player_mutex.as_ref().unwrap();
 
       let snapshot = Self::get_score_snapshot(player, &player.movie.score);
@@ -309,7 +308,7 @@ impl JsApi {
     async_std::task::spawn_local(async move {
       let selected_channel = RENDERER_LOCK.with(|x| x.borrow().as_ref().and_then(|y| y.debug_selected_channel_num));
       if selected_channel.is_some() && selected_channel.unwrap() == channel {
-        let player_opt = PLAYER_LOCK.lock().await;
+        let player_opt = PLAYER_LOCK.read().await;
         let player = player_opt.as_ref().unwrap();
         let snapshot = Self::get_channel_snapshot(player, &channel);
         onChannelChanged(channel, snapshot.to_js_object());
@@ -406,7 +405,7 @@ impl JsApi {
 
   pub fn dispatch_channel_name_changed(channel: i16) {
     async_std::task::spawn_local(async move {
-      let player_opt = PLAYER_LOCK.lock().await;
+      let player_opt = PLAYER_LOCK.read().await;
       let player = player_opt.as_ref().unwrap();
       
       if player.is_subscribed_to_channel_names {
@@ -575,7 +574,7 @@ impl JsApi {
 
   pub fn dispatch_breakpoint_list_changed() {
     async_std::task::spawn_local(async move {
-      let player_opt = PLAYER_LOCK.lock().await;
+      let player_opt = PLAYER_LOCK.read().await;
       let player = player_opt.as_ref().unwrap();
       let breakpoints = player
         .breakpoint_manager

@@ -117,7 +117,7 @@ pub async fn player_execute_bytecode<'a>(
     ctx: &BytecodeHandlerContext,
 ) -> Result<HandlerExecutionResultContext, ScriptError> {
     let (sync_opt, async_opt, opcode) = {
-        let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+        let mut player_opt = PLAYER_LOCK.try_write().unwrap();
         {
             let mut_player = player_opt.as_mut().unwrap();
             mut_player.allocator.run_cycle();

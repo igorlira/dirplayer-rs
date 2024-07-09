@@ -556,7 +556,7 @@ async fn run_draw_loop() {
     loop {
         let draw_fps = 24;
         {
-            let mut player_opt = PLAYER_LOCK.lock().await;
+            let mut player_opt = PLAYER_LOCK.write().await;
             let mut player = player_opt.as_mut().unwrap();
             with_canvas_renderer_mut(|renderer| {
                 let renderer = renderer.as_mut().unwrap();

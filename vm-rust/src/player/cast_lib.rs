@@ -250,7 +250,7 @@ impl CastMemberRef {
 }
 
 pub async fn player_cast_lib_set_prop(cast_lib: u32, prop_name: &String, value: Datum) -> Result<(), ScriptError> {
-  let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+  let mut player_opt = PLAYER_LOCK.try_write().unwrap();
   let player = player_opt.as_mut().unwrap();
 
   let cast_lib = player.movie.cast_manager.get_cast_mut(cast_lib as u32);

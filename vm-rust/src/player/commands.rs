@@ -147,27 +147,27 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
     // TODO
     match command {
         PlayerVMCommand::SetBasePath(path) => {
-            let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
             let player = player_opt.as_mut().unwrap();
             player.net_manager.set_base_path(Url::parse(&path).unwrap());
         }
         PlayerVMCommand::Play => {
-            let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
             let player = player_opt.as_mut().unwrap();
             player.play();
         }
         PlayerVMCommand::Stop => {
-            let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
             let player = player_opt.as_mut().unwrap();
             player.stop();
         }
         PlayerVMCommand::Reset => {
-            let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
             let player = player_opt.as_mut().unwrap();
             player.reset();
         }
         PlayerVMCommand::LoadMovieFromFile(file_path) => {
-            let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
             let player = player_opt.as_mut().unwrap();
             player.load_movie_from_file(&file_path).await;
         }
@@ -252,7 +252,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             }
         }
         PlayerVMCommand::PrintMemberBitmapHex(member_ref) => {
-            let player_opt = PLAYER_LOCK.try_lock().unwrap();
+            let player_opt = PLAYER_LOCK.try_read().unwrap();
             let player = player_opt.as_ref().unwrap();
             let member = player
                 .movie

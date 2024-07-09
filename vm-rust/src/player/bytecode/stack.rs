@@ -61,7 +61,7 @@ impl StackBytecodeHandler {
   }
 
   pub fn push_symb(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
-    let mut player_opt = PLAYER_LOCK.try_lock().unwrap();
+    let mut player_opt = PLAYER_LOCK.try_write().unwrap();
     let player = player_opt.as_mut().unwrap();
     let name_id = player.get_ctx_current_bytecode(ctx).obj;
     let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
