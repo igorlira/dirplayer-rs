@@ -192,15 +192,17 @@ impl DatumAllocatorTrait for DatumAllocator {
   }
 
   fn on_datum_ref_added(&mut self, id: DatumId) {
-    let entry = self.datums.get_mut(&id).unwrap();
-    entry.ref_count += 1;
+    if let Some(entry) = self.datums.get_mut(&id) {
+      entry.ref_count += 1;
+    }
   }
 
   fn on_datum_ref_dropped(&mut self, id: DatumId) {
-    let entry = self.datums.get_mut(&id).unwrap();
-    entry.ref_count -= 1;
-    if entry.ref_count <= 0 {
-      self.dealloc_datum(id);
+    if let Some(entry) = self.datums.get_mut(&id) {
+      entry.ref_count -= 1;
+      if entry.ref_count <= 0 {
+        self.dealloc_datum(id);
+      }
     }
   }
 }
@@ -230,15 +232,17 @@ impl ScriptInstanceAllocatorTrait for DatumAllocator {
   }
 
   fn on_script_instance_ref_added(&mut self, id: ScriptInstanceId) {
-    let entry = self.script_instances.get_mut(&id).unwrap();
-    entry.ref_count += 1;
+    if let Some(entry) = self.script_instances.get_mut(&id) {
+      entry.ref_count += 1;
+    }
   }
 
   fn on_script_instance_ref_dropped(&mut self, id: ScriptInstanceId) {
-    let entry = self.script_instances.get_mut(&id).unwrap();
-    entry.ref_count -= 1;
-    if entry.ref_count <= 0 {
-      self.dealloc_script_instance(id);
+    if let Some(entry) = self.script_instances.get_mut(&id) {
+      entry.ref_count -= 1;
+      if entry.ref_count <= 0 {
+        self.dealloc_script_instance(id);
+      }
     }
   }
 }
