@@ -213,7 +213,22 @@ pub fn sprite_get_prop(
       let instance_ids = sprite.map_or(vec![], |x| x.script_instance_list.clone());
       let instance_ids = instance_ids.iter().map(|x| player.alloc_datum(Datum::ScriptInstanceRef(x.clone()))).collect();
       Ok(Datum::List(DatumType::List, instance_ids, false))
-    }
+    },
+    "castNum" => Ok(
+      Datum::Int(
+        sprite.map_or(
+          0, 
+          |x| {
+            x.member
+              .as_ref()
+              .map_or(
+                0, 
+                |y| CastMemberRefHandlers::get_cast_slot_number(y.cast_lib as u32, y.cast_member as u32) as i32
+              )
+          }
+        )
+      )
+    ),
     _ => Err(ScriptError::new(format!("Cannot get prop {} of sprite", prop_name))),
   }
 }
