@@ -8,6 +8,9 @@ impl IntDatumHandlers {
       "ilk" => {
         Ok(player.alloc_datum(Datum::Symbol("integer".to_string())))
       },
+      "integer" => {
+        Ok(player.alloc_datum(Datum::Int(1)))
+      },
       _ => {
         Err(ScriptError::new(format!("Cannot get int property {}", prop)))
       },
