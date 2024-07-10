@@ -214,7 +214,7 @@ impl StringChunkHandlers {
 
   pub fn set_prop(_: &mut DirPlayer, _: &DatumRef, prop: &String, _value_ref: &DatumRef) -> Result<(), ScriptError> {
     match prop.as_str() {
-      "font" | "fontStyle" => {
+      "font" | "fontStyle" | "color" => {
         // TODO
       },
       _ => {
