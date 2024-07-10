@@ -71,6 +71,22 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
         _ => Err(ScriptError::new(format!("Invalid operands for add_datums: {:?}, {:?}", a, b))),
       }
     },
+    (Datum::String(left), Datum::Int(right)) => {
+      let left_float = left.parse::<f32>().unwrap_or(0.0);
+      Ok(Datum::Float(left_float + (*right as f32)))
+    }
+    (Datum::String(left), Datum::Float(right)) => {
+      let left_float = left.parse::<f32>().unwrap_or(0.0);
+      Ok(Datum::Float(left_float + right))
+    }
+    (Datum::Float(left), Datum::String(right)) => {
+      let right_float = right.parse::<f32>().unwrap_or(0.0);
+      Ok(Datum::Float(left + right_float))
+    }
+    (Datum::Int(left), Datum::String(right)) => {
+      let right_float = right.parse::<f32>().unwrap_or(0.0);
+      Ok(Datum::Float((*left as f32) + right_float))
+    }
     _ => Err(ScriptError::new(format!("Invalid operands for add_datums: {}, {}", left.type_str(), right.type_str()))),
   }
 }
@@ -124,10 +140,22 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
         _ => Err(ScriptError::new(format!("Invalid operands for subtract_datums: {:?}, {:?}", a, b))),
       }
     },
-    (Datum::String(_), Datum::Int(_)) => {
-      // returns junk data
-      Ok(Datum::Int(0xFFFF))
-    },
+    (Datum::String(left), Datum::Int(right)) => {
+      let left_float = left.parse::<f32>().unwrap_or(0.0);
+      Ok(Datum::Float(left_float - (*right as f32)))
+    }
+    (Datum::String(left), Datum::Float(right)) => {
+      let left_float = left.parse::<f32>().unwrap_or(0.0);
+      Ok(Datum::Float(left_float - right))
+    }
+    (Datum::Float(left), Datum::String(right)) => {
+      let right_float = right.parse::<f32>().unwrap_or(0.0);
+      Ok(Datum::Float(left - right_float))
+    }
+    (Datum::Int(left), Datum::String(right)) => {
+      let right_float = right.parse::<f32>().unwrap_or(0.0);
+      Ok(Datum::Float((*left as f32) - right_float))
+    }
     (left, Datum::Void) => Ok(left.clone()),
     _ => Err(ScriptError::new(format!("Invalid operands for subtract_datums: {}, {}", left.type_str(), right.type_str()))),
   }

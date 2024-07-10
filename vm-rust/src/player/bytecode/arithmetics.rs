@@ -144,6 +144,14 @@ impl ArithmeticsBytecodeHandler {
           let right = right.parse::<f32>().map_err(|_| ScriptError::new(format!("Cannot divide float by string: {}", right)))?;
           Datum::Float(left / right)
         }
+        (Datum::String(left), Datum::Int(right)) => {
+          let left_float = left.parse::<f32>().unwrap_or(0.0);
+          Datum::Float(left_float / (*right as f32))
+        }
+        (Datum::String(left), Datum::Float(right)) => {
+          let left_float = left.parse::<f32>().unwrap_or(0.0);
+          Datum::Float(left_float / right)
+        }
         (Datum::Void, _) => Datum::Int(0),
         _ => return Err(ScriptError::new(format!("Div operator only works with ints and floats (Provided: {} and {})", left.type_str(), right.type_str()))),
       };
@@ -188,6 +196,22 @@ impl ArithmeticsBytecodeHandler {
             ref_list.push(player.alloc_datum(item));
           }
           Datum::List(DatumType::List, ref_list, false)
+        }
+        (Datum::String(left), Datum::Int(right)) => {
+          let left_float = left.parse::<f32>().unwrap_or(0.0);
+          Datum::Float(left_float * (*right as f32))
+        }
+        (Datum::String(left), Datum::Float(right)) => {
+          let left_float = left.parse::<f32>().unwrap_or(0.0);
+          Datum::Float(left_float * right)
+        }
+        (Datum::Float(left), Datum::String(right)) => {
+          let right_float = right.parse::<f32>().unwrap_or(0.0);
+          Datum::Float(left * right_float)
+        }
+        (Datum::Int(left), Datum::String(right)) => {
+          let right_float = right.parse::<f32>().unwrap_or(0.0);
+          Datum::Float((*left as f32) * right_float)
         }
         _ => return Err(ScriptError::new(format!("Mul operator only works with ints and floats. Given: {}, {}", format_datum(&left_ref, player), format_datum(&right_ref, player)))),
       };
