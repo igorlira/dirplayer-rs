@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef, script_ref::ScriptInstanceRef, DatumRef, VOID_DATUM_REF};
+use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef, script_ref::ScriptInstanceRef, DatumRef};
 
 pub type ScopeRef = usize;
 
@@ -47,7 +47,7 @@ impl Scope {
       bytecode_index: 0,
       locals: HashMap::new(),
       loop_return_indices: vec![],
-      return_value: VOID_DATUM_REF.clone(),
+      return_value: DatumRef::Void,
       stack: vec![],
       passed: false,
     }

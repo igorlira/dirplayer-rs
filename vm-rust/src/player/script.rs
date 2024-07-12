@@ -7,7 +7,7 @@ use crate::director::{
 };
 
 use super::{
-    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, score::{sprite_get_prop, sprite_set_prop}, script_ref::ScriptInstanceRef, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF
+    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, score::{sprite_get_prop, sprite_set_prop}, script_ref::ScriptInstanceRef, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError
 };
 
 #[derive(Clone)]
@@ -35,7 +35,7 @@ impl ScriptInstance {
         let mut properties = HashMap::new();
         for name_id in script_def.chunk.property_name_ids.iter() {
             let name = lctx.names[*name_id as usize].clone();
-            properties.insert(name, VOID_DATUM_REF.clone());
+            properties.insert(name, DatumRef::Void);
         }
         ScriptInstance {
             instance_id,
@@ -85,7 +85,7 @@ pub fn script_get_prop_opt(
         if let Some(ancestor_id) = &script_instance.ancestor {
             Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())))
         } else {
-            Some(VOID_DATUM_REF.clone())
+            Some(DatumRef::Void)
         }
     } else {
         // Try to find the property on the current instance

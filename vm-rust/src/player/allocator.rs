@@ -1,20 +1,22 @@
+use std::{cell::UnsafeCell, rc::Rc};
+
 use async_std::channel::{Receiver, Sender};
 use nohash_hasher::IntMap;
 
 use crate::{console_warn, director::lingo::datum::Datum};
 
-use super::{datum_ref::{DatumId, DatumRef}, reserve_player_mut, reserve_player_ref, script::{ScriptInstance, ScriptInstanceId}, script_ref::ScriptInstanceRef, ScriptError, PLAYER_LOCK, VOID_DATUM_REF};
+use super::{datum_ref::{DatumId, DatumRef}, reserve_player_mut, reserve_player_ref, script::{ScriptInstance, ScriptInstanceId}, script_ref::ScriptInstanceRef, ScriptError};
 
 
 pub struct DatumRefEntry {
   pub id: DatumId,
-  pub ref_count: u32,
+  pub ref_count: Rc<UnsafeCell<u32>>,
   pub datum: Datum,
 }
 
 pub struct ScriptInstanceRefEntry {
   pub id: ScriptInstanceId,
-  pub ref_count: u32,
+  pub ref_count: Rc<UnsafeCell<u32>>,
   pub script_instance: ScriptInstance,
 }
 
@@ -26,7 +28,7 @@ pub trait DatumAllocatorTrait {
   fn alloc_datum(&mut self, datum: Datum) -> Result<DatumRef, ScriptError>;
   fn get_datum(&self, id: &DatumRef) -> &Datum;
   fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum;
-  fn on_datum_ref_added(&mut self, id: DatumId);
+  // fn on_datum_ref_added(&mut self, id: DatumId);
   fn on_datum_ref_dropped(&mut self, id: DatumId);
 }
 
@@ -35,7 +37,7 @@ pub trait ScriptInstanceAllocatorTrait {
   fn get_script_instance(&self, instance_ref: &ScriptInstanceRef) -> &ScriptInstance;
   fn get_script_instance_opt(&self, instance_ref: &ScriptInstanceRef) -> Option<&ScriptInstance>;
   fn get_script_instance_mut(&mut self, instance_ref: &ScriptInstanceRef) -> &mut ScriptInstance;
-  fn on_script_instance_ref_added(&mut self, id: ScriptInstanceId);
+  // fn on_script_instance_ref_added(&mut self, id: ScriptInstanceId);
   fn on_script_instance_ref_dropped(&mut self, id: ScriptInstanceId);
 }
 
@@ -130,42 +132,62 @@ impl DatumAllocator {
     self.script_instances.remove(&id);
   }
 
-  pub fn run_cycle(&mut self) {
-    for _ in 0..self.rx.len() {
-      let item = self.rx.try_recv().unwrap();
-      match item {
-        DatumAllocatorEvent::RefAdded(id) => {
-          self.on_datum_ref_added(id);
-        }
-        DatumAllocatorEvent::RefDropped(id) => {
-          self.on_datum_ref_dropped(id);
-        }
-        DatumAllocatorEvent::ScriptInstanceRefAdded(id) => {
-          self.on_script_instance_ref_added(id);
-        }
-        DatumAllocatorEvent::ScriptInstanceRefDropped(id) => {
-          self.on_script_instance_ref_dropped(id);
-        }
-      }
+  pub fn get_datum_ref(&self, id: DatumId) -> Option<DatumRef> {
+    if let Some(entry) = self.datums.get(&id) {
+      let ref_count = entry.ref_count.clone();
+      Some(DatumRef::from_id(id, ref_count.get()))
+    } else {
+      None
     }
   }
+
+  pub fn get_script_instance_ref(&self, id: ScriptInstanceId) -> Option<ScriptInstanceRef> {
+    if let Some(entry) = self.script_instances.get(&id) {
+      let ref_count = entry.ref_count.clone();
+      Some(ScriptInstanceRef::from_id(id, ref_count.get()))
+    } else {
+      None
+    }
+  }
+
+  // pub fn run_cycle(&mut self) {
+  //   for _ in 0..self.rx.len() {
+  //     let item = self.rx.try_recv().unwrap();
+  //     match item {
+  //       DatumAllocatorEvent::RefAdded(id) => {
+  //         self.on_datum_ref_added(id);
+  //       }
+  //       DatumAllocatorEvent::RefDropped(id) => {
+  //         self.on_datum_ref_dropped(id);
+  //       }
+  //       DatumAllocatorEvent::ScriptInstanceRefAdded(id) => {
+  //         self.on_script_instance_ref_added(id);
+  //       }
+  //       DatumAllocatorEvent::ScriptInstanceRefDropped(id) => {
+  //         self.on_script_instance_ref_dropped(id);
+  //       }
+  //     }
+  //   }
+  // }
 }
 
 impl DatumAllocatorTrait for DatumAllocator {
   fn alloc_datum(&mut self, datum: Datum) -> Result<DatumRef, ScriptError> {
     if datum.is_void() {
-      return Ok(VOID_DATUM_REF.clone());
+      return Ok(DatumRef::Void);
     }
     
     if let Some(id) = self.get_free_id() {
+      let ref_count_rc = Rc::new(UnsafeCell::<u32>::new(0));
+      let ref_count_ptr = ref_count_rc.get();
       let entry = DatumRefEntry {
         id,
-        ref_count: 0,
+        ref_count: ref_count_rc,
         datum,
       };
       self.datum_id_counter += 1;
       self.datums.insert(id, entry);
-      Ok(DatumRef::from_id(id))
+      Ok(DatumRef::from_id(id, ref_count_ptr))
     } else {
       Err(ScriptError::new("Failed to allocate datum".to_string()))
     }
@@ -191,18 +213,18 @@ impl DatumAllocatorTrait for DatumAllocator {
     }
   }
 
-  fn on_datum_ref_added(&mut self, id: DatumId) {
-    if let Some(entry) = self.datums.get_mut(&id) {
-      entry.ref_count += 1;
-    }
-  }
+  // fn on_datum_ref_added(&mut self, id: DatumId) {
+  //   // if let Some(entry) = self.datums.get_mut(&id) {
+  //   //   entry.ref_count += 1;
+  //   // }
+  // }
 
   fn on_datum_ref_dropped(&mut self, id: DatumId) {
     if let Some(entry) = self.datums.get_mut(&id) {
-      entry.ref_count -= 1;
-      if entry.ref_count <= 0 {
+      // entry.ref_count -= 1;
+      // if entry.ref_count <= 0 {
         self.dealloc_datum(id);
-      }
+      // }
     }
   }
 }
@@ -210,13 +232,15 @@ impl DatumAllocatorTrait for DatumAllocator {
 impl ScriptInstanceAllocatorTrait for DatumAllocator {
   fn alloc_script_instance(&mut self, script_instance: ScriptInstance) -> ScriptInstanceRef {
     let id = self.get_free_script_instance_id();
+    let ref_count = Rc::new(UnsafeCell::<u32>::new(0));
+    let ref_count_ptr = ref_count.get();
     self.script_instance_counter += 1;
     self.script_instances.insert(id, ScriptInstanceRefEntry {
       id,
-      ref_count: 0,
+      ref_count,
       script_instance,
     });
-    ScriptInstanceRef::from(id)
+    ScriptInstanceRef::from_id(id, ref_count_ptr)
   }
 
   fn get_script_instance(&self, instance_ref: &ScriptInstanceRef) -> &ScriptInstance {
@@ -231,18 +255,18 @@ impl ScriptInstanceAllocatorTrait for DatumAllocator {
     &mut self.script_instances.get_mut(instance_ref).unwrap().script_instance
   }
 
-  fn on_script_instance_ref_added(&mut self, id: ScriptInstanceId) {
-    if let Some(entry) = self.script_instances.get_mut(&id) {
-      entry.ref_count += 1;
-    }
-  }
+  // fn on_script_instance_ref_added(&mut self, id: ScriptInstanceId) {
+  //   if let Some(entry) = self.script_instances.get_mut(&id) {
+  //     entry.ref_count += 1;
+  //   }
+  // }
 
   fn on_script_instance_ref_dropped(&mut self, id: ScriptInstanceId) {
     if let Some(entry) = self.script_instances.get_mut(&id) {
-      entry.ref_count -= 1;
-      if entry.ref_count <= 0 {
+      // entry.ref_count -= 1;
+      // if entry.ref_count <= 0 {
         self.dealloc_script_instance(id);
-      }
+      // }
     }
   }
 }

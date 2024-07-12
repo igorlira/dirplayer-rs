@@ -1,4 +1,4 @@
-use super::{bytecode::handler_manager::BytecodeHandlerContext, scope::ScopeRef, script::{get_current_handler_def, get_current_variable_multiplier, get_name}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF};
+use super::{bytecode::handler_manager::BytecodeHandlerContext, scope::ScopeRef, script::{get_current_handler_def, get_current_variable_multiplier, get_name}, DatumRef, DirPlayer, ScriptError};
 
 pub fn read_context_var_args(player: &mut DirPlayer, var_type: u32, scope_ref: ScopeRef) -> (DatumRef, Option<DatumRef>) {
   let scope = player.scopes.get_mut(scope_ref).unwrap();
@@ -39,7 +39,8 @@ pub fn player_get_context_var(
       let local_name_ids = &handler.local_name_ids;
       let local_name = get_name(player, &ctx, local_name_ids[id.int_value()? as usize]).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      let local = scope.locals.get(&local_name).unwrap_or(&VOID_DATUM_REF);
+      let void = DatumRef::Void;
+      let local = scope.locals.get(&local_name).unwrap_or(&void);
       Ok(local.clone())
     }
     0x6 => {

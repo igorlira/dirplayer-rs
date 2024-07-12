@@ -7,7 +7,7 @@ use crate::{
 };
 
 use super::{
-    cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils, player_call_script_handler, reserve_player_ref, script::ScriptInstanceId, script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX, PLAYER_SEMAPHONE, VOID_DATUM_REF
+    cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils, player_call_script_handler, reserve_player_ref, script::ScriptInstanceId, script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX, PLAYER_SEMAPHONE
 };
 
 pub enum PlayerVMEvent {
@@ -166,7 +166,7 @@ async fn player_invoke_targeted_event(
     if !handled {
         player_invoke_static_event(handler_name, args).await?;
     }
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
 }
 
 pub async fn player_invoke_global_event(
@@ -200,11 +200,11 @@ pub async fn player_invoke_global_event(
     let handled =
         player_invoke_event_to_instances(handler_name, args, &active_instance_scripts).await?;
     if handled {
-        return Ok(VOID_DATUM_REF.clone());
+        return Ok(DatumRef::Void);
     }
     player_invoke_static_event(handler_name, args).await?;
 
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
 }
 
 pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
@@ -241,7 +241,7 @@ pub fn player_unwrap_result(result: Result<DatumRef, ScriptError>) -> DatumRef {
         Ok(result) => result,
         Err(err) => {
             reserve_player_mut(|player| player.on_script_error(&err));
-            VOID_DATUM_REF.clone()
+            DatumRef::Void
         }
     }
 }

@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::format_datum, eval::eval_lingo, geometry::IntRect, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::format_datum, eval::eval_lingo, geometry::IntRect, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DirPlayer, ScriptError}};
 
 use super::datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, prop_list::{PropListDatumHandlers, PropListUtils}, rect::RectUtils};
 
@@ -89,7 +89,7 @@ impl TypeUtils {
           list[index as usize] = value_ref.clone();
         } else {
           // FIXME this is not the same as Director, which would fill in the list with zeros
-          list.resize((index as usize + 1).max(list.len()), VOID_DATUM_REF.clone());
+          list.resize((index as usize + 1).max(list.len()), DatumRef::Void);
           list[index as usize] = value_ref.clone();
         }
         Ok(())
@@ -194,7 +194,7 @@ impl TypeHandlers {
   }
 
   pub fn void(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
   }
 
   pub fn ilk(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -282,7 +282,7 @@ impl TypeHandlers {
           if let Some(int_value) = result {
             Datum::Int(int_value)
           } else {
-            return Ok(VOID_DATUM_REF.clone());
+            return Ok(DatumRef::Void);
           }
         },
         Datum::Void => Datum::Void,
@@ -373,13 +373,13 @@ impl TypeHandlers {
         let arg = player.get_datum(&args[0]);
         if arg.is_int() {
           player.cursor = CursorRef::System(arg.int_value()?);
-          Ok(VOID_DATUM_REF.clone())
+          Ok(DatumRef::Void)
         } else if arg.is_list() {
           let list = arg.to_list()?;
           // TODO why not: let members = list.clone().iter().map(|x| player.get_datum(x).int_value()).collect_vec();
           let members = list.clone().iter().map(|x| x.unwrap() as i32).collect_vec();
           player.cursor = CursorRef::Member(members);
-          Ok(VOID_DATUM_REF.clone())
+          Ok(DatumRef::Void)
         } else {
           Err(ScriptError::new("Invalid argument for cursor".to_string()))
         }
@@ -578,7 +578,7 @@ impl TypeHandlers {
   }
 
   pub fn nothing(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
   }
 
   pub fn get_a_prop(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

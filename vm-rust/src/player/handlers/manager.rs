@@ -1,4 +1,4 @@
-use crate::{console_warn, director::lingo::datum::Datum, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{console_warn, director::lingo::datum::Datum, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError}};
 
 use super::{cast::CastHandlers, datum_handlers::{player_call_datum_handler, script_instance::ScriptInstanceUtils}, movie::MovieHandlers, net::NetHandlers, string::StringHandlers, types::TypeHandlers};
 
@@ -52,7 +52,7 @@ impl BuiltInHandlerManager {
       JsApi::dispatch_debug_message(line.as_str());
       Ok(())
     })?;
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
   }
 
   fn random(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -159,7 +159,7 @@ impl BuiltInHandlerManager {
       "castLib" => CastHandlers::cast_lib(args),
       "preloadNetThing" => NetHandlers::preload_net_thing(args),
       "netDone" => NetHandlers::net_done(args),
-      "moveToFront" => Ok(VOID_DATUM_REF.clone()),
+      "moveToFront" => Ok(DatumRef::Void),
       "puppetTempo" => MovieHandlers::puppet_tempo(args),
       "objectp" => TypeHandlers::objectp(args),
       "voidp" => TypeHandlers::voidp(args),
@@ -227,7 +227,7 @@ impl BuiltInHandlerManager {
       "intersect" => TypeHandlers::intersect(args),
       "rollover" => MovieHandlers::rollover(args),
       "getPropAt" => TypeHandlers::get_prop_at(args),
-      "puppetSound" => Ok(VOID_DATUM_REF.clone()), // TODO
+      "puppetSound" => Ok(DatumRef::Void), // TODO
       "pi" => TypeHandlers::pi(args),
       "sin" => TypeHandlers::sin(args),
       "cos" => TypeHandlers::cos(args),

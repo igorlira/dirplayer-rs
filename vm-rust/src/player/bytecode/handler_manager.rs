@@ -6,7 +6,7 @@ use crate::{
         bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
-        }, scope::ScopeRef, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK
+        }, scope::ScopeRef, HandlerExecutionResultContext, ScriptError, PLAYER_OPT
     },
 };
 
@@ -117,12 +117,12 @@ pub async fn player_execute_bytecode<'a>(
     ctx: &BytecodeHandlerContext,
 ) -> Result<HandlerExecutionResultContext, ScriptError> {
     let (sync_opt, async_opt, opcode) = {
-        let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-        {
-            let mut_player = player_opt.as_mut().unwrap();
-            mut_player.allocator.run_cycle();
-        }
-        let player = player_opt.as_ref().unwrap();
+        // let player_opt = PLAYER_LOCK.try_read().unwrap();
+        // {
+        //     let mut_player = player_opt.as_mut().unwrap();
+        //     mut_player.allocator.run_cycle();
+        // }
+        let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
         let scope = player.scopes.get(ctx.scope_ref).unwrap();
         let script_member_ref = &scope.script_ref;
         let handler_name_id = scope.handler_name_id;

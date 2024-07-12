@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::{director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType}, player::{cast_member::CastMemberType, reserve_player_mut, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType}, player::{cast_member::CastMemberType, reserve_player_mut, DatumRef, DirPlayer, ScriptError}};
 
 use super::string::string_get_lines;
 
@@ -228,7 +228,7 @@ impl StringChunkHandlers {
     reserve_player_mut(|player| {
       let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;
       StringChunkUtils::delete(player, &original_str_ref.clone(), &chunk_expr.clone())?;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 

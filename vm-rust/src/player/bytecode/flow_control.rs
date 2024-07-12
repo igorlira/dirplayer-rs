@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{Datum, DatumType}, player::{compare::datum_is_zero, handlers::datum_handlers::player_call_datum_handler, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK}};
+use crate::{director::lingo::datum::{Datum, DatumType}, player::{compare::datum_is_zero, handlers::datum_handlers::player_call_datum_handler, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -16,8 +16,7 @@ impl FlowControlBytecodeHandler {
   pub async fn ext_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
     // let script = get_current_script(player.to_owned(), ctx.to_owned());
     let (name, arg_ref_list, is_no_ret) = {
-      let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-      let player = player_opt.as_mut().unwrap();
+      let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
       let player_cell = &player;
 
       let name_id = player.get_ctx_current_bytecode(&ctx).obj as u16;

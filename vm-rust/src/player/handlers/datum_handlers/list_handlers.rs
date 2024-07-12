@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::{DatumAllocator, DatumAllocatorTrait}, compare::{datum_equals, datum_less_than}, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::{DatumAllocator, DatumAllocatorTrait}, compare::{datum_equals, datum_less_than}, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, ScriptError}};
 
 pub struct ListDatumHandlers {}
 pub struct ListDatumUtils {}
@@ -57,11 +57,11 @@ impl ListDatumHandlers {
         let padding_size = index - list_vec.len() as i32;
         for _ in 0..padding_size {
           // TODO: should this be filled with zeroes instead?
-          list_vec.push(VOID_DATUM_REF.clone());
+          list_vec.push(DatumRef::Void);
         }
         list_vec.push(item_ref.clone());
       }
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -95,7 +95,7 @@ impl ListDatumHandlers {
   fn get_last(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let list_vec = player.get_datum(datum).to_list()?;
-      let last = list_vec.last().map(|x| x.clone()).unwrap_or(VOID_DATUM_REF.clone());
+      let last = list_vec.last().map(|x| x.clone()).unwrap_or(DatumRef::Void);
       Ok(last)
     })
   }
@@ -136,7 +136,7 @@ impl ListDatumHandlers {
       } else {
         list_vec.push(item.clone());
       }
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -164,7 +164,7 @@ impl ListDatumHandlers {
       if position <= list_vec.len() as i32 {
         let index = (position - 1) as usize;
         list_vec.remove(index);
-        Ok(VOID_DATUM_REF.clone())
+        Ok(DatumRef::Void)
       } else {
         Err(ScriptError::new("Index out of bounds".to_string()))
       }
@@ -178,7 +178,7 @@ impl ListDatumHandlers {
 
       let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
       list_vec.insert(position as usize, item_ref.clone());
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -187,7 +187,7 @@ impl ListDatumHandlers {
     reserve_player_mut(|player| {
       let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
       list_vec.push(item.clone());
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -217,7 +217,7 @@ impl ListDatumHandlers {
       list_vec.extend(sorted_list);
       *is_sorted = true;
 
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 

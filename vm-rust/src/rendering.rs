@@ -4,7 +4,7 @@ use async_std::task::spawn_local;
 use wasm_bindgen::{prelude::*, Clamped};
 
 use crate::{js_api::JsApi, player::{
-    bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, score::{get_concrete_sprite_rect, get_sprite_at}, sprite::CursorRef, DirPlayer, PLAYER_LOCK
+    bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, score::{get_concrete_sprite_rect, get_sprite_at}, sprite::CursorRef, DirPlayer, PLAYER_OPT
 }};
 
 pub struct PlayerCanvasRenderer {
@@ -556,8 +556,7 @@ async fn run_draw_loop() {
     loop {
         let draw_fps = 24;
         {
-            let mut player_opt = PLAYER_LOCK.write().await;
-            let mut player = player_opt.as_mut().unwrap();
+            let mut player = unsafe { PLAYER_OPT.as_mut().unwrap() };
             with_canvas_renderer_mut(|renderer| {
                 let renderer = renderer.as_mut().unwrap();
                 renderer.draw_frame(&mut player);

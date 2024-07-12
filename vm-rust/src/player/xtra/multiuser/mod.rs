@@ -6,7 +6,7 @@ use nohash_hasher::IntMap;
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::{ErrorEvent, Event, MessageEvent, WebSocket};
 
-use crate::{console_warn, director::lingo::datum::{Datum, DatumType}, player::{events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, DatumRef, ScriptError, VOID_DATUM_REF}};
+use crate::{console_warn, director::lingo::datum::{Datum, DatumType}, player::{events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, DatumRef, ScriptError}};
 
 
 pub struct MultiuserMessage {
@@ -84,9 +84,9 @@ impl MultiuserXtraManager {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
-            "setNetBufferLimits" => Ok(VOID_DATUM_REF.clone()),
+            "setNetBufferLimits" => Ok(DatumRef::Void),
             "setNetMessageHandler" => {
-                let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
+                let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_mut(|player| {
                     let handler_symbol = player.get_datum(args.get(0).unwrap());
@@ -104,7 +104,7 @@ impl MultiuserXtraManager {
                 })
             }
             "connectToNetServer" => {
-                let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
+                let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 if let Some((handler_obj_ref, handler_symbol)) = &instance.net_message_handler {
                     let _handler_symbol = handler_symbol.clone();
@@ -130,7 +130,7 @@ impl MultiuserXtraManager {
                     let string = String::from_utf8_lossy(&vec);
                     console_warn!("WebSocket message: {:?}", string);
 
-                    let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
+                    let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                     let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                     instance.dispatch_message(MultiuserMessage {
                         error_code: 0,
@@ -147,7 +147,7 @@ impl MultiuserXtraManager {
                 });
                 let onopen_callback = Closure::<dyn FnMut(_)>::new(move |e: Event| {
                     console_warn!("WebSocket opened");
-                    let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
+                    let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                     let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                     instance.dispatch_message(MultiuserMessage {
                         error_code: 0,
@@ -176,10 +176,10 @@ impl MultiuserXtraManager {
                 onerror_callback.forget();
                 onopen_callback.forget();
 
-                Ok(VOID_DATUM_REF.clone())
+                Ok(DatumRef::Void)
             },
             "getNetMessage" => {
-                let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
+                let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 if let Some(message) = instance.next_message() {
                     reserve_player_mut(|player| {
@@ -211,18 +211,18 @@ impl MultiuserXtraManager {
                         ], false)))
                     })
                 } else {
-                    Ok(VOID_DATUM_REF.clone())
+                    Ok(DatumRef::Void)
                 }
             }
             "sendNetMessage" => {
-                let mut multiusr_manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
+                let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_ref(|player| {
                     let msg_string = player.get_datum(args.get(2).unwrap()).string_value()?;
                     console_warn!("sendNetMessage: {:?}", msg_string);
                     if let Some(tx) = &instance.socket_tx {
                         tx.try_send(msg_string).unwrap();
-                        Ok(VOID_DATUM_REF.clone())
+                        Ok(DatumRef::Void)
                     } else {
                         Err(ScriptError::new("Socket not connected".to_string()))
                     }
@@ -244,11 +244,13 @@ impl MultiuserXtraManager {
 }
 
 pub fn borrow_multiuser_manager_mut<T>(callback: impl FnOnce(&mut MultiuserXtraManager) -> T) -> T {
-    let mut manager = MULTIUSER_XTRA_MANAGER.lock().unwrap();
+    let mut manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
     callback(&mut *manager)
 }
 
-lazy_static! {
-    pub static ref MULTIUSER_XTRA_MANAGER: Arc<Mutex<MultiuserXtraManager>> =
-        Arc::new(Mutex::new(MultiuserXtraManager::new()));
-}
+// lazy_static! {
+//     pub static ref MULTIUSER_XTRA_MANAGER: Arc<Mutex<MultiuserXtraManager>> =
+//         Arc::new(Mutex::new(MultiuserXtraManager::new()));
+// }
+
+pub static mut MULTIUSER_XTRA_MANAGER_OPT: Option<MultiuserXtraManager> = None;
