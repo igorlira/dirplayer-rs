@@ -63,7 +63,8 @@ const vmSlice = createSlice({
             ...state.castSnapshots[action.payload.castNumber],
             name: action.payload.name,
           }
-        }
+        },
+        castNames: state.castNames.map((name, i) => i === action.payload.castNumber - 1 ? action.payload.name : name)
       }
     },
     castMemberListChanged: (state, action: PayloadAction<CastMemberListChangedPayload>) => {
