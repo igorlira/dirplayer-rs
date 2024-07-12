@@ -1,15 +1,16 @@
-use super::{allocator::DatumAllocatorEvent, script::ScriptInstanceId, ALLOCATOR_TX};
+use super::{allocator::ScriptInstanceAllocatorTrait, script::ScriptInstanceId, PLAYER_OPT};
 
-pub struct ScriptInstanceRef(ScriptInstanceId);
+pub struct ScriptInstanceRef(ScriptInstanceId, *mut u32);
 
-impl<T> From<T> for ScriptInstanceRef where T: Into<ScriptInstanceId> {
+impl ScriptInstanceRef {
   #[inline]
-  fn from(id: T) -> Self {
+  pub fn from_id(id: ScriptInstanceId, ref_count: *mut u32) -> Self {
     let val = id.into();
     unsafe {
-      ALLOCATOR_TX.as_ref().unwrap().try_send(DatumAllocatorEvent::ScriptInstanceRefAdded(val)).unwrap();
+      let mut_ref = &mut *ref_count;
+      *mut_ref += 1;
     }
-    Self(val)
+    Self(val, ref_count)
   }
 }
 
@@ -24,14 +25,18 @@ impl std::ops::Deref for ScriptInstanceRef {
 
 impl Clone for ScriptInstanceRef {
   fn clone(&self) -> Self {
-    Self::from(self.0)
+    Self::from_id(self.0, self.1)
   }
 }
 
 impl Drop for ScriptInstanceRef {
   fn drop(&mut self) {
     unsafe {
-      ALLOCATOR_TX.as_ref().unwrap().try_send(DatumAllocatorEvent::ScriptInstanceRefDropped(self.0)).unwrap();
+      let mut_ref = &mut *self.1;
+      *mut_ref -= 1;
+      if *mut_ref <= 0 {
+        PLAYER_OPT.as_mut().unwrap().allocator.on_script_instance_ref_dropped(self.0);
+      }
     }
   }
 }

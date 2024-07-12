@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::ScriptInstanceAllocatorTrait, handlers::types::TypeUtils, player_call_script_handler, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{script_get_prop, script_set_prop, Script, ScriptHandlerRef}, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::ScriptInstanceAllocatorTrait, handlers::types::TypeUtils, player_call_script_handler, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{script_get_prop, script_set_prop, Script, ScriptHandlerRef}, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode}};
 
 pub struct ScriptInstanceDatumHandlers {}
 pub struct ScriptInstanceUtils {}
@@ -125,7 +125,7 @@ impl ScriptInstanceDatumHandlers {
       let value_ref = &args[1];
 
       ScriptInstanceUtils::set_at(datum, &key, &value_ref, player)?;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -138,7 +138,7 @@ impl ScriptInstanceDatumHandlers {
         Datum::ScriptInstanceRef(instance_ref) => instance_ref.clone(),
         _ => return Err(ScriptError::new("Cannot set property on non-script instance".to_string())),
       };
-      script_set_prop(player, &instance_ref, &prop_name, &value_ref, false).map(|_| VOID_DATUM_REF.clone())
+      script_set_prop(player, &instance_ref, &prop_name, &value_ref, false).map(|_| DatumRef::Void)
     })
   }
 
@@ -172,7 +172,7 @@ impl ScriptInstanceDatumHandlers {
       let local_prop_ref = script_get_prop(player, &instance_ref, &local_prop_name)?;
       TypeUtils::set_sub_prop(&local_prop_ref, &list_prop_name_ref, &value_ref, player)?;
 
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 

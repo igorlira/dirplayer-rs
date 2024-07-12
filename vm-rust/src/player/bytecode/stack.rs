@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{Datum, DatumType}, player::{context_vars::{player_get_context_var, read_context_var_args}, handlers::datum_handlers::script::ScriptDatumHandlers, reserve_player_mut, script::{get_current_script, get_current_variable_multiplier, get_name}, DatumRef, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK}};
+use crate::{director::lingo::datum::{Datum, DatumType}, player::{context_vars::{player_get_context_var, read_context_var_args}, handlers::datum_handlers::script::ScriptDatumHandlers, reserve_player_mut, script::{get_current_script, get_current_variable_multiplier, get_name}, DatumRef, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -61,8 +61,7 @@ impl StackBytecodeHandler {
   }
 
   pub fn push_symb(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
-    let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-    let player = player_opt.as_mut().unwrap();
+    let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
     let name_id = player.get_ctx_current_bytecode(ctx).obj;
     let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
     let datum_ref = player.alloc_datum(Datum::Symbol(symbol_name.to_owned()));

@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError}};
 
 pub struct PointDatumHandlers {}
 
@@ -49,7 +49,7 @@ impl PointDatumHandlers {
         2 => point.1 = value,
         _ => return Err(ScriptError::new("Invalid index for point".to_string())),
       }
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 

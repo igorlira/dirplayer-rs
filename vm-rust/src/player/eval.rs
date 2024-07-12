@@ -1,6 +1,6 @@
 use pest::{iterators::Pair, Parser};
 
-use crate::{console_error, director::lingo::datum::{datum_bool, Datum, DatumType}, js_api::ascii_safe, player::VOID_DATUM_REF};
+use crate::{console_error, director::lingo::datum::{datum_bool, Datum, DatumType}, js_api::ascii_safe};
 
 use super::{sprite::ColorRef, DatumRef, DirPlayer, ScriptError};
 
@@ -97,7 +97,7 @@ pub fn eval_lingo_pair(pair: Pair<Rule>, player: &mut DirPlayer) -> Result<Datum
     }
     Rule::bool_true => Ok(player.alloc_datum(datum_bool(true))),
     Rule::bool_false => Ok(player.alloc_datum(datum_bool(false))),
-    Rule::void => Ok(VOID_DATUM_REF.clone()),
+    Rule::void => Ok(DatumRef::Void),
     Rule::string_empty => Ok(player.alloc_datum(Datum::String("".to_owned()))),
     Rule::nohash_symbol => Ok(player.alloc_datum(Datum::Symbol(pair.as_str().to_owned()))),
     Rule::point => {
@@ -130,7 +130,7 @@ pub fn eval_lingo(expr: String, player: &mut DirPlayer) -> Result<DatumRef, Scri
     }
     Err(e) => {
       console_error!("Lingo parse error: {}", ascii_safe(&e.to_string()));
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     }
   } 
 }

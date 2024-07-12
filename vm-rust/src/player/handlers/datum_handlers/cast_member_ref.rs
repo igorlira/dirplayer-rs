@@ -1,4 +1,4 @@
-use crate::{console_warn, director::lingo::datum::Datum, js_api::JsApi, player::{cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, CastMemberTypeId, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{console_warn, director::lingo::datum::Datum, js_api::JsApi, player::{cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, CastMemberTypeId, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
 
 use super::cast_member::{bitmap::BitmapMemberHandlers, field::FieldMemberHandlers, text::TextMemberHandlers};
 
@@ -106,7 +106,7 @@ impl CastMemberRefHandlers {
         _ => return Err(ScriptError::new("Cannot erase non-cast-member".to_string())),
       };
       player.movie.cast_manager.remove_member_with_ref(&cast_member_ref)?;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 

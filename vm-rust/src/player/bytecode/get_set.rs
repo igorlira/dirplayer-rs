@@ -1,4 +1,4 @@
-use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, MOVIE_PROP_NAMES}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_LOCK, VOID_DATUM_REF}};
+use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, MOVIE_PROP_NAMES}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -33,8 +33,7 @@ impl GetSetUtils {
 
 impl GetSetBytecodeHandler {
   pub fn get_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
-    let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-    let player = player_opt.as_mut().unwrap();
+    let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
     let receiver ={
       let scope = player.scopes.get(ctx.scope_ref).unwrap();
       scope.receiver.clone()
@@ -146,7 +145,7 @@ impl GetSetBytecodeHandler {
     reserve_player_mut(|player| {
       let value_ref = {
         let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
-        player.globals.get(prop_name).unwrap_or(&VOID_DATUM_REF).clone()
+        player.globals.get(prop_name).unwrap_or(&DatumRef::Void).clone()
       };
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(value_ref);
@@ -204,7 +203,7 @@ impl GetSetBytecodeHandler {
       let var_name = get_name(&player, &ctx, name_id).unwrap();
 
       let scope = player.scopes.get(ctx.scope_ref).unwrap();
-      let value_ref = scope.locals.get(var_name).unwrap_or(&VOID_DATUM_REF).clone();
+      let value_ref = scope.locals.get(var_name).unwrap_or(&DatumRef::Void).clone();
 
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(value_ref);
@@ -234,7 +233,7 @@ impl GetSetBytecodeHandler {
     reserve_player_mut(|player| {
       let param_number = player.get_ctx_current_bytecode(ctx).obj as usize;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      let result = scope.args.get(param_number).unwrap_or(&VOID_DATUM_REF).clone();
+      let result = scope.args.get(param_number).unwrap_or(&DatumRef::Void).clone();
       scope.stack.push(result);
     });
     Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
@@ -252,7 +251,7 @@ impl GetSetBytecodeHandler {
         scope.args[arg_index] = value_ref;
         Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
       } else {
-        scope.args.resize(arg_count.max(arg_index), VOID_DATUM_REF.clone());
+        scope.args.resize(arg_count.max(arg_index), DatumRef::Void);
         scope.args.insert(arg_index, value_ref);
         Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
       }

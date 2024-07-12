@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::Datum, player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::Datum, player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError}};
 
 pub struct RectDatumHandlers {}
 pub struct RectUtils {}
@@ -71,7 +71,7 @@ impl RectDatumHandlers {
         4 => rect.3 = value,
         _ => return Err(ScriptError::new("Invalid index for rect".to_string())),
       }
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
