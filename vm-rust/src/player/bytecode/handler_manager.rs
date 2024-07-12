@@ -6,7 +6,7 @@ use crate::{
         bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
-        }, scope::ScopeRef, HandlerExecutionResultContext, ScriptError, PLAYER_OPT
+        }, scope::ScopeRef, HandlerExecutionResult, ScriptError, PLAYER_OPT
     },
 };
 
@@ -18,10 +18,10 @@ pub struct BytecodeHandlerContext {
     // pub player: RefCell<&'a DirPlayer>,
 }
 pub type BytecodeHandlerFunctionSync =
-    fn(&BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError>;
+    fn(&BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError>;
 pub type BytecodeHandlerFunctionAsync = Box<
     dyn Fn(BytecodeHandlerContext)
-        -> Pin<Box<dyn Future<Output = Result<HandlerExecutionResultContext, ScriptError>>>>,
+        -> Pin<Box<dyn Future<Output = Result<HandlerExecutionResult, ScriptError>>>>,
 >;
 pub struct StaticBytecodeHandlerManager {}
 impl StaticBytecodeHandlerManager {
@@ -115,7 +115,7 @@ impl StaticBytecodeHandlerManager {
 #[inline(always)]
 pub async fn player_execute_bytecode<'a>(
     ctx: &BytecodeHandlerContext,
-) -> Result<HandlerExecutionResultContext, ScriptError> {
+) -> Result<HandlerExecutionResult, ScriptError> {
     let (sync_opt, async_opt, opcode) = {
         // let player_opt = PLAYER_LOCK.try_read().unwrap();
         // {
