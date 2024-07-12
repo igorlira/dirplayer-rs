@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError}};
 
 pub struct MovieHandlers {}
 
@@ -6,7 +6,7 @@ impl MovieHandlers {
   pub fn puppet_tempo(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       player.movie.puppet_tempo = player.get_datum(&args[0]).int_value()? as u32;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -58,7 +58,7 @@ impl MovieHandlers {
   pub fn go(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       player.next_frame = Some(player.get_datum(&args[0]).int_value()? as u32);
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -68,7 +68,7 @@ impl MovieHandlers {
       let is_puppet = player.get_datum(&args[1]).int_value()? == 1;
       let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
       sprite.puppet = is_puppet;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -88,26 +88,26 @@ impl MovieHandlers {
 
   pub fn stop_event(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     // TODO stop event
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
   }
 
   pub fn get_pref(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
   }
 
   pub fn set_pref(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
   }
 
   pub fn go_to_net_page(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
   }
 
   pub fn pass(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let scope = player.scopes.last_mut().unwrap();
       scope.passed = true;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -115,7 +115,7 @@ impl MovieHandlers {
     // TODO: re-render
     // The updateStage() method redraws sprites, performs transitions, plays sounds, sends a prepareFrame message
     // (affecting movie and behavior scripts), and sends a stepFrame message (which affects actorList)
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
   }
 
   pub fn rollover(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

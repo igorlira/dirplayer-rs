@@ -4,7 +4,7 @@ use url::Url;
 
 use crate::{director::{cast::CastDef, file::{read_director_file_bytes, DirectorFile}, lingo::{datum::Datum, script::ScriptContext}}, js_api::{self, JsApi}, utils::{get_base_url, get_basename_no_extension, log_i}};
 
-use super::{allocator::DatumAllocator, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, manager::BitmapManager}, cast_member::{BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, net_task::NetResult, script::Script, ScriptError, PLAYER_LOCK};
+use super::{allocator::DatumAllocator, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, manager::BitmapManager}, cast_member::{BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, net_task::NetResult, reserve_player_mut, script::Script, ScriptError, PLAYER_OPT};
 
 #[repr(u8)]
 #[derive(PartialEq)]
@@ -271,8 +271,7 @@ impl CastMemberRef {
 }
 
 pub async fn player_cast_lib_set_prop(cast_lib: u32, prop_name: &String, value: Datum) -> Result<(), ScriptError> {
-  let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-  let player = player_opt.as_mut().unwrap();
+  let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
 
   let cast_lib = player.movie.cast_manager.get_cast_mut(cast_lib as u32);
   cast_lib.set_prop(&prop_name, value, &player.allocator)?;

@@ -35,7 +35,7 @@ pub mod script_ref;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use allocator::{DatumAllocator, DatumAllocatorEvent, DatumAllocatorTrait, ResetableAllocator};
-use datum_ref::{DatumRef, VOID_DATUM_REF};
+use datum_ref::DatumRef;
 use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::{Mutex, RwLock}, task::spawn_local};
 use cast_manager::CastPreloadReason;
 use chrono::Local;
@@ -44,6 +44,7 @@ use net_manager::NetManager;
 use lazy_static::lazy_static;
 use profiling::{end_profiling, start_profiling};
 use script_ref::ScriptInstanceRef;
+use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
 use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name, get_opcode_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
 
@@ -153,7 +154,7 @@ impl DirPlayer {
       text_selection_start: 0,
       text_selection_end: 0,
       float_precision: 4,
-      last_handler_result: VOID_DATUM_REF.clone(),
+      last_handler_result: DatumRef::Void,
       hovered_sprite: None,
       timer_tick_start: get_ticks(),
       allocator: DatumAllocator::default(allocator_rx, allocator_tx),
@@ -411,9 +412,11 @@ impl DirPlayer {
 }
 
 pub fn player_alloc_datum(datum: Datum) -> DatumRef {
-  let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-  let player = player_opt.as_mut().unwrap();
-  player.alloc_datum(datum)
+  // let mut player_opt = PLAYER_LOCK.try_write().unwrap();
+  unsafe {
+    let player = PLAYER_OPT.as_mut().unwrap();
+    player.alloc_datum(datum)
+  }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -450,9 +453,9 @@ pub fn player_handle_scope_return(scope: &Scope) {
 }
 
 async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-  let receiver_handlers: Vec<ScriptHandlerRef> = {
-    let player_opt = PLAYER_LOCK.try_read().unwrap();
-    let player = player_opt.as_ref().unwrap();
+  let receiver_handlers: Vec<ScriptHandlerRef> = unsafe {
+    // let player_opt = PLAYER_LOCK.try_read().unwrap();
+    let player = PLAYER_OPT.as_ref().unwrap();
   
     let receiver_refs = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals());
 
@@ -481,15 +484,22 @@ async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>)
 }
 
 pub fn reserve_player_ref<T, F>(callback: F) -> T where F: FnOnce(&DirPlayer) -> T {
-  let player_opt = PLAYER_LOCK.try_read().unwrap();
-  let player = player_opt.as_ref().unwrap();
-  callback(player)
+  // let player_opt = PLAYER_LOCK.try_read().unwrap();
+  // let player = player_opt.as_ref().unwrap();
+  // callback(player)
+  unsafe {
+    let player = PLAYER_OPT.as_ref().unwrap();
+    callback(player)
+  }
 }
 
 pub fn reserve_player_mut<T, F>(callback: F) -> T where F: FnOnce(&mut DirPlayer) -> T {
-  let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-  let player = player_opt.as_mut().unwrap();
-  callback(player)
+  // let mut player_opt = PLAYER_LOCK.try_write().unwrap();
+  // let player = player_opt.as_mut().unwrap();
+  unsafe {
+    let player = PLAYER_OPT.as_mut().unwrap();
+    callback(player)
+  }
 }
 
 #[allow(dead_code)]
@@ -614,6 +624,7 @@ pub async fn player_call_script_handler_raw_args(
   let scope = reserve_player_mut(|player| {
     let result = player.scopes.pop().unwrap();
     player.last_handler_result = result.return_value.clone();
+    // player.allocator.run_cycle();
     result
   });
 
@@ -621,11 +632,10 @@ pub async fn player_call_script_handler_raw_args(
 }
 
 pub async fn run_frame_loop() {
-  let player_arc = &PLAYER_LOCK;
+  // let player_arc = &PLAYER_LOCK;
   let mut fps: u32;
-  {
-    let player_opt = player_arc.try_read().unwrap();
-    let player = player_opt.as_ref().unwrap();
+  unsafe {
+    let player = PLAYER_OPT.as_ref().unwrap();
     if !player.is_playing {
       return;
     }
@@ -662,14 +672,15 @@ pub async fn run_frame_loop() {
       return;
     }
     if new_frame > 1 && prev_frame <= 1 {
-      let mut player = player_arc.write().await;
-      let player = player.as_mut().unwrap();
-      player.movie.cast_manager.preload_casts(
-        CastPreloadReason::AfterFrameOne, 
-        &mut player.net_manager, 
-        &mut player.bitmap_manager,
-        &mut player.dir_cache,
-      ).await;
+      unsafe {
+        let player = PLAYER_OPT.as_mut().unwrap();
+        player.movie.cast_manager.preload_casts(
+          CastPreloadReason::AfterFrameOne, 
+          &mut player.net_manager, 
+          &mut player.bitmap_manager,
+          &mut player.dir_cache,
+        ).await;
+      }
     }
     if !is_script_paused {
       let frame_skipped = reserve_player_ref(|player| {
@@ -707,16 +718,17 @@ pub async fn player_trigger_breakpoint(breakpoint: Breakpoint, script_ref: CastM
 }
 
 pub async fn player_is_playing() -> bool {
-  let player_opt = PLAYER_LOCK.read().await;
-  let player = player_opt.as_ref().unwrap();
-  player.is_playing
+  unsafe {
+    PLAYER_OPT.as_ref().unwrap().is_playing
+  }
 }
 
 static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
 static mut PLAYER_EVENT_TX: Option<Sender<PlayerVMEvent>> = None;
 static mut ALLOCATOR_TX: Option<Sender<DatumAllocatorEvent>> = None;
+pub static mut PLAYER_OPT: Option<DirPlayer> = None;
 lazy_static! {
-  pub static ref PLAYER_LOCK: RwLock<Option<DirPlayer>> = RwLock::new(None);
+  // pub static ref PLAYER_LOCK: RwLock<Option<DirPlayer>> = RwLock::new(None);
   pub static ref PLAYER_SEMAPHONE: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 }
 
@@ -728,10 +740,14 @@ pub fn init_player() {
     PLAYER_TX = Some(tx.clone()); 
     PLAYER_EVENT_TX = Some(event_tx.clone());
     ALLOCATOR_TX = Some(allocator_tx.clone());
+    MULTIUSER_XTRA_MANAGER_OPT = Some(MultiuserXtraManager::new());
   }
 
-  let mut player = PLAYER_LOCK.try_write().unwrap();
-  *player = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));
+  unsafe {
+    PLAYER_OPT = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));
+  }
+  // let mut player = //PLAYER_LOCK.try_write().unwrap();
+  // *player = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));
 
   async_std::task::spawn_local(async move {
     player_load_system_font().await;

@@ -15,7 +15,7 @@ extern crate pest_derive;
 
 mod director;
 
-use player::{cast_lib::{cast_member_ref, CastMemberRef}, commands::{player_dispatch, PlayerVMCommand}, datum_ref::DatumId, init_player, PLAYER_LOCK};
+use player::{cast_lib::{cast_member_ref, CastMemberRef}, commands::{player_dispatch, PlayerVMCommand}, datum_ref::DatumId, init_player, PLAYER_OPT};
 
 #[wasm_bindgen]
 extern "C" {
@@ -135,8 +135,7 @@ pub fn trigger_alert_hook() {
 #[wasm_bindgen]
 pub fn subscribe_to_channel_names() {
   spawn_local(async {
-    let mut player_mutex = PLAYER_LOCK.write().await;
-    let player = player_mutex.as_mut().unwrap();
+    let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
 
     player.is_subscribed_to_channel_names = true;
     for channel in &player.movie.score.channels {
@@ -148,8 +147,7 @@ pub fn subscribe_to_channel_names() {
 #[wasm_bindgen]
 pub fn unsubscribe_from_channel_names() {
   spawn_local(async {
-    let mut player_mutex = PLAYER_LOCK.write().await;
-    let player = player_mutex.as_mut().unwrap();
+    let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
 
     player.is_subscribed_to_channel_names = false;
   });

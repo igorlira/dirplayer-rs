@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{datum_bool, Datum, PropListPair}, player::{allocator::{DatumAllocator, DatumAllocatorTrait}, compare::{datum_equals, datum_less_than}, datum_formatting::{format_concrete_datum, format_datum}, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{director::lingo::datum::{datum_bool, Datum, PropListPair}, player::{allocator::{DatumAllocator, DatumAllocatorTrait}, compare::{datum_equals, datum_less_than}, datum_formatting::{format_concrete_datum, format_datum}, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
 
 pub struct PropListDatumHandlers {}
 
@@ -90,7 +90,7 @@ impl PropListUtils {
     if key_index >= 0 {
       Ok(prop_list[key_index as usize].1.clone())
     } else {
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     }
   }
 
@@ -158,7 +158,7 @@ impl PropListUtils {
   ) -> Result<DatumRef, ScriptError> {
     let key_index = Self::get_key_index(prop_list, key, &allocator)?;
     if key_index < 0 {
-      return Ok(VOID_DATUM_REF.clone());
+      return Ok(DatumRef::Void);
     }
     Ok(prop_list[key_index as usize].1.clone())
   }
@@ -269,7 +269,7 @@ impl PropListDatumHandlers {
       if let Some(position) = position {
         return Ok(player.alloc_datum(Datum::Int(position as i32 + 1)));
       } else {
-        return Ok(VOID_DATUM_REF.clone());
+        return Ok(DatumRef::Void);
       }
     })
   }
@@ -315,7 +315,7 @@ impl PropListDatumHandlers {
           if key_index >= 0 {
             return Ok(prop_list[key_index as usize].1.clone());
           } else {
-            return Ok(VOID_DATUM_REF.clone());
+            return Ok(DatumRef::Void);
           }
         },
         _ => return Err(ScriptError::new("Cannot get a prop of non-prop list".to_string())),
@@ -359,7 +359,7 @@ impl PropListDatumHandlers {
       let value_ref = &args[1];
       
       PropListUtils::set_prop(datum, &prop_name_ref, &value_ref, player, false, formatted_key)?;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -382,7 +382,7 @@ impl PropListDatumHandlers {
         prop_list.push((prop_name_ref.clone(), value_ref.clone()));
       }
 
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -398,7 +398,7 @@ impl PropListDatumHandlers {
       let value_ref = &args[1];
       
       PropListUtils::set_prop(datum, &prop_name_ref, &value_ref, player, true, formatted_key)?;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -414,7 +414,7 @@ impl PropListDatumHandlers {
       let value_ref = &args[1];
       
       PropListUtils::set_at(player, datum, &prop_name_ref, &value_ref, formatted_key)?;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -441,7 +441,7 @@ impl PropListDatumHandlers {
         },
         _ => Err(ScriptError::new("Cannot get prop list at non-prop list".to_string())),
       }?;
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -484,7 +484,7 @@ impl PropListDatumHandlers {
       list_vec.extend(sorted_prop_list);
       *is_sorted = true;
 
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 

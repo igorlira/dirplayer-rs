@@ -3,15 +3,11 @@ use manual_future::ManualFuture;
 use url::Url;
 
 use crate::{
-    console_warn,
-    director::lingo::datum::{Datum, TimeoutRef},
-    js_api::JsApi,
-    player::PLAYER_LOCK,
-    utils::ToHexString,
+    console_warn, director::lingo::datum::{Datum, TimeoutRef}, js_api::JsApi, player::PLAYER_OPT, utils::ToHexString
 };
 
 use super::{
-    allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::{DatumId, DatumRef}, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, script_ref::ScriptInstanceRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX, VOID_DATUM_REF
+    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::{DatumId, DatumRef}, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, script_ref::ScriptInstanceRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX
 };
 
 #[allow(dead_code)]
@@ -147,28 +143,27 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
     // TODO
     match command {
         PlayerVMCommand::SetBasePath(path) => {
-            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-            let player = player_opt.as_mut().unwrap();
-            player.net_manager.set_base_path(Url::parse(&path).unwrap());
+            reserve_player_mut(|player| {
+                player.net_manager.set_base_path(Url::parse(&path).unwrap());
+            });
         }
         PlayerVMCommand::Play => {
-            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-            let player = player_opt.as_mut().unwrap();
-            player.play();
+            reserve_player_mut(|player| {
+                player.play();
+            });
         }
         PlayerVMCommand::Stop => {
-            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-            let player = player_opt.as_mut().unwrap();
-            player.stop();
+            reserve_player_mut(|player| {
+                player.stop();
+            });
         }
         PlayerVMCommand::Reset => {
-            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-            let player = player_opt.as_mut().unwrap();
-            player.reset();
+            reserve_player_mut(|player| {
+                player.reset();
+            });
         }
         PlayerVMCommand::LoadMovieFromFile(file_path) => {
-            let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-            let player = player_opt.as_mut().unwrap();
+            let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
             player.load_movie_from_file(&file_path).await;
         }
         PlayerVMCommand::DispatchEvent(handler_name, args) => {
@@ -228,7 +223,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                             false,
                             false,
                             false,
-                            VOID_DATUM_REF.clone(),
+                            DatumRef::Void,
                             "".to_string(),
                             "".to_string(),
                         )
@@ -236,37 +231,37 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 });
             if !is_found {
                 console_warn!("Timeout triggered but not found: {}", timeout_ref);
-                return Ok(VOID_DATUM_REF.clone());
+                return Ok(DatumRef::Void);
             }
             if !is_playing || is_script_paused {
                 // TODO how to handle is_script_paused?
                 console_warn!("Timeout triggered but not playing");
-                return Ok(VOID_DATUM_REF.clone());
+                return Ok(DatumRef::Void);
             }
             let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name));
             let args = vec![ref_datum];
-            if target_ref != VOID_DATUM_REF {
+            if target_ref != DatumRef::Void {
                 player_dispatch_callback_event(target_ref, &handler_name, &args);
             } else {
                 player_dispatch_global_event(&handler_name, &args);
             }
         }
         PlayerVMCommand::PrintMemberBitmapHex(member_ref) => {
-            let player_opt = PLAYER_LOCK.try_read().unwrap();
-            let player = player_opt.as_ref().unwrap();
-            let member = player
-                .movie
-                .cast_manager
-                .find_member_by_ref(&member_ref)
-                .unwrap();
-            let bitmap = member.member_type.as_bitmap().unwrap();
-            let bitmap = player.bitmap_manager.get_bitmap(bitmap.image_ref).unwrap();
-            let bitmap = &bitmap.data;
-            console_warn!("Bitmap hex: {}", bitmap.to_hex_string());
+            reserve_player_ref(|player| {
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .unwrap();
+                let bitmap = member.member_type.as_bitmap().unwrap();
+                let bitmap = player.bitmap_manager.get_bitmap(bitmap.image_ref).unwrap();
+                let bitmap = &bitmap.data;
+                console_warn!("Bitmap hex: {}", bitmap.to_hex_string());
+            });
         }
         PlayerVMCommand::MouseDown((x, y)) => {
             if !player_is_playing().await {
-                return Ok(VOID_DATUM_REF.clone());
+                return Ok(DatumRef::Void);
             }
             let instance_ids = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
@@ -298,11 +293,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 &vec![],
                 instance_ids.as_ref(),
             );
-            return Ok(VOID_DATUM_REF.clone());
+            return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseUp((x, y)) => {
             if !player_is_playing().await {
-                return Ok(VOID_DATUM_REF.clone());
+                return Ok(DatumRef::Void);
             }
             let result = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
@@ -323,11 +318,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let instance_ids = result.as_ref().map(|x| &x.0);
             let event_name = if is_inside { "mouseUp" } else { "mouseUpOutSide" };
             player_dispatch_targeted_event(&event_name.to_string(), &vec![], instance_ids);
-            return Ok(VOID_DATUM_REF.clone());
+            return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseMove((x, y)) => {
             if !player_is_playing().await {
-                return Ok(VOID_DATUM_REF.clone());
+                return Ok(DatumRef::Void);
             }
             let (sprite_num, hovered_sprite) = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
@@ -359,12 +354,14 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         }
         PlayerVMCommand::RequestDatum(datum_id) => {
             reserve_player_ref(|player| {
-                JsApi::dispatch_datum_snapshot(&DatumRef::from_id(datum_id), player);
+                if let Some(datum_ref) = player.allocator.get_datum_ref(datum_id) {
+                    JsApi::dispatch_datum_snapshot(&datum_ref, player);
+                }
             });
         }
         PlayerVMCommand::RequestScriptInstanceSnapshot(script_instance_id) => {
             reserve_player_ref(|player| {
-                JsApi::dispatch_script_instance_snapshot(if script_instance_id > 0 { Some(ScriptInstanceRef::from(script_instance_id)) } else { None }, player);
+                JsApi::dispatch_script_instance_snapshot(if script_instance_id > 0 { Some(player.allocator.get_script_instance_ref(script_instance_id).unwrap()) } else { None }, player);
             });
         }
         PlayerVMCommand::SubscribeToMember(member_ref) => {
@@ -430,5 +427,5 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             panic!("Unknown VM command");
         }
     }
-    Ok(VOID_DATUM_REF.clone())
+    Ok(DatumRef::Void)
 }

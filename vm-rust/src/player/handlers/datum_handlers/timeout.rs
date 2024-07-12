@@ -1,4 +1,4 @@
-use crate::{console_warn, director::lingo::datum::Datum, player::{reserve_player_mut, timeout::Timeout, DatumRef, DirPlayer, ScriptError, VOID_DATUM_REF}};
+use crate::{console_warn, director::lingo::datum::Datum, player::{reserve_player_mut, timeout::Timeout, DatumRef, DirPlayer, ScriptError}};
 
 pub struct TimeoutDatumHandlers {}
 
@@ -46,7 +46,7 @@ impl TimeoutDatumHandlers {
         }?
       };
       player.timeout_manager.forget_timeout(&timeout_name);
-      Ok(VOID_DATUM_REF.clone())
+      Ok(DatumRef::Void)
     })
   }
 
@@ -62,7 +62,7 @@ impl TimeoutDatumHandlers {
         Ok(player.alloc_datum(Datum::String(_timeout_name.to_owned())))
       },
       "target" => {
-        Ok(timeout.map_or(VOID_DATUM_REF.clone(), |x| x.target_ref.clone()))
+        Ok(timeout.map_or(DatumRef::Void, |x| x.target_ref.clone()))
       }
       _ => {
         Err(ScriptError::new(format!("Cannot get timeout property {}", prop)))
