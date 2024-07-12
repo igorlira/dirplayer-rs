@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::Local;
 
 use crate::{director::{file::DirectorFile, lingo::datum::{datum_bool, Datum}}, utils::PATH_SEPARATOR};
@@ -19,7 +21,13 @@ pub struct Movie {
 }
 
 impl Movie {
-  pub async fn load_from_file(&mut self, file: &DirectorFile, net_manager: &mut NetManager, bitmap_manager: &mut BitmapManager) {
+  pub async fn load_from_file(
+    &mut self, 
+    file: &DirectorFile, 
+    net_manager: &mut NetManager, 
+    bitmap_manager: &mut BitmapManager,
+    dir_cache: &mut HashMap<String, DirectorFile>,
+  ) {
     self.dir_version = file.version;
     self.stage_color = (
       file.config.d7_stage_color_r,
@@ -33,7 +41,7 @@ impl Movie {
       right: file.config.movie_right as i32,
       bottom: file.config.movie_bottom as i32,
     };
-    self.cast_manager.load_from_dir(file, net_manager, bitmap_manager).await;
+    self.cast_manager.load_from_dir(file, net_manager, bitmap_manager, dir_cache).await;
     self.score.load_from_dir(file);
   }
 

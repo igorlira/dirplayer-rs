@@ -24,7 +24,13 @@ impl CastManager {
     CastManager { casts: Vec::new() }
   }
 
-  pub async fn load_from_dir(&mut self, dir: &DirectorFile, net_manager: &mut NetManager, bitmap_manager: &mut BitmapManager) {
+  pub async fn load_from_dir(
+    &mut self, 
+    dir: &DirectorFile, 
+    net_manager: &mut NetManager, 
+    bitmap_manager: &mut BitmapManager,
+    dir_cache: &mut HashMap<String, DirectorFile>
+  ) {
     let dir_path_uri = &dir.base_path;
     if !IS_WEB || dir_path_uri.host().is_some() {
       net_manager.set_base_path(dir_path_uri.clone());
@@ -53,11 +59,17 @@ impl CastManager {
       casts.push(cast);
     }
     self.casts = casts;
-    self.preload_casts(CastPreloadReason::MovieLoaded, net_manager, bitmap_manager).await;
+    self.preload_casts(CastPreloadReason::MovieLoaded, net_manager, bitmap_manager, dir_cache).await;
     JsApi::dispatch_cast_list_changed();
   }
 
-  pub async fn preload_casts(&mut self, reason: CastPreloadReason, net_manager: &mut NetManager, bitmap_manager: &mut BitmapManager) {
+  pub async fn preload_casts(
+    &mut self, 
+    reason: CastPreloadReason, 
+    net_manager: &mut NetManager, 
+    bitmap_manager: &mut BitmapManager,
+    dir_cache: &mut HashMap<String, DirectorFile>,
+  ) {
     for cast in self.casts.iter_mut() {
       if cast.is_external && !cast.is_loaded && !cast.is_loading && !cast.file_name.is_empty() {
         match cast.preload_mode {
@@ -66,13 +78,13 @@ impl CastManager {
           },
           1 => {
             if reason == CastPreloadReason::AfterFrameOne {
-              cast.preload(net_manager, bitmap_manager).await;
+              cast.preload(net_manager, bitmap_manager, dir_cache).await;
             }
           },
           2 => {
             // Before frame one
             if reason == CastPreloadReason::MovieLoaded {
-              cast.preload(net_manager, bitmap_manager).await;
+              cast.preload(net_manager, bitmap_manager, dir_cache).await;
             }
           },
           _ => {},

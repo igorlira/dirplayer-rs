@@ -98,6 +98,7 @@ pub struct DirPlayer {
   pub hovered_sprite: Option<i16>,
   pub timer_tick_start: u32,
   pub allocator: DatumAllocator,
+  pub dir_cache: HashMap<String, DirectorFile>,
 }
 
 impl DirPlayer {
@@ -156,6 +157,7 @@ impl DirPlayer {
       hovered_sprite: None,
       timer_tick_start: get_ticks(),
       allocator: DatumAllocator::default(allocator_rx, allocator_tx),
+      dir_cache: HashMap::new(),
     }
   }
 
@@ -175,7 +177,7 @@ impl DirPlayer {
   }
 
   async fn load_movie_from_dir(&mut self, dir: &DirectorFile) {
-    self.movie.load_from_file(&dir, &mut self.net_manager, &mut self.bitmap_manager).await;
+    self.movie.load_from_file(&dir, &mut self.net_manager, &mut self.bitmap_manager, &mut self.dir_cache).await;
     let (r, g, b) = self.movie.stage_color;
     self.bg_color = ColorRef::Rgb(r, g, b);
     JsApi::dispatch_movie_loaded(&dir);
@@ -662,7 +664,12 @@ pub async fn run_frame_loop() {
     if new_frame > 1 && prev_frame <= 1 {
       let mut player = player_arc.write().await;
       let player = player.as_mut().unwrap();
-      player.movie.cast_manager.preload_casts(CastPreloadReason::AfterFrameOne, &mut player.net_manager, &mut player.bitmap_manager).await;
+      player.movie.cast_manager.preload_casts(
+        CastPreloadReason::AfterFrameOne, 
+        &mut player.net_manager, 
+        &mut player.bitmap_manager,
+        &mut player.dir_cache,
+      ).await;
     }
     if !is_script_paused {
       let frame_skipped = reserve_player_ref(|player| {

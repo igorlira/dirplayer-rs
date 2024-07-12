@@ -43,8 +43,18 @@ impl CastLib {
     JsApi::dispatch_cast_member_list_changed(self.number);
   }
 
-  pub async fn preload(&mut self, net_manager: &mut NetManager, bitmap_manager: &mut BitmapManager) {
-    if !self.file_name.is_empty() {
+  pub async fn preload(
+    &mut self, 
+    net_manager: &mut NetManager, 
+    bitmap_manager: &mut BitmapManager,
+    dir_cache: &mut HashMap<String, DirectorFile>,
+  ) {
+    let file_name = self.file_name.clone();
+    if file_name.is_empty() {
+      return;
+    } else if let Some(cached_file) = dir_cache.get(&file_name) {
+      self.load_from_dir_file(cached_file, &file_name, bitmap_manager);
+    } else {
       log_i(format_args!("Loading cast {}", self.file_name).to_string().as_str());
       self.is_loading = true;
       let task_id = net_manager.preload_net_thing(self.file_name.clone());
@@ -53,20 +63,21 @@ impl CastLib {
       }
       let task = net_manager.get_task(task_id).unwrap();
       let result = net_manager.get_task_result(Some(task_id)).unwrap();
-      self.on_cast_preload_result(&result, &task.resolved_url, bitmap_manager);
+      self.on_cast_preload_result(&result, &task.resolved_url, bitmap_manager, dir_cache);
     }
   }
 
-  fn on_cast_preload_result(&mut self, result: &NetResult, resolved_url: &Url, bitmap_manager: &mut BitmapManager) {
+  fn on_cast_preload_result(&mut self, result: &NetResult, resolved_url: &Url, bitmap_manager: &mut BitmapManager, dir_cache: &mut HashMap<String, DirectorFile>) {
     let load_file_name = resolved_url.to_string();
     if let Ok(cast_bytes) = result {
       let cast_file = read_director_file_bytes(cast_bytes, &resolved_url.to_string(), &get_base_url(resolved_url).to_string());
       if let Ok(cast_file) = cast_file {
+        dir_cache.insert(load_file_name.clone(), cast_file);
+        let cast_file = dir_cache.get(&load_file_name).unwrap();
         self.load_from_dir_file(&cast_file, &load_file_name, bitmap_manager);
       } else {
         log_i(format!("Could not parse {load_file_name}").to_string().as_str());
       }
-      self.is_loaded = true;
     } else {
       log_i(format!("Fetching {load_file_name} failed").to_string().as_str());
     }
@@ -153,6 +164,8 @@ impl CastLib {
     self.clear();
     // TODO file.parseScripts
 
+    self.is_loaded = true;
+    self.is_loading = false;
     self.file_name = load_file_name.to_owned();
     if self.name.is_empty() {
       self.set_name(get_basename_no_extension(&load_file_name));
@@ -160,7 +173,6 @@ impl CastLib {
     if let Some(cast_def) = file.casts.first() {
       self.apply_cast_def(file, cast_def, bitmap_manager);
     }
-    log_i(format!("Loaded {load_file_name}").to_string().as_str());
   }
 
   pub fn apply_cast_def(&mut self, _: &DirectorFile, cast_def: &CastDef, bitmap_manager: &mut BitmapManager) {
@@ -256,7 +268,7 @@ pub async fn player_cast_lib_set_prop(cast_lib: u32, prop_name: &String, value: 
   let cast_lib = player.movie.cast_manager.get_cast_mut(cast_lib as u32);
   cast_lib.set_prop(&prop_name, value, &player.allocator)?;
   if prop_name == "fileName" {
-    cast_lib.preload(&mut player.net_manager, &mut player.bitmap_manager).await;
+    cast_lib.preload(&mut player.net_manager, &mut player.bitmap_manager, &mut player.dir_cache).await;
   }
   // TODO handle preload error
   Ok(())
