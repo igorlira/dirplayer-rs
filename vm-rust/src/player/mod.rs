@@ -596,8 +596,7 @@ pub async fn player_call_script_handler_raw_args(
         bytecode_index,
       ).await;
     }
-    let context = player_execute_bytecode(&ctx).await?; // TODO catch error
-    let result = context.result;
+    let result = player_execute_bytecode(&ctx).await?; // TODO catch error
 
     match result {
       HandlerExecutionResult::Advance => {
@@ -810,7 +809,7 @@ fn get_active_scripts<'a>(
   return active_scripts;
 }
 
-async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: ScopeRef) -> HandlerExecutionResultContext {
+async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: ScopeRef) -> HandlerExecutionResult {
   // let formatted_args: Vec<String> = reserve_player_ref(|player| {
   //   args.iter().map(|datum_ref| format_datum(*datum_ref, player)).collect()
   // });
@@ -823,7 +822,7 @@ async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: Scop
         });
       }
 
-      HandlerExecutionResultContext { result: HandlerExecutionResult::Stop }
+      HandlerExecutionResult::Stop
     }
     _ => {
       let result = player_call_global_handler(&name, args).await;
@@ -834,12 +833,10 @@ async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: Scop
             player.last_handler_result = result.clone();
             player.scopes.get_mut(scope_ref).unwrap().return_value = result;
           });
-          HandlerExecutionResultContext { result: HandlerExecutionResult::Advance }
+          HandlerExecutionResult::Advance
         }
         Err(err) => {
-          HandlerExecutionResultContext { 
-            result: HandlerExecutionResult::Error(err), 
-          }
+          HandlerExecutionResult::Error(err)
         }
       }
     }

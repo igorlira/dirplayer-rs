@@ -5,16 +5,16 @@ use super::handler_manager::BytecodeHandlerContext;
 pub struct StackBytecodeHandler { }
 
 impl StackBytecodeHandler {
-  pub fn push_int(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_int(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let datum_ref = player.alloc_datum(Datum::Int(player.get_ctx_current_bytecode(ctx).obj as i32));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(datum_ref);
     });
-    Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    Ok(HandlerExecutionResult::Advance)
   }
 
-  pub fn push_f32(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_f32(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let bytes = (player.get_ctx_current_bytecode(ctx).obj as i32).to_be_bytes();
       let result = f32::from_be_bytes(bytes);
@@ -23,10 +23,10 @@ impl StackBytecodeHandler {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(datum_ref);
     });
-    Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    Ok(HandlerExecutionResult::Advance)
   }
 
-  pub fn push_arglist(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_arglist(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -40,10 +40,10 @@ impl StackBytecodeHandler {
       scope.stack.push(datum_ref);
       Ok(())
     })?;
-    Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    Ok(HandlerExecutionResult::Advance)
   }
 
-  pub fn push_arglist_no_ret(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_arglist_no_ret(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -57,10 +57,10 @@ impl StackBytecodeHandler {
       scope.stack.push(datum_ref);
       Ok(())
     })?;
-    Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    Ok(HandlerExecutionResult::Advance)
   }
 
-  pub fn push_symb(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_symb(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
     let name_id = player.get_ctx_current_bytecode(ctx).obj;
     let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
@@ -68,10 +68,10 @@ impl StackBytecodeHandler {
 
     let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
     scope.stack.push(datum_ref);
-    Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    Ok(HandlerExecutionResult::Advance)
   }
 
-  pub fn push_cons(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_cons(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       // let (member_ref, handler_def) = get_current_handler_def(&player, ctx.to_owned()).unwrap();
       let script = get_current_script(&player, &ctx).unwrap();
@@ -82,20 +82,20 @@ impl StackBytecodeHandler {
 
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(datum_ref);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub fn push_zero(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_zero(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let datum_ref = player.alloc_datum(Datum::Int(0));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(datum_ref);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub fn push_prop_list(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_prop_list(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     let arg_list_ref = reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.pop().unwrap()
@@ -115,11 +115,11 @@ impl StackBytecodeHandler {
       let datum_ref = player.alloc_datum(Datum::PropList(entries, false));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(datum_ref);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub fn push_list(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_list(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let list_id = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -129,31 +129,31 @@ impl StackBytecodeHandler {
       let result_id = player.alloc_datum(Datum::List(DatumType::List, list, false));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_id);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub fn peek(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn peek(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let offset = player.get_ctx_current_bytecode(ctx).obj;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let stack_index = scope.stack.len() - 1 - offset as usize;
       let datum_ref = scope.stack.get(stack_index).unwrap().clone();  
       scope.stack.push(datum_ref);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub fn pop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn pop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let count = player.get_ctx_current_bytecode(ctx).obj;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.pop_n(count as usize);
     });
-    Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    Ok(HandlerExecutionResult::Advance)
   }
 
-  pub fn push_chunk_var_ref(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn push_chunk_var_ref(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj;
       let (id_ref, cast_id_ref) = read_context_var_args(player, bytecode_obj as u32, ctx.scope_ref);
@@ -161,11 +161,11 @@ impl StackBytecodeHandler {
     
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(value_ref);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub async fn new_obj(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub async fn new_obj(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     let (script_ref, extra_args) = reserve_player_mut(|player| {
       let bytecode = player.get_ctx_current_bytecode(&ctx);
       let obj_type = get_name(player, &ctx, bytecode.obj as u16).unwrap();
@@ -189,7 +189,7 @@ impl StackBytecodeHandler {
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 }

@@ -5,7 +5,7 @@ use super::handler_manager::BytecodeHandlerContext;
 pub struct ArithmeticsBytecodeHandler { }
 
 impl ArithmeticsBytecodeHandler {
-  pub fn add(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn add(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -22,11 +22,11 @@ impl ArithmeticsBytecodeHandler {
       };
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_id);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub fn sub(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn sub(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -41,7 +41,7 @@ impl ArithmeticsBytecodeHandler {
       let result_id = player.alloc_datum(result);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_id);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
@@ -61,7 +61,7 @@ impl ArithmeticsBytecodeHandler {
     }
   }
 
-  pub fn mod_handler(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn mod_handler(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -116,11 +116,11 @@ impl ArithmeticsBytecodeHandler {
       let result_id = player.alloc_datum(result);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_id);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub fn div(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn div(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let (left, right) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -158,11 +158,11 @@ impl ArithmeticsBytecodeHandler {
       let result_id = player.alloc_datum(result);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_id);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub fn mul(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn mul(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let (left_ref, right_ref) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -218,11 +218,11 @@ impl ArithmeticsBytecodeHandler {
       let result_id = player.alloc_datum(result);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_id);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 
-  pub fn inv(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn inv(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let value_id = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -238,7 +238,7 @@ impl ArithmeticsBytecodeHandler {
       let result_id = player.alloc_datum(result);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_id);
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+      Ok(HandlerExecutionResult::Advance)
     })
   }
 }
