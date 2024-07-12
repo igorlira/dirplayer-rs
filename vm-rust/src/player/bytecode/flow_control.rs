@@ -5,15 +5,15 @@ use super::handler_manager::BytecodeHandlerContext;
 pub struct FlowControlBytecodeHandler { }
 
 impl FlowControlBytecodeHandler {
-  pub fn ret(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn ret(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.clear();
     });
-    Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Stop })
+    Ok(HandlerExecutionResult::Stop)
   }
 
-  pub async fn ext_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub async fn ext_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     // let script = get_current_script(player.to_owned(), ctx.to_owned());
     let (name, arg_ref_list, is_no_ret) = {
       let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
@@ -44,10 +44,10 @@ impl FlowControlBytecodeHandler {
         scope.stack.push(scope.return_value.clone());
       });
     }
-    return Ok(HandlerExecutionResultContext { result: result_ctx.result });
+    return Ok(result_ctx);
   }
 
-  pub async fn local_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub async fn local_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     let (handler_ref, is_no_ret, args) = reserve_player_mut(|player| {
       let arg_list_id = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -77,10 +77,10 @@ impl FlowControlBytecodeHandler {
         scope.stack.push(result);
       });
     }
-    Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    Ok(HandlerExecutionResult::Advance)
   }
 
-  pub fn jmp_if_zero(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn jmp_if_zero(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let value_id = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -101,14 +101,14 @@ impl FlowControlBytecodeHandler {
         };
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.bytecode_index = new_bytecode_index;
-        Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Jump })
+        Ok(HandlerExecutionResult::Jump)
       } else {
-        Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+        Ok(HandlerExecutionResult::Advance)
       }
     })
   }
 
-  pub fn jmp(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn jmp(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let bytecode = player.get_ctx_current_bytecode(ctx);
       let new_bytecode_index = {
@@ -118,11 +118,11 @@ impl FlowControlBytecodeHandler {
       };
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.bytecode_index = new_bytecode_index;
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Jump })
+      Ok(HandlerExecutionResult::Jump)
     })
   }
 
-  pub async fn obj_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub async fn obj_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     // let token = start_profiling("_obj_call_prepare".to_string());
     let (obj_ref, handler_name, args, is_no_ret) = reserve_player_mut(|player| {
       let arg_list_id = {
@@ -154,10 +154,10 @@ impl FlowControlBytecodeHandler {
       };
     });
     // end_profiling(token);
-    Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Advance })
+    Ok(HandlerExecutionResult::Advance)
   }
 
-  pub fn end_repeat(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResultContext, ScriptError> {
+  pub fn end_repeat(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let new_index = {
         let bytecode = player.get_ctx_current_bytecode(ctx);
@@ -167,7 +167,7 @@ impl FlowControlBytecodeHandler {
       };
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.bytecode_index = new_index;
-      Ok(HandlerExecutionResultContext { result: HandlerExecutionResult::Jump })
+      Ok(HandlerExecutionResult::Jump)
     })
   }
 }
