@@ -5,7 +5,7 @@ use url::Url;
 
 use crate::{director::{enums::ScriptType, file::DirectorFile, lingo::datum::Datum}, js_api::JsApi, player::cast_lib::CastLib};
 
-use super::{allocator::DatumAllocator, bitmap::{manager::BitmapManager, palette_map::PaletteMap}, cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF}, cast_member::{CastMember, CastMemberType}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, script::Script, ScriptError};
+use super::{allocator::DatumAllocator, bitmap::{manager::BitmapManager, palette_map::PaletteMap}, cast_lib::{CastLibState, CastMemberRef, INVALID_CAST_MEMBER_REF}, cast_member::{CastMember, CastMemberType}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, script::Script, ScriptError};
 
 pub struct CastManager {
   pub casts: Vec<CastLib>,
@@ -29,7 +29,7 @@ impl CastManager {
     dir: &DirectorFile, 
     net_manager: &mut NetManager, 
     bitmap_manager: &mut BitmapManager,
-    dir_cache: &mut HashMap<String, DirectorFile>
+    dir_cache: &mut HashMap<Box<str>, DirectorFile>
   ) {
     let dir_path_uri = &dir.base_path;
     if !IS_WEB || dir_path_uri.host().is_some() {
@@ -44,8 +44,7 @@ impl CastManager {
         file_name: normalize_cast_lib_path(&net_manager.base_path, &cast_entry.file_path).map_or("".to_string(), |it| it.to_string()),
         number: (index + 1) as u32,
         is_external: cast_def.is_none(),
-        is_loaded: cast_def.is_some(),
-        is_loading: false,
+        state: if cast_def.is_some() { CastLibState::Loaded } else { CastLibState::None },
         lctx: cast_def.and_then(|x| x.lctx.clone()),
         members: HashMap::new(),
         scripts: HashMap::new(),
@@ -68,10 +67,10 @@ impl CastManager {
     reason: CastPreloadReason, 
     net_manager: &mut NetManager, 
     bitmap_manager: &mut BitmapManager,
-    dir_cache: &mut HashMap<String, DirectorFile>,
+    dir_cache: &mut HashMap<Box<str>, DirectorFile>,
   ) {
     for cast in self.casts.iter_mut() {
-      if cast.is_external && !cast.is_loaded && !cast.is_loading && !cast.file_name.is_empty() {
+      if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
         match cast.preload_mode {
           0 => {
             // When needed

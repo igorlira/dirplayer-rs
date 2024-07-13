@@ -98,7 +98,7 @@ pub struct DirPlayer {
   pub hovered_sprite: Option<i16>,
   pub timer_tick_start: u32,
   pub allocator: DatumAllocator,
-  pub dir_cache: HashMap<String, DirectorFile>,
+  pub dir_cache: HashMap<Box<str>, DirectorFile>,
 }
 
 impl DirPlayer {
