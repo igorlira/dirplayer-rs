@@ -26,7 +26,7 @@ impl Movie {
     file: &DirectorFile, 
     net_manager: &mut NetManager, 
     bitmap_manager: &mut BitmapManager,
-    dir_cache: &mut HashMap<String, DirectorFile>,
+    dir_cache: &mut HashMap<Box<str>, DirectorFile>,
   ) {
     self.dir_version = file.version;
     self.stage_color = (

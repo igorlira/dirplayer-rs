@@ -6,13 +6,20 @@ use crate::{director::{cast::CastDef, file::{read_director_file_bytes, DirectorF
 
 use super::{allocator::DatumAllocator, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, manager::BitmapManager}, cast_member::{BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, net_task::NetResult, script::Script, ScriptError, PLAYER_LOCK};
 
+#[repr(u8)]
+#[derive(PartialEq)]
+pub enum CastLibState {
+  None,
+  Loading,
+  Loaded,
+}
+
 pub struct CastLib {
   pub name: String,
   pub file_name: String,
   pub number: u32,
   pub is_external: bool,
-  pub is_loaded: bool,
-  pub is_loading: bool,
+  pub state: CastLibState,
   pub lctx: Option<ScriptContext>,
   pub members: HashMap<u32, CastMember>,
   pub scripts: HashMap<u32, Script>,
@@ -47,16 +54,16 @@ impl CastLib {
     &mut self, 
     net_manager: &mut NetManager, 
     bitmap_manager: &mut BitmapManager,
-    dir_cache: &mut HashMap<String, DirectorFile>,
+    dir_cache: &mut HashMap<Box<str>, DirectorFile>,
   ) {
     let file_name = self.file_name.clone();
     if file_name.is_empty() {
       return;
-    } else if let Some(cached_file) = dir_cache.get(&file_name) {
+    } else if let Some(cached_file) = dir_cache.get(&*file_name) {
       self.load_from_dir_file(cached_file, &file_name, bitmap_manager);
     } else {
       log_i(format_args!("Loading cast {}", self.file_name).to_string().as_str());
-      self.is_loading = true;
+      self.state = CastLibState::Loading;
       let task_id = net_manager.preload_net_thing(self.file_name.clone());
       if !net_manager.is_task_done(Some(task_id)) {
         net_manager.await_task(task_id).await;
@@ -67,21 +74,25 @@ impl CastLib {
     }
   }
 
-  fn on_cast_preload_result(&mut self, result: &NetResult, resolved_url: &Url, bitmap_manager: &mut BitmapManager, dir_cache: &mut HashMap<String, DirectorFile>) {
-    let load_file_name = resolved_url.to_string();
+  fn on_cast_preload_result(&mut self, result: &NetResult, resolved_url: &Url, bitmap_manager: &mut BitmapManager, dir_cache: &mut HashMap<Box<str>, DirectorFile>) {
+    let load_file_name = resolved_url.as_str();
+
     if let Ok(cast_bytes) = result {
       let cast_file = read_director_file_bytes(cast_bytes, &resolved_url.to_string(), &get_base_url(resolved_url).to_string());
       if let Ok(cast_file) = cast_file {
-        dir_cache.insert(load_file_name.clone(), cast_file);
-        let cast_file = dir_cache.get(&load_file_name).unwrap();
-        self.load_from_dir_file(&cast_file, &load_file_name, bitmap_manager);
+        dir_cache.insert(load_file_name.into(), cast_file);
+        let cast_file = dir_cache.get(load_file_name).unwrap();
+        self.load_from_dir_file(&cast_file, load_file_name, bitmap_manager);
+        // We return here because the function `load_from_dir_file()`
+        // has changed our `state` to `Loaded` and we want to keep this.
+        return;
       } else {
-        log_i(format!("Could not parse {load_file_name}").to_string().as_str());
+        log_i(format!("Could not parse {load_file_name}").as_str());
       }
     } else {
-      log_i(format!("Fetching {load_file_name} failed").to_string().as_str());
+      log_i(format!("Fetching {load_file_name} failed").as_str());
     }
-    self.is_loading = false;
+    self.state = CastLibState::None;
   }
 
   pub fn find_member_by_number(&self, number: u32) -> Option<&CastMember> {
@@ -102,14 +113,13 @@ impl CastLib {
   }
 
   fn clear(&mut self) {
-    if !self.is_loaded {
+    if self.state != CastLibState::Loaded {
       return;
     }
     self.members.clear();
     self.scripts.clear();
     self.lctx = None;
-    self.is_loaded = false;
-    self.is_loading = false;
+    self.state = CastLibState::None;
 
     JsApi::dispatch_cast_member_list_changed(self.number);
   }
@@ -160,15 +170,14 @@ impl CastLib {
     }
   }
 
-  fn load_from_dir_file(&mut self, file: &DirectorFile, load_file_name: &String, bitmap_manager: &mut BitmapManager) {
+  fn load_from_dir_file(&mut self, file: &DirectorFile, load_file_name: &str, bitmap_manager: &mut BitmapManager) {
     self.clear();
     // TODO file.parseScripts
 
-    self.is_loaded = true;
-    self.is_loading = false;
     self.file_name = load_file_name.to_owned();
+    self.state = CastLibState::Loaded;
     if self.name.is_empty() {
-      self.set_name(get_basename_no_extension(&load_file_name));
+      self.set_name(get_basename_no_extension(load_file_name));
     }
     if let Some(cast_def) = file.casts.first() {
       self.apply_cast_def(file, cast_def, bitmap_manager);
