@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
+use fxhash::FxHashMap;
 use url::Url;
 
 use crate::{director::{cast::CastDef, file::{read_director_file_bytes, DirectorFile}, lingo::{datum::Datum, script::ScriptContext}}, js_api::{self, JsApi}, utils::{get_base_url, get_basename_no_extension, log_i}};
@@ -21,8 +22,8 @@ pub struct CastLib {
   pub is_external: bool,
   pub state: CastLibState,
   pub lctx: Option<ScriptContext>,
-  pub members: HashMap<u32, CastMember>,
-  pub scripts: HashMap<u32, Script>,
+  pub members: FxHashMap<u32, CastMember>,
+  pub scripts: FxHashMap<u32, Rc<Script>>,
   pub preload_mode: u8,
   pub capital_x: bool,
   pub dir_version: u16,
@@ -203,10 +204,10 @@ impl CastLib {
       let script_def = self.lctx.as_ref().unwrap().scripts.get(&script_member.script_id).unwrap();
 
       let mut handler_names = Vec::new();
-      let mut handler_name_map = HashMap::new();
+      let mut handler_name_map = FxHashMap::default();
       for handler in &script_def.handlers {
         let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
-        handler_name_map.insert(handler_name.to_owned(), handler.clone());
+        handler_name_map.insert(handler_name.to_owned(), Rc::new(handler.clone()));
         handler_names.push(handler_name.to_owned());
       }
 
@@ -218,7 +219,7 @@ impl CastLib {
         handlers: handler_name_map,
         handler_names,
       };
-      self.scripts.insert(number, script);
+      self.scripts.insert(number, Rc::new(script));
     }
 
     self.members.insert(number, member);
@@ -246,7 +247,7 @@ impl CastLib {
     Ok(cast_member_ref(self.number as i32, number as i32))
   }
 
-  pub fn get_script_for_member(&self, number: u32) -> Option<&Script> {
+  pub fn get_script_for_member(&self, number: u32) -> Option<&Rc<Script>> {
     self.scripts.get(&number)
   }
 }

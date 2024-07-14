@@ -1,6 +1,10 @@
-use std::collections::HashMap;
+use std::rc::Rc;
 
-use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef, script_ref::ScriptInstanceRef, DatumRef};
+use fxhash::FxHashMap;
+
+use crate::director::chunks::handler::HandlerDef;
+
+use super::{cast_lib::CastMemberRef, script::{Script, ScriptHandlerRef}, script_ref::ScriptInstanceRef, DatumRef};
 
 pub type ScopeRef = usize;
 
@@ -13,11 +17,13 @@ pub struct Scope {
   pub handler_name_id: u16,
   pub args: Vec<DatumRef>,
   pub bytecode_index: usize,
-  pub locals: HashMap<String, DatumRef>,
+  pub locals: FxHashMap<String, DatumRef>,
   pub loop_return_indices: Vec<usize>,
   pub return_value: DatumRef,
   pub stack: Vec<DatumRef>,
   pub passed: bool,
+  pub script_rc: Rc<Script>,
+  pub handler_rc: Rc<HandlerDef>,
 }
 
 impl Scope {
@@ -35,7 +41,9 @@ impl Scope {
     receiver: Option<ScriptInstanceRef>, 
     handler_ref: ScriptHandlerRef, 
     handler_name_id: u16,
-    args: Vec<DatumRef>
+    args: Vec<DatumRef>,
+    script_rc: Rc<Script>,
+    handler_rc: Rc<HandlerDef>,
   ) -> Scope {
     Scope {
       scope_ref,
@@ -45,11 +53,13 @@ impl Scope {
       handler_name_id,
       args,
       bytecode_index: 0,
-      locals: HashMap::new(),
+      locals: FxHashMap::default(),
       loop_return_indices: vec![],
       return_value: DatumRef::Void,
       stack: vec![],
       passed: false,
+      script_rc,
+      handler_rc,
     }
   }
 }
