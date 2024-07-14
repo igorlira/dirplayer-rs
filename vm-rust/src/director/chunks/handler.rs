@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-
 use binary_reader::BinaryReader;
+use fxhash::FxHashMap;
 
 use crate::director::lingo::{constants::OPCODE_NAMES, opcode::OpCode, script::ScriptContext};
 
@@ -97,7 +96,7 @@ pub fn get_opcode_name(id: u16) -> String {
 pub struct HandlerDef {
   pub name_id: u16,
   pub bytecode_array: Vec<Bytecode>,
-  pub bytecode_index_map: HashMap<usize, usize>,
+  pub bytecode_index_map: FxHashMap<usize, usize>,
   pub argument_name_ids: Vec<u16>,
   pub local_name_ids: Vec<u16>,
   pub global_name_ids: Vec<u16>,
@@ -154,7 +153,7 @@ impl HandlerRecord {
     record: &HandlerRecord,
   ) -> Result<HandlerDef, String> {
     let mut bytecode_array: Vec<Bytecode> = Vec::new();
-    let mut bytecode_index_map: HashMap<usize, usize> = HashMap::new();
+    let mut bytecode_index_map: FxHashMap<usize, usize> = FxHashMap::default();
 
     reader.jmp(record.compiled_offset);
 

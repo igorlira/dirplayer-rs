@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
+use fxhash::FxHashMap;
 use itertools::Itertools;
 use url::Url;
 
@@ -47,8 +48,8 @@ impl CastManager {
         is_loaded: cast_def.is_some(),
         is_loading: false,
         lctx: cast_def.and_then(|x| x.lctx.clone()),
-        members: HashMap::new(),
-        scripts: HashMap::new(),
+        members: FxHashMap::default(),
+        scripts: FxHashMap::default(),
         preload_mode: 0,
         capital_x: false,
         dir_version: 0,
@@ -241,7 +242,7 @@ impl CastManager {
     self.get_cast_mut(member_ref.cast_lib as u32).find_mut_member_by_number(member_ref.cast_member as u32)
   }
 
-  pub fn get_script_by_ref(&self, member_ref: &CastMemberRef) -> Option<&Script> {
+  pub fn get_script_by_ref(&self, member_ref: &CastMemberRef) -> Option<&Rc<Script>> {
     if member_ref.cast_lib == INVALID_CAST_MEMBER_REF.cast_lib || member_ref.cast_member == INVALID_CAST_MEMBER_REF.cast_member {
       return None;
     } else if let Ok(cast) = self.get_cast(member_ref.cast_lib as u32) {
@@ -276,7 +277,7 @@ impl CastManager {
     Ok(())
   }
 
-  pub fn get_movie_scripts(&self) -> Vec<&Script> {
+  pub fn get_movie_scripts(&self) -> Vec<&Rc<Script>> {
     let mut result = Vec::new();
     for cast in &self.casts {
       for script in cast.scripts.values() {

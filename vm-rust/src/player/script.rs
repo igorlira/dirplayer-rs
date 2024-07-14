@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::rc::Rc;
 
+use fxhash::FxHashMap;
 use itertools::Itertools;
 
 use crate::director::{
@@ -7,7 +8,7 @@ use crate::director::{
 };
 
 use super::{
-    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, score::{sprite_get_prop, sprite_set_prop}, script_ref::ScriptInstanceRef, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError
+    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, scope::Scope, score::{sprite_get_prop, sprite_set_prop}, script_ref::ScriptInstanceRef, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError
 };
 
 #[derive(Clone)]
@@ -16,23 +17,23 @@ pub struct Script {
     pub name: String,
     pub chunk: ScriptChunk,
     pub script_type: ScriptType,
-    pub handlers: HashMap<String, HandlerDef>,
+    pub handlers: FxHashMap<String, Rc<HandlerDef>>,
     pub handler_names: Vec<String>,
 }
 
 pub type ScriptInstanceId = u32;
-pub type ScriptHandlerRefDef<'a> = (CastMemberRef, &'a HandlerDef);
+pub type ScriptHandlerRefDef<'a> = (CastMemberRef, &'a Rc<HandlerDef>);
 
 pub struct ScriptInstance {
     pub instance_id: ScriptInstanceId,
     pub script: CastMemberRef,
     pub ancestor: Option<ScriptInstanceRef>,
-    pub properties: HashMap<String, DatumRef>,
+    pub properties: FxHashMap<String, DatumRef>,
 }
 
 impl ScriptInstance {
     pub fn new(instance_id: ScriptInstanceId, script_ref: CastMemberRef, script_def: &Script, lctx: &ScriptContext) -> ScriptInstance {
-        let mut properties = HashMap::new();
+        let mut properties = FxHashMap::default();
         for name_id in script_def.chunk.property_name_ids.iter() {
             let name = lctx.names[*name_id as usize].clone();
             properties.insert(name, DatumRef::Void);
@@ -51,11 +52,11 @@ impl Script {
         return self.handler_names.get(index).map(|x| (self.member_ref.clone(), x.clone()));
     }
 
-    pub fn get_own_handler(&self, name: &String) -> Option<&HandlerDef> {
+    pub fn get_own_handler(&self, name: &String) -> Option<&Rc<HandlerDef>> {
         self.handlers.get(name) // TODO make case insenitive
     }
 
-    pub fn get_own_handler_by_name_id(&self, name_id: u16) -> Option<&HandlerDef> {
+    pub fn get_own_handler_by_name_id(&self, name_id: u16) -> Option<&Rc<HandlerDef>> {
         self.handlers.iter().find(|x| x.1.name_id == name_id).map(|x| x.1)
     }
 
@@ -185,29 +186,27 @@ pub fn script_set_prop(
     })
 }
 
+pub fn get_current_scope<'a>(
+    player: &'a DirPlayer,
+    ctx: &'a BytecodeHandlerContext,
+) -> Option<&'a Scope> {
+    player.scopes.get(ctx.scope_ref)
+}
+
 pub fn get_current_script<'a>(
     player: &'a DirPlayer,
     ctx: &'a BytecodeHandlerContext,
 ) -> Option<&'a Script> {
-    let script = player
-        .movie
-        .cast_manager
-        .get_script_by_ref(&player.scopes.get(ctx.scope_ref).unwrap().script_ref);
-    return script;
+    let scope = get_current_scope(player, ctx);
+    scope.map(|x| x.script_rc.as_ref())
 }
 
 pub fn get_current_handler_def<'a>(
     player: &'a DirPlayer,
     ctx: &'a BytecodeHandlerContext,
 ) -> Option<ScriptHandlerRefDef<'a>> {
-    let script = get_current_script(player, ctx);
-    if let Some(script) = script {
-        let handler = script.get_handler(&player.scopes.get(ctx.scope_ref).unwrap().handler_ref.1);
-        if let Some(handler) = handler {
-            return Some(handler);
-        }
-    }
-    None
+    let scope = get_current_scope(player, ctx);
+    scope.map(|x| (x.script_ref.clone(), &x.handler_rc))
 }
 
 pub fn get_current_variable_multiplier(player: &DirPlayer, ctx: &BytecodeHandlerContext) -> u32 {

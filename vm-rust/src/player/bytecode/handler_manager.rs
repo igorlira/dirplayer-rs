@@ -124,12 +124,10 @@ pub async fn player_execute_bytecode<'a>(
         // }
         let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
         let scope = player.scopes.get(ctx.scope_ref).unwrap();
-        let script_member_ref = &scope.script_ref;
-        let handler_name_id = scope.handler_name_id;
-        let bytecode_index = scope.bytecode_index;
 
         let handler_manager = &player.bytecode_handler_manager;
-        let bytecode = player.get_bytecode_ref(script_member_ref, handler_name_id, bytecode_index);
+        let handler = scope.handler_rc.as_ref();
+        let bytecode = &handler.bytecode_array[scope.bytecode_index];
 
         if let Some(async_handler) = handler_manager.get_async_handler(&bytecode.opcode) {
             (None, Some(async_handler), bytecode.opcode)
