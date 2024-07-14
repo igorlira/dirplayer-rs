@@ -1,7 +1,5 @@
 use std::{cell::{Cell, UnsafeCell}, fmt::Display, rc::Rc};
 
-use nohash_hasher::IntMap;
-
 use super::{allocator::{DatumAllocatorEvent, DatumAllocatorTrait}, ALLOCATOR_TX, PLAYER_OPT};
 
 pub type DatumId = usize;
