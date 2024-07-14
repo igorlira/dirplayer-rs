@@ -18,6 +18,7 @@ pub struct PlayerCanvasRenderer {
     pub preview_size: (u32, u32),
     pub preview_member_ref: Option<CastMemberRef>,
     pub debug_selected_channel_num: Option<i16>,
+    pub bitmap: Bitmap,
 }
 
 pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug_sprite_num: Option<i16>) {
@@ -328,7 +329,7 @@ impl PlayerCanvasRenderer {
         }
     }
 
-    pub fn draw_frame(&self, player: &mut DirPlayer) {
+    pub fn draw_frame(&mut self, player: &mut DirPlayer) {
         // let time = chrono::Local::now().timestamp_millis() as i64;
         // let time_seconds = time as f64 / 1000.0;
         // let oscillated_r = 127.0 + 255.0 * (time_seconds * 2.0 * std::f32::consts::PI as f64).sin();
@@ -336,29 +337,35 @@ impl PlayerCanvasRenderer {
         // let oscillated_b = 127.0 + 255.0 * (time_seconds * 2.0 * std::f32::consts::PI as f64 + (std::f32::consts::PI) as f64).sin();
 
         // let color = format!("rgba({}, {}, {}, {})", oscillated_r, oscillated_g, oscillated_b, 1);
-        let bg_color = "black";
+        // let bg_color = "black";
 
-        let (width, height) = self.size;
-        self.ctx2d.clear_rect(0.0, 0.0, width as f64, height as f64);
-        self.ctx2d.set_fill_style(&JsValue::from_str(&bg_color));
-        self.ctx2d.fill_rect(0.0, 0.0, width as f64, height as f64);
+        // let (width, height) = self.size;
+        // self.ctx2d.clear_rect(0.0, 0.0, width as f64, height as f64);
+        // self.ctx2d.set_fill_style(&JsValue::from_str(&bg_color));
+        // self.ctx2d.fill_rect(0.0, 0.0, width as f64, height as f64);
 
-        self.ctx2d.set_fill_style(&JsValue::from_str("black"));
-        self.ctx2d
-            .fill_text(
-                &format!("dir_version: {}", player.movie.dir_version),
-                0.0,
-                10.0,
-            )
-            .unwrap();
+        // self.ctx2d.set_fill_style(&JsValue::from_str("black"));
+        // self.ctx2d
+        //     .fill_text(
+        //         &format!("dir_version: {}", player.movie.dir_version),
+        //         0.0,
+        //         10.0,
+        //     )
+        //     .unwrap();
 
-        let mut bitmap = Bitmap::new(
-            width as u16,
-            height as u16,
-            32,
-            PaletteRef::BuiltIn(get_system_default_palette()),
-        );
-        render_stage_to_bitmap(player, &mut bitmap, self.debug_selected_channel_num);
+        let movie_width = player.movie.rect.width();
+        let movie_height = player.movie.rect.height();
+
+        if self.bitmap.width != movie_width as u16 || self.bitmap.height != movie_height as u16 {
+            self.bitmap = Bitmap::new(
+                movie_width as u16,
+                movie_height as u16,
+                32,
+                PaletteRef::BuiltIn(get_system_default_palette()),
+            );
+        }
+        let bitmap = &mut self.bitmap;
+        render_stage_to_bitmap(player, bitmap, self.debug_selected_channel_num);
 
         let font = player.font_manager.get_system_font().unwrap();
         let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
@@ -533,6 +540,7 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 preview_size: (1, 1),
                 preview_member_ref: None,
                 debug_selected_channel_num: None,
+                bitmap: Bitmap::new(1, 1, 32, PaletteRef::BuiltIn(get_system_default_palette())),
             };
 
             *renderer_lock = Some(renderer);
