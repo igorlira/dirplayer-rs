@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
+use fxhash::FxHashMap;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use nohash_hasher::IntMap;
 
 pub struct ProfilingToken {
   name: String,
@@ -19,7 +19,7 @@ impl ProfilingToken {
 }
 
 pub struct PlayerProfiler {
-  tokens: IntMap<u32, ProfilingToken>,
+  tokens: FxHashMap<u32, ProfilingToken>,
   total_time_by_name: HashMap<String, Duration>,
   token_id_counter: u32,
 }
@@ -27,7 +27,7 @@ pub struct PlayerProfiler {
 impl PlayerProfiler {
   pub fn new() -> PlayerProfiler {
     PlayerProfiler { 
-      tokens: IntMap::default(), 
+      tokens: FxHashMap::default(), 
       token_id_counter: 0,
       total_time_by_name: HashMap::new(),
     }

@@ -1,7 +1,7 @@
 use std::{cell::UnsafeCell, rc::Rc};
 
 use async_std::channel::{Receiver, Sender};
-use nohash_hasher::IntMap;
+use fxhash::FxHashMap;
 
 use crate::{console_warn, director::lingo::datum::Datum};
 
@@ -49,8 +49,8 @@ pub enum DatumAllocatorEvent {
 }
 
 pub struct DatumAllocator {
-  pub datums: IntMap<DatumId, DatumRefEntry>,
-  pub script_instances: IntMap<ScriptInstanceId, ScriptInstanceRefEntry>,
+  pub datums: FxHashMap<DatumId, DatumRefEntry>,
+  pub script_instances: FxHashMap<ScriptInstanceId, ScriptInstanceRefEntry>,
   datum_id_counter: DatumId,
   script_instance_counter: ScriptInstanceId,
   void_datum: Datum,
@@ -64,8 +64,8 @@ const MAX_SCRIPT_INSTANCE_ID: ScriptInstanceId = 0xFFFFFF;
 impl DatumAllocator {
   pub fn default(rx: Receiver<DatumAllocatorEvent>, tx: Sender<DatumAllocatorEvent>) -> Self {
     DatumAllocator {
-      datums: IntMap::default(),
-      script_instances: IntMap::default(),
+      datums: FxHashMap::default(),
+      script_instances: FxHashMap::default(),
       datum_id_counter: 1,
       script_instance_counter: 1,
       void_datum: Datum::Void,

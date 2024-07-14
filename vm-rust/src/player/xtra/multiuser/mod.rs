@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_std::{channel::Sender, task::spawn_local};
+use fxhash::FxHashMap;
 use lazy_static::lazy_static;
 use nohash_hasher::IntMap;
 use wasm_bindgen::{closure::Closure, JsCast};
@@ -47,7 +48,7 @@ impl MultiuserXtraInstance {
 }
 
 pub struct MultiuserXtraManager {
-    pub instances: IntMap<u32, MultiuserXtraInstance>,
+    pub instances: FxHashMap<u32, MultiuserXtraInstance>,
     pub instance_counter: u32,
 }
 
@@ -237,7 +238,7 @@ impl MultiuserXtraManager {
 
     pub fn new() -> MultiuserXtraManager {
         MultiuserXtraManager {
-            instances: IntMap::default(),
+            instances: FxHashMap::default(),
             instance_counter: 0,
         }
     }
