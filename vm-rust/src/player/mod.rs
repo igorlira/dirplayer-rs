@@ -32,13 +32,14 @@ pub mod allocator;
 pub mod datum_ref;
 pub mod script_ref;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 
 use allocator::{DatumAllocator, DatumAllocatorEvent, DatumAllocatorTrait, ResetableAllocator};
 use datum_ref::DatumRef;
 use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::{Mutex, RwLock}, task::spawn_local};
 use cast_manager::CastPreloadReason;
 use chrono::Local;
+use fxhash::FxHashMap;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use lazy_static::lazy_static;
@@ -73,7 +74,7 @@ pub struct DirPlayer {
   pub is_script_paused: bool,
   pub next_frame: Option<u32>,
   pub queue_tx: Sender<PlayerVMExecutionItem>,
-  pub globals: HashMap<String, DatumRef>,
+  pub globals: FxHashMap<String, DatumRef>,
   pub scopes: Vec<Scope>,
   pub bytecode_handler_manager: StaticBytecodeHandlerManager,
   pub breakpoint_manager: BreakpointManager,
@@ -132,7 +133,7 @@ impl DirPlayer {
       is_script_paused: false,
       next_frame: None,
       queue_tx: tx,
-      globals: HashMap::new(),
+      globals: FxHashMap::default(),
       scopes: vec![],
       bytecode_handler_manager: StaticBytecodeHandlerManager {},
       breakpoint_manager: BreakpointManager::new(),
@@ -228,7 +229,7 @@ impl DirPlayer {
     if self.movie.puppet_tempo > 0 { self.movie.puppet_tempo } else { 1 }
   }
 
-  pub fn get_hydrated_globals(&self) -> HashMap<String, &Datum> {
+  pub fn get_hydrated_globals(&self) -> FxHashMap<String, &Datum> {
     self.globals.iter().map(|(k, v)| (k.to_owned(), self.get_datum(v))).collect()
   }
 
@@ -547,9 +548,11 @@ pub async fn player_call_script_handler_raw_args(
   });
 
   let (scope_ref, script_name) = reserve_player_mut(|player| {
-    let script = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
+    let script_rc = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
+    let script = script_rc.as_ref();
     let handler = script.get_own_handler(&handler_name);
-    if let Some(handler) = handler {
+    if let Some(handler_rc) = handler {
+      let handler = handler_rc.as_ref();
       // let scope_ref = player.scope_id_counter + 1;
       let scope_ref = player.scopes.len();
       let scope = Scope::new(
@@ -559,6 +562,8 @@ pub async fn player_call_script_handler_raw_args(
         handler_ref.clone(), 
         handler.name_id,
         new_args,
+        script_rc.clone(),
+        handler_rc.clone(),
       );
       if player.scopes.len() >= 50 {
         return Err(ScriptError::new("Stack overflow".to_string()));
@@ -761,7 +766,7 @@ pub fn init_player() {
 
 fn get_active_static_script_refs<'a>(
   movie: &'a Movie, 
-  globals: &'a HashMap<String, &'a Datum>,
+  globals: &'a FxHashMap<String, &'a Datum>,
 ) -> Vec<CastMemberRef> {
   let frame_script = movie.score.get_script_in_frame(movie.current_frame);
   let movie_scripts = movie.cast_manager.get_movie_scripts();
@@ -785,11 +790,11 @@ fn get_active_static_script_refs<'a>(
 fn get_active_scripts<'a>(
   movie: &'a Movie, 
   globals: &'a HashMap<String, Datum>
-) -> Vec<&'a Script> {
+) -> Vec<&'a Rc<Script>> {
   let frame_script = movie.score.get_script_in_frame(movie.current_frame);
   let mut movie_scripts = movie.cast_manager.get_movie_scripts();
 
-  let mut active_scripts: Vec<&Script> = vec![];
+  let mut active_scripts: Vec<&Rc<Script>> = vec![];
   active_scripts.append(&mut movie_scripts);
   if let Some(frame_script) = frame_script {
     let script = movie.cast_manager

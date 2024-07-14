@@ -534,7 +534,7 @@ impl JsApi {
             script_member_ref: scope.script_ref.to_js(),
             bytecode_index: scope.bytecode_index as u32,
             handler_name: scope.handler_ref.1.to_owned(),
-            locals: scope.locals.clone(),
+            locals: scope.locals.clone().into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
             stack: scope.stack.clone(),
             args: scope.args.clone()
           };
