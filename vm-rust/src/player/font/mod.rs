@@ -1,4 +1,4 @@
-use nohash_hasher::IntMap;
+use fxhash::FxHashMap;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
@@ -16,7 +16,7 @@ use super::{
 pub type FontRef = u32;
 
 pub struct FontManager {
-    pub fonts: IntMap<FontRef, BitmapFont>,
+    pub fonts: FxHashMap<FontRef, BitmapFont>,
     pub system_font: Option<FontRef>,
     pub font_counter: FontRef,
 }
@@ -45,7 +45,7 @@ impl FontManager {
     pub fn new() -> FontManager {
         return FontManager {
             system_font: None,
-            fonts: IntMap::default(),
+            fonts: FxHashMap::default(),
             font_counter: 0,
         };
     }
