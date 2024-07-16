@@ -114,6 +114,7 @@ async fn player_invoke_static_event(
             .score
             .get_script_in_frame(player.movie.current_frame);
         let movie_scripts = player.movie.cast_manager.get_movie_scripts();
+        let movie_scripts = movie_scripts.as_ref().unwrap();
 
         let mut active_static_scripts: Vec<CastMemberRef> = vec![];
         if let Some(frame_script) = frame_script {
