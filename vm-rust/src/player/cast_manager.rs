@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{cell::{Ref, RefCell}, collections::HashMap, rc::Rc};
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
@@ -10,6 +10,7 @@ use super::{allocator::DatumAllocator, bitmap::{manager::BitmapManager, palette_
 
 pub struct CastManager {
   pub casts: Vec<CastLib>,
+  pub movie_script_cache: RefCell<Option<Vec<Rc<Script>>>>,
 }
 
 const IS_WEB: bool = false;
@@ -22,7 +23,10 @@ pub enum CastPreloadReason {
 
 impl CastManager {
   pub const fn empty() -> CastManager {
-    CastManager { casts: Vec::new() }
+    CastManager { 
+      casts: Vec::new(),
+      movie_script_cache: RefCell::new(None),
+    }
   }
 
   pub async fn load_from_dir(
@@ -56,6 +60,7 @@ impl CastManager {
       };
       if let Some(cast_def) = cast_def {
         cast.apply_cast_def(dir, cast_def, bitmap_manager);
+        self.clear_movie_script_cache();
       }
       casts.push(cast);
     }
@@ -277,16 +282,25 @@ impl CastManager {
     Ok(())
   }
 
-  pub fn get_movie_scripts(&self) -> Vec<&Rc<Script>> {
-    let mut result = Vec::new();
-    for cast in &self.casts {
-      for script in cast.scripts.values() {
-        if let ScriptType::Movie = script.script_type {
-          result.push(script);
+  pub fn clear_movie_script_cache(&mut self) {
+    let mut cache = self.movie_script_cache.borrow_mut();
+    *cache = None;
+  }
+
+  pub fn get_movie_scripts(&self) -> Ref<Option<Vec<Rc<Script>>>> {
+    if self.movie_script_cache.borrow().is_none() {
+      let mut result = Vec::new();
+      for cast in &self.casts {
+        for script_rc in cast.scripts.values() {
+          if let ScriptType::Movie = script_rc.script_type {
+            result.push(script_rc.clone());
+          }
         }
       }
+      self.movie_script_cache.replace(Some(result));
     }
-    result
+    let cell = self.movie_script_cache.borrow();
+    cell
   }
 }
 
