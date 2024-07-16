@@ -770,6 +770,7 @@ fn get_active_static_script_refs<'a>(
 ) -> Vec<CastMemberRef> {
   let frame_script = movie.score.get_script_in_frame(movie.current_frame);
   let movie_scripts = movie.cast_manager.get_movie_scripts();
+  let movie_scripts = movie_scripts.as_ref().unwrap();
 
   let mut active_script_refs: Vec<CastMemberRef> = vec![];
   for script in movie_scripts {
@@ -786,33 +787,33 @@ fn get_active_static_script_refs<'a>(
   return active_script_refs;
 }
 
-#[allow(dead_code)]
-fn get_active_scripts<'a>(
-  movie: &'a Movie, 
-  globals: &'a HashMap<String, Datum>
-) -> Vec<&'a Rc<Script>> {
-  let frame_script = movie.score.get_script_in_frame(movie.current_frame);
-  let mut movie_scripts = movie.cast_manager.get_movie_scripts();
+// #[allow(dead_code)]
+// fn get_active_scripts<'a>(
+//   movie: &'a Movie, 
+//   globals: &'a HashMap<String, Datum>
+// ) -> Vec<&'a Rc<Script>> {
+//   let frame_script = movie.score.get_script_in_frame(movie.current_frame);
+//   let mut movie_scripts = movie.cast_manager.get_movie_scripts();
 
-  let mut active_scripts: Vec<&Rc<Script>> = vec![];
-  active_scripts.append(&mut movie_scripts);
-  if let Some(frame_script) = frame_script {
-    let script = movie.cast_manager
-      .get_cast(frame_script.cast_lib as u32)
-      .unwrap()
-      .get_script_for_member(frame_script.cast_member.into())
-      .unwrap();
-    active_scripts.push(script);
-  }
-  for global in globals.values() {
-    if let Datum::VarRef(VarRef::Script(script_ref)) = global {
-      active_scripts.push(
-        movie.cast_manager.get_script_by_ref(script_ref).unwrap()
-      );
-    }
-  }
-  return active_scripts;
-}
+//   let mut active_scripts: Vec<&Rc<Script>> = vec![];
+//   active_scripts.append(&mut movie_scripts);
+//   if let Some(frame_script) = frame_script {
+//     let script = movie.cast_manager
+//       .get_cast(frame_script.cast_lib as u32)
+//       .unwrap()
+//       .get_script_for_member(frame_script.cast_member.into())
+//       .unwrap();
+//     active_scripts.push(script);
+//   }
+//   for global in globals.values() {
+//     if let Datum::VarRef(VarRef::Script(script_ref)) = global {
+//       active_scripts.push(
+//         movie.cast_manager.get_script_by_ref(script_ref).unwrap()
+//       );
+//     }
+//   }
+//   return active_scripts;
+// }
 
 async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: ScopeRef) -> HandlerExecutionResult {
   // let formatted_args: Vec<String> = reserve_player_ref(|player| {

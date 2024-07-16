@@ -45,6 +45,7 @@ impl CastLib {
   }
 
   pub fn remove_member(&mut self, number: u32) {
+    // TODO remove from movie script cache
     self.members.remove(&number);
     self.scripts.remove(&number);
     JsApi::on_cast_member_name_changed(CastMemberRefHandlers::get_cast_slot_number(self.number, number));
@@ -75,9 +76,14 @@ impl CastLib {
     }
   }
 
-  fn on_cast_preload_result(&mut self, result: &NetResult, resolved_url: &Url, bitmap_manager: &mut BitmapManager, dir_cache: &mut HashMap<Box<str>, DirectorFile>) {
+  fn on_cast_preload_result(
+    &mut self, 
+    result: &NetResult, 
+    resolved_url: &Url, 
+    bitmap_manager: &mut BitmapManager, 
+    dir_cache: &mut HashMap<Box<str>, DirectorFile>,
+  ) {
     let load_file_name = resolved_url.as_str();
-
     if let Ok(cast_bytes) = result {
       let cast_file = read_director_file_bytes(cast_bytes, &resolved_url.to_string(), &get_base_url(resolved_url).to_string());
       if let Ok(cast_file) = cast_file {
@@ -197,6 +203,7 @@ impl CastLib {
       JsApi::on_cast_member_name_changed(CastMemberRefHandlers::get_cast_slot_number(self.number, *id));
     }
     JsApi::dispatch_cast_member_list_changed(self.number);
+    unsafe { PLAYER_OPT.as_mut().unwrap().movie.cast_manager.clear_movie_script_cache() };
   }
 
   pub fn insert_member(&mut self, number: u32, member: CastMember) {
@@ -274,7 +281,8 @@ impl CastMemberRef {
 pub async fn player_cast_lib_set_prop(cast_lib: u32, prop_name: &String, value: Datum) -> Result<(), ScriptError> {
   let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
 
-  let cast_lib = player.movie.cast_manager.get_cast_mut(cast_lib as u32);
+  let cast_manager = &mut player.movie.cast_manager;
+  let cast_lib = cast_manager.get_cast_mut(cast_lib as u32);
   cast_lib.set_prop(&prop_name, value, &player.allocator)?;
   if prop_name == "fileName" {
     cast_lib.preload(&mut player.net_manager, &mut player.bitmap_manager, &mut player.dir_cache).await;
