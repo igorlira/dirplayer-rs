@@ -165,7 +165,7 @@ impl StackBytecodeHandler {
     })
   }
 
-  pub async fn new_obj(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+  pub async fn new_obj(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     let (script_ref, extra_args) = reserve_player_mut(|player| {
       let bytecode = player.get_ctx_current_bytecode(&ctx);
       let obj_type = get_name(player, &ctx, bytecode.obj as u16).unwrap();
