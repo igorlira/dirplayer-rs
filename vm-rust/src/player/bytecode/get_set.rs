@@ -73,7 +73,7 @@ impl GetSetBytecodeHandler {
     })
   }
 
-  pub async fn set_obj_prop(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+  pub async fn set_obj_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     let (value, obj_datum_ref, prop_name) = reserve_player_mut(|player| {
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let value = scope.stack.pop().unwrap();

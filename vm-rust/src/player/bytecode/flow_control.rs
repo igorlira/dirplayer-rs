@@ -13,7 +13,7 @@ impl FlowControlBytecodeHandler {
     Ok(HandlerExecutionResult::Stop)
   }
 
-  pub async fn ext_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+  pub async fn ext_call(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     // let script = get_current_script(player.to_owned(), ctx.to_owned());
     let (name, arg_ref_list, is_no_ret) = {
       let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
@@ -47,7 +47,7 @@ impl FlowControlBytecodeHandler {
     return Ok(result_ctx);
   }
 
-  pub async fn local_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+  pub async fn local_call(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     let (handler_ref, is_no_ret, args) = reserve_player_mut(|player| {
       let arg_list_id = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -122,7 +122,7 @@ impl FlowControlBytecodeHandler {
     })
   }
 
-  pub async fn obj_call(ctx: BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+  pub async fn obj_call(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     // let token = start_profiling("_obj_call_prepare".to_string());
     let (obj_ref, handler_name, args, is_no_ret) = reserve_player_mut(|player| {
       let arg_list_id = {
