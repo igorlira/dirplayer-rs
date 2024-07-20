@@ -95,7 +95,7 @@ impl FlowControlBytecodeHandler {
 
       if datum_is_zero(datum, &player.allocator)? {
         let new_bytecode_index = {
-          let (_, handler) = get_current_handler_def(&player, &ctx).unwrap();
+          let handler = get_current_handler_def(player, &ctx);
           let dest_pos = (position as i32 + offset) as usize;
           handler.bytecode_index_map[&dest_pos] as usize
         };
@@ -112,7 +112,7 @@ impl FlowControlBytecodeHandler {
     reserve_player_mut(|player| {
       let bytecode = player.get_ctx_current_bytecode(ctx);
       let new_bytecode_index = {
-        let (_, handler) = get_current_handler_def(&player, &ctx).unwrap();
+        let handler = get_current_handler_def(player, &ctx);
         let dest_pos = (bytecode.pos as i32 + bytecode.obj as i32) as usize;
         handler.bytecode_index_map[&dest_pos] as usize
       };
@@ -161,7 +161,7 @@ impl FlowControlBytecodeHandler {
     reserve_player_mut(|player| {
       let new_index = {
         let bytecode = player.get_ctx_current_bytecode(ctx);
-        let (_, handler) = get_current_handler_def(&player, &ctx).unwrap();
+        let handler = get_current_handler_def(player, &ctx);
         let return_pos = bytecode.pos - bytecode.obj as usize;
         handler.bytecode_index_map[&return_pos] as usize
       };

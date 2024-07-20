@@ -21,7 +21,7 @@ pub fn player_get_context_var(
 ) -> Result<DatumRef, ScriptError> {
   let variable_multiplier = get_current_variable_multiplier(player, ctx);
   let id = player.get_datum(id_ref);
-  let (_, handler) = get_current_handler_def(player, &ctx).unwrap();
+  let handler = get_current_handler_def(player, &ctx);
   
   match var_type {
     // global | global | property/instance
@@ -60,7 +60,7 @@ pub fn player_set_context_var(
   ctx: &BytecodeHandlerContext, 
 ) -> Result<(), ScriptError> {
   let variable_multiplier = get_current_variable_multiplier(player, ctx);
-  let (_, handler) = get_current_handler_def(player, &ctx).unwrap();
+  let handler = get_current_handler_def(player, &ctx);
   let id = player.get_datum(id_ref);
   
   match var_type {

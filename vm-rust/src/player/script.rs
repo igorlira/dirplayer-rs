@@ -197,16 +197,14 @@ pub fn get_current_script<'a>(
     player: &'a DirPlayer,
     ctx: &'a BytecodeHandlerContext,
 ) -> Option<&'a Script> {
-    let scope = get_current_scope(player, ctx);
-    scope.map(|x| x.script_rc.as_ref())
+    return Some(unsafe { &*ctx.script_ptr });
 }
 
 pub fn get_current_handler_def<'a>(
-    player: &'a DirPlayer,
+    _: &'a DirPlayer,
     ctx: &'a BytecodeHandlerContext,
-) -> Option<ScriptHandlerRefDef<'a>> {
-    let scope = get_current_scope(player, ctx);
-    scope.map(|x| (x.script_ref.clone(), &x.handler_rc))
+) -> &'a HandlerDef {
+    return unsafe { &*ctx.handler_def_ptr };
 }
 
 pub fn get_current_variable_multiplier(player: &DirPlayer, ctx: &BytecodeHandlerContext) -> u32 {
