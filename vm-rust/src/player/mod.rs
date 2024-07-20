@@ -32,11 +32,11 @@ pub mod allocator;
 pub mod datum_ref;
 pub mod script_ref;
 
-use std::{collections::HashMap, rc::Rc, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use allocator::{DatumAllocator, DatumAllocatorEvent, DatumAllocatorTrait, ResetableAllocator};
 use datum_ref::DatumRef;
-use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::{Mutex, RwLock}, task::spawn_local};
+use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
 use chrono::Local;
 use fxhash::FxHashMap;
@@ -47,7 +47,7 @@ use profiling::{end_profiling, start_profiling};
 use script_ref::ScriptInstanceRef;
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
-use crate::{console_warn, director::{chunks::handler::Bytecode, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name, get_opcode_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
+use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
 
 use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef, ScriptInstance, ScriptInstanceId}, sprite::{ColorRef, CursorRef}, timeout::TimeoutManager};
 
@@ -388,27 +388,14 @@ impl DirPlayer {
     JsApi::dispatch_script_error(self, &err);
   }
 
-  fn get_bytecode_ref<'a>(
-    &'a self,
-    script_member_ref: &CastMemberRef,
-    handler_name_id: u16,
-    bytecode_index: usize,
-  ) -> &'a Bytecode {
-    let script = self.movie.cast_manager.get_script_by_ref(script_member_ref).unwrap();
-    let handler = script.get_own_handler_by_name_id(handler_name_id).unwrap();
-    let bytecode = handler.bytecode_array.get(bytecode_index).unwrap();
-    bytecode
-  }
-
   fn get_ctx_current_bytecode<'a>(
     &'a self,
-    ctx: &BytecodeHandlerContext,
+    ctx: &'a BytecodeHandlerContext,
   ) -> &'a Bytecode {
     let scope = self.scopes.get(ctx.scope_ref).unwrap();
-    let script_member_ref = &scope.script_ref;
-    let handler_name_id = scope.handler_name_id;
     let bytecode_index = scope.bytecode_index;
-    self.get_bytecode_ref(script_member_ref, handler_name_id, bytecode_index)
+    let handler_def = unsafe { &*ctx.handler_def_ptr };
+    handler_def.bytecode_array.get(bytecode_index).unwrap()
   }
 }
 
@@ -547,12 +534,13 @@ pub async fn player_call_script_handler_raw_args(
     new_args
   });
 
-  let (scope_ref, script_name) = reserve_player_mut(|player| {
+  let (scope_ref, script_name, handler_ptr) = reserve_player_mut(|player| {
     let script_rc = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
     let script = script_rc.as_ref();
     let handler = script.get_own_handler(&handler_name);
     if let Some(handler_rc) = handler {
       let handler = handler_rc.as_ref();
+      let handler_ptr: *const HandlerDef = handler_rc.as_ref();
       // let scope_ref = player.scope_id_counter + 1;
       let scope_ref = player.scopes.len();
       let scope = Scope::new(
@@ -570,8 +558,7 @@ pub async fn player_call_script_handler_raw_args(
       }
       // player.scope_id_counter += 1;
       player.scopes.push(scope);
-  
-      Ok((scope_ref, script.name.to_owned()))
+      Ok((scope_ref, script.name.clone(), handler_ptr))
     } else {
       Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("Handler {handler_name} not found for script {}", script.name)))
     }
@@ -579,6 +566,7 @@ pub async fn player_call_script_handler_raw_args(
 
   let ctx = BytecodeHandlerContext {
     scope_ref,
+    handler_def_ptr: handler_ptr
   };
 
   // self.scopes.push(scope);
