@@ -1,7 +1,7 @@
 use async_recursion::async_recursion;
 
 use crate::{
-    director::lingo::{constants::get_opcode_name, opcode::OpCode},
+    director::{chunks::handler::HandlerDef, lingo::{constants::get_opcode_name, opcode::OpCode}},
     player::{
         bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
@@ -15,7 +15,7 @@ use super::{compare::CompareBytecodeHandler, get_set::GetSetBytecodeHandler, str
 #[derive(Clone)]
 pub struct BytecodeHandlerContext {
     pub scope_ref: ScopeRef,
-    // pub player: RefCell<&'a DirPlayer>,
+    pub handler_def_ptr: *const HandlerDef,
 }
 pub struct StaticBytecodeHandlerManager {}
 impl StaticBytecodeHandlerManager {
