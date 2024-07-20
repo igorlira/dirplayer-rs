@@ -6,7 +6,7 @@ use crate::{
         bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
-        }, scope::ScopeRef, HandlerExecutionResult, ScriptError, PLAYER_OPT
+        }, scope::ScopeRef, script::Script, HandlerExecutionResult, ScriptError, PLAYER_OPT
     },
 };
 
@@ -16,6 +16,7 @@ use super::{compare::CompareBytecodeHandler, get_set::GetSetBytecodeHandler, str
 pub struct BytecodeHandlerContext {
     pub scope_ref: ScopeRef,
     pub handler_def_ptr: *const HandlerDef,
+    pub script_ptr: *const Script,
 }
 pub struct StaticBytecodeHandlerManager {}
 impl StaticBytecodeHandlerManager {
@@ -131,7 +132,7 @@ pub async fn player_execute_bytecode<'a>(
         let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
         let scope = player.scopes.get(ctx.scope_ref).unwrap();
 
-        let handler = scope.handler_rc.as_ref();
+        let handler = unsafe { &*ctx.handler_def_ptr };
         let bytecode = &handler.bytecode_array[scope.bytecode_index];
 
         bytecode.opcode

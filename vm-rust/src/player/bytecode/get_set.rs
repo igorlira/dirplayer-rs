@@ -197,7 +197,7 @@ impl GetSetBytecodeHandler {
   pub fn get_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let name_int = player.get_ctx_current_bytecode(ctx).obj as u32 / get_current_variable_multiplier(player, &ctx);
-      let (_, handler) = get_current_handler_def(&player, &ctx).unwrap();
+      let handler = get_current_handler_def(player, &ctx);
       let name_id = handler.local_name_ids[name_int as usize];
       
       let var_name = get_name(&player, &ctx, name_id).unwrap();
@@ -214,17 +214,17 @@ impl GetSetBytecodeHandler {
   pub fn set_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
       let name_int = player.get_ctx_current_bytecode(ctx).obj as u32 / get_current_variable_multiplier(player, &ctx);
-      let (_, handler) = get_current_handler_def(&player, &ctx).unwrap();
+      let handler = get_current_handler_def(player, &ctx);
       let name_id = handler.local_name_ids[name_int as usize];
-      let var_name = get_name(&player, &ctx, name_id).unwrap().to_owned();
 
       let value_ref = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
 
+      let var_name = get_name(&player, &ctx, name_id).unwrap().to_owned();
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      scope.locals.insert(var_name.to_owned(), value_ref);
+      scope.locals.insert(var_name, value_ref);
       Ok(HandlerExecutionResult::Advance)
     })
   }

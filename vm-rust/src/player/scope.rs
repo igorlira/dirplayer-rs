@@ -1,10 +1,6 @@
-use std::rc::Rc;
-
 use fxhash::FxHashMap;
 
-use crate::director::chunks::handler::HandlerDef;
-
-use super::{cast_lib::CastMemberRef, script::{Script, ScriptHandlerRef}, script_ref::ScriptInstanceRef, DatumRef};
+use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef, script_ref::ScriptInstanceRef, DatumRef};
 
 pub type ScopeRef = usize;
 
@@ -22,8 +18,6 @@ pub struct Scope {
   pub return_value: DatumRef,
   pub stack: Vec<DatumRef>,
   pub passed: bool,
-  pub script_rc: Rc<Script>,
-  pub handler_rc: Rc<HandlerDef>,
 }
 
 impl Scope {
@@ -42,8 +36,6 @@ impl Scope {
     handler_ref: ScriptHandlerRef, 
     handler_name_id: u16,
     args: Vec<DatumRef>,
-    script_rc: Rc<Script>,
-    handler_rc: Rc<HandlerDef>,
   ) -> Scope {
     Scope {
       scope_ref,
@@ -58,8 +50,6 @@ impl Scope {
       return_value: DatumRef::Void,
       stack: vec![],
       passed: false,
-      script_rc,
-      handler_rc,
     }
   }
 }
