@@ -534,9 +534,10 @@ pub async fn player_call_script_handler_raw_args(
     new_args
   });
 
-  let (scope_ref, script_name, handler_ptr) = reserve_player_mut(|player| {
+  let (scope_ref, script_name, handler_ptr, script_ptr) = reserve_player_mut(|player| {
     let script_rc = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
     let script = script_rc.as_ref();
+    let script_ptr = script as *const Script;
     let handler = script.get_own_handler(&handler_name);
     if let Some(handler_rc) = handler {
       let handler = handler_rc.as_ref();
@@ -550,15 +551,13 @@ pub async fn player_call_script_handler_raw_args(
         handler_ref.clone(), 
         handler.name_id,
         new_args,
-        script_rc.clone(),
-        handler_rc.clone(),
       );
       if player.scopes.len() >= 50 {
         return Err(ScriptError::new("Stack overflow".to_string()));
       }
       // player.scope_id_counter += 1;
       player.scopes.push(scope);
-      Ok((scope_ref, script.name.clone(), handler_ptr))
+      Ok((scope_ref, &script.name as *const String, handler_ptr, script_ptr))
     } else {
       Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("Handler {handler_name} not found for script {}", script.name)))
     }
@@ -566,7 +565,8 @@ pub async fn player_call_script_handler_raw_args(
 
   let ctx = BytecodeHandlerContext {
     scope_ref,
-    handler_def_ptr: handler_ptr
+    handler_def_ptr: handler_ptr,
+    script_ptr
   };
 
   // self.scopes.push(scope);
@@ -579,7 +579,7 @@ pub async fn player_call_script_handler_raw_args(
     // TODO breakpoint
     if let Some(breakpoint) = reserve_player_ref(|player| {
       player.breakpoint_manager
-        .find_breakpoint_for_bytecode(&script_name, &handler_name, bytecode_index)
+        .find_breakpoint_for_bytecode(unsafe { &*script_name }, &handler_name, bytecode_index)
         .cloned()
     }) {
       player_trigger_breakpoint(
