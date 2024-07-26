@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "DirPlayer",
+  "version": "0.0.1",
+  "action": {
+    "default_title": "DirPlayer",
+    "default_popup": "extension/index.html",
+    "default_icon": "logo192.png"
+  },
+  "icons": {},
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["extension/src/content-script.tsx"],
+      "media": []
+    }
+  ],
+  "web_accessible_resources": [{
+    "resources": ["vm-rust/pkg/*", "charmap-system.png"],
+    "matches": ["<all_urls>"]
+  }]
+}
