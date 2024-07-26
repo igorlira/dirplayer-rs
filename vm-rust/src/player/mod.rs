@@ -101,6 +101,7 @@ pub struct DirPlayer {
   pub timer_tick_start: u32,
   pub allocator: DatumAllocator,
   pub dir_cache: HashMap<String, DirectorFile>,
+  pub external_params: HashMap<String, String>,
 }
 
 impl DirPlayer {
@@ -160,6 +161,7 @@ impl DirPlayer {
       timer_tick_start: get_ticks(),
       allocator: DatumAllocator::default(allocator_rx, allocator_tx),
       dir_cache: HashMap::new(),
+      external_params: HashMap::new(),
     }
   }
 

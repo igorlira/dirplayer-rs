@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_std::channel::Receiver;
 use manual_future::ManualFuture;
 use url::Url;
@@ -20,6 +22,7 @@ pub enum PlayerVMCommand {
     Stop,
     Reset,
     LoadMovieFromFile(String),
+    SetExternalParams(HashMap<String, String>),
     SetBasePath(String),
     SetSystemFontPath(String),
     AddBreakpoint(String, String, usize),
@@ -51,6 +54,9 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         PlayerVMCommand::Stop => "Stop".to_string(),
         PlayerVMCommand::Reset => "Reset".to_string(),
         PlayerVMCommand::LoadMovieFromFile(path) => format!("LoadMovieFromFile({})", path),
+        PlayerVMCommand::SetExternalParams(params) => {
+            format!("SetExternalParams({:?})", params.keys().collect::<Vec<_>>())
+        }
         PlayerVMCommand::SetBasePath(path) => format!("SetBasePath({})", path),
         PlayerVMCommand::SetSystemFontPath(path) => format!("SetSystemFontPath({})", path),
         PlayerVMCommand::AddBreakpoint(script_name, handler_name, bytecode_index) => format!(
@@ -144,6 +150,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
 
     // TODO
     match command {
+        PlayerVMCommand::SetExternalParams(params) => {
+            console_warn!("Setting external params: {:?}", params);
+            reserve_player_mut(|player| {
+                player.external_params = params;
+            });
+        }
         PlayerVMCommand::SetBasePath(path) => {
             reserve_player_mut(|player| {
                 player.net_manager.set_base_path(Url::parse(&path).unwrap());
