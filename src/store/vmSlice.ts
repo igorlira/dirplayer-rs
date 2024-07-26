@@ -16,7 +16,7 @@ interface VMSliceState {
   scriptError?: string
   breakpoints: JsBridgeBreakpoint[],
   globals: Record<string, DatumRef>,
-  timeoutHandles: Record<string, NodeJS.Timer>,
+  timeoutHandles: Record<string, NodeJS.Timeout>,
   datumSnapshots: Record<DatumRef, JsBridgeDatum>,
   scriptInstanceSnapshots: Record<ScriptInstanceId, JsBridgeDatum>,
   channelSnapshots: Record<number, ScoreSpriteSnapshot>,
@@ -142,7 +142,7 @@ const vmSlice = createSlice({
         globals: action.payload,
       }
     },
-    setTimeoutHandle: (state, action: PayloadAction<{ name: string, handle: NodeJS.Timer }>) => {
+    setTimeoutHandle: (state, action: PayloadAction<{ name: string, handle: NodeJS.Timeout }>) => {
       return {
         ...state,
         timeoutHandles: {
