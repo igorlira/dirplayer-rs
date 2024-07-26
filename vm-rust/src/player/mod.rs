@@ -106,6 +106,7 @@ pub struct DirPlayer {
   pub allocator: DatumAllocator,
   pub dir_cache: HashMap<Box<str>, DirectorFile>,
   pub scope_count: u32,
+  pub external_params: HashMap<String, String>,
 }
 
 impl DirPlayer {
@@ -164,6 +165,7 @@ impl DirPlayer {
       allocator: DatumAllocator::default(),
       dir_cache: HashMap::new(),
       scope_count: 0,
+      external_params: HashMap::new(),
     };
     for i in 0..MAX_STACK_SIZE {
       result.scopes.push(Scope::default(i));

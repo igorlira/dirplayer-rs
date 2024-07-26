@@ -23,6 +23,19 @@ extern "C" {
 }
 
 #[wasm_bindgen]
+pub fn set_external_params(params: js_sys::Object) {
+  let mut external_params = std::collections::HashMap::new();
+  let keys = js_sys::Object::keys(&params);
+  for key in keys.iter() {
+    let key_str = key.as_string().unwrap();
+    let value = js_sys::Reflect::get(&params, &key).unwrap().as_string().unwrap();
+    external_params.insert(key_str, value);
+  }
+
+  player_dispatch(PlayerVMCommand::SetExternalParams(external_params));
+}
+
+#[wasm_bindgen]
 pub fn set_base_path(path: String) {
   player_dispatch(PlayerVMCommand::SetBasePath(path));
 }
