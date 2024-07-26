@@ -79,10 +79,13 @@ impl MovieHandlers {
     })
   }
 
-  pub fn external_param_value(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn external_param_value(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      // TODO
-      Ok(player.alloc_datum(Datum::String("".to_string())))
+      let key = player.get_datum(&args[0]).string_value()?;
+      let value: String = player.external_params.get(&key)
+        .map(|x| x.clone())
+        .unwrap_or("".to_string());
+      Ok(player.alloc_datum(Datum::String(value)))
     })
   }
 

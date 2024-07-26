@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import init, { set_system_font_path } from 'vm-rust'
+import init, { set_external_params, set_system_font_path } from 'vm-rust'
 
 import EmbedPlayer from '../../src/components/EmbedPlayer';
 import { initVmCallbacks } from '../../src/vm/callbacks';
@@ -18,10 +18,23 @@ init(wasmUrl).then(() => {
 })
 
 function replaceDirEmbed(element: HTMLEmbedElement) {
+  const {width, height, src} = element;
+  const externalParams = {};
+  for (let i = 1; i <= 30; i++) {
+    const swValue = element.getAttribute(`sw${i}`);
+    if (swValue === null) {
+      break;
+    }
+    externalParams[`sw${i}`] = swValue;
+  }
+
+  console.log('External params:', externalParams);
+  
   const newElement = document.createElement('div');
   element.replaceWith(newElement);
 
-  const {width, height, src} = element;
+  // TODO: set params on a per-embed basis
+  set_external_params(externalParams);
 
   const root = ReactDOM.createRoot(
     newElement

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_std::channel::Receiver;
 use log::warn;
 use manual_future::ManualFuture;
@@ -21,6 +23,7 @@ pub enum PlayerVMCommand {
     Stop,
     Reset,
     LoadMovieFromFile(String),
+    SetExternalParams(HashMap<String, String>),
     SetBasePath(String),
     SetSystemFontPath(String),
     AddBreakpoint(String, String, usize),
@@ -52,6 +55,9 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         PlayerVMCommand::Stop => "Stop".to_string(),
         PlayerVMCommand::Reset => "Reset".to_string(),
         PlayerVMCommand::LoadMovieFromFile(path) => format!("LoadMovieFromFile({})", path),
+        PlayerVMCommand::SetExternalParams(params) => {
+            format!("SetExternalParams({:?})", params.keys().collect::<Vec<_>>())
+        }
         PlayerVMCommand::SetBasePath(path) => format!("SetBasePath({})", path),
         PlayerVMCommand::SetSystemFontPath(path) => format!("SetSystemFontPath({})", path),
         PlayerVMCommand::AddBreakpoint(script_name, handler_name, bytecode_index) => format!(
