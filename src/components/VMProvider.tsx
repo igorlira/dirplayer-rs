@@ -8,7 +8,8 @@ import {
 import init from "vm-rust";
 import { initVmCallbacks } from "../vm/callbacks";
 import { JsBridgeBreakpoint } from "dirplayer-js-api";
-import { add_breakpoint } from 'vm-rust'
+import { add_breakpoint, set_system_font_path } from 'vm-rust'
+import { getFullPathFromOrigin } from "../utils/path";
 
 interface VMProviderProps {
   children?: string | JSX.Element | JSX.Element[];
@@ -51,6 +52,8 @@ export default function VMProvider({ children }: VMProviderProps) {
       init().then((vm: Object) => {
         console.log("VM initialized", vm);
         send({ type: "INIT_OK" });
+
+        set_system_font_path(getFullPathFromOrigin("charmap-system.png"))
 
         const savedBreakpoints = window.localStorage.getItem("breakpoints");
         if (savedBreakpoints) {

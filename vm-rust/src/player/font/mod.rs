@@ -58,9 +58,9 @@ impl FontManager {
     }
 }
 
-pub async fn player_load_system_font() {
+pub async fn player_load_system_font(path: &str) {
     let window = web_sys::window().unwrap();
-    let result = JsFuture::from(window.fetch_with_str("charmap-system.png")).await;
+    let result = JsFuture::from(window.fetch_with_str(path)).await;
 
     match result {
         Ok(result) => {
