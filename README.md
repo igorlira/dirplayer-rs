@@ -24,6 +24,12 @@ wasm-pack build --target web
 npm run start
 ```
 
+## Join our Discord!
+
+If you have any questions or you're interested in being part of the discussions of this project, please join our Discord!
+
+https://discord.gg/swVG87Ga
+
 ## Acknowledgements
 
 This project would have not been possible without the extensive work of the Shockwave reverse engineering community.
