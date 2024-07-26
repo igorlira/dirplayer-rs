@@ -768,7 +768,7 @@ pub fn init_player() {
   // *player = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));
 
   async_std::task::spawn_local(async move {
-    player_load_system_font().await;
+    // player_load_system_font().await;
     async_std::task::spawn_local(async move {
       run_command_loop(rx).await;
     });
