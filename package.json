@@ -2,6 +2,7 @@
   "name": "app",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "dependencies": {
     "@fortawesome/fontawesome-svg-core": "^6.4.2",
     "@fortawesome/free-solid-svg-icons": "^6.4.2",
@@ -10,9 +11,10 @@
     "@testing-library/jest-dom": "^5.17.0",
     "@testing-library/react": "^13.4.0",
     "@testing-library/user-event": "^13.5.0",
+    "@types/chrome": "^0.0.269",
     "@types/jest": "^27.5.2",
     "@types/lodash": "^4.14.198",
-    "@types/node": "^16.18.48",
+    "@types/node": "^20.0.0",
     "@types/react": "^18.2.21",
     "@types/react-dom": "^18.2.7",
     "@uidotdev/usehooks": "^2.4.1",
@@ -34,6 +36,7 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
+    "build-extension": "vite build -c vite.config.extension.js",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
@@ -54,5 +57,11 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "vite": "^3.0.0",
+    "vite-plugin-svgr": "^4.2.0",
+    "@vitejs/plugin-react": "^2.1.0",
+    "@crxjs/vite-plugin": "^2.0.0-beta.25"
   }
 }
