@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::{DatumId, DatumRef}, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, script_ref::ScriptInstanceRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX
+    allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::{DatumId, DatumRef}, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, font::player_load_system_font, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, script_ref::ScriptInstanceRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX
 };
 
 #[allow(dead_code)]
@@ -22,6 +22,7 @@ pub enum PlayerVMCommand {
     Reset,
     LoadMovieFromFile(String),
     SetBasePath(String),
+    SetSystemFontPath(String),
     AddBreakpoint(String, String, usize),
     RemoveBreakpoint(String, String, usize),
     ToggleBreakpoint(String, String, usize),
@@ -52,6 +53,7 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         PlayerVMCommand::Reset => "Reset".to_string(),
         PlayerVMCommand::LoadMovieFromFile(path) => format!("LoadMovieFromFile({})", path),
         PlayerVMCommand::SetBasePath(path) => format!("SetBasePath({})", path),
+        PlayerVMCommand::SetSystemFontPath(path) => format!("SetSystemFontPath({})", path),
         PlayerVMCommand::AddBreakpoint(script_name, handler_name, bytecode_index) => format!(
             "AddBreakpoint({}, {}, {})",
             script_name, handler_name, bytecode_index
@@ -147,6 +149,10 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             reserve_player_mut(|player| {
                 player.net_manager.set_base_path(Url::parse(&path).unwrap());
             });
+        }
+        PlayerVMCommand::SetSystemFontPath(path) => {
+            console_warn!("Loading system font: {}", path);
+            player_load_system_font(&path).await;
         }
         PlayerVMCommand::Play => {
             reserve_player_mut(|player| {

@@ -3,29 +3,7 @@ import styles from './styles.module.css';
 import { load_movie_file, play, set_base_path } from 'vm-rust';
 import { useMountEffect } from '../../utils/hooks';
 import { isDebugSession } from '../../utils/debug';
-
-function getBasePath(fullPath: string) {
-  const pathComponents = fullPath.split("/");
-  if (pathComponents.length > 0) {
-    pathComponents.pop();
-  }
-
-  return pathComponents.join("/");
-}
-
-function getFullPathFromOrigin(path: string) {
-  if (path.includes('://')) {
-    return path;
-  }
-
-  const currentPathSegments = window.location.pathname.split('/');
-  if (currentPathSegments.length > 0 && currentPathSegments[currentPathSegments.length - 1] !== '') {
-    currentPathSegments.pop();
-    currentPathSegments.push('');
-  }
-  const currentPathWithSlash = currentPathSegments.join('/');
-  return window.location.origin + currentPathWithSlash + path;
-}
+import { getBasePath, getFullPathFromOrigin } from '../../utils/path';
 
 export default function LoadMovie() {
   const defaultMovieUrl = getFullPathFromOrigin(process.env.REACT_APP_MOVIE_URL || '');
