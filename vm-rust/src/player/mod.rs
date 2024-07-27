@@ -34,7 +34,7 @@ pub mod script_ref;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use allocator::{DatumAllocator, DatumAllocatorEvent, DatumAllocatorTrait, ResetableAllocator};
+use allocator::{DatumAllocator, DatumAllocatorTrait, ResetableAllocator};
 use datum_ref::DatumRef;
 use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
@@ -109,9 +109,7 @@ pub struct DirPlayer {
 
 impl DirPlayer {
   pub fn new<'a>(
-    tx: Sender<PlayerVMExecutionItem>, 
-    allocator_rx: Receiver<DatumAllocatorEvent>,
-    allocator_tx: Sender<DatumAllocatorEvent>
+    tx: Sender<PlayerVMExecutionItem>,
   ) -> DirPlayer {
     let mut result = DirPlayer {
       movie: Movie { 
@@ -162,7 +160,7 @@ impl DirPlayer {
       last_handler_result: DatumRef::Void,
       hovered_sprite: None,
       timer_tick_start: get_ticks(),
-      allocator: DatumAllocator::default(allocator_rx, allocator_tx),
+      allocator: DatumAllocator::default(),
       dir_cache: HashMap::new(),
       scope_count: 0,
     };
@@ -746,7 +744,6 @@ pub async fn player_is_playing() -> bool {
 
 static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
 static mut PLAYER_EVENT_TX: Option<Sender<PlayerVMEvent>> = None;
-static mut ALLOCATOR_TX: Option<Sender<DatumAllocatorEvent>> = None;
 pub static mut PLAYER_OPT: Option<DirPlayer> = None;
 lazy_static! {
   // pub static ref PLAYER_LOCK: RwLock<Option<DirPlayer>> = RwLock::new(None);
@@ -756,16 +753,14 @@ lazy_static! {
 pub fn init_player() {
   let (tx, rx) = channel::unbounded();
   let (event_tx, event_rx) = channel::unbounded();
-  let (allocator_tx, allocator_rx) = channel::unbounded();
   unsafe { 
     PLAYER_TX = Some(tx.clone()); 
     PLAYER_EVENT_TX = Some(event_tx.clone());
-    ALLOCATOR_TX = Some(allocator_tx.clone());
     MULTIUSER_XTRA_MANAGER_OPT = Some(MultiuserXtraManager::new());
   }
 
   unsafe {
-    PLAYER_OPT = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));
+    PLAYER_OPT = Some(DirPlayer::new(tx));
   }
   // let mut player = //PLAYER_LOCK.try_write().unwrap();
   // *player = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));

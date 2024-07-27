@@ -28,7 +28,6 @@ pub trait DatumAllocatorTrait {
   fn alloc_datum(&mut self, datum: Datum) -> Result<DatumRef, ScriptError>;
   fn get_datum(&self, id: &DatumRef) -> &Datum;
   fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum;
-  // fn on_datum_ref_added(&mut self, id: DatumId);
   fn on_datum_ref_dropped(&mut self, id: DatumId);
 }
 
@@ -37,15 +36,7 @@ pub trait ScriptInstanceAllocatorTrait {
   fn get_script_instance(&self, instance_ref: &ScriptInstanceRef) -> &ScriptInstance;
   fn get_script_instance_opt(&self, instance_ref: &ScriptInstanceRef) -> Option<&ScriptInstance>;
   fn get_script_instance_mut(&mut self, instance_ref: &ScriptInstanceRef) -> &mut ScriptInstance;
-  // fn on_script_instance_ref_added(&mut self, id: ScriptInstanceId);
   fn on_script_instance_ref_dropped(&mut self, id: ScriptInstanceId);
-}
-
-pub enum DatumAllocatorEvent {
-  RefAdded(DatumId),
-  RefDropped(DatumId),
-  ScriptInstanceRefAdded(ScriptInstanceId),
-  ScriptInstanceRefDropped(ScriptInstanceId),
 }
 
 pub struct DatumAllocator {
@@ -54,23 +45,19 @@ pub struct DatumAllocator {
   datum_id_counter: DatumId,
   script_instance_counter: ScriptInstanceId,
   void_datum: Datum,
-  pub tx: Sender<DatumAllocatorEvent>,
-  pub rx: Receiver<DatumAllocatorEvent>,
 }
 
 const MAX_DATUM_ID: DatumId = 0xFFFFFF;
 const MAX_SCRIPT_INSTANCE_ID: ScriptInstanceId = 0xFFFFFF;
 
 impl DatumAllocator {
-  pub fn default(rx: Receiver<DatumAllocatorEvent>, tx: Sender<DatumAllocatorEvent>) -> Self {
+  pub fn default() -> Self {
     DatumAllocator {
       datums: FxHashMap::default(),
       script_instances: FxHashMap::default(),
       datum_id_counter: 1,
       script_instance_counter: 1,
       void_datum: Datum::Void,
-      tx,
-      rx,
     }
   }
 
