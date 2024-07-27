@@ -1,6 +1,6 @@
 use fxhash::FxHashMap;
 
-use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef, script_ref::ScriptInstanceRef, DatumRef};
+use super::{cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF}, script::ScriptHandlerRef, script_ref::ScriptInstanceRef, DatumRef};
 
 pub type ScopeRef = usize;
 
@@ -9,7 +9,6 @@ pub struct Scope {
   pub scope_ref: ScopeRef,
   pub script_ref: CastMemberRef,
   pub receiver: Option<ScriptInstanceRef>,
-  pub handler_ref: ScriptHandlerRef,
   pub handler_name_id: u16,
   pub args: Vec<DatumRef>,
   pub bytecode_index: usize,
@@ -17,6 +16,11 @@ pub struct Scope {
   pub loop_return_indices: Vec<usize>,
   pub return_value: DatumRef,
   pub stack: Vec<DatumRef>,
+  pub passed: bool,
+}
+
+pub struct ScopeResult {
+  pub return_value: DatumRef,
   pub passed: bool,
 }
 
@@ -29,21 +33,13 @@ impl Scope {
     result
   }
 
-  pub fn new(
-    scope_ref: ScopeRef,
-    script_ref: CastMemberRef, 
-    receiver: Option<ScriptInstanceRef>, 
-    handler_ref: ScriptHandlerRef, 
-    handler_name_id: u16,
-    args: Vec<DatumRef>,
-  ) -> Scope {
+  pub fn default(scope_ref: ScopeRef) -> Scope {
     Scope {
       scope_ref,
-      script_ref,
-      receiver,
-      handler_ref,
-      handler_name_id,
-      args,
+      script_ref: INVALID_CAST_MEMBER_REF,
+      receiver: None,
+      handler_name_id: 0,
+      args: vec![],
       bytecode_index: 0,
       locals: FxHashMap::default(),
       loop_return_indices: vec![],
@@ -51,5 +47,18 @@ impl Scope {
       stack: vec![],
       passed: false,
     }
+  }
+
+  pub fn reset(&mut self) {
+    self.script_ref = INVALID_CAST_MEMBER_REF;
+    self.receiver = None;
+    self.handler_name_id = 0;
+    self.args.clear();
+    self.bytecode_index = 0;
+    self.locals.clear();
+    self.loop_return_indices.clear();
+    self.return_value = DatumRef::Void;
+    self.stack.clear();
+    self.passed = false;
   }
 }

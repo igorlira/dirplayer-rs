@@ -528,12 +528,15 @@ impl JsApi {
       player
         .scopes
         .iter()
-        .map(|scope| {
-
+        .enumerate()
+        .filter(|(i, _)| player.scope_count > *i as u32)
+        .map(|(_, scope)| {
+          let cast_lib = player.movie.cast_manager.get_cast(scope.script_ref.cast_lib as u32).unwrap();
+          let handler_name = cast_lib.lctx.as_ref().unwrap().names.get(scope.handler_name_id as usize).unwrap();
           let scope = JsBridgeScope {
             script_member_ref: scope.script_ref.to_js(),
             bytecode_index: scope.bytecode_index as u32,
-            handler_name: scope.handler_ref.1.to_owned(),
+            handler_name: handler_name.to_owned(),
             locals: scope.locals.clone().into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
             stack: scope.stack.clone(),
             args: scope.args.clone()
@@ -562,12 +565,22 @@ impl JsApi {
   }
 
   pub fn dispatch_script_error(player: &DirPlayer, err: &ScriptError) {
-    let current_scope = player.scopes.last();
-    let data: js_sys::Map = OnScriptErrorCallbackData {
-      message: err.message.to_owned(),
-      script_member_ref: current_scope.map(|x| x.handler_ref.0.to_js()),
-      handler_name: current_scope.map(|x| x.handler_ref.1.to_owned()),
-    }.into();
+    let data: js_sys::Map = if let Some(current_scope) = player.scopes.get(player.current_scope_ref()) {
+      let current_script = player.movie.cast_manager.get_script_by_ref(&current_scope.script_ref).unwrap();
+      let current_handler_name = current_script.handler_names.get(current_scope.handler_name_id as usize).unwrap();
+
+      OnScriptErrorCallbackData {
+        message: err.message.to_owned(),
+        script_member_ref: Some(current_scope.script_ref.to_js()),
+        handler_name: Some(current_handler_name.to_owned()),
+      }.into()
+    } else {
+      OnScriptErrorCallbackData {
+        message: err.message.to_owned(),
+        script_member_ref: None,
+        handler_name: None,
+      }.into()
+    };
 
     Self::dispatch_debug_update(player);
     onScriptError(data.to_js_object());

@@ -44,6 +44,7 @@ use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use lazy_static::lazy_static;
 use profiling::{end_profiling, start_profiling};
+use scope::ScopeResult;
 use script_ref::ScriptInstanceRef;
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
@@ -66,6 +67,8 @@ pub struct PlayerVMExecutionItem {
   pub command: PlayerVMCommand,
   pub completer: Option<ManualFutureCompleter<Result<DatumRef, ScriptError>>>,
 }
+
+pub const MAX_STACK_SIZE: usize = 50;
 
 pub struct DirPlayer {
   pub net_manager: NetManager,
@@ -101,6 +104,7 @@ pub struct DirPlayer {
   pub timer_tick_start: u32,
   pub allocator: DatumAllocator,
   pub dir_cache: HashMap<Box<str>, DirectorFile>,
+  pub scope_count: u32,
 }
 
 impl DirPlayer {
@@ -109,7 +113,7 @@ impl DirPlayer {
     allocator_rx: Receiver<DatumAllocatorEvent>,
     allocator_tx: Sender<DatumAllocatorEvent>
   ) -> DirPlayer {
-    DirPlayer {
+    let mut result = DirPlayer {
       movie: Movie { 
         rect: IntRect::from(0, 0, 0, 0),
         cast_manager: CastManager::empty(),
@@ -134,7 +138,7 @@ impl DirPlayer {
       next_frame: None,
       queue_tx: tx,
       globals: FxHashMap::default(),
-      scopes: vec![],
+      scopes: Vec::with_capacity(MAX_STACK_SIZE),
       bytecode_handler_manager: StaticBytecodeHandlerManager {},
       breakpoint_manager: BreakpointManager::new(),
       current_breakpoint: None,
@@ -160,7 +164,12 @@ impl DirPlayer {
       timer_tick_start: get_ticks(),
       allocator: DatumAllocator::default(allocator_rx, allocator_tx),
       dir_cache: HashMap::new(),
+      scope_count: 0,
+    };
+    for i in 0..MAX_STACK_SIZE {
+      result.scopes.push(Scope::default(i));
     }
+    result
   }
 
   pub async fn load_movie_from_file(&mut self, path: &str) -> DirectorFile  {
@@ -397,6 +406,25 @@ impl DirPlayer {
     let handler_def = unsafe { &*ctx.handler_def_ptr };
     handler_def.bytecode_array.get(bytecode_index).unwrap()
   }
+
+  pub fn push_scope(&mut self) -> ScopeRef{
+    if (self.scope_count + 1) as usize >= MAX_STACK_SIZE {
+      panic!("Stack overflow");
+    }
+    let scope_ref = self.scope_count;
+    let scope = self.scopes.get_mut(scope_ref as ScopeRef).unwrap();
+    scope.reset();
+    self.scope_count += 1;
+    scope_ref as ScopeRef
+  }
+
+  pub fn pop_scope(&mut self) {
+    self.scope_count -= 1;
+  }
+
+  pub fn current_scope_ref(&self) -> ScopeRef {
+    (self.scope_count - 1) as ScopeRef
+  }
 }
 
 pub fn player_alloc_datum(datum: Datum) -> DatumRef {
@@ -429,10 +457,11 @@ impl ScriptError {
   }
 }
 
-pub fn player_handle_scope_return(scope: &Scope) {
+pub fn player_handle_scope_return(scope: &ScopeResult) {
   if scope.passed {
     reserve_player_mut(|player| {
-      let last_scope = player.scopes.last_mut();
+      let scope_ref = player.current_scope_ref();
+      let last_scope = player.scopes.get_mut(scope_ref);
       if let Some(last_scope) = last_scope {
         last_scope.passed = true;
       }
@@ -501,7 +530,7 @@ pub async fn player_call_script_handler(
   receiver: Option<ScriptInstanceRef>, 
   handler_ref: ScriptHandlerRef,
   arg_list: &Vec<DatumRef>,
-) -> Result<Scope, ScriptError> {
+) -> Result<ScopeResult, ScriptError> {
   player_call_script_handler_raw_args(receiver, handler_ref, arg_list, false).await
 }
 
@@ -510,13 +539,24 @@ pub async fn player_call_script_handler_raw_args(
   handler_ref: ScriptHandlerRef,
   arg_list: &Vec<DatumRef>,
   use_raw_arg_list: bool,
-) -> Result<Scope, ScriptError> {
+) -> Result<ScopeResult, ScriptError> {
   let (script_member_ref, handler_name) = &handler_ref;
-  let new_args = reserve_player_mut(|player| {
-    let script = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
-    let script_type = script.script_type;
+  let (scope_ref, handler_ptr, script_ptr) = reserve_player_mut(|player| {
+    let (script_ptr, handler_ptr, handler_name_id, script_type) = {
+      let script_rc = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
+      let script = script_rc.as_ref();
+      let script_ptr = script as *const Script;
+      let handler = script.get_own_handler(&handler_name);
 
-    let mut new_args = vec![];
+      if let Some(handler_rc) = handler {
+        let handler_name_id = handler_rc.name_id;
+        let handler_ptr: *const HandlerDef = handler_rc.as_ref();
+        Ok((script_ptr, handler_ptr, handler_name_id, script.script_type))
+      } else {
+        Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("Handler {handler_name} not found for script {}", script.name)))
+      }
+    }?;
+
     let receiver_arg = if let Some(script_instance_ref) = receiver.as_ref() {
       Some(Datum::ScriptInstanceRef(script_instance_ref.clone()))
     } else if script_type != ScriptType::Movie {
@@ -525,42 +565,27 @@ pub async fn player_call_script_handler_raw_args(
     } else {
       None
     };
+
+    let scope_ref = player.push_scope();
+    {
+      let scope = player.scopes.get_mut(scope_ref).unwrap();
+      scope.script_ref = script_member_ref.clone();
+      scope.receiver = receiver;
+      scope.handler_name_id = handler_name_id;
+    };
+
     if let Some(receiver_arg) = receiver_arg {
       if !use_raw_arg_list {
-        new_args.push(player.alloc_datum(receiver_arg));
+        let arg_ref = player.alloc_datum(receiver_arg);
+        let scope = player.scopes.get_mut(scope_ref).unwrap();
+        scope.args.push(arg_ref);
       }
     }
-    new_args.extend_from_slice(arg_list);
-    new_args
-  });
 
-  let (scope_ref, script_name, handler_ptr, script_ptr) = reserve_player_mut(|player| {
-    let script_rc = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
-    let script = script_rc.as_ref();
-    let script_ptr = script as *const Script;
-    let handler = script.get_own_handler(&handler_name);
-    if let Some(handler_rc) = handler {
-      let handler = handler_rc.as_ref();
-      let handler_ptr: *const HandlerDef = handler_rc.as_ref();
-      // let scope_ref = player.scope_id_counter + 1;
-      let scope_ref = player.scopes.len();
-      let scope = Scope::new(
-        scope_ref,
-        script_member_ref.clone(), 
-        receiver, 
-        handler_ref.clone(), 
-        handler.name_id,
-        new_args,
-      );
-      if player.scopes.len() >= 50 {
-        return Err(ScriptError::new("Stack overflow".to_string()));
-      }
-      // player.scope_id_counter += 1;
-      player.scopes.push(scope);
-      Ok((scope_ref, &script.name as *const String, handler_ptr, script_ptr))
-    } else {
-      Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("Handler {handler_name} not found for script {}", script.name)))
-    }
+    let scope = player.scopes.get_mut(scope_ref).unwrap();
+    scope.args.extend_from_slice(arg_list);
+
+    Ok((scope_ref, handler_ptr, script_ptr))
   })?;
 
   let ctx = BytecodeHandlerContext {
@@ -569,17 +594,14 @@ pub async fn player_call_script_handler_raw_args(
     script_ptr
   };
 
-  // self.scopes.push(scope);
-  // let scope = self.scopes.last().unwrap();
   let mut should_return = false;
 
   loop {
     let bytecode_index = reserve_player_ref(|player| player.scopes.get(scope_ref).unwrap().bytecode_index);
     // let profile_token = start_profiling(get_opcode_name(&bytecode.opcode));
-    // TODO breakpoint
     if let Some(breakpoint) = reserve_player_ref(|player| {
       player.breakpoint_manager
-        .find_breakpoint_for_bytecode(unsafe { &*script_name }, &handler_name, bytecode_index)
+        .find_breakpoint_for_bytecode(unsafe { &(&*script_ptr).name }, &handler_name, bytecode_index)
         .cloned()
     }) {
       player_trigger_breakpoint(
@@ -614,9 +636,16 @@ pub async fn player_call_script_handler_raw_args(
   }
 
   let scope = reserve_player_mut(|player| {
-    let result = player.scopes.pop().unwrap();
-    player.last_handler_result = result.return_value.clone();
-    // player.allocator.run_cycle();
+    let result = {
+      let scope = player.scopes.get(scope_ref).unwrap();
+      player.last_handler_result = scope.return_value.clone();
+
+      ScopeResult { 
+        passed: scope.passed, 
+        return_value: scope.return_value.clone() 
+      }
+    };
+    player.pop_scope();
     result
   });
 
