@@ -1,3 +1,4 @@
+use log::error;
 use pest::{iterators::Pair, Parser};
 
 use crate::{console_error, director::lingo::datum::{datum_bool, Datum, DatumType}, js_api::ascii_safe};
@@ -13,7 +14,7 @@ fn tokenize_lingo(_expr: &String) -> Vec<String> {
 }
 
 pub fn eval_lingo_pair(pair: Pair<Rule>, player: &mut DirPlayer) -> Result<DatumRef, ScriptError> {
-  // console_warn!("eval_lingo_expr: {:?}", pair);
+  // warn!("eval_lingo_expr: {:?}", pair);
 
   let inner_rule = pair.as_rule();
   match pair.as_rule() {
@@ -129,7 +130,7 @@ pub fn eval_lingo(expr: String, player: &mut DirPlayer) -> Result<DatumRef, Scri
       eval_lingo_pair(expr_pair.1.clone(), player)
     }
     Err(e) => {
-      console_error!("Lingo parse error: {}", ascii_safe(&e.to_string()));
+      error!("Lingo parse error: {}", ascii_safe(&e.to_string()));
       Ok(DatumRef::Void)
     }
   } 

@@ -53,7 +53,7 @@ impl CastDef {
           if child.is_ok() { 
             Some(child.unwrap()) 
           } else {
-            // console_warn!("Could not read child chunk of type {}", fourcc_to_string(x.fourcc));
+            // warn!("Could not read child chunk of type {}", fourcc_to_string(x.fourcc));
             None
           }
         })

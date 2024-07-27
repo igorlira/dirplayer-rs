@@ -1,4 +1,6 @@
-use crate::{console_warn, player::keyboard_map::KEYBOARD_KEY_MAP_JS_TO_SW};
+use log::debug;
+
+use crate::player::keyboard_map::KEYBOARD_KEY_MAP_JS_TO_SW;
 
 pub struct KeyboardKey {
     pub key: String,
@@ -18,7 +20,7 @@ impl KeyboardManager {
 
     pub fn key_down(&mut self, key: String, code: u16) {
         let code_mapped = KEYBOARD_KEY_MAP_JS_TO_SW.get(&code);
-        console_warn!("Key down: {} {} (mapped to: {:?}", key, code, code_mapped);
+        debug!("Key down: {} {} (mapped to: {:?}", key, code, code_mapped);
         if !self.down_keys.iter().any(|x| x.code == code) {
             self.down_keys.push(KeyboardKey {
                 key: key,

@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use binary_reader::BinaryReader;
 use itertools::Itertools;
+use log::warn;
 use url::Url;
 use crate::console_warn;
 use crate::director::rifx::RIFXReaderContext;
@@ -102,7 +103,7 @@ impl DirectorFile {
     rifx.dir_version = human_version(config.director_version);
     let dot_syntax = rifx.dir_version >= 700;
 
-    // console_log!("width={}, height={}", config.movie_right - config.movie_left, config.movie_bottom - config.movie_top);
+    // info!("width={}, height={}", config.movie_right - config.movie_left, config.movie_bottom - config.movie_top);
 
     let (cast_entries, casts) = read_casts(
       reader,  
@@ -113,9 +114,9 @@ impl DirectorFile {
     ).unwrap();
 
     // for cast in &casts {
-    //   console_log!("Cast {} members ({})", cast.name, cast.members.len());
+    //   info!("Cast {} members ({})", cast.name, cast.members.len());
     //   for (id, member) in &cast.members {
-    //     console_log!("- id: {} {}", id, member.chunk.member_info.name)
+    //     info!("- id: {} {}", id, member.chunk.member_info.name)
     //   }
     // }
 
@@ -164,7 +165,7 @@ fn read_casts(
     if cast_list.is_some() {
       let cast_list = cast_list.unwrap();
       for cast_entry in &cast_list.entries {
-      // console_log!("Cast: {} id: {}", &cast_entry.name, &cast_entry.id);
+      // info!("Cast: {} id: {}", &cast_entry.name, &cast_entry.id);
         let cast = get_cast_chunk_for_cast(
           reader,
           chunk_container,
@@ -174,7 +175,7 @@ fn read_casts(
         );
         if let Some(cast) = cast {
           // TODO cast.populate(castEntry.name, castEntry.id, castEntry.minMember);
-          // console_log!("Cast {} member count: {}", cast_entry.name, cast.member_ids.len());
+          // info!("Cast {} member count: {}", cast_entry.name, cast.member_ids.len());
           casts.push(
             CastDef::from(
               cast_entry.name.to_owned(), 
@@ -459,21 +460,21 @@ fn read_after_burner_map(
   let fver_length = reader.read_var_int().unwrap();
   start = reader.pos;
   let fver_version = reader.read_var_int().unwrap();
-  // console_log!("Fver: version {}", fver_version);
+  // info!("Fver: version {}", fver_version);
   if fver_version >= 0x401 {
     let _imap_version = reader.read_var_int().unwrap();
     let _director_version = reader.read_var_int().unwrap();
-    // console_log!("Fver: imapVersion: {} directorVersion: {}", imap_version, director_version);
+    // info!("Fver: imapVersion: {} directorVersion: {}", imap_version, director_version);
   }
   if fver_version >= 0x501 {
     let version_string_len = reader.read_u8().unwrap();
     let _fver_version_string = String::from_utf8(reader.read_bytes(version_string_len as usize).unwrap().to_vec()).unwrap();
-    // console_log!("Fver: versionString: {}", fver_version_string);
+    // info!("Fver: versionString: {}", fver_version_string);
   }
   end = reader.pos;
   
   if end - start != fver_length as usize {
-    // console_log!("read_after_burner_map(): Expected Fver of length {} but read {} bytes", fver_length, end - start);
+    // info!("read_after_burner_map(): Expected Fver of length {} but read {} bytes", fver_length, end - start);
     reader.jmp(start + fver_length as usize);
   }
 
@@ -493,19 +494,19 @@ fn read_after_burner_map(
   let compression_descs: Vec<String> = (0..compression_type_count).map(|_| fcdr_reader.read_cstr().unwrap()).collect();
 
   // for desc in &compression_descs {
-  //   console_log!("{}", desc);
+  //   info!("{}", desc);
   // }
 
   if fcdr_reader.pos != fcdr_reader.length {
-    console_warn!("readAfterburnerMap(): Fcdr has uncompressed length {} but read {} bytes", fcdr_reader.length, fcdr_reader.pos);
+    warn!("readAfterburnerMap(): Fcdr has uncompressed length {} but read {} bytes", fcdr_reader.length, fcdr_reader.pos);
   }
 
-  // console_log!("Fcdr: {} compression types", compression_type_count);
+  // info!("Fcdr: {} compression types", compression_type_count);
 
   for i in 0..compression_type_count {
     let _id = &compression_ids[i as usize];
     let _desc = &compression_descs[i as usize];
-    // console_log!("Fcdr: type {}: {} \"{}\"", i, id, desc);
+    // info!("Fcdr: type {}: {} \"{}\"", i, id, desc);
   }
 
   if reader.read_u32().unwrap() != FOURCC("ABMP") {
@@ -516,11 +517,11 @@ fn read_after_burner_map(
   let abmp_end = reader.pos + abmp_length as usize;
   let _abmp_compression_type = reader.read_var_int().unwrap();
   let abmp_uncomp_length = reader.read_var_int().unwrap();
-  // console_log!("ABMP: length: {} compressionType: {} uncompressedLength: {}", abmp_length, abmp_compression_type, abmp_uncomp_length);
+  // info!("ABMP: length: {} compressionType: {} uncompressedLength: {}", abmp_length, abmp_compression_type, abmp_uncomp_length);
 
   let abmp_uncomp = reader.read_zlib_bytes(abmp_end - reader.pos).unwrap();
   if abmp_uncomp.len() != abmp_uncomp_length as usize {
-    console_warn!("ABMP: Expected uncompressed length {} but got length {}", abmp_uncomp_length, abmp_uncomp.len());
+    warn!("ABMP: Expected uncompressed length {} but got length {}", abmp_uncomp_length, abmp_uncomp.len());
   }
   let mut abmp_reader = BinaryReader::from_vec(&abmp_uncomp);
   abmp_reader.set_endian(reader.endian);
@@ -528,7 +529,7 @@ fn read_after_burner_map(
   let _abmp_unk1 = abmp_reader.read_var_int().unwrap();
   let _abmp_unk2 = abmp_reader.read_var_int().unwrap();
   let res_count = abmp_reader.read_var_int().unwrap();
-  // console_log!("ABMP: unk1: {} unk2: {} resCount: {}", abmp_unk1, abmp_unk2, res_count);
+  // info!("ABMP: unk1: {} unk2: {} resCount: {}", abmp_unk1, abmp_unk2, res_count);
 
   for _ in 0..res_count {
     let res_id = abmp_reader.read_var_int().unwrap() as u32;
@@ -538,7 +539,7 @@ fn read_after_burner_map(
     let compression_type = abmp_reader.read_var_int().unwrap() as u32;
     let tag = abmp_reader.read_u32().unwrap();
 
-    // console_log!(
+    // info!(
     //   "Found RIFX resource index {}: '{}', {} bytes ({} uncompressed) @ pos {}, compressionType: {}",
     //   res_id,
     //   fourcc_to_string(tag),
@@ -569,12 +570,12 @@ fn read_after_burner_map(
 
   let ils_info = chunk_info.get(&2).unwrap();
   let _ils_unk1 = reader.read_var_int().unwrap();
-  // console_log!("ILS: length: {} unk1: {}", ils_info.len, ils_unk1);
+  // info!("ILS: length: {} unk1: {}", ils_info.len, ils_unk1);
   let ils_body_offset = reader.pos;
 
   let ils_uncomp = reader.read_zlib_bytes(ils_info.len).unwrap();
   if ils_uncomp.len() != ils_info.uncompressed_len {
-    console_warn!("ILS: Expected uncompressed length {} but got length {}", ils_info.uncompressed_len, ils_uncomp.len());
+    warn!("ILS: Expected uncompressed length {} but got length {}", ils_info.uncompressed_len, ils_uncomp.len());
   }
 
   let mut ils_reader = BinaryReader::from_vec(&ils_uncomp);
@@ -584,7 +585,7 @@ fn read_after_burner_map(
     let res_id = ils_reader.read_var_int().unwrap() as u32;
     let info = chunk_info.get(&res_id).unwrap();
 
-    // console_log!("Loading ILS resource {}: '{}', {} bytes", res_id, fourcc_to_string(info.fourcc), info.len);
+    // info!("Loading ILS resource {}: '{}', {} bytes", res_id, fourcc_to_string(info.fourcc), info.len);
     cached_chunk_views.insert(res_id, ils_reader.read_bytes(info.len).unwrap().to_vec());
   }
   return Ok(ils_body_offset);
@@ -617,7 +618,7 @@ fn read_key_table(
         if chunk_container.chunk_info.contains_key(&entry.cast_id) {
           _owner_tag = chunk_container.chunk_info.get(&entry.cast_id).unwrap().fourcc;
         }
-        // console_log!("KEY* entry ${i}: '{}' @ {} owned by '{}' @ {}", fourcc_to_string(entry.fourcc), entry.section_id, fourcc_to_string(owner_tag), entry.cast_id);
+        // info!("KEY* entry ${i}: '{}' @ {} owned by '{}' @ {}", fourcc_to_string(entry.fourcc), entry.section_id, fourcc_to_string(owner_tag), entry.cast_id);
       }
       return Ok(key_table)
     }
@@ -674,7 +675,7 @@ fn read_chunk_data(reader: &mut BinaryReader, fourcc: u32, len: u32) -> Result<V
       ).to_string()
     );
   } else {
-    console_warn!("At offset ${offset} reading chunk '{}' with length ${use_len}", fourcc_to_string(fourcc));
+    warn!("At offset ${offset} reading chunk '{}' with length ${use_len}", fourcc_to_string(fourcc));
   }
 
   return Ok(reader.read_bytes(use_len as usize).unwrap().to_vec());
@@ -745,7 +746,7 @@ fn get_chunk_data(
           return Err("TODO".to_owned());
         } else {
           if info.compression_id != NULL_COMPRESSION_GUID {
-            console_warn!("Unhandled compression type {}", info.compression_id)
+            warn!("Unhandled compression type {}", info.compression_id)
           }
           chunk_container.cached_chunk_views.insert(id, reader.read_bytes(info.len).unwrap().to_vec());
         }
@@ -788,7 +789,7 @@ pub fn get_chunk(
     );
     return chunk;
   } else {
-    // console_warn!("Could not find chunk data for chunk {} of id {}", fourcc_to_string(fourcc), id);
+    // warn!("Could not find chunk data for chunk {} of id {}", fourcc_to_string(fourcc), id);
     Err(chunk_view.unwrap_err())
   }
   // deserialized_chunks.insert(id, chunk);

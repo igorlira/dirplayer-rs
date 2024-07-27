@@ -1,4 +1,6 @@
-use crate::{console_warn, director::lingo::datum::Datum, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError}};
+use log::warn;
+
+use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError}};
 
 use super::{cast::CastHandlers, datum_handlers::{player_call_datum_handler, script_instance::ScriptInstanceUtils}, movie::MovieHandlers, net::NetHandlers, string::StringHandlers, types::TypeHandlers};
 
@@ -245,7 +247,7 @@ impl BuiltInHandlerManager {
           Ok(formatted_args)
         })?;
         let msg = format!("No built-in handler: {}({})", name, formatted_args);
-        console_warn!("{msg}");
+        warn!("{msg}");
         return Err(ScriptError::new(msg));
       }
     }

@@ -1,13 +1,10 @@
-use std::sync::{Arc, Mutex};
-
 use async_std::{channel::Sender, task::spawn_local};
 use fxhash::FxHashMap;
-use lazy_static::lazy_static;
-use nohash_hasher::IntMap;
+use log::warn;
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::{ErrorEvent, Event, MessageEvent, WebSocket};
 
-use crate::{console_warn, director::lingo::datum::{Datum, DatumType}, player::{events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, DatumRef, ScriptError}};
+use crate::{director::lingo::datum::{Datum, DatumType}, player::{events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, DatumRef, ScriptError}};
 
 
 pub struct MultiuserMessage {
@@ -129,7 +126,7 @@ impl MultiuserXtraManager {
                     let array = js_sys::Uint8Array::new(&data);
                     let vec = array.to_vec();
                     let string = String::from_utf8_lossy(&vec);
-                    console_warn!("WebSocket message: {:?}", string);
+                    warn!("WebSocket message: {:?}", string);
 
                     let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                     let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
@@ -144,10 +141,10 @@ impl MultiuserXtraManager {
                 });
                 let onerror_callback = Closure::<dyn FnMut(_)>::new(move |e: ErrorEvent| {
                     // e.data().dyn_into::<js_sys::JsString>()
-                    console_warn!("WebSocket error: {:?}", e);
+                    warn!("WebSocket error: {:?}", e);
                 });
                 let onopen_callback = Closure::<dyn FnMut(_)>::new(move |e: Event| {
-                    console_warn!("WebSocket opened");
+                    warn!("WebSocket opened");
                     let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                     let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                     instance.dispatch_message(MultiuserMessage {
@@ -167,7 +164,7 @@ impl MultiuserXtraManager {
                 instance.socket_tx = Some(tx);
                 spawn_local(async move {
                     while let Ok(message) = rx.recv().await {
-                        console_warn!("Sending message: {:?}", message);
+                        warn!("Sending message: {:?}", message);
                         socket_clone.send_with_u8_array(&message.as_bytes()).unwrap();
                     }
                 });
@@ -220,7 +217,7 @@ impl MultiuserXtraManager {
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_ref(|player| {
                     let msg_string = player.get_datum(args.get(2).unwrap()).string_value()?;
-                    console_warn!("sendNetMessage: {:?}", msg_string);
+                    warn!("sendNetMessage: {:?}", msg_string);
                     if let Some(tx) = &instance.socket_tx {
                         tx.try_send(msg_string).unwrap();
                         Ok(DatumRef::Void)

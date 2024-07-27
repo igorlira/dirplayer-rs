@@ -1,4 +1,6 @@
-use crate::{console_warn, director::lingo::datum::Datum, js_api::JsApi, player::{cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, CastMemberTypeId, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
+use log::warn;
+
+use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, CastMemberTypeId, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
 
 use super::cast_member::{bitmap::BitmapMemberHandlers, field::FieldMemberHandlers, text::TextMemberHandlers};
 
@@ -229,7 +231,7 @@ impl CastMemberRefHandlers {
         (name, slot_number, member_type, color, bg_color)
       },
       None => {
-        console_warn!("Getting prop {} of non-existent castMember reference {}, {}", prop, cast_member_ref.cast_lib, cast_member_ref.cast_member);
+        warn!("Getting prop {} of non-existent castMember reference {}, {}", prop, cast_member_ref.cast_lib, cast_member_ref.cast_member);
         return Self::get_invalid_member_prop(player, cast_member_ref, prop);
       }
     };

@@ -1,3 +1,5 @@
+use log::warn;
+
 use crate::{console_warn, director::lingo::datum::Datum};
 
 use super::{allocator::{DatumAllocator, DatumAllocatorTrait}, bitmap::bitmap::PaletteRef, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, DatumRef, ScriptError};
@@ -85,11 +87,11 @@ pub fn datum_equals(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> 
     (Datum::String(_), Datum::Void) => Ok(false),
     (Datum::Void, Datum::Symbol(_)) => Ok(false),
     (Datum::ColorRef(color_ref), Datum::String(string)) => {
-      console_warn!("Datum equals not supported for ColorRef and String: {:?} and {}", color_ref, string);
+      warn!("Datum equals not supported for ColorRef and String: {:?} and {}", color_ref, string);
       Ok(false)
     }
     _ => {
-      console_warn!("datum_equals not supported for types: {} and {}", left.type_str(), right.type_str());
+      warn!("datum_equals not supported for types: {} and {}", left.type_str(), right.type_str());
       Ok(false)
     }
   }
@@ -109,7 +111,7 @@ pub fn datum_greater_than(left: &Datum, right: &Datum) -> Result<bool, ScriptErr
       }
     }
     (Datum::Int(_), _) => {
-      console_warn!("Datum isGreaterThan not supported for int");
+      warn!("Datum isGreaterThan not supported for int");
       Ok(false)
     }
     (Datum::Float(left), Datum::Int(right)) => Ok(*left > (*right as f32)),
@@ -117,7 +119,7 @@ pub fn datum_greater_than(left: &Datum, right: &Datum) -> Result<bool, ScriptErr
     (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left.0 > right.0 && left.1 > right.1),
     (Datum::Void, Datum::Int(_)) => Ok(false),
     _ => {
-      console_warn!("datum_greater_than not supported for types: {} and {}", left.type_str(), right.type_str());
+      warn!("datum_greater_than not supported for types: {} and {}", left.type_str(), right.type_str());
       Ok(false)
     }
   }
@@ -136,7 +138,7 @@ pub fn datum_less_than(left: &Datum, right: &Datum) -> Result<bool, ScriptError>
       }
     }
     (Datum::Int(_), _) => {
-      console_warn!("Datum isLessThan not supported for int");
+      warn!("Datum isLessThan not supported for int");
       Ok(false)
     }
     (Datum::Float(left), Datum::Int(right)) => Ok(*left < (*right as f32)),
@@ -144,7 +146,7 @@ pub fn datum_less_than(left: &Datum, right: &Datum) -> Result<bool, ScriptError>
     (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left.0 < right.0 && left.1 < right.1),
     (Datum::String(..), Datum::String(..)) => Ok(false),
     _ => {
-      console_warn!("datum_less_than not supported for types: {} and {}", left.type_str(), right.type_str());
+      warn!("datum_less_than not supported for types: {} and {}", left.type_str(), right.type_str());
       Ok(false)
     }
   }
@@ -159,7 +161,7 @@ pub fn datum_is_zero(datum: &Datum, datums: &DatumAllocator) -> Result<bool, Scr
     Datum::Null => true,
     Datum::IntPoint(_) => false,
     _ => {
-      console_warn!("datum_is_zero not supported for type: {}", datum.type_str());
+      warn!("datum_is_zero not supported for type: {}", datum.type_str());
       datum.int_value()? == 0
     }
   })

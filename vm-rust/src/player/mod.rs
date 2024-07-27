@@ -40,6 +40,7 @@ use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync
 use cast_manager::CastPreloadReason;
 use chrono::Local;
 use fxhash::FxHashMap;
+use log::warn;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use lazy_static::lazy_static;
@@ -271,7 +272,7 @@ impl DirPlayer {
     self.timeout_manager.clear();
     //notifyListeners();
 
-    console_warn!("Profiler report: {}", get_profiler_report());
+    warn!("Profiler report: {}", get_profiler_report());
   }
 
   pub fn reset(&mut self) {
@@ -389,7 +390,7 @@ impl DirPlayer {
   }
 
   fn on_script_error(&mut self, err: &ScriptError) {
-    console_warn!("[!!] play failed with error: {}", err.message);
+    warn!("[!!] play failed with error: {}", err.message);
     self.stop();
 
     JsApi::dispatch_script_error(self, &err);
@@ -751,6 +752,7 @@ lazy_static! {
 }
 
 pub fn init_player() {
+  console_log::init_with_level(log::Level::Error).unwrap_or(());
   let (tx, rx) = channel::unbounded();
   let (event_tx, event_rx) = channel::unbounded();
   unsafe { 
@@ -831,7 +833,7 @@ async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: Scop
   // let formatted_args: Vec<String> = reserve_player_ref(|player| {
   //   args.iter().map(|datum_ref| format_datum(*datum_ref, player)).collect()
   // });
-  // console_warn!("ext_call: {name}({})", formatted_args.join(", "));
+  // warn!("ext_call: {name}({})", formatted_args.join(", "));
   match name.as_str() {
     "return" => {
       if let Some(return_value) = args.first() {
