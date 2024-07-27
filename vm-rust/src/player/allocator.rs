@@ -136,26 +136,6 @@ impl DatumAllocator {
       None
     }
   }
-
-  // pub fn run_cycle(&mut self) {
-  //   for _ in 0..self.rx.len() {
-  //     let item = self.rx.try_recv().unwrap();
-  //     match item {
-  //       DatumAllocatorEvent::RefAdded(id) => {
-  //         self.on_datum_ref_added(id);
-  //       }
-  //       DatumAllocatorEvent::RefDropped(id) => {
-  //         self.on_datum_ref_dropped(id);
-  //       }
-  //       DatumAllocatorEvent::ScriptInstanceRefAdded(id) => {
-  //         self.on_script_instance_ref_added(id);
-  //       }
-  //       DatumAllocatorEvent::ScriptInstanceRefDropped(id) => {
-  //         self.on_script_instance_ref_dropped(id);
-  //       }
-  //     }
-  //   }
-  // }
 }
 
 impl DatumAllocatorTrait for DatumAllocator {
