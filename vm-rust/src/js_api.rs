@@ -566,8 +566,8 @@ impl JsApi {
 
   pub fn dispatch_script_error(player: &DirPlayer, err: &ScriptError) {
     let data: js_sys::Map = if let Some(current_scope) = player.scopes.get(player.current_scope_ref()) {
-      let current_script = player.movie.cast_manager.get_script_by_ref(&current_scope.script_ref).unwrap();
-      let current_handler_name = current_script.handler_names.get(current_scope.handler_name_id as usize).unwrap();
+      let cast_lib = player.movie.cast_manager.get_cast(current_scope.script_ref.cast_lib as u32).unwrap();
+      let current_handler_name = cast_lib.lctx.as_ref().unwrap().names.get(current_scope.handler_name_id as usize).unwrap();
 
       OnScriptErrorCallbackData {
         message: err.message.to_owned(),
