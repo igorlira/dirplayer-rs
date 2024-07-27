@@ -84,3 +84,7 @@ default-features = false
 [profile.release]
 # Tell `rustc` to optimize for small code size.
 opt-level = "s"
+
+[package.metadata.wasm-pack.profile.release]
+# default is ["-O"]; -g means to preserve debug symbols.
+wasm-opt = ["-O", "-g"]
