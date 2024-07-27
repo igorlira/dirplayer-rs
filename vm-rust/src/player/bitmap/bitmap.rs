@@ -1,11 +1,11 @@
 use std::{sync::Arc, vec};
 
 use binary_reader::BinaryReader;
+use log::warn;
 use num::ToPrimitive;
 use num_derive::{FromPrimitive, ToPrimitive};
 
 use crate::{
-    console_warn,
     director::enums::BitmapInfo,
     io::reader::DirectorExt,
     player::{
@@ -301,7 +301,7 @@ fn decode_generic_bitmap(
     let bytes_per_pixel = bit_depth / 8;
     if scan_width as usize * scan_height as usize * num_channels as usize * bytes_per_pixel as usize != data.len()
     {
-        console_warn!(
+        warn!(
             "decode_generic_bitmap: Expected {} bytes, got {}",
             scan_width * scan_height * num_channels as u16 * bytes_per_pixel as u16,
             data.len()

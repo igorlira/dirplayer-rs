@@ -309,7 +309,7 @@ impl CastMember {
               bitmap_manager.add_bitmap(new_bitmap)
             },
             Err(_e) => {
-              // console_warn!("Failed to decompress bitmap. Using an empty image instead. {:?}", e);
+              // warn!("Failed to decompress bitmap. Using an empty image instead. {:?}", e);
               // TODO create error texture?
               // INVALID_BITMAP_REF
               bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))

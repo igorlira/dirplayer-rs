@@ -1,4 +1,5 @@
 use async_std::channel::Receiver;
+use log::warn;
 
 use crate::{
     console_warn,
@@ -209,7 +210,7 @@ pub async fn player_invoke_global_event(
 }
 
 pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
-    console_warn!("Starting event loop");
+    warn!("Starting event loop");
     while !rx.is_closed() {
         let item = rx.recv().await.unwrap();
         player_wait_available().await;
@@ -234,7 +235,7 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
             _ => {}
         };
     }
-    console_warn!("Event loop stopped!")
+    warn!("Event loop stopped!")
 }
 
 pub fn player_unwrap_result(result: Result<DatumRef, ScriptError>) -> DatumRef {

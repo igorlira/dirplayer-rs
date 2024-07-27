@@ -2,6 +2,7 @@ use std::{cell::UnsafeCell, rc::Rc};
 
 use async_std::channel::{Receiver, Sender};
 use fxhash::FxHashMap;
+use log::warn;
 
 use crate::{console_warn, director::lingo::datum::Datum};
 
@@ -74,7 +75,7 @@ impl DatumAllocator {
     } else if self.datum_id_counter + 1 < MAX_DATUM_ID && !self.contains_datum(self.datum_id_counter + 1) {
       Some(self.datum_id_counter + 1)
     } else {
-      console_warn!("Datum id overflow. Searching for free id...");
+      warn!("Datum id overflow. Searching for free id...");
       let first_free_id = (1..MAX_DATUM_ID).find(|id| !self.contains_datum(*id));
       first_free_id
     }
@@ -89,7 +90,7 @@ impl DatumAllocator {
     } else if self.script_instance_counter + 1 < MAX_SCRIPT_INSTANCE_ID && !self.contains_script_instance(self.script_instance_counter + 1) {
       self.script_instance_counter + 1
     } else {
-      console_warn!("Script instance id overflow. Searching for free id...");
+      warn!("Script instance id overflow. Searching for free id...");
       let first_free_id = (1..MAX_SCRIPT_INSTANCE_ID).find(|id| !self.contains_script_instance(*id));
       if let Some(id) = first_free_id {
         id

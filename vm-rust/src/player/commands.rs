@@ -1,4 +1,5 @@
 use async_std::channel::Receiver;
+use log::warn;
 use manual_future::ManualFuture;
 use url::Url;
 
@@ -91,7 +92,7 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
 }
 
 pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
-  console_warn!("Starting command loop");
+  warn!("Starting command loop");
 
   while !rx.is_closed() {
     let item = rx.recv().await.unwrap();
@@ -114,7 +115,7 @@ pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
       }
     }
   }
-  console_warn!("Command loop stopped!")  
+  warn!("Command loop stopped!")  
 }
 
 pub fn player_dispatch(command: PlayerVMCommand) {
@@ -136,12 +137,18 @@ pub async fn player_dispatch_async(command: PlayerVMCommand) -> Result<DatumRef,
 
 pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, ScriptError> {
     player_wait_available().await;
-    // console_warn!("run_player_command {}", format_player_cmd(&command)); // TODO
+    // warn!("run_player_command {}", format_player_cmd(&command)); // TODO
 
     // let player = player_opt.as_mut().unwrap();
 
     // TODO
     match command {
+        PlayerVMCommand::SetExternalParams(params) => {
+            warn!("Setting external params: {:?}", params);
+            reserve_player_mut(|player| {
+                player.external_params = params;
+            });
+        }
         PlayerVMCommand::SetBasePath(path) => {
             reserve_player_mut(|player| {
                 player.net_manager.set_base_path(Url::parse(&path).unwrap());
@@ -230,12 +237,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     }
                 });
             if !is_found {
-                console_warn!("Timeout triggered but not found: {}", timeout_ref);
+                warn!("Timeout triggered but not found: {}", timeout_ref);
                 return Ok(DatumRef::Void);
             }
             if !is_playing || is_script_paused {
                 // TODO how to handle is_script_paused?
-                console_warn!("Timeout triggered but not playing");
+                warn!("Timeout triggered but not playing");
                 return Ok(DatumRef::Void);
             }
             let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name));
@@ -256,7 +263,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let bitmap = member.member_type.as_bitmap().unwrap();
                 let bitmap = player.bitmap_manager.get_bitmap(bitmap.image_ref).unwrap();
                 let bitmap = &bitmap.data;
-                console_warn!("Bitmap hex: {}", bitmap.to_hex_string());
+                warn!("Bitmap hex: {}", bitmap.to_hex_string());
             });
         }
         PlayerVMCommand::MouseDown((x, y)) => {

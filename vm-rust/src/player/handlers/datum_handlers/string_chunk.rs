@@ -129,13 +129,13 @@ impl StringChunkUtils {
   pub fn resolve_chunk_expr_string(string: &String, chunk_expr: &StringChunkExpr) -> Result<String, ScriptError> {    
     // let type_str: String = chunk_expr.chunk_type.to_owned().into();
 
-    //console_warn!("-============ resolve_chunk_expr_string =============-");
-    //console_warn!("input string: {}", string);
-    //console_warn!("type: {}", type_str);
-    //console_warn!("vm range ({}, {})", chunk_expr.start, chunk_expr.end);
-    //console_warn!("host range ({}, {})", start, end);
-    //console_warn!("delimiter: {} (len {})", chunk_expr.item_delimiter, chunk_expr.item_delimiter.len());
-    //console_warn!("chunk list: {:?}", chunk_list);
+    //warn!("-============ resolve_chunk_expr_string =============-");
+    //warn!("input string: {}", string);
+    //warn!("type: {}", type_str);
+    //warn!("vm range ({}, {})", chunk_expr.start, chunk_expr.end);
+    //warn!("host range ({}, {})", start, end);
+    //warn!("delimiter: {} (len {})", chunk_expr.item_delimiter, chunk_expr.item_delimiter.len());
+    //warn!("chunk list: {:?}", chunk_list);
 
     if string.len() == 0 {
       return Ok("".to_string());
@@ -176,8 +176,8 @@ impl StringChunkUtils {
       },
     };
 
-    //console_warn!("result: {}", result);
-    //console_warn!("-============  =============-");
+    //warn!("result: {}", result);
+    //warn!("-============  =============-");
 
     Ok(result)
   }

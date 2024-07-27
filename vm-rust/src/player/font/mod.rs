@@ -1,12 +1,11 @@
 use fxhash::FxHashMap;
+use log::warn;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::{
-    console_warn, player::{
-        bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
-        reserve_player_mut,
-    }
+use crate::player::{
+    bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
+    reserve_player_mut,
 };
 
 use super::{
@@ -133,10 +132,10 @@ pub async fn player_load_system_font() {
                 player.font_manager.system_font = Some(font_ref);
             });
 
-            console_warn!("Loaded system font image data: {:?}", image_data);
+            warn!("Loaded system font image data: {:?}", image_data);
         }
         Err(err) => {
-            console_warn!("Error fetching system font: {:?}", err);
+            warn!("Error fetching system font: {:?}", err);
             return;
         }
     };

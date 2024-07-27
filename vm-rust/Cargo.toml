@@ -37,6 +37,8 @@ rgb565 = "0.1.3"
 bitvec = "1.0.1"
 fxhash = "0.2.1"
 async-recursion = "1.1.1"
+console_log = "1.0.0"
+log = "0.4.22"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

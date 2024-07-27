@@ -1,4 +1,6 @@
-use crate::{console_warn, director::lingo::datum::Datum, player::bitmap::bitmap::PaletteRef};
+use log::warn;
+
+use crate::{director::lingo::datum::Datum, player::bitmap::bitmap::PaletteRef};
 
 use super::{bitmap::bitmap::{get_system_default_palette, Bitmap}, DatumRef, DirPlayer, ScriptError};
 
@@ -18,7 +20,7 @@ pub fn get_stage_prop(
       Ok(Datum::ColorRef(player.bg_color.clone()))
     },
     "image" => {
-      console_warn!("TODO get stage image");
+      warn!("TODO get stage image");
       let new_bitmap = Bitmap::new(
         player.movie.rect.width() as u16, 
         player.movie.rect.height() as u16, 

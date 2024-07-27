@@ -1,3 +1,5 @@
+use log::warn;
+
 use crate::console_warn;
 
 pub struct IntRect {
@@ -29,7 +31,7 @@ impl IntRect {
     bottom_left: (i32, i32),
   ) -> IntRect {
     if top_left.1 != top_right.1 || top_right.0 != bottom_right.0 || bottom_right.1 != bottom_left.1 || bottom_left.0 != top_left.0 {
-      console_warn!("INVALID IntRect::from_quad(({}, {}), ({}, {}), ({}, {}), ({}, {}))", top_left.0, top_left.1, top_right.0, top_right.1, bottom_right.0, bottom_right.1, bottom_left.0, bottom_left.1);
+      warn!("INVALID IntRect::from_quad(({}, {}), ({}, {}), ({}, {}), ({}, {}))", top_left.0, top_left.1, top_right.0, top_right.1, bottom_right.0, bottom_right.1, bottom_left.0, bottom_left.1);
       return IntRect::from(0, 0, 0, 0);
     }
 
