@@ -9,7 +9,9 @@ impl BuiltInHandlerManager {
   fn param(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_ref(|player| {
       let param_number = player.get_datum(&args[0]).int_value()?;
-      Ok(player.scopes.last().unwrap().args[(param_number - 1) as usize].clone())
+      let scope_ref = player.current_scope_ref();
+      let scope = player.scopes.get(scope_ref).unwrap();
+      Ok(scope.args[(param_number - 1) as usize].clone())
     })
   }
 

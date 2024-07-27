@@ -213,19 +213,8 @@ impl DatumAllocatorTrait for DatumAllocator {
     }
   }
 
-  // fn on_datum_ref_added(&mut self, id: DatumId) {
-  //   // if let Some(entry) = self.datums.get_mut(&id) {
-  //   //   entry.ref_count += 1;
-  //   // }
-  // }
-
   fn on_datum_ref_dropped(&mut self, id: DatumId) {
-    if let Some(entry) = self.datums.get_mut(&id) {
-      // entry.ref_count -= 1;
-      // if entry.ref_count <= 0 {
-        self.dealloc_datum(id);
-      // }
-    }
+    self.dealloc_datum(id);
   }
 }
 

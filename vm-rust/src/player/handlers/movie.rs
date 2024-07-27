@@ -105,7 +105,8 @@ impl MovieHandlers {
 
   pub fn pass(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let scope = player.scopes.last_mut().unwrap();
+      let scope_ref = player.current_scope_ref();
+      let scope = player.scopes.get_mut(scope_ref).unwrap();
       scope.passed = true;
       Ok(DatumRef::Void)
     })
