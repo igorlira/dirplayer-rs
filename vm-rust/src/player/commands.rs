@@ -143,12 +143,6 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
 
     // TODO
     match command {
-        PlayerVMCommand::SetExternalParams(params) => {
-            warn!("Setting external params: {:?}", params);
-            reserve_player_mut(|player| {
-                player.external_params = params;
-            });
-        }
         PlayerVMCommand::SetBasePath(path) => {
             reserve_player_mut(|player| {
                 player.net_manager.set_base_path(Url::parse(&path).unwrap());
