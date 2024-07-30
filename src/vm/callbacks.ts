@@ -67,14 +67,14 @@ export function initVmCallbacks() {
     onClearTimeout: (timeoutName: string) => {
       const handle = store.getState().vm.timeoutHandles[timeoutName];
       if (handle) {
-        clearInterval(handle);
+        clearInterval(handle as Parameters<typeof clearInterval>[0]);
         store.dispatch(removeTimeoutHandle(timeoutName))
       }
     },
     onClearAllTimeouts: () => {
       const handles = store.getState().vm.timeoutHandles;
       Object.keys(handles).forEach((key) => {
-        clearInterval(handles[key]);
+        clearInterval(handles[key] as Parameters<typeof clearInterval>[0]);
         store.dispatch(removeTimeoutHandle(key))
       })
       console.log("Cleared all timeouts");
