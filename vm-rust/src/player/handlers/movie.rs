@@ -83,8 +83,8 @@ impl MovieHandlers {
     reserve_player_mut(|player| {
       let key = player.get_datum(&args[0]).string_value()?;
       let value: String = player.external_params.get(&key)
-        .map(|x| x.clone())
-        .unwrap_or("".to_string());
+        .cloned()
+        .unwrap_or_default();
       Ok(player.alloc_datum(Datum::String(value)))
     })
   }
