@@ -1,6 +1,7 @@
-use std::{borrow::{Borrow, BorrowMut}, cell::RefCell, collections::HashMap};
+use std::{borrow::{Borrow, BorrowMut}, cell::RefCell, collections::HashMap, time::Duration};
 
 use async_std::task::spawn_local;
+use chrono::Local;
 use wasm_bindgen::{prelude::*, Clamped};
 
 use crate::{js_api::JsApi, player::{
@@ -561,8 +562,10 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
 }
 
 async fn run_draw_loop() {
+    let draw_fps = 24;
+    let frame_duration = std::time::Duration::from_millis(1000 / draw_fps as u64);
     loop {
-        let draw_fps = 24;
+        let start = Local::now().timestamp_millis();
         {
             let mut player = unsafe { PLAYER_OPT.as_mut().unwrap() };
             with_canvas_renderer_mut(|renderer| {
@@ -571,6 +574,9 @@ async fn run_draw_loop() {
                 renderer.draw_preview_frame(&player);
             });
         }
-        async_std::task::sleep(std::time::Duration::from_millis(1000 / draw_fps)).await;
+        let end = Local::now().timestamp_millis();
+        let draw_time = end - start;
+        let sleep_ms = (frame_duration.as_millis() as i64 - draw_time).min(1);
+        async_std::task::sleep(Duration::from_millis(sleep_ms as u64)).await;
     }
 }
