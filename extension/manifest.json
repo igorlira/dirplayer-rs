@@ -23,10 +23,7 @@
     }
   ],
   "host_permissions": ["<all_urls>"],
-  "permissions": [
-      "storage",
-      "scripting"
-  ],
+  "permissions": [],
   "web_accessible_resources": [{
     "resources": ["vm-rust/pkg/*", "charmap-system.png"],
     "matches": ["<all_urls>"]
