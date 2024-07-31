@@ -18,6 +18,9 @@ impl VoidDatumHandlers {
       "length" => {
         Ok(player.alloc_datum(Datum::Int(0)))
       }
+      "string" => {
+        Ok(player.alloc_datum(Datum::String("".to_owned())))
+      }
       _ => {
         Err(ScriptError::new(format!("Cannot get Void property {}", prop)))
       },

@@ -143,6 +143,7 @@ impl BuiltInHandlerManager {
     match name.as_str() {
       "call" => true,
       "new" => true,
+      "callAncestor" => true,
       _ => false,
     }
   }
@@ -151,6 +152,7 @@ impl BuiltInHandlerManager {
     match name.as_str() {
       "call" => Self::call(args).await,
       "new" => TypeHandlers::new(args).await,
+      "callAncestor" => TypeHandlers::call_ancestor(args).await,
       _ => {
         let msg = format!("No built-in async handler: {}", name);
         return Err(ScriptError::new(msg));

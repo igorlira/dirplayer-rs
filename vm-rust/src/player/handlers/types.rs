@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::format_datum, eval::eval_lingo, geometry::IntRect, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DirPlayer, ScriptError}};
+use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{allocator::ScriptInstanceAllocatorTrait, bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::format_datum, eval::eval_lingo, geometry::IntRect, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DirPlayer, ScriptError}};
 
 use super::datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, prop_list::{PropListDatumHandlers, PropListUtils}, rect::RectUtils};
 
@@ -683,5 +683,26 @@ impl TypeHandlers {
       let channel_num = player.get_datum(&args[0]).int_value()? as u16;
       Ok(player.alloc_datum(Datum::SoundRef(channel_num)))
     })
+  }
+
+  pub async fn call_ancestor(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    let (ref_list, handler_name, args) = reserve_player_mut(|player| {
+      let handler_name = player.get_datum(&args[0]).string_value()?;
+      let instance_list = player.get_datum(&args[1]).to_list()?.clone();
+      let mut ref_list = vec![];
+      for instance_ref in instance_list {
+        let instance_ref = player.get_datum(&instance_ref).to_script_instance_ref()?;
+        let instance = player.allocator.get_script_instance(instance_ref);
+        let ancestor = instance.ancestor.as_ref().unwrap();
+        ref_list.push(player.alloc_datum(Datum::ScriptInstanceRef(ancestor.clone())));
+      }
+      let args = args[2..].to_vec();
+      Ok((ref_list, handler_name, args))
+    })?;
+    let mut result = DatumRef::Void;
+    for ref_item in ref_list {
+      result = player_call_datum_handler(&ref_item, &handler_name.to_string(), &args).await?;
+    }
+    Ok(result)
   }
 }
