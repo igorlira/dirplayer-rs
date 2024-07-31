@@ -1,10 +1,10 @@
-use std::{borrow::{Borrow, BorrowMut}, cell::RefCell, collections::HashMap, time::Duration};
+use std::{borrow::{Borrow, BorrowMut}, cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use async_std::task::spawn_local;
 use chrono::Local;
 use wasm_bindgen::{prelude::*, Clamped};
 
-use crate::{js_api::JsApi, player::{
+use crate::{console_warn, js_api::JsApi, player::{
     bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, score::{get_concrete_sprite_rect, get_sprite_at}, sprite::CursorRef, DirPlayer, PLAYER_OPT
 }};
 
@@ -562,22 +562,38 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
     Ok(())
 }
 
+fn request_animation_frame(f: &Closure<dyn FnMut()>) {
+    web_sys::window()
+        .unwrap()
+        .request_animation_frame(f.as_ref().unchecked_ref())
+        .unwrap();
+}
+
 async fn run_draw_loop() {
-    let draw_fps = 24;
-    let frame_duration = std::time::Duration::from_millis(1000 / draw_fps as u64);
-    loop {
-        let start = Local::now().timestamp_millis();
-        {
-            let mut player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    let rc = Rc::new(RefCell::new(None));
+    let rc_clone = rc.clone();
+
+    let mut last_frame_ms = 0;
+    let cb = Closure::<dyn FnMut()>::new(move || {
+        let mut player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+        let draw_fps = 24;
+
+        if Local::now().timestamp_millis() - last_frame_ms >= 1000 / draw_fps as i64 {
+            last_frame_ms = Local::now().timestamp_millis();
             with_canvas_renderer_mut(|renderer| {
                 let renderer = renderer.as_mut().unwrap();
                 renderer.draw_frame(&mut player);
                 renderer.draw_preview_frame(&player);
             });
         }
-        let end = Local::now().timestamp_millis();
-        let draw_time = end - start;
-        let sleep_ms = (frame_duration.as_millis() as i64 - draw_time).min(1);
-        async_std::task::sleep(Duration::from_millis(sleep_ms as u64)).await;
-    }
+
+        let cb = rc.as_ref().borrow();
+        let cb = cb.as_ref().unwrap();
+        request_animation_frame(&cb);
+    });
+    rc_clone.replace(Some(cb));
+
+    let cb = rc_clone.as_ref().borrow();
+    let cb = cb.as_ref().unwrap();
+    request_animation_frame(&cb);
 }
