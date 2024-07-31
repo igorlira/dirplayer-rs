@@ -385,6 +385,10 @@ impl DirPlayer {
         // TODO
         Ok(())
       },
+      "actorList" => {
+        // TODO
+        Ok(())
+      },
       _ => {
         self.movie.set_prop(prop, value, &self.allocator)
       }
