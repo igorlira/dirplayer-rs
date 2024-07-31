@@ -1,4 +1,5 @@
 use binary_reader::BinaryReader;
+use log::warn;
 use num_derive::FromPrimitive;
 
 use crate::io::reader::DirectorExt;
@@ -53,6 +54,7 @@ pub enum ShapeType {
 	Oval,
 	OvalRect,
 	Line,
+	Unknown,
 }
 
 #[derive(Clone)]
@@ -133,7 +135,10 @@ impl From<&[u8]> for ShapeInfo {
 		return ShapeInfo {
 			shape_type: match shape_type {
 				0x0001 => ShapeType::Rect,
-				_ => panic!("Unknown shape type: {:x}", shape_type),
+				_ => {
+					warn!("Unknown shape type: {:x}", shape_type);
+					ShapeType::Unknown
+				}
 			},
 			reg_point: (reg_x as i16, reg_y as i16),
 			width,
