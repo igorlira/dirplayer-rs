@@ -235,6 +235,7 @@ impl BuiltInHandlerManager {
       "pi" => TypeHandlers::pi(args),
       "sin" => TypeHandlers::sin(args),
       "cos" => TypeHandlers::cos(args),
+      "sound" => TypeHandlers::sound(args),
       _ => {
         let formatted_args = reserve_player_ref(|player| {
           let mut formatted_args = String::new();

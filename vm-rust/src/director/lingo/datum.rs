@@ -38,6 +38,7 @@ pub enum DatumType {
   Matte,
   PlayerRef,
   MovieRef,
+  SoundRef,
 }
 
 #[derive(Clone, FromPrimitive)]
@@ -131,6 +132,7 @@ pub enum Datum {
   Matte(Arc<BitmapMask>),
   PlayerRef,
   MovieRef,
+  SoundRef(u16),
   Null,
 }
 
@@ -168,6 +170,7 @@ impl DatumType {
       DatumType::Matte => "matte".to_string(),
       DatumType::PlayerRef => "player_ref".to_string(),
       DatumType::MovieRef => "movie_ref".to_string(),
+      DatumType::SoundRef => "sound_ref".to_string(),
     }
   }
 }
@@ -202,6 +205,7 @@ impl Datum {
       Datum::Matte(..) => DatumType::Matte,
       Datum::PlayerRef => DatumType::PlayerRef,
       Datum::MovieRef => DatumType::MovieRef,
+      Datum::SoundRef(_) => DatumType::SoundRef,
       Datum::Null => DatumType::Null,
     }
   }

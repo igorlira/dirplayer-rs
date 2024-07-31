@@ -16,6 +16,7 @@ pub mod int;
 pub mod color;
 pub mod cast_member;
 pub mod player;
+pub mod sound;
 
 use player::PlayerDatumHandlers;
 

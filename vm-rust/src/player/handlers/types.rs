@@ -677,4 +677,11 @@ impl TypeHandlers {
       Ok(player.alloc_datum(Datum::Float(value.cos())))
     })
   }
+
+  pub fn sound(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let channel_num = player.get_datum(&args[0]).int_value()? as u16;
+      Ok(player.alloc_datum(Datum::SoundRef(channel_num)))
+    })
+  }
 }
