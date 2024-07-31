@@ -15,10 +15,7 @@ use super::{
 
 #[allow(dead_code)]
 pub enum PlayerVMCommand {
-    CallObjectHandler,
     DispatchEvent(String, Vec<DatumRef>),
-    CallHandler,
-    CallScriptHandler,
     Play,
     Stop,
     Reset,
@@ -47,10 +44,7 @@ pub enum PlayerVMCommand {
 
 pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
     match command {
-        PlayerVMCommand::CallObjectHandler => "CallObjectHandler".to_string(),
         PlayerVMCommand::DispatchEvent(name, _) => format!("DispatchEvent({})", name),
-        PlayerVMCommand::CallHandler => "CallHandler".to_string(),
-        PlayerVMCommand::CallScriptHandler => "CallScriptHandler".to_string(),
         PlayerVMCommand::Play => "Play".to_string(),
         PlayerVMCommand::Stop => "Stop".to_string(),
         PlayerVMCommand::Reset => "Reset".to_string(),
@@ -145,12 +139,12 @@ pub async fn player_dispatch_async(command: PlayerVMCommand) -> Result<DatumRef,
 
 pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, ScriptError> {
     player_wait_available().await;
-    // warn!("run_player_command {}", format_player_cmd(&command)); // TODO
-
-    // let player = player_opt.as_mut().unwrap();
-
-    // TODO
     match command {
+        PlayerVMCommand::SetExternalParams(params) => {
+            reserve_player_mut(|player| {
+                player.external_params = params;
+            });
+        }
         PlayerVMCommand::SetBasePath(path) => {
             reserve_player_mut(|player| {
                 player.net_manager.set_base_path(Url::parse(&path).unwrap());
@@ -435,9 +429,6 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if let Some((receiver, handler, args)) = call_params {
                 player_call_script_handler(receiver, handler, &args).await?;
             }
-        }
-        _ => {
-            panic!("Unknown VM command");
         }
     }
     Ok(DatumRef::Void)
