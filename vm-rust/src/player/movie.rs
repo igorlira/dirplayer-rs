@@ -17,6 +17,7 @@ pub struct Movie {
   pub item_delimiter: String,
   pub alert_hook: Option<ScriptReceiver>,
   pub base_path: String,
+  pub file_name: String,
   pub stage_color: (u8, u8, u8),
 }
 
@@ -43,6 +44,7 @@ impl Movie {
     };
     self.cast_manager.load_from_dir(file, net_manager, bitmap_manager, dir_cache).await;
     self.score.load_from_dir(file);
+    self.file_name = file.file_name.to_string();
   }
 
   pub fn get_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
@@ -87,6 +89,7 @@ impl Movie {
       "stageBottom" => Ok(Datum::Int(self.rect.bottom as i32)),
       "traceLogFile" => Ok(Datum::String("".to_string())), // TODO
       "traceScript" => Ok(Datum::Int(0)), // TODO
+      "movieName" => Ok(Datum::String(self.file_name.to_owned())),
       _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
     }
   }

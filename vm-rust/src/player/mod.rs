@@ -125,6 +125,7 @@ impl DirPlayer {
         item_delimiter: ".".to_string(),
         alert_hook: None,
         base_path: "".to_string(),
+        file_name: "".to_string(),
         stage_color: (0, 0, 0),
       },
       net_manager: NetManager {
