@@ -38,9 +38,6 @@ impl ScriptDatumHandlers {
   }
 
   pub async fn new(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    if !args.is_empty() {
-      return Err(ScriptError::new("new handler does not take arguments".to_string()));
-    }
     let (script_ref, new_handler_ref) = reserve_player_mut(|player| {
       let script_ref = match player.get_datum(datum) {
         Datum::ScriptRef(script_ref) => script_ref,
