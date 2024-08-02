@@ -8,6 +8,12 @@ DirPlayer is a Shockwave Player emulator written in Rust that aims to make playi
 
 Check out a live demo of this project at http://dirplayer-rs.s3-website-us-west-2.amazonaws.com/
 
+## Chrome Extension
+
+Download the Chrome Extension at https://chromewebstore.google.com/detail/dirplayer-shockwave-emula/gpgalkgegfekkmaknocegonkakahkhbc
+
+The extension implements a polyfill that replaces all `<embed>` elements that point to a Shockwave file in websites you navigate.
+
 ## Installing dependencies
 ```bash
 npm install
@@ -19,6 +25,18 @@ npm install
 cd vm-rust
 wasm-pack build --target web
 ```
+
+## Building extension
+
+```bash
+npm run build-extension
+```
+
+Make sure to build the VM first. The bundled extension will be located in `./dist-extension`. 
+
+You can install the local build by going to `chrome://extensions`, enabling Developer Mode, then clicking the `Load unpacked` button.
+
+Note that the extension is currently only available on Chrome.
 
 ## Running locally
 
