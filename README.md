@@ -48,7 +48,7 @@ npm run start
 
 If you have any questions or you're interested in being part of the discussions of this project, please join our Discord!
 
-https://discord.gg/swVG87Ga
+https://discord.gg/8yKDk9nJH2
 
 ## Acknowledgements
 
