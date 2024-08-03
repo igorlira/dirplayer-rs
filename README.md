@@ -12,7 +12,7 @@ Check out a live demo of this project at http://dirplayer-rs.s3-website-us-west-
 
 Download the Chrome Extension at https://chromewebstore.google.com/detail/dirplayer-shockwave-emula/gpgalkgegfekkmaknocegonkakahkhbc
 
-The extension implements a polyfill that replaces all `<embed>` elements that point to a Shockwave file in websites you navigate.
+The extension implements a polyfill that replaces all `<embed>` elements that point to a Shockwave file in websites you visit.
 
 ## Installing dependencies
 ```bash
