@@ -281,7 +281,8 @@ impl CastMember {
         CastMemberType::Field(field_member)
       }
       MemberType::Script => {
-        let script_id = chunk.member_info.header.script_id;
+        let member_info = chunk.member_info.as_ref().unwrap();
+        let script_id = member_info.header.script_id;
         let script_type = chunk.specific_data.script_type().unwrap();
         let _script_chunk = &lctx.as_ref().unwrap().scripts[&script_id];
 
@@ -289,7 +290,7 @@ impl CastMember {
           ScriptMember { 
             script_id, 
             script_type, 
-            name: member_def.chunk.member_info.name.clone() 
+            name: member_info.name.clone() 
           }
         )
       }
@@ -341,7 +342,7 @@ impl CastMember {
     };
     CastMember {
       number,
-      name: chunk.member_info.name.to_owned(),
+      name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
       member_type: member_type,
       color: ColorRef::PaletteIndex(255),
       bg_color: ColorRef::PaletteIndex(0),

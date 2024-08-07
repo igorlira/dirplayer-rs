@@ -7,7 +7,7 @@ use super::Chunk;
 pub struct CastMemberChunk {
   pub member_type: MemberType,
   pub specific_data: CastMemberSpecificData,
-  pub member_info: CastMemberInfoChunk,
+  pub member_info: Option<CastMemberInfoChunk>,
 }
 
 pub struct CastMemberDef {
@@ -99,7 +99,7 @@ impl CastMemberChunk {
     return Ok(CastMemberChunk {
       member_type,
       specific_data: specific_data_parsed,
-      member_info: info.expect("No member info chunk"),
+      member_info: info,
     })
   }
 }
