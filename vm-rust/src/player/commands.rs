@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use async_std::channel::Receiver;
+use chrono::Local;
 use log::warn;
 use manual_future::ManualFuture;
 use url::Url;
@@ -271,7 +272,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 return Ok(DatumRef::Void);
             }
             let instance_ids = reserve_player_mut(|player| {
+                let now = Local::now().timestamp_millis().abs();
+                let is_double_click = (now - player.last_mouse_down_time) < 500;
                 player.mouse_loc = (x, y);
+                player.is_double_click = is_double_click;
+                player.last_mouse_down_time = now;
                 let sprite = get_sprite_at(player, x, y, true);
                 if let Some(sprite_number) = sprite {
                     let sprite = player.movie.score.get_sprite(sprite_number as i16);
@@ -325,6 +330,9 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let instance_ids = result.as_ref().map(|x| &x.0);
             let event_name = if is_inside { "mouseUp" } else { "mouseUpOutSide" };
             player_dispatch_targeted_event(&event_name.to_string(), &vec![], instance_ids);
+            reserve_player_mut(|player| {
+                player.is_double_click = false;
+            });
             return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseMove((x, y)) => {

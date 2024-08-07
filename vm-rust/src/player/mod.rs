@@ -94,6 +94,8 @@ pub struct DirPlayer {
   pub text_selection_start: u16,
   pub text_selection_end: u16,
   pub mouse_loc: (i32, i32),
+  pub last_mouse_down_time: i64,
+  pub is_double_click: bool,
   pub mouse_down_sprite: i16,
   pub subscribed_member_refs: Vec<CastMemberRef>, // TODO move to debug module
   pub is_subscribed_to_channel_names: bool, // TODO move to debug module
@@ -152,6 +154,8 @@ impl DirPlayer {
       bg_color: ColorRef::Rgb(0, 0, 0),
       keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
       mouse_loc: (0, 0),
+      last_mouse_down_time: 0,
+      is_double_click: false,
       mouse_down_sprite: 0,
       subscribed_member_refs: vec![],
       is_subscribed_to_channel_names: false,
@@ -323,7 +327,7 @@ impl DirPlayer {
       "altDown" => Ok(datum_bool(self.keyboard_manager.is_alt_down())),
       "key" => Ok(Datum::String(self.keyboard_manager.key())),
       "floatPrecision" => Ok(Datum::Int(self.float_precision as i32)),
-      "doubleClick" => Ok(datum_bool(false)), // TODO
+      "doubleClick" => Ok(datum_bool(self.is_double_click)),
       _ => self.movie.get_prop(prop),
     }
   }
