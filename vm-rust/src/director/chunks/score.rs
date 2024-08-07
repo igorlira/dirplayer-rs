@@ -1,5 +1,6 @@
 use binary_reader::{BinaryReader, Endian};
 use itertools::Itertools;
+use log::error;
 
 use crate::{utils::log_i, io::reader::DirectorExt};
 
@@ -157,21 +158,21 @@ pub struct FrameIntervalPrimary {
 }
 
 impl FrameIntervalPrimary {
-  pub fn read(reader: &mut BinaryReader) -> Self {
-    FrameIntervalPrimary {
-      start_frame: reader.read_u32().unwrap(),
-      end_frame: reader.read_u32().unwrap(),
-      unk0: reader.read_u32().unwrap(),
-      unk1: reader.read_u32().unwrap(),
-      sprite_number: reader.read_u32().unwrap(),
-      unk2: reader.read_u16().unwrap(),
-      unk3: reader.read_u32().unwrap(),
-      unk4: reader.read_u16().unwrap(),
-      unk5: reader.read_u32().unwrap(),
-      unk6: reader.read_u32().unwrap(),
-      unk7: reader.read_u32().unwrap(),
-      unk8: reader.read_u32().unwrap(),
-    }
+  pub fn read(reader: &mut BinaryReader) -> Result<Self, ()> {
+    Ok(FrameIntervalPrimary {
+      start_frame: reader.read_u32().map_err(|_| ())?,
+      end_frame: reader.read_u32().map_err(|_| ())?,
+      unk0: reader.read_u32().map_err(|_| ())?,
+      unk1: reader.read_u32().map_err(|_| ())?,
+      sprite_number: reader.read_u32().map_err(|_| ())?,
+      unk2: reader.read_u16().map_err(|_| ())?,
+      unk3: reader.read_u32().map_err(|_| ())?,
+      unk4: reader.read_u16().map_err(|_| ())?,
+      unk5: reader.read_u32().map_err(|_| ())?,
+      unk6: reader.read_u32().map_err(|_| ())?,
+      unk7: reader.read_u32().map_err(|_| ())?,
+      unk8: reader.read_u32().map_err(|_| ())?,
+    })
   }
 }
 
@@ -244,7 +245,12 @@ impl ScoreChunk {
       let mut frame_interval_reader = BinaryReader::from_u8(entry);
       frame_interval_reader.set_endian(Endian::Big);
       if is_primary {
-        frame_interval_primaries.push(FrameIntervalPrimary::read(&mut frame_interval_reader));
+        if let Ok(item) = FrameIntervalPrimary::read(&mut frame_interval_reader) {
+          frame_interval_primaries.push(item);
+        } else {
+          error!("Failed to read FrameIntervalPrimary at index {}", i);
+          break;
+        }
       } else if is_secondary {
         frame_interval_secondaries.push(FrameIntervalSecondary::read(&mut frame_interval_reader));
       }
@@ -267,7 +273,7 @@ impl ScoreChunk {
       unk1: reader.read_u32().unwrap(),
       unk2: reader.read_u32().unwrap(),
       entry_count: reader.read_u32().unwrap(),
-      unk3: reader.read_u32().unwrap(),
+      unk3: reader.read_u32().unwrap(), // entry_count + 1
       entry_size_sum: reader.read_u32().unwrap(),
     }
   }
