@@ -227,6 +227,10 @@ impl CastLib {
         handler_names,
       };
       self.scripts.insert(number, Rc::new(script));
+    } else if let CastMemberType::Palette(_) = &member.member_type {
+      reserve_player_mut(|player| {
+        player.movie.cast_manager.invalidate_palette_cache();
+      });
     }
 
     self.members.insert(number, member);

@@ -1,10 +1,10 @@
-use std::{borrow::{Borrow, BorrowMut}, cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
+use std::{borrow::{Borrow, BorrowMut}, cell::RefCell, collections::HashMap, rc::Rc};
 
 use async_std::task::spawn_local;
 use chrono::Local;
 use wasm_bindgen::{prelude::*, Clamped};
 
-use crate::{console_warn, js_api::JsApi, player::{
+use crate::{js_api::JsApi, player::{
     bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, score::{get_concrete_sprite_rect, get_sprite_at}, sprite::CursorRef, DirPlayer, PLAYER_OPT
 }};
 
@@ -293,7 +293,7 @@ impl PlayerCanvasRenderer {
                     0,
                     0,
                     resolve_color_ref(
-                        &player.movie.cast_manager.palettes(),
+                        &palettes,
                         &player.bg_color,
                         &PaletteRef::BuiltIn(get_system_default_palette()),
                     ),
@@ -301,7 +301,7 @@ impl PlayerCanvasRenderer {
                     1.0
                 );
                 bitmap.copy_pixels(
-                    &player.movie.cast_manager.palettes(),
+                    &palettes,
                     sprite_bitmap,
                     IntRect::from(0, 0, sprite_bitmap.width as i32, sprite_bitmap.height as i32),
                     IntRect::from(0, 0, sprite_bitmap.width as i32, sprite_bitmap.height as i32),

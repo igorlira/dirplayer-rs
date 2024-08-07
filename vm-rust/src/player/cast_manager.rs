@@ -11,6 +11,7 @@ use super::{allocator::DatumAllocator, bitmap::{manager::BitmapManager, palette_
 pub struct CastManager {
   pub casts: Vec<CastLib>,
   pub movie_script_cache: RefCell<Option<Vec<Rc<Script>>>>,
+  pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
 }
 
 const IS_WEB: bool = false;
@@ -26,6 +27,7 @@ impl CastManager {
     CastManager { 
       casts: Vec::new(),
       movie_script_cache: RefCell::new(None),
+      palette_cache: RefCell::new(None),
     }
   }
 
@@ -125,17 +127,25 @@ impl CastManager {
     None
   }
 
-  pub fn palettes(&self) -> PaletteMap {
-    let mut result = PaletteMap::new();
-    for cast in &self.casts {
-      for member in cast.members.values() {
-        if let CastMemberType::Palette(palette) = &member.member_type {
-          let slot_number = CastMemberRefHandlers::get_cast_slot_number(cast.number, member.number);
-          result.insert(slot_number as u32, palette.clone());
+  pub fn invalidate_palette_cache(&self) {
+    self.palette_cache.replace(None);
+  }
+
+  pub fn palettes(&self) -> Rc<PaletteMap> {
+    let has_cache = self.palette_cache.borrow().is_some();
+    if !has_cache {
+      let mut result = PaletteMap::new();
+      for cast in &self.casts {
+        for member in cast.members.values() {
+          if let CastMemberType::Palette(palette) = &member.member_type {
+            let slot_number = CastMemberRefHandlers::get_cast_slot_number(cast.number, member.number);
+            result.insert(slot_number as u32, palette.clone());
+          }
         }
       }
+      self.palette_cache.replace(Some(Rc::new(result)));
     }
-    result
+    self.palette_cache.borrow().as_ref().unwrap().clone()
   }
 
   pub fn find_member_ref_by_name(&self, name: &String) -> Option<CastMemberRef> {
