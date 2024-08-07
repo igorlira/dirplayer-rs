@@ -60,7 +60,8 @@ impl Bytecode {
         writer.push_str(name);
       }
       OpCode::SetLocal | OpCode::GetLocal => {
-        let name = lctx.names.get(handler.local_name_ids[self.obj as usize] as usize).unwrap();
+        let name_id = handler.local_name_ids.get(self.obj as usize).map(|x| *x as usize);
+        let name = name_id.and_then(|name_id| lctx.names.get(name_id).map(|x| x.as_str())).unwrap_or("UNKOWN_LOCAL");
         writer.push_str(" ");
         writer.push_str(name);
       }
