@@ -64,6 +64,8 @@ impl StringBytecodeHandler {
         Ok(search_in.contains(search_str.as_str()))
       } else if search_in.is_symbol() {
         Ok(false)
+      } else if search_in.is_number() {
+        Ok(false)
       } else {
         Err(ScriptError::new("kOpContainsStr invalid search subject".to_string()))
       }?;
