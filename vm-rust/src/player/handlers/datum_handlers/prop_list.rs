@@ -511,6 +511,8 @@ impl PropListDatumHandlers {
         } else {
           Ok(player.alloc_datum(datum_bool(false)))
         }
+      } else if prop_name.is_void() {
+        Ok(player.alloc_datum(datum_bool(false)))
       } else {
         Err(ScriptError::new(format!("Prop name must be a string, int or symbol (is {})", prop_name.type_str())))
       }
