@@ -8,6 +8,7 @@ export type TMemberSubscription = {
 }
 
 interface VMSliceState {
+  isReady: boolean,
   castNames: string[],
   castSnapshots: Record<number, CastSnapshot>,
   scoreSnapshot?: ScoreSnapshot,
@@ -25,6 +26,7 @@ interface VMSliceState {
 }
 
 const initialState: VMSliceState = {
+  isReady: false,
   castNames: [],
   castSnapshots: [],
   currentFrame: 1,
@@ -48,6 +50,12 @@ const vmSlice = createSlice({
   name: 'vm',
   initialState,
   reducers: {
+    ready: (state) => {
+      return {
+        ...state,
+        isReady: true,
+      }
+    },
     castListChanged: (state, action: PayloadAction<string[]>) => {
       return {
         ...state,
@@ -231,5 +239,5 @@ export const selectBreakpoints = (state: VMSliceState, scriptName?: string) => s
 export const selectGlobals = (state: VMSliceState) => state.globals
 
 // Action creators are generated for each case reducer function
-export const { castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded } = vmSlice.actions
+export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded } = vmSlice.actions
 export default vmSlice.reducer
