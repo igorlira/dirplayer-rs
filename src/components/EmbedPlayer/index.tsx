@@ -37,6 +37,6 @@ export default function EmbedPlayer({width, height, src, externalParams}: EmbedP
     }
   }, [width, height]);
   return <div style={{width: widthValue, height: heightValue}}>
-    <Stage />
+    {!!isVmReady && <Stage />}
   </div>
 }
