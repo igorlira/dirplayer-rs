@@ -90,6 +90,13 @@ impl BuiltInHandlerManager {
     })
   }
 
+  fn bit_not(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let a = player.get_datum(&args[0]).int_value()?;
+      Ok(player.alloc_datum(Datum::Int(!a)))
+    })
+  }
+
   async fn call(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let receiver_ref = &args[1];
     let (handler_name, args, instance_ids) = reserve_player_mut(|player| {
@@ -194,6 +201,7 @@ impl BuiltInHandlerManager {
       "random" => Self::random(args),
       "bitAnd" => Self::bit_and(args),
       "bitOr" => Self::bit_or(args),
+      "bitNot" => Self::bit_not(args),
       "symbol" => TypeHandlers::symbol(args),
       "go" => MovieHandlers::go(args),
       "puppetSprite" => MovieHandlers::puppet_sprite(args),
