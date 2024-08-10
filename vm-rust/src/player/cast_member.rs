@@ -298,8 +298,7 @@ impl CastMember {
         let bitmap_info = chunk.specific_data.bitmap_info().unwrap();
         let abmp_chunk = member_def.children
           .get(0)
-          .unwrap()
-          .as_ref();
+          .and_then(|x| x.as_ref());
         let new_bitmap_ref = if let Some(abmp_chunk) = abmp_chunk {
           let abmp_chunk = abmp_chunk
             .as_bitmap()
