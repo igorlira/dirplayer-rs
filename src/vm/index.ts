@@ -28,7 +28,11 @@ export type TJsBridgeDatumUnknown = TJsBridgeDatumBase & {
   properties: Record<string, DatumRef>,
 }
 
-export type JsBridgeDatum = TJsBridgeDatumScriptInstance | TJsBridgeDatumList | TJsBridgeDatumPropList// | TJsBridgeDatumUnknown;
+export type TJsBridgeDatumVoid = TJsBridgeDatumBase & {
+  type: 'void',
+}
+
+export type JsBridgeDatum = TJsBridgeDatumScriptInstance | TJsBridgeDatumList | TJsBridgeDatumPropList | TJsBridgeDatumVoid// | TJsBridgeDatumUnknown;
 
 export interface IVMScope {
   script_member_ref: ICastMemberRef,

@@ -43,7 +43,11 @@ function DatumDebugListItems({
       case "scriptInstance":
         return state.vm.scriptInstanceSnapshots[datumRef.instanceId];
       case "datum":
-        return state.vm.datumSnapshots[datumRef.datumRef];
+        if (datumRef.datumRef === 0) {
+          return {type: 'void' as const, debugDescription: '<Void>'};
+        } else {          
+          return state.vm.datumSnapshots[datumRef.datumRef];
+        }
     }
   });
   const datumLoaded = !!datum;
