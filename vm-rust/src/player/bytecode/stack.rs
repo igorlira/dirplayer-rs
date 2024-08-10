@@ -192,4 +192,15 @@ impl StackBytecodeHandler {
       Ok(HandlerExecutionResult::Advance)
     })
   }
+
+  pub fn swap(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    reserve_player_mut(|player| {
+      let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+      let a = scope.stack.pop().unwrap();
+      let b = scope.stack.pop().unwrap();
+      scope.stack.push(a);
+      scope.stack.push(b);
+      Ok(HandlerExecutionResult::Advance)
+    })
+  }
 }
