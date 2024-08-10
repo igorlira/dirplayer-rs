@@ -85,7 +85,7 @@ impl NetHandlers {
       let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
       let text = if is_ok {
         let text = task_state.result.as_ref().unwrap().as_ref().unwrap();
-        Datum::String(unsafe { String::from_utf8_unchecked(text.clone()) })
+        Datum::String(String::from_utf8_lossy(text).to_string())
       } else {
         Datum::String("".to_owned())
       };
