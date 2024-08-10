@@ -6,6 +6,7 @@ use super::Chunk;
 
 pub struct CastMemberChunk {
   pub member_type: MemberType,
+  pub member_type_id: u32,
   pub specific_data: CastMemberSpecificData,
   pub member_info: Option<CastMemberInfoChunk>,
 }
@@ -25,12 +26,14 @@ impl CastMemberChunk {
     let specific_data: Vec<u8>;
     let specific_data_len: usize;
     let member_type: MemberType;
+    let member_type_id: u32;
     let mut has_flags1 = false;
     let flags1: u8;
     let specific_data_parsed;
 
     if dir_version >= 500 {
-      member_type = MemberType::from(reader.read_u32().unwrap());
+      member_type_id = reader.read_u32().unwrap();
+      member_type = MemberType::from(member_type_id);
       info_len = reader.read_u32().unwrap() as usize;
       specific_data_len = reader.read_u32().unwrap() as usize;
 
@@ -51,7 +54,8 @@ impl CastMemberChunk {
 
       // these bytes are common but stored in the specific data
       let mut specific_data_left = specific_data_len;
-      member_type = MemberType::from(reader.read_u8().unwrap() as u32);
+      member_type_id = reader.read_u8().unwrap() as u32;
+      member_type = MemberType::from(member_type_id);
       specific_data_left -= 1;
       if specific_data_left != 0 {
         has_flags1 = true;
@@ -98,6 +102,7 @@ impl CastMemberChunk {
     
     return Ok(CastMemberChunk {
       member_type,
+      member_type_id,
       specific_data: specific_data_parsed,
       member_info: info,
     })

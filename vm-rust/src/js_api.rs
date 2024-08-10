@@ -344,6 +344,10 @@ impl JsApi {
       "type",
       &JsValue::from_str(&member.member_type.type_string()),
     );
+    member_map.str_set(
+      "formattedType", 
+      &JsValue::from_str(format!("{:?}", member.member_type).as_str()),
+    );
 
     match &member.member_type {
       CastMemberType::Field(text_data) => {

@@ -138,7 +138,7 @@ pub enum CastMemberType {
   Bitmap(BitmapMember),
   Palette(PaletteMember),
   Shape(ShapeMember),
-  Unknown
+  Unknown(u32)
 }
 
 #[derive(Debug)]
@@ -161,7 +161,7 @@ impl fmt::Debug for CastMemberType {
       Self::Bitmap(_) => { write!(f, "Bitmap") }
       Self::Palette(_) => { write!(f, "Palette") }
       Self::Shape(_) => { write!(f, "Shape") }
-      Self::Unknown => { write!(f, "Unknown") }
+      Self::Unknown(id) => { write!(f, "Unknown({})", id) }
     }
   }
 }
@@ -189,7 +189,7 @@ impl CastMemberType {
       Self::Bitmap(_) => { CastMemberTypeId::Bitmap }
       Self::Palette(_) => { CastMemberTypeId::Palette }
       Self::Shape(_) => { CastMemberTypeId::Shape }
-      Self::Unknown => { CastMemberTypeId::Unknown }
+      Self::Unknown(_) => { CastMemberTypeId::Unknown }
     }
   }
 
@@ -336,7 +336,7 @@ impl CastMember {
         })
       }
       _ => { 
-        CastMemberType::Unknown
+        CastMemberType::Unknown(chunk.member_type_id)
       }
     };
     CastMember {
