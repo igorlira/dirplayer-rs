@@ -87,7 +87,11 @@ pub fn string_get_count(value: &String, operand: &String, delimiter: &String) ->
 }
 
 pub fn string_get_items(value: &String, delimiter: &String) -> Vec<String> {
-  value.split(delimiter).map(|s| s.to_string()).collect()
+  if delimiter == "\r" || delimiter == "\n" {
+    string_get_lines(value)
+  } else {
+    value.split(delimiter).map(|s| s.to_string()).collect()
+  }
 }
 
 #[allow(dead_code)]
