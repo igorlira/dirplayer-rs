@@ -1,4 +1,4 @@
-use std::{sync::Arc, vec};
+use std::{cell::RefCell, rc::Rc, vec};
 
 use binary_reader::BinaryReader;
 use log::warn;
@@ -94,15 +94,22 @@ pub fn get_system_default_palette() -> BuiltInPalette {
 
 #[derive(Clone)]
 pub struct Bitmap {
-    pub width: u16,
-    pub height: u16,
+    pub size: RefCell<(u16, u16)>,
     pub bit_depth: u8,
-    pub data: Vec<u8>, // RGBA
+    pub data: RefCell<Vec<u8>>, // RGBA
     pub palette_ref: PaletteRef,
-    pub matte: Option<Arc<BitmapMask>>,
+    pub matte: RefCell<Option<Rc<BitmapMask>>>,
 }
 
 impl Bitmap {
+    pub fn width(&self) -> u16 {
+        self.size.borrow().0
+    }
+
+    pub fn height(&self) -> u16 {
+        self.size.borrow().1
+    }
+
     pub fn new(width: u16, height: u16, bit_depth: u8, palette_ref: PaletteRef) -> Self {
         let bytes_per_pixel = bit_depth as usize / 8;
         let initial_color = match bit_depth {
@@ -112,13 +119,18 @@ impl Bitmap {
         };
         let data = vec![initial_color; width as usize * height as usize * bytes_per_pixel as usize];
         Self {
-            width,
-            height,
+            size: RefCell::new((width, height)),
             bit_depth,
-            data,
+            data: RefCell::new(data),
             palette_ref,
-            matte: None,
+            matte: RefCell::new(None),
         }
+    }
+
+    pub fn set_size(&self, width: u16, height: u16) {
+        let bytes_per_pixel = self.bit_depth as usize / 8;
+        self.size.replace((width, height));
+        self.data.replace(vec![0; width as usize * height as usize * bytes_per_pixel]);
     }
 }
 
@@ -173,11 +185,10 @@ fn decode_bitmap_1bit(
 
     Ok(Bitmap {
         bit_depth: 8,
-        width,
-        height,
-        data: result,
+        size: RefCell::new((width, height)),
+        data: RefCell::new(result),
         palette_ref,
-        matte: None,
+        matte: RefCell::new(None),
     })
 }
 
@@ -230,11 +241,10 @@ fn decode_bitmap_2bit(
 
     Ok(Bitmap {
         bit_depth: 8,
-        width,
-        height,
-        data: result_bmp,
+        size: RefCell::new((width, height)),
+        data: RefCell::new(result_bmp),
         palette_ref,
-        matte: None,
+        matte: RefCell::new(None),
     })
 }
 
@@ -279,11 +289,10 @@ fn decode_bitmap_4bit(
 
     Ok(Bitmap {
         bit_depth: 4,
-        width,
-        height,
-        data: result_bmp,
+        size: RefCell::new((width, height)),
+        data: RefCell::new(result_bmp),
         palette_ref,
-        matte: None,
+        matte: RefCell::new(None),
     })
 }
 
@@ -339,12 +348,11 @@ fn decode_generic_bitmap(
             }
         }
         return Ok(Bitmap {
-            width,
-            height,
+            size: RefCell::new((width, height)),
             bit_depth,
-            data: result,
+            data: RefCell::new(result),
             palette_ref,
-            matte: None,
+            matte: RefCell::new(None),
         });
     }
 }

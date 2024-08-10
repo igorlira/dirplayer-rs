@@ -48,10 +48,13 @@ impl BitmapDatumHandlers {
       if args.len() != 0 {
         return Err(ScriptError::new("Invalid number of arguments for createMatte".to_string()));
       }
-      let bitmap = player.get_datum(datum).to_bitmap_ref()?;
-      let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap).unwrap();
-      bitmap.create_matte(&player.movie.cast_manager.palettes());
-      let matte_arc = bitmap.matte.as_ref().unwrap().clone();
+      let matte_arc = {
+        let bitmap = player.get_datum(datum).to_bitmap_ref()?;
+        let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
+        bitmap.create_matte(&player.movie.cast_manager.palettes());
+        let matte = bitmap.matte.borrow();
+        matte.as_ref().unwrap().clone()
+      };
       Ok(player.alloc_datum(Datum::Matte(matte_arc)))
     })
   }
@@ -114,7 +117,7 @@ impl BitmapDatumHandlers {
         let y = player.get_datum(&args[1]).int_value()?;
         let color_obj_or_int = player.get_datum(&args[2]);
 
-        if x < 0 || y < 0 || x >= bitmap.width as i32 || y >= bitmap.height as i32 {
+        if x < 0 || y < 0 || x >= bitmap.width() as i32 || y >= bitmap.height() as i32 {
           return Ok(player.alloc_datum(datum_bool(false)));
         }
         (x, y, color_obj_or_int.to_owned(), bitmap.bit_depth, &bitmap.palette_ref)
@@ -221,13 +224,13 @@ impl BitmapDatumHandlers {
     let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
     let result = match prop.as_str() {
       "width" => {
-        Ok(Datum::Int(bitmap.width as i32))
+        Ok(Datum::Int(bitmap.width() as i32))
       },
       "height" => {
-        Ok(Datum::Int(bitmap.height as i32))
+        Ok(Datum::Int(bitmap.height() as i32))
       },
       "rect" => {
-        Ok(Datum::IntRect((0, 0, bitmap.width as i32, bitmap.height as i32)))
+        Ok(Datum::IntRect((0, 0, bitmap.width() as i32, bitmap.height() as i32)))
       },
       "depth" => {
         Ok(Datum::Int(bitmap.bit_depth as i32))

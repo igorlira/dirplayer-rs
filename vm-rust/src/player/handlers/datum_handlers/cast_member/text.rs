@@ -1,8 +1,7 @@
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType},
-    player::{
-        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, font::{get_text_index_at_pos, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, DatumRef, DirPlayer, ScriptError
-    },
+    director::lingo::datum::{datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType}, player::{
+        bitmap::{bitmap::resolve_color_ref, manager::BitmapRef}, cast_lib::CastMemberRef, font::{get_text_index_at_pos, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, reserve_player_mut, DatumRef, DirPlayer, ScriptError
+    }
 };
 
 pub struct TextMemberHandlers {}
@@ -103,41 +102,13 @@ impl TextMemberHandlers {
                 Ok(Datum::Int(height as i32))
             }
             "image" => {
-                // TODO: alignment
-                let font = player.font_manager.get_system_font().unwrap();
-                let (width, height) = measure_text(
-                    &text_data.text,
-                    &font,
-                    None,
-                    text_data.fixed_line_space,
-                    text_data.top_spacing,
-                );
-                // TODO use 32 bits
-                let mut bitmap = Bitmap::new(
-                    width,
-                    height,
-                    8,
-                    PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
-                );
-                let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
-                let palettes = player.movie.cast_manager.palettes();
-
-                let ink = 36;
-                bitmap.draw_text(
-                    &text_data.text,
-                    font,
-                    font_bitmap,
-                    0,
-                    text_data.top_spacing as i32,
-                    ink,
-                    bitmap.get_bg_color_ref(),
-                    &palettes,
-                    text_data.fixed_line_space,
-                    text_data.top_spacing,
-                );
-
-                let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
-                Ok(Datum::BitmapRef(bitmap_ref))
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(cast_member_ref)
+                    .unwrap();
+                let text_data = member.member_type.as_text().unwrap();
+                Ok(Datum::BitmapRef(text_data.image_ref))
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for text",
@@ -255,7 +226,7 @@ impl TextMemberHandlers {
                 |player| {
                     let rect = value.to_int_rect()?;
                     let rect: (i16, i16, i16, i16) =
-                        (rect.1 as i16, rect.0 as i16, rect.3 as i16, rect.2 as i16);
+                        (rect.0 as i16, rect.1 as i16, rect.2 as i16, rect.3 as i16);
                     Ok(rect)
                 },
                 |cast_member, value| {
@@ -269,6 +240,68 @@ impl TextMemberHandlers {
                 "Cannot set castMember prop {} for text",
                 prop
             ))),
+        }?;
+        reserve_player_mut(|player| {
+            let cast_member_ref = member_ref;
+            TextMemberHandlers::render_to_bitmap(player, cast_member_ref)?;
+            Ok(())
+        })
+    }
+
+    pub fn render_to_bitmap(
+        player: &mut DirPlayer,
+        cast_member_ref: &CastMemberRef,
+    ) -> Result<BitmapRef, ScriptError> {
+        let member = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(cast_member_ref)
+            .unwrap();
+        let text_data = member.member_type.as_text().unwrap().clone();
+
+        let font = player.font_manager.get_system_font().unwrap();
+        let (width, height) = measure_text(
+            &text_data.text,
+            &font,
+            None,
+            text_data.fixed_line_space,
+            text_data.top_spacing,
+        );
+        let draw_x = match text_data.alignment.as_str() {
+            "left" => 0,
+            "center" => (text_data.width as i32 - width as i32) / 2,
+            "right" => text_data.width as i32 - width as i32,
+            _ => 0,
+        };
+        // TODO use 32 bits
+        let bitmap = player.bitmap_manager.get_bitmap(text_data.image_ref).unwrap();
+        let bitmap_width = bitmap.width();
+        let bitmap_height = bitmap.height();
+        if bitmap_width != text_data.width || bitmap_height != height {
+            bitmap.set_size(text_data.width, height);
+        } else {
+            let bg_color = bitmap.get_bg_color_ref();
+            let palettes = player.movie.cast_manager.palettes();
+            let bg_color = resolve_color_ref(&palettes, &bg_color, &bitmap.palette_ref);
+            bitmap.clear_rect(0, 0, text_data.width as i32, height as i32, bg_color, &palettes);
         }
+
+        let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+        let palettes = player.movie.cast_manager.palettes();
+
+        let ink = 36;
+        bitmap.draw_text(
+            &text_data.text,
+            font,
+            font_bitmap,
+            draw_x,
+            text_data.top_spacing as i32,
+            ink,
+            bitmap.get_bg_color_ref(),
+            &palettes,
+            text_data.fixed_line_space,
+            text_data.top_spacing,
+        );
+        Ok(text_data.image_ref)
     }
 }

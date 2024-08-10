@@ -239,7 +239,7 @@ impl CastLib {
   pub fn create_member_at(&mut self, number: u32, member_type: &str, bitmap_manager: &mut BitmapManager) -> Result<CastMemberRef, ScriptError> {
     let member = match member_type {
       "field" => Ok(CastMember::new(number, CastMemberType::Field(FieldMember::new()))),
-      "text" => Ok(CastMember::new(number, CastMemberType::Text(TextMember::new()))),
+      "text" => Ok(CastMember::new(number, CastMemberType::Text(TextMember::new(bitmap_manager)))),
       "bitmap" => {
         let bitmap = Bitmap::new(0, 0, 32, PaletteRef::BuiltIn(BuiltInPalette::GrayScale));
         let bitmap_ref = bitmap_manager.add_bitmap(bitmap);

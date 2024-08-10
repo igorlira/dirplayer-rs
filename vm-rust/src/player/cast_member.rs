@@ -45,6 +45,7 @@ pub struct TextMember {
   pub fixed_line_space: u16,
   pub top_spacing: i16,
   pub width: u16,
+  pub image_ref: BitmapRef,
 }
 
 impl CastMember {
@@ -81,19 +82,22 @@ impl FieldMember {
 }
 
 impl TextMember {
-  pub fn new() -> TextMember {
+  pub fn new(bitmap_manager: &mut BitmapManager) -> TextMember {
+    let width = 500;
+    let font_size = 12;
     TextMember {
       text: "".to_string(),
       alignment: "left".to_string(),
       word_wrap: true,
       font: "Arial".to_string(),
       font_style: vec!["plain".to_string()],
-      font_size: 12,
+      font_size,
       fixed_line_space: 0,
       top_spacing: 0,
       box_type: "adjust".to_string(),
       anti_alias: false,
-      width: 100,
+      width,
+      image_ref: bitmap_manager.add_bitmap(Bitmap::new(width, font_size, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))),
     }
   }
 }

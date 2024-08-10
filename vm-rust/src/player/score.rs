@@ -425,7 +425,7 @@ pub fn sprite_set_prop(
             match &x.member_type {
               CastMemberType::Bitmap(bitmap) => {
                 let bitmap = player.bitmap_manager.get_bitmap(bitmap.image_ref).unwrap();
-                (bitmap.width, bitmap.height)
+                bitmap.size.borrow().clone()
               }
               CastMemberType::Shape(shape) => (shape.shape_info.width, shape.shape_info.height),
               _ => (0, 0),
@@ -633,8 +633,8 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
           return IntRect::from(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height);
         }
         let src_bitmap = sprite_bitmap.unwrap();
-        let reg_x = if sprite.flip_h { src_bitmap.width as i16 - bitmap_member.reg_point.0 } else { bitmap_member.reg_point.0 };
-        let reg_y = if sprite.flip_v { src_bitmap.height as i16 - bitmap_member.reg_point.1 } else { bitmap_member.reg_point.1 };
+        let reg_x = if sprite.flip_h { src_bitmap.width() as i16 - bitmap_member.reg_point.0 } else { bitmap_member.reg_point.0 };
+        let reg_y = if sprite.flip_v { src_bitmap.height() as i16 - bitmap_member.reg_point.1 } else { bitmap_member.reg_point.1 };
 
         let dst_rect = IntRect::from(
             sprite.loc_h - reg_x as i32,

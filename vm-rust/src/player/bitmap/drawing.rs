@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use nohash_hasher::IntMap;
 use rgb565::Rgb565;
@@ -7,16 +7,16 @@ use crate::{director::lingo::datum::Datum, player::{font::{bitmap_font_copy_char
 
 use super::{bitmap::{resolve_color_ref, Bitmap}, mask::BitmapMask, palette_map::PaletteMap};
 
-pub struct CopyPixelsParams<'a> {
+pub struct CopyPixelsParams {
     pub blend: i32,
     pub ink: u32,
     pub color: ColorRef,
     pub bg_color: ColorRef,
-    pub mask_image: Option<&'a BitmapMask>,
+    pub mask_image: Option<Rc<BitmapMask>>,
 }
 
-impl CopyPixelsParams<'_> {
-    pub const fn default(bitmap: &Bitmap) -> CopyPixelsParams<'static> {
+impl CopyPixelsParams {
+    pub const fn default(bitmap: &Bitmap) -> CopyPixelsParams {
         CopyPixelsParams {
             blend: 100,
             ink: 0,
@@ -111,35 +111,36 @@ fn blend_pixel(
 }
 
 impl Bitmap {
-    pub fn set_pixel(&mut self, x: i32, y: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+    pub fn set_pixel(&self, x: i32, y: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
+        if x < 0 || y < 0 || x >= self.width() as i32 || y >= self.height() as i32 {
             return;
         }
-        self.matte = None; // TODO draw on matte instead
+        let mut data = self.data.borrow_mut();
+        self.matte.replace(None); // TODO draw on matte instead
         let (r, g, b) = color;
         let x = x as usize;
         let y = y as usize;
-        if x < self.width as usize && y < self.height as usize {
+        if x < self.width() as usize && y < self.height() as usize {
             let bytes_per_pixel = self.bit_depth as usize / 8;
-            let index = (y * self.width as usize + x) * bytes_per_pixel;
+            let index = (y * self.width() as usize + x) * bytes_per_pixel;
             match self.bit_depth {
                 1 => {
-                    let bit_index = y * self.width as usize + x;
+                    let bit_index = y * self.width() as usize + x;
                     let byte_index = bit_index / 8;
                     let bit_offset = bit_index % 8;
-                    let value = self.data[byte_index];
+                    let value = data[byte_index];
                     let mask = 1 << (7 - bit_offset);
                     let value = if r > 127 || g > 127 || b > 127 {
                         value | mask
                     } else {
                         value & !mask
                     };
-                    self.data[byte_index] = value;
+                    data[byte_index] = value;
                 }
                 4 => {
-                    let bit_index = (y * self.width as usize + x) * 4;
+                    let bit_index = (y * self.width() as usize + x) * 4;
                     let index = bit_index / 8;
-                    let value = self.data[index];
+                    let value = data[index];
                     
                     let own_palette = &self.palette_ref;
                     let mut result_index = 0;
@@ -168,7 +169,7 @@ impl Bitmap {
                     };
 
                     let value = (left << 4) | right;
-                    self.data[index] = value;
+                    data[index] = value;
                 }
                 8 => {
                     let own_palette = &self.palette_ref;
@@ -182,7 +183,7 @@ impl Bitmap {
                             result_distance = distance;
                         }
                     }
-                    self.data[index] = result_index;
+                    data[index] = result_index;
                 }
                 16 => {
                     let r = r as f32 * 31.0 / 255.0;
@@ -190,14 +191,14 @@ impl Bitmap {
                     let b = b as f32 * 31.0 / 255.0;
                     let value = Rgb565::pack_565((r as u8, g as u8, b as u8));
                     let bytes = value.to_le_bytes();
-                    self.data[index] = bytes[0];
-                    self.data[index + 1] = bytes[1];
+                    data[index] = bytes[0];
+                    data[index + 1] = bytes[1];
                 }
                 32 => {
-                    self.data[index] = r;
-                    self.data[index + 1] = g;
-                    self.data[index + 2] = b;
-                    self.data[index + 3] = 0xFF;
+                    data[index] = r;
+                    data[index + 1] = g;
+                    data[index + 2] = b;
+                    data[index + 3] = 0xFF;
                 }
                 _ => {
                     // TODO: Should this be logged?
@@ -210,15 +211,16 @@ impl Bitmap {
     pub fn get_pixel_color_ref(&self, x: u16, y: u16) -> ColorRef {
         let x = x as usize;
         let y = y as usize;
-        if x >= self.width as usize || y >= self.height as usize {
+        if x >= self.width() as usize || y >= self.height() as usize {
             return self.get_bg_color_ref();
         }
+        let data = self.data.borrow();
         
         match self.bit_depth {
             4 => {
-                let bit_index = (y * self.width as usize + x) * 4;
+                let bit_index = (y * self.width() as usize + x) * 4;
                 let index = bit_index / 8;
-                let value = self.data[index];
+                let value = data[index];
                 if x % 2 == 0 {
                     let left = value >> 4;
                     let left = (left as f32 / 15.0 * 255.0) as u8;
@@ -232,12 +234,12 @@ impl Bitmap {
                 }
             }
             8 => {
-                let index = y * self.width as usize + x;
-                ColorRef::PaletteIndex(self.data[index])
+                let index = y * self.width() as usize + x;
+                ColorRef::PaletteIndex(data[index])
             }
             16 => {
-                let index = (y * self.width as usize + x) * 2;
-                let value = u16::from_le_bytes([self.data[index], self.data[index + 1]]);
+                let index = (y * self.width() as usize + x) * 2;
+                let value = u16::from_le_bytes([data[index], data[index + 1]]);
                 let (red, green, blue) = Rgb565::unpack_565(value);
                 let red = (red as f32 / 31.0 * 255.0) as u8;
                 let green = (green as f32 / 63.0 * 255.0) as u8;
@@ -246,8 +248,8 @@ impl Bitmap {
             }
             32 => {
                 let bytes_per_pixel = 4;
-                let index = (y * self.width as usize + x) * bytes_per_pixel as usize;
-                ColorRef::Rgb(self.data[index], self.data[index + 1], self.data[index + 2])
+                let index = (y * self.width() as usize + x) * bytes_per_pixel as usize;
+                ColorRef::Rgb(data[index], data[index + 1], data[index + 2])
             }
             _ => {
                 self.get_bg_color_ref()
@@ -283,12 +285,12 @@ impl Bitmap {
 
     pub fn _flipped_hv(&self, palettes: &PaletteMap) -> Bitmap {
         let mut flipped = self.clone();
-        for y in 0..self.height as usize {
-            for x in 0..self.width as usize {
+        for y in 0..self.height() as usize {
+            for x in 0..self.width() as usize {
                 let src_x = x;
                 let src_y = y;
-                let dst_x = self.width as usize - x - 1;
-                let dst_y = self.height as usize - y - 1;
+                let dst_x = self.width() as usize - x - 1;
+                let dst_y = self.height() as usize - y - 1;
                 let src_color = self.get_pixel_color(palettes, src_x as u16, src_y as u16);
                 flipped.set_pixel(dst_x as i32, dst_y as i32, src_color, palettes);
             }
@@ -298,11 +300,11 @@ impl Bitmap {
 
     pub fn _flipped_h(&self, palettes: &PaletteMap) -> Bitmap {
         let mut flipped = self.clone();
-        for y in 0..self.height as usize {
-            for x in 0..self.width as usize {
+        for y in 0..self.height() as usize {
+            for x in 0..self.width() as usize {
                 let src_x = x;
                 let src_y = y;
-                let dst_x = self.width as usize - x - 1;
+                let dst_x = self.width() as usize - x - 1;
                 let dst_y = y;
                 let src_color = self.get_pixel_color(palettes, src_x as u16, src_y as u16);
                 flipped.set_pixel(dst_x as i32, dst_y as i32, src_color, palettes);
@@ -313,12 +315,12 @@ impl Bitmap {
 
     pub fn _flipped_v(&self, palettes: &PaletteMap) -> Bitmap {
         let mut flipped = self.clone();
-        for y in 0..self.height as usize {
-            for x in 0..self.width as usize {
+        for y in 0..self.height() as usize {
+            for x in 0..self.width() as usize {
                 let src_x = x;
                 let src_y = y;
                 let dst_x = x;
-                let dst_y = self.height as usize - y - 1;
+                let dst_y = self.height() as usize - y - 1;
                 let src_color = self.get_pixel_color(palettes, src_x as u16, src_y as u16);
                 flipped.set_pixel(dst_x as i32, dst_y as i32, src_color, palettes);
             }
@@ -326,7 +328,7 @@ impl Bitmap {
         flipped
     }
 
-    pub fn stroke_sized_rect(&mut self, left: i32, top: i32, width: i32, height: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn stroke_sized_rect(&self, left: i32, top: i32, width: i32, height: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
         let left = left.max(0) as i32;
         let top = top.max(0) as i32;
         let right = (left + width) as i32;
@@ -334,7 +336,7 @@ impl Bitmap {
         self.stroke_rect(left, top, right, bottom, color, palettes, alpha);
     }
 
-    pub fn stroke_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn stroke_rect(&self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
         let left = x1;
         let top = y1;
         let right = x2 - 1;
@@ -358,7 +360,7 @@ impl Bitmap {
         }
     }
 
-    pub fn clear_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
+    pub fn clear_rect(&self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
         for y in y1..y2 {
             for x in x1..x2 {
                 self.set_pixel(x, y, color, palettes);
@@ -366,21 +368,21 @@ impl Bitmap {
         }
     }
 
-    pub fn fill_relative_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn fill_relative_rect(&self, left: i32, top: i32, right: i32, bottom: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
         let left = left.max(0);
         let top = top.max(0);
-        let right = right.min(self.width as i32 - 1);
-        let bottom = bottom.min(self.height as i32 - 1);
+        let right = right.min(self.width() as i32 - 1);
+        let bottom = bottom.min(self.height() as i32 - 1);
         
         let x1 = left;
         let y1 = top;
-        let x2 = self.width as i32 - right;
-        let y2 = self.height as i32 - bottom;
+        let x2 = self.width() as i32 - right;
+        let y2 = self.height() as i32 - bottom;
 
         self.fill_rect(x1, y1, x2, y2, color, palettes, alpha);
     }
 
-    pub fn fill_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn fill_rect(&self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
         if alpha == 0.0 {
             return;
         }
@@ -398,7 +400,7 @@ impl Bitmap {
     }
 
     pub fn copy_pixels(
-        &mut self, 
+        &self, 
         palettes: &PaletteMap,
         src: &Bitmap, 
         dst_rect: IntRect,
@@ -428,7 +430,7 @@ impl Bitmap {
         };
 
         let mask_image = param_list.get("maskImage");
-        let mask_image = mask_image.map(|x| x.to_mask().unwrap());
+        let mask_image = mask_image.map(|x| x.to_mask().unwrap().clone());
         
         let params = CopyPixelsParams {
             blend,
@@ -441,7 +443,7 @@ impl Bitmap {
     }
 
     pub fn copy_pixels_with_params(
-        &mut self, 
+        &self, 
         palettes: &PaletteMap,
         src: &Bitmap, 
         dst_rect: IntRect,
@@ -450,7 +452,7 @@ impl Bitmap {
     ) {
         let ink = params.ink;
         let alpha = params.blend as f32 / 100.0;
-        let mask_image = params.mask_image;
+        let mask_image = params.mask_image.as_ref();
         let bg_color = &params.bg_color;
         let bg_color = resolve_color_ref(palettes, &bg_color, &self.palette_ref);
 
@@ -512,13 +514,13 @@ impl Bitmap {
         params.insert("ink".to_owned(), Datum::Int(ink as i32));
         params.insert("bgColor".to_owned(), Datum::ColorRef(ColorRef::Rgb(bg_color.0, bg_color.1, bg_color.2)));
 
-        let src_rect = IntRect::from_tuple((0, 0, bitmap.width as i32, bitmap.height as i32));
+        let src_rect = IntRect::from_tuple((0, 0, bitmap.width() as i32, bitmap.height() as i32));
         let dst_rect = IntRect::from_tuple((loc_h, loc_v, loc_h + width as i32, loc_v + height as i32));
         self.copy_pixels(palettes, bitmap, dst_rect, src_rect, &params);
     }
 
     pub fn draw_text(
-        &mut self,
+        &self,
         text: &str,
         font: &BitmapFont,
         font_bitmap: &Bitmap,
@@ -552,13 +554,13 @@ impl Bitmap {
     pub fn trim_whitespace(&mut self, palettes: &PaletteMap) {
         let mut left = 0 as i32;
         let mut top = 0 as i32;
-        let mut right = self.width as i32;
-        let mut bottom = self.height as i32;
+        let mut right = self.width() as i32;
+        let mut bottom = self.height() as i32;
         let bg_color = self.get_bg_color_ref();
 
-        for x in 0..self.width as i32 {
+        for x in 0..self.width() as i32 {
             let mut is_empty = true;
-            for y in 0..self.height as i32 {
+            for y in 0..self.height() as i32 {
                 let color = self.get_pixel_color_ref(x as u16, y as u16);
                 if color != bg_color {
                     is_empty = false;
@@ -571,9 +573,9 @@ impl Bitmap {
             }
         }
 
-        for x in (0..self.width as i32).rev() {
+        for x in (0..self.width() as i32).rev() {
             let mut is_empty = true;
-            for y in 0..self.height as i32 {
+            for y in 0..self.height() as i32 {
                 let color = self.get_pixel_color_ref(x as u16, y as u16);
                 if color != bg_color {
                     is_empty = false;
@@ -586,9 +588,9 @@ impl Bitmap {
             }
         }
 
-        for y in 0..self.height as i32 {
+        for y in 0..self.height() as i32 {
             let mut is_empty = true;
-            for x in 0..self.width as i32 {
+            for x in 0..self.width() as i32 {
                 let color = self.get_pixel_color_ref(x as u16, y as u16);
                 if color != bg_color {
                     is_empty = false;
@@ -601,9 +603,9 @@ impl Bitmap {
             }
         }
 
-        for y in (0..self.height as i32).rev() {
+        for y in (0..self.height() as i32).rev() {
             let mut is_empty = true;
-            for x in 0..self.width as i32 {
+            for x in 0..self.width() as i32 {
                 let color = self.get_pixel_color_ref(x as u16, y as u16);
                 if color != bg_color {
                     is_empty = false;
@@ -619,20 +621,19 @@ impl Bitmap {
         let width = right - left;
         let height = bottom - top;
 
-        let mut trimmed = Bitmap::new(width as u16, height as u16, self.bit_depth, self.palette_ref.clone());
+        let trimmed = Bitmap::new(width as u16, height as u16, self.bit_depth, self.palette_ref.clone());
         let params = CopyPixelsParams::default(&self);
         trimmed.copy_pixels_with_params(palettes, &self, IntRect::from(0, 0, width, height), IntRect::from(left, top, right, bottom), &params);
         
-        self.width = width as u16;
-        self.height = height as u16;
+        self.set_size(width as u16, height as u16);
         self.data = trimmed.data;
     }
 
     pub fn to_mask(&self) -> BitmapMask {
-        let mut mask = BitmapMask::new(self.width, self.height, false);
+        let mut mask = BitmapMask::new(self.width(), self.height(), false);
         let bg_color = self.get_bg_color_ref();
-        for y in 0..self.height {
-            for x in 0..self.width {
+        for y in 0..self.height() {
+            for x in 0..self.width() {
                 let pixel = self.get_pixel_color_ref(x, y);
                 if pixel != bg_color {
                     mask.set_bit(x, y, true);

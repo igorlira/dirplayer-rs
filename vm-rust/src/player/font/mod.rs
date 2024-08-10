@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use fxhash::FxHashMap;
 use log::warn;
 use wasm_bindgen::JsCast;
@@ -100,18 +102,17 @@ pub async fn player_load_system_font(path: &str) {
                 .unwrap();
 
             let bitmap = Bitmap {
-                width: image_data.width() as u16,
-                height: image_data.height() as u16,
-                data: image_data.data().0,
+                size: RefCell::new((image_data.width() as u16, image_data.height() as u16)),
+                data: RefCell::new(image_data.data().0),
                 bit_depth: 32, // TODO use a smaller bit depth
                 palette_ref: PaletteRef::BuiltIn(get_system_default_palette()),
-                matte: None,
+                matte: RefCell::new(None),
             };
             reserve_player_mut(|player| {
                 let grid_columns = 18;
                 let grid_rows = 7;
-                let grid_cell_width = bitmap.width / grid_columns;
-                let grid_cell_height = bitmap.height / grid_rows;
+                let grid_cell_width = bitmap.width() / grid_columns;
+                let grid_cell_height = bitmap.height() / grid_rows;
 
                 let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
                 let font = BitmapFont {
@@ -145,7 +146,7 @@ pub fn bitmap_font_copy_char(
     font: &BitmapFont,
     font_bitmap: &Bitmap,
     char_num: u8,
-    dest: &mut Bitmap,
+    dest: &Bitmap,
     dest_x: i32,
     dest_y: i32,
     palettes: &PaletteMap,

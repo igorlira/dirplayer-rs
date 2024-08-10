@@ -31,8 +31,8 @@ impl BitmapMemberHandlers {
             )));
         }
         match prop.as_str() {
-            "width" => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
-            "height" => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
+            "width" => Ok(Datum::Int(bitmap.map(|x| x.width() as i32).unwrap_or(0))),
+            "height" => Ok(Datum::Int(bitmap.map(|x| x.height() as i32).unwrap_or(0))),
             "image" => Ok(Datum::BitmapRef(bitmap_ref)),
             "paletteRef" => Ok(Datum::PaletteRef(
                 bitmap
@@ -41,8 +41,8 @@ impl BitmapMemberHandlers {
             )),
             "regPoint" => Ok(Datum::IntPoint((bitmap_member.reg_point.0 as i32, bitmap_member.reg_point.1 as i32))),
             "rect" => {
-                let width = bitmap.map(|x| x.width as i32).unwrap_or(0);
-                let height = bitmap.map(|x| x.height as i32).unwrap_or(0);
+                let width = bitmap.map(|x| x.width() as i32).unwrap_or(0);
+                let height = bitmap.map(|x| x.height() as i32).unwrap_or(0);
                 Ok(Datum::IntRect((0, 0, width, height)))
             }
             _ => Err(ScriptError::new(format!(
