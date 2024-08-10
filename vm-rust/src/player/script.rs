@@ -53,7 +53,7 @@ impl Script {
     }
 
     pub fn get_own_handler(&self, name: &String) -> Option<&Rc<HandlerDef>> {
-        self.handlers.get(name) // TODO make case insenitive
+        self.handlers.get(&name.to_lowercase())
     }
 
     pub fn get_own_handler_by_name_id(&self, name_id: u16) -> Option<&Rc<HandlerDef>> {

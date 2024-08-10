@@ -214,7 +214,7 @@ impl CastLib {
       let mut handler_name_map = FxHashMap::default();
       for handler in &script_def.handlers {
         let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
-        handler_name_map.insert(handler_name.to_owned(), Rc::new(handler.clone()));
+        handler_name_map.insert(handler_name.to_lowercase(), Rc::new(handler.clone()));
         handler_names.push(handler_name.to_owned());
       }
 
