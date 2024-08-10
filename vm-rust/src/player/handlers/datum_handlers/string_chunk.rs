@@ -2,7 +2,7 @@ use itertools::Itertools;
 
 use crate::{director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType}, player::{cast_member::CastMemberType, reserve_player_mut, DatumRef, DirPlayer, ScriptError}};
 
-use super::string::string_get_lines;
+use super::string::{string_get_items, string_get_lines};
 
 pub struct StringChunkHandlers { }
 pub struct StringChunkUtils { }
@@ -16,6 +16,23 @@ impl StringChunkUtils {
       };
       Self::string_by_deleting_chunk(&original_str, &chunk_expr)
     }?;
+    Self::set_value(player, original_str_src, chunk_expr, new_string)?;
+    Ok(())
+  }
+
+  pub fn set_contents(player: &mut DirPlayer, original_str_src: &StringChunkSource, chunk_expr: &StringChunkExpr, new_string: String) -> Result<(), ScriptError> {
+    let new_string = {
+      let original_str = match original_str_src {
+        StringChunkSource::Datum(original_str_ref) => player.get_datum(original_str_ref).string_value()?,
+        StringChunkSource::Member(member_ref) => player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap().member_type.as_field().unwrap().text.clone()
+      };
+      Self::string_by_setting_chunk(&original_str, &chunk_expr, &new_string)
+    }?;
+    Self::set_value(player, original_str_src, chunk_expr, new_string)?;
+    Ok(())
+  }
+
+  pub fn set_value(player: &mut DirPlayer, original_str_src: &StringChunkSource, chunk_expr: &StringChunkExpr, new_string: String) -> Result<(), ScriptError> {
     match original_str_src {
       StringChunkSource::Datum(original_str_ref) => {
         let original_str_value = player.get_datum_mut(original_str_ref).to_string_mut()?;
@@ -26,7 +43,7 @@ impl StringChunkUtils {
         match member {
           CastMemberType::Field(field) => field.text = new_string,
           CastMemberType::Text(member) => member.text = new_string,
-          _ => return Err(ScriptError::new("Cannot delete chunk from non-text member".to_string()))
+          _ => return Err(ScriptError::new("Cannot set contents for non-text member".to_string()))
         }
       }
     }
@@ -43,6 +60,20 @@ impl StringChunkUtils {
       },
       _ => {
         Err(ScriptError::new("Only char chunk type is supported for string by deleting chunk".to_string()))
+      }
+    }
+  }
+
+  pub fn string_by_setting_chunk(string: &String, chunk_expr: &StringChunkExpr, replace_with: &String) -> Result<String, ScriptError> {
+    match chunk_expr.chunk_type {
+      StringChunkType::Char => {
+        let mut new_string = string.clone();
+        let (start, end) = Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
+        new_string.replace_range(start..end, &replace_with);
+        Ok(new_string)
+      },
+      _ => {
+        Err(ScriptError::new("Only char chunk type is supported for string by setting chunk".to_string()))
       }
     }
   }
@@ -71,8 +102,7 @@ impl StringChunkUtils {
   pub fn resolve_chunk_list(string: &String, chunk_type: StringChunkType, item_delimiter: &String) -> Result<Vec<String>, ScriptError> {
     match chunk_type {
       StringChunkType::Item => {
-        let items = string.split(item_delimiter).map(|x| x.to_string());
-        Ok(items.collect_vec())
+        Ok(string_get_items(string, item_delimiter))
       },
       StringChunkType::Word => {
         let words = string.split_whitespace().map(|x| x.to_string());
@@ -232,11 +262,21 @@ impl StringChunkHandlers {
     })
   }
 
+  fn set_contents(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;
+      let new_str = player.get_datum(&args[0]).string_value()?;
+      StringChunkUtils::set_contents(player, &original_str_ref.clone(), &chunk_expr.clone(), new_str)?;
+      Ok(DatumRef::Void)
+    })
+  }
+
   pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "count" => Self::count(datum, args),
       "getProp" => Self::get_prop(datum, args),
       "delete" => Self::delete(datum, args),
+      "setContents" => Self::set_contents(datum, args),
       _ => Err(ScriptError::new(format!("No handler {handler_name} for string chunk datum")))
     }
   }
