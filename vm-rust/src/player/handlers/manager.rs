@@ -59,6 +59,13 @@ impl BuiltInHandlerManager {
     Ok(DatumRef::Void)
   }
 
+  fn clear_globals(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      player.globals.clear();
+      Ok(DatumRef::Void)
+    })
+  }
+
   fn random(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let min: i32 = 1;
@@ -205,6 +212,7 @@ impl BuiltInHandlerManager {
       "symbol" => TypeHandlers::symbol(args),
       "go" => MovieHandlers::go(args),
       "puppetSprite" => MovieHandlers::puppet_sprite(args),
+      "clearGlobals" => Self::clear_globals(args),
       "sprite" => MovieHandlers::sprite(args),
       "point" => TypeHandlers::point(args),
       "cursor" => TypeHandlers::cursor(args),
