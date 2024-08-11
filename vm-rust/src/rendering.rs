@@ -56,7 +56,7 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &Bitmap, debug_spr
         let member = member.unwrap();
         match &member.member_type {
             CastMemberType::Bitmap(bitmap_member) => {
-                let sprite_bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_member.image_ref);
+                let sprite_bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref);
                 if sprite_bitmap.is_none() {
                     continue;
                 }
@@ -112,7 +112,18 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &Bitmap, debug_spr
                 let font = player.font_manager.get_system_font().unwrap(); // TODO
                 let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
-                bitmap.draw_text(&field_member.text, font, font_bitmap, sprite.loc_h, sprite.loc_v, sprite.ink as u32, sprite.bg_color.clone(), &palettes, field_member.fixed_line_space, field_member.top_spacing);
+                bitmap.draw_text(
+                    &field_member.text, 
+                    font, 
+                    font_bitmap, 
+                    sprite.loc_h, 
+                    sprite.loc_v, 
+                    sprite.ink as u32, 
+                    sprite.bg_color.clone(), 
+                    &palettes, 
+                    field_member.fixed_line_space, 
+                    field_member.top_spacing
+                );
 
                 if player.keyboard_focus_sprite == sprite.number as i16 {
                     let cursor_x = sprite.loc_h + (sprite.width / 2);
@@ -280,11 +291,12 @@ impl PlayerCanvasRenderer {
                 let size = sprite_bitmap.size.borrow();
                 let width = size.0 as u32;
                 let height = size.1 as u32;
-                let mut bitmap = Bitmap::new(
+                let bitmap = Bitmap::new(
                     width as u16,
                     height as u16,
                     32,
                     PaletteRef::BuiltIn(get_system_default_palette()),
+                    None,
                 );
                 let palettes = &player.movie.cast_manager.palettes();
                 bitmap.fill_relative_rect(
@@ -297,7 +309,7 @@ impl PlayerCanvasRenderer {
                         &player.bg_color,
                         &PaletteRef::BuiltIn(get_system_default_palette()),
                     ),
-                    palettes,
+                    &palettes,
                     1.0
                 );
                 bitmap.copy_pixels(
@@ -307,7 +319,7 @@ impl PlayerCanvasRenderer {
                     IntRect::from(0, 0, width as i32, height as i32),
                     &HashMap::new(),
                 );
-                bitmap.set_pixel(sprite_member.reg_point.0 as i32, sprite_member.reg_point.1 as i32, (255, 0, 255), palettes);
+                bitmap.set_pixel(sprite_member.reg_point.0 as i32, sprite_member.reg_point.1 as i32, (255, 0, 255), &palettes);
 
                 if self.preview_size.0 != width as u32 || self.preview_size.1 != height as u32 {
                     self.set_preview_size(width as u32, height as u32);
@@ -361,7 +373,7 @@ impl PlayerCanvasRenderer {
         let mut bitmap_height = self.bitmap.height();
 
         if bitmap_width != movie_width as u16 || bitmap_height != movie_height as u16 {
-            self.bitmap.set_size(movie_width as u16, movie_height as u16);
+            self.bitmap.set_size(movie_width as u16, movie_height as u16, true);
             bitmap_width = movie_width as u16;
             bitmap_height = movie_height as u16;
         }
@@ -543,7 +555,7 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 preview_size: (1, 1),
                 preview_member_ref: None,
                 debug_selected_channel_num: None,
-                bitmap: Bitmap::new(1, 1, 32, PaletteRef::BuiltIn(get_system_default_palette())),
+                bitmap: Bitmap::new(1, 1, 32, PaletteRef::BuiltIn(get_system_default_palette()), None),
             };
 
             *renderer_lock = Some(renderer);

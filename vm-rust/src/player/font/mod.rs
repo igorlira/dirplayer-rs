@@ -101,13 +101,13 @@ pub async fn player_load_system_font(path: &str) {
                 )
                 .unwrap();
 
-            let bitmap = Bitmap {
-                size: RefCell::new((image_data.width() as u16, image_data.height() as u16)),
-                data: RefCell::new(image_data.data().0),
-                bit_depth: 32, // TODO use a smaller bit depth
-                palette_ref: PaletteRef::BuiltIn(get_system_default_palette()),
-                matte: RefCell::new(None),
-            };
+            let bitmap = Bitmap::from_data(
+                image_data.width() as u16, 
+                image_data.height() as u16, 
+                32, // TODO use a smaller bit depth
+                image_data.data().0,
+                PaletteRef::BuiltIn(get_system_default_palette()), 
+            );
             reserve_player_mut(|player| {
                 let grid_columns = 18;
                 let grid_rows = 7;

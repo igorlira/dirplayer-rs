@@ -1,11 +1,10 @@
 use std::{collections::HashMap, rc::Rc};
 
-use nohash_hasher::IntMap;
 use rgb565::Rgb565;
 
-use crate::{director::lingo::datum::Datum, player::{font::{bitmap_font_copy_char, BitmapFont}, geometry::IntRect, sprite::ColorRef}};
+use crate::{director::lingo::datum::Datum, player::{font::{bitmap_font_copy_char, BitmapFont}, geometry::IntRect, handlers::datum_handlers::cast_member::text::TextMemberHandlers, reserve_player_mut, sprite::ColorRef}};
 
-use super::{bitmap::{resolve_color_ref, Bitmap}, mask::BitmapMask, palette_map::PaletteMap};
+use super::{bitmap::{resolve_color_ref, Bitmap, ProceduralBitmapType}, mask::BitmapMask, palette_map::PaletteMap};
 
 pub struct CopyPixelsParams {
     pub blend: i32,
@@ -209,6 +208,8 @@ impl Bitmap {
     }
 
     pub fn get_pixel_color_ref(&self, x: u16, y: u16) -> ColorRef {
+        self.render_if_needed();
+
         let x = x as usize;
         let y = y as usize;
         if x >= self.width() as usize || y >= self.height() as usize {
@@ -281,51 +282,6 @@ impl Bitmap {
         } else {
             ColorRef::Rgb(0, 0, 0)
         }
-    }
-
-    pub fn _flipped_hv(&self, palettes: &PaletteMap) -> Bitmap {
-        let mut flipped = self.clone();
-        for y in 0..self.height() as usize {
-            for x in 0..self.width() as usize {
-                let src_x = x;
-                let src_y = y;
-                let dst_x = self.width() as usize - x - 1;
-                let dst_y = self.height() as usize - y - 1;
-                let src_color = self.get_pixel_color(palettes, src_x as u16, src_y as u16);
-                flipped.set_pixel(dst_x as i32, dst_y as i32, src_color, palettes);
-            }
-        }
-        flipped
-    }
-
-    pub fn _flipped_h(&self, palettes: &PaletteMap) -> Bitmap {
-        let mut flipped = self.clone();
-        for y in 0..self.height() as usize {
-            for x in 0..self.width() as usize {
-                let src_x = x;
-                let src_y = y;
-                let dst_x = self.width() as usize - x - 1;
-                let dst_y = y;
-                let src_color = self.get_pixel_color(palettes, src_x as u16, src_y as u16);
-                flipped.set_pixel(dst_x as i32, dst_y as i32, src_color, palettes);
-            }
-        }
-        flipped
-    }
-
-    pub fn _flipped_v(&self, palettes: &PaletteMap) -> Bitmap {
-        let mut flipped = self.clone();
-        for y in 0..self.height() as usize {
-            for x in 0..self.width() as usize {
-                let src_x = x;
-                let src_y = y;
-                let dst_x = x;
-                let dst_y = self.height() as usize - y - 1;
-                let src_color = self.get_pixel_color(palettes, src_x as u16, src_y as u16);
-                flipped.set_pixel(dst_x as i32, dst_y as i32, src_color, palettes);
-            }
-        }
-        flipped
     }
 
     pub fn stroke_sized_rect(&self, left: i32, top: i32, width: i32, height: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
@@ -442,6 +398,47 @@ impl Bitmap {
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
 
+    pub fn is_dirty(&self) -> bool {
+        match &self.procedural_type {
+            Some(ProceduralBitmapType::Text(_, is_dirty)) => {
+                *is_dirty.borrow()
+            }
+            _ => false
+        }
+    }
+
+    pub fn set_dirty(&self, dirty: bool) {
+        match &self.procedural_type {
+            Some(ProceduralBitmapType::Text(_, is_dirty)) => {
+                *is_dirty.borrow_mut() = dirty;
+            }
+            _ => {}
+        }
+    }
+
+    fn render_if_needed(&self) {
+        match &self.procedural_type {
+            Some(ProceduralBitmapType::Text(text_data, is_dirty)) => {
+                if !*is_dirty.borrow() {
+                    return;
+                }
+                *is_dirty.borrow_mut() = false;
+                let text_data = text_data.borrow();
+                reserve_player_mut(|player| {
+                    let palettes = &player.movie.cast_manager.palettes();
+                    TextMemberHandlers::render_to_bitmap(
+                        palettes, 
+                        &player.font_manager,
+                        &player.bitmap_manager,
+                        &text_data, 
+                        self
+                    ).unwrap();
+                });
+            }
+            _ => {}
+        }
+    }
+
     pub fn copy_pixels_with_params(
         &self, 
         palettes: &PaletteMap,
@@ -497,28 +494,6 @@ impl Bitmap {
         // self.stroke_rect(min_dst_x, min_dst_y, max_dst_x, max_dst_y, (0, 255, 0), palettes, 1.0);
     }
 
-    pub fn _draw_bitmap(
-        &mut self,
-        palettes: &PaletteMap,
-        bitmap: &Bitmap, 
-        loc_h: i32, 
-        loc_v: i32, 
-        width: i32,
-        height: i32,
-        ink: u32, 
-        bg_color: (u8, u8, u8),
-        alpha: f32,
-    ) {
-        let mut params = HashMap::new();
-        params.insert("blend".to_owned(), Datum::Int((alpha * 100.0) as i32));
-        params.insert("ink".to_owned(), Datum::Int(ink as i32));
-        params.insert("bgColor".to_owned(), Datum::ColorRef(ColorRef::Rgb(bg_color.0, bg_color.1, bg_color.2)));
-
-        let src_rect = IntRect::from_tuple((0, 0, bitmap.width() as i32, bitmap.height() as i32));
-        let dst_rect = IntRect::from_tuple((loc_h, loc_v, loc_h + width as i32, loc_v + height as i32));
-        self.copy_pixels(palettes, bitmap, dst_rect, src_rect, &params);
-    }
-
     pub fn draw_text(
         &self,
         text: &str,
@@ -551,7 +526,7 @@ impl Bitmap {
         }
     }
 
-    pub fn trim_whitespace(&mut self, palettes: &PaletteMap) {
+    pub fn trim_whitespace(&self, palettes: &PaletteMap) {
         let mut left = 0 as i32;
         let mut top = 0 as i32;
         let mut right = self.width() as i32;
@@ -621,12 +596,12 @@ impl Bitmap {
         let width = right - left;
         let height = bottom - top;
 
-        let trimmed = Bitmap::new(width as u16, height as u16, self.bit_depth, self.palette_ref.clone());
+        let trimmed = Bitmap::new(width as u16, height as u16, self.bit_depth, self.palette_ref.clone(), None);
         let params = CopyPixelsParams::default(&self);
         trimmed.copy_pixels_with_params(palettes, &self, IntRect::from(0, 0, width, height), IntRect::from(left, top, right, bottom), &params);
         
-        self.set_size(width as u16, height as u16);
-        self.data = trimmed.data;
+        let data = trimmed.data.take();
+        self.set_size_with_data(width as u16, height as u16, data);
     }
 
     pub fn to_mask(&self) -> BitmapMask {

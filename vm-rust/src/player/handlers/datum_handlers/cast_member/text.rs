@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType}, player::{
-        bitmap::{bitmap::resolve_color_ref, manager::BitmapRef}, cast_lib::CastMemberRef, font::{get_text_index_at_pos, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, reserve_player_mut, DatumRef, DirPlayer, ScriptError
+        bitmap::{bitmap::{resolve_color_ref, Bitmap}, manager::BitmapManager, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::TextData, font::{get_text_index_at_pos, measure_text, DrawTextParams, FontManager}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, reserve_player_mut, DatumRef, DirPlayer, ScriptError
     }
 };
 
@@ -8,43 +8,64 @@ pub struct TextMemberHandlers {}
 
 impl TextMemberHandlers {
     pub fn call(player: &mut DirPlayer, datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let member_ref = player.get_datum(datum).to_member_ref()?;
-        let member = player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap();
-        let text = member.member_type.as_text().unwrap();
         match handler_name.as_str() {
             "count" => {
-              let count_of = player.get_datum(&args[0]).string_value()?;
-              if args.len() != 1 {
-                return Err(ScriptError::new("count requires 1 argument".to_string()));
-              }
-              let delimiter = &player.movie.item_delimiter;
-              let count = StringChunkUtils::resolve_chunk_count(&text.text, StringChunkType::from(&count_of), delimiter)?;
-              Ok(player.alloc_datum(Datum::Int(count as i32)))
+                let count = {
+                    let member_ref = player.get_datum(datum).to_member_ref()?;
+                    let member = player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap();
+                    let text = member.member_type.as_text().unwrap();
+                    let text = text.text_data.borrow();
+
+                    let count_of = player.get_datum(&args[0]).string_value()?;
+                    if args.len() != 1 {
+                        return Err(ScriptError::new("count requires 1 argument".to_string()));
+                    }
+                    let delimiter = &player.movie.item_delimiter;
+                    let count = StringChunkUtils::resolve_chunk_count(&text.text, StringChunkType::from(&count_of), delimiter)?;
+                    count
+                };
+                Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-              let prop_name = player.get_datum(&args[0]).string_value()?;
-              let start = player.get_datum(&args[1]).int_value()?;
-              let end = if args.len() > 2 { player.get_datum(&args[2]).int_value()? } else { start };
-              let chunk_expr = StringChunkType::from(&prop_name);
-              let chunk_expr = StringChunkExpr {
-                chunk_type: chunk_expr,
-                start,
-                end,
-                item_delimiter: player.movie.item_delimiter.clone(),
-              };
-              let resolved_str = StringChunkUtils::resolve_chunk_expr_string(&text.text, &chunk_expr)?;
-              Ok(player.alloc_datum(Datum::StringChunk(StringChunkSource::Member(member_ref), chunk_expr, resolved_str)))
+                let result = {
+                    let member_ref = player.get_datum(datum).to_member_ref()?;
+                    let member = player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap();
+                    let text = member.member_type.as_text().unwrap();
+                    let text = text.text_data.borrow();
+
+                    let prop_name = player.get_datum(&args[0]).string_value()?;
+                    let start = player.get_datum(&args[1]).int_value()?;
+                    let end = if args.len() > 2 { player.get_datum(&args[2]).int_value()? } else { start };
+                    let chunk_expr = StringChunkType::from(&prop_name);
+                    let chunk_expr = StringChunkExpr {
+                        chunk_type: chunk_expr,
+                        start,
+                        end,
+                        item_delimiter: player.movie.item_delimiter.clone(),
+                    };
+                    let resolved_str = StringChunkUtils::resolve_chunk_expr_string(&text.text, &chunk_expr)?;
+                    Datum::StringChunk(StringChunkSource::Member(member_ref), chunk_expr, resolved_str)
+                };
+                Ok(player.alloc_datum(result))
             }
             "locToCharPos" => {
-                let (x, y) = player.get_datum(&args[0]).to_int_point()?;
-                let params = DrawTextParams {
-                    font: player.font_manager.get_system_font().unwrap(),
-                    line_height: None,
-                    line_spacing: text.fixed_line_space,
-                    top_spacing: text.top_spacing,
+                let result = {
+                    let member_ref = player.get_datum(datum).to_member_ref()?;
+                    let member = player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap();
+                    let text = member.member_type.as_text().unwrap();
+                    let text = text.text_data.borrow();
+
+                    let (x, y) = player.get_datum(&args[0]).to_int_point()?;
+                    let params = DrawTextParams {
+                        font: player.font_manager.get_system_font().unwrap(),
+                        line_height: None,
+                        line_spacing: text.fixed_line_space,
+                        top_spacing: text.top_spacing,
+                    };
+                    let index = get_text_index_at_pos(&text.text, &params, x, y);
+                    Datum::Int((index + 1) as i32)
                 };
-                let index = get_text_index_at_pos(&text.text, &params, x, y);
-                Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
+                Ok(player.alloc_datum(result))
             }
             _ => Err(ScriptError::new(format!("No handler {handler_name} for text member type")))
           }
@@ -61,6 +82,7 @@ impl TextMemberHandlers {
             .find_member_by_ref(cast_member_ref)
             .unwrap();
         let text_data = member.member_type.as_text().unwrap().clone();
+        let text_data = text_data.text_data.borrow_mut();
         match prop.as_str() {
             "text" => Ok(Datum::String(text_data.text.to_owned())),
             "alignment" => Ok(Datum::String(text_data.alignment.to_owned())),
@@ -127,7 +149,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().text = value?;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.text = value?;
                     Ok(())
                 },
             ),
@@ -135,7 +159,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().alignment = value?;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.alignment = value?;
                     Ok(())
                 },
             ),
@@ -143,7 +169,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.bool_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().word_wrap = value?;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.word_wrap = value?;
                     Ok(())
                 },
             ),
@@ -151,7 +179,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().width = value? as u16;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.width = value? as u16;
                     Ok(())
                 },
             ),
@@ -159,7 +189,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().font = value?;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.font = value?;
                     Ok(())
                 },
             ),
@@ -167,7 +199,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().font_size = value? as u16;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.font_size = value? as u16;
                     Ok(())
                 },
             ),
@@ -181,7 +215,9 @@ impl TextMemberHandlers {
                     Ok(item_strings)
                 },
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().font_style = value?;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.font_style = value?;
                     Ok(())
                 },
             ),
@@ -189,11 +225,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member
-                        .member_type
-                        .as_text_mut()
-                        .unwrap()
-                        .fixed_line_space = value? as u16;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.fixed_line_space = value? as u16;
                     Ok(())
                 },
             ),
@@ -201,7 +235,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().top_spacing = value? as i16;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.top_spacing = value? as i16;
                     Ok(())
                 },
             ),
@@ -209,7 +245,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().box_type = value?;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.box_type = value?;
                     Ok(())
                 },
             ),
@@ -217,7 +255,9 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.bool_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().anti_alias = value?;
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
+                    text_data.anti_alias = value?;
                     Ok(())
                 },
             ),
@@ -231,7 +271,8 @@ impl TextMemberHandlers {
                 },
                 |cast_member, value| {
                     let value = value?;
-                    let text_data = cast_member.member_type.as_text_mut().unwrap();
+                    let text_data = cast_member.member_type.as_text().unwrap();
+                    let mut text_data = text_data.text_data.borrow_mut();
                     text_data.width = value.2 as u16;
                     Ok(())
                 },
@@ -243,23 +284,49 @@ impl TextMemberHandlers {
         }?;
         reserve_player_mut(|player| {
             let cast_member_ref = member_ref;
-            TextMemberHandlers::render_to_bitmap(player, cast_member_ref)?;
+            TextMemberHandlers::invalidate_bitmap(player, cast_member_ref)?;
             Ok(())
         })
     }
 
-    pub fn render_to_bitmap(
-        player: &mut DirPlayer,
-        cast_member_ref: &CastMemberRef,
-    ) -> Result<BitmapRef, ScriptError> {
+    pub fn invalidate_bitmap(player: &mut DirPlayer, cast_member_ref: &CastMemberRef) -> Result<(), ScriptError> {
         let member = player
             .movie
             .cast_manager
             .find_member_by_ref(cast_member_ref)
             .unwrap();
-        let text_data = member.member_type.as_text().unwrap().clone();
+        let text_member = member.member_type.as_text().unwrap();
+        let text_data = text_member.text_data.borrow();
+        let width = text_data.width;
+        
+        let image_ref = text_member.image_ref;
+        let bitmap = player.bitmap_manager.get_bitmap(image_ref).unwrap();
+        if !bitmap.is_dirty() {
+            bitmap.set_dirty(true);
+        }
 
         let font = player.font_manager.get_system_font().unwrap();
+        let (_, height) = measure_text(
+            &text_data.text,
+            &font,
+            None,
+            text_data.fixed_line_space,
+            text_data.top_spacing,
+        );
+        if width != bitmap.width() || height != bitmap.height() {
+            bitmap.set_size(width, height, false);
+        }
+        Ok(())
+    }
+
+    pub fn render_to_bitmap(
+        palettes: &PaletteMap,
+        font_manager: &FontManager,
+        bitmap_manager: &BitmapManager,
+        text_data: &TextData,
+        bitmap: &Bitmap,
+    ) -> Result<(), ScriptError> {
+        let font = font_manager.get_system_font().unwrap();
         let (width, height) = measure_text(
             &text_data.text,
             &font,
@@ -274,22 +341,17 @@ impl TextMemberHandlers {
             _ => 0,
         };
         // TODO use 32 bits
-        let bitmap = player.bitmap_manager.get_bitmap(text_data.image_ref).unwrap();
-        let bitmap_width = bitmap.width();
-        let bitmap_height = bitmap.height();
-        if bitmap_width != text_data.width || bitmap_height != height {
-            bitmap.set_size(text_data.width, height);
+        if bitmap.buffer_width() != text_data.width || bitmap.buffer_height() != height {
+            bitmap.set_size(text_data.width, height, true);
         } else {
             let bg_color = bitmap.get_bg_color_ref();
-            let palettes = player.movie.cast_manager.palettes();
             let bg_color = resolve_color_ref(&palettes, &bg_color, &bitmap.palette_ref);
             bitmap.clear_rect(0, 0, text_data.width as i32, height as i32, bg_color, &palettes);
         }
 
-        let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
-        let palettes = player.movie.cast_manager.palettes();
+        let font_bitmap = bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
-        let ink = 36;
+        let ink = 0;//36;
         bitmap.draw_text(
             &text_data.text,
             font,
@@ -297,11 +359,11 @@ impl TextMemberHandlers {
             draw_x,
             text_data.top_spacing as i32,
             ink,
-            bitmap.get_bg_color_ref(),
+            bitmap.get_bg_color_ref(), // TODO use chunk color
             &palettes,
             text_data.fixed_line_space,
             text_data.top_spacing,
         );
-        Ok(text_data.image_ref)
+        Ok(())
     }
 }

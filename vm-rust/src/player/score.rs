@@ -655,7 +655,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
         )
     }
     CastMemberType::Field(field_member) => IntRect::from_size(sprite.loc_h, sprite.loc_v, field_member.width as i32, 12), // TODO
-    CastMemberType::Text(text_member) => IntRect::from_size(sprite.loc_h, sprite.loc_v, text_member.width as i32, 12), // TODO
+    CastMemberType::Text(text_member) => IntRect::from_size(sprite.loc_h, sprite.loc_v, text_member.text_data.borrow().width as i32, 12), // TODO measure text
     _ => IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height)
   }
 }

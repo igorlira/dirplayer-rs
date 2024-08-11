@@ -354,7 +354,7 @@ impl JsApi {
         member_map.str_set("text", &ascii_safe(&text_data.text).to_js_value());
       }
       CastMemberType::Text(text_data) => {
-        member_map.str_set("text", &ascii_safe(&text_data.text).to_js_value());
+        member_map.str_set("text", &ascii_safe(&text_data.text_data.borrow().text).to_js_value());
       }
       CastMemberType::Script(script_data) => {
         let lctx = lctx.unwrap();

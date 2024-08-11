@@ -42,7 +42,11 @@ impl StringChunkUtils {
         let member = &mut player.movie.cast_manager.find_mut_member_by_ref(&member_ref).unwrap().member_type;
         match member {
           CastMemberType::Field(field) => field.text = new_string,
-          CastMemberType::Text(member) => member.text = new_string,
+          CastMemberType::Text(member) => {
+            let text_data = &member.text_data;
+            let mut text_data = text_data.borrow_mut();
+            text_data.text = new_string
+          },
           _ => return Err(ScriptError::new("Cannot set contents for non-text member".to_string()))
         }
       }

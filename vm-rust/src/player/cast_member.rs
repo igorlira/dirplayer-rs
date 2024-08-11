@@ -1,9 +1,9 @@
 use core::fmt;
-use std::fmt::Formatter;
+use std::{cell::RefCell, fmt::Formatter, rc::Rc};
 
 use crate::director::{chunks::cast_member::CastMemberDef, enums::{MemberType, ScriptType, ShapeInfo}, lingo::script::ScriptContext};
 
-use super::{bitmap::{bitmap::{decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef}, manager::{BitmapManager, BitmapRef}}, sprite::ColorRef, ScriptError};
+use super::{bitmap::{bitmap::{decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef, ProceduralBitmapType}, manager::{BitmapManager, BitmapRef}}, sprite::ColorRef, ScriptError};
 
 #[derive(Clone)]
 pub struct CastMember {
@@ -34,6 +34,12 @@ pub struct FieldMember {
 
 #[derive(Clone)]
 pub struct TextMember {
+  pub text_data: Rc<RefCell<TextData>>,
+  pub image_ref: BitmapRef,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextData {
   pub text: String,
   pub alignment: String,
   pub box_type: String,
@@ -45,7 +51,6 @@ pub struct TextMember {
   pub fixed_line_space: u16,
   pub top_spacing: i16,
   pub width: u16,
-  pub image_ref: BitmapRef,
 }
 
 impl CastMember {
@@ -85,19 +90,34 @@ impl TextMember {
   pub fn new(bitmap_manager: &mut BitmapManager) -> TextMember {
     let width = 500;
     let font_size = 12;
+    let text_data_rc = Rc::new(
+      RefCell::new(
+        TextData {
+          text: "".to_string(),
+          alignment: "left".to_string(),
+          word_wrap: true,
+          font: "Arial".to_string(),
+          font_style: vec!["plain".to_string()],
+          font_size,
+          fixed_line_space: 0,
+          top_spacing: 0,
+          box_type: "adjust".to_string(),
+          anti_alias: false,
+          width,
+        }
+      )
+    );
     TextMember {
-      text: "".to_string(),
-      alignment: "left".to_string(),
-      word_wrap: true,
-      font: "Arial".to_string(),
-      font_style: vec!["plain".to_string()],
-      font_size,
-      fixed_line_space: 0,
-      top_spacing: 0,
-      box_type: "adjust".to_string(),
-      anti_alias: false,
-      width,
-      image_ref: bitmap_manager.add_bitmap(Bitmap::new(width, font_size, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))),
+      text_data: text_data_rc.clone(),
+      image_ref: bitmap_manager.add_bitmap(
+        Bitmap::new(
+          width, 
+          font_size, 
+          8, 
+          PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
+          Some(ProceduralBitmapType::Text(text_data_rc, RefCell::new(true)))
+        )
+      ),
     }
   }
 }
@@ -316,11 +336,11 @@ impl CastMember {
               // warn!("Failed to decompress bitmap. Using an empty image instead. {:?}", e);
               // TODO create error texture?
               // INVALID_BITMAP_REF
-              bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+              bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale), None))
             }
           }
         } else {
-          bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+          bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale), None))
         };
 
         CastMemberType::Bitmap(
