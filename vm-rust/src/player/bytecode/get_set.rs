@@ -34,7 +34,7 @@ impl GetSetUtils {
 impl GetSetBytecodeHandler {
   pub fn get_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
-    let receiver ={
+    let receiver = {
       let scope = player.scopes.get(ctx.scope_ref).unwrap();
       scope.receiver.clone()
     };
