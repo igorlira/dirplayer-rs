@@ -132,7 +132,7 @@ lazy_static! {
   ]);
 
   pub static ref ANIM2_PROP_NAMES: HashMap<u16, String> = HashMap::from([
-    (0x01, "perFramework".to_owned()),
+    (0x01, "perFrameHook".to_owned()),
     (0x02, "number of castMembers".to_owned()),
     (0x03, "number of menus".to_owned()),
     (0x04, "number of castLibs".to_owned()),
