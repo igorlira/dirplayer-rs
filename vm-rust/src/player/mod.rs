@@ -115,6 +115,7 @@ impl DirPlayer {
   pub fn new<'a>(
     tx: Sender<PlayerVMExecutionItem>,
   ) -> DirPlayer {
+    let timer_tick_start = utils::get_ticks();
     let mut result = DirPlayer {
       movie: Movie { 
         rect: IntRect::from(0, 0, 0, 0),
@@ -129,6 +130,7 @@ impl DirPlayer {
         base_path: "".to_string(),
         file_name: "".to_string(),
         stage_color: (0, 0, 0),
+        timer_tick_start: timer_tick_start,
       },
       net_manager: NetManager {
         base_path: None,
@@ -166,7 +168,7 @@ impl DirPlayer {
       float_precision: 4,
       last_handler_result: DatumRef::Void,
       hovered_sprite: None,
-      timer_tick_start: get_ticks(),
+      timer_tick_start: timer_tick_start,
       allocator: DatumAllocator::default(),
       dir_cache: HashMap::new(),
       scope_count: 0,
@@ -354,7 +356,7 @@ impl DirPlayer {
     let prop_name = get_anim_prop_name(prop_id);
     match prop_name.as_str() {
       "colorDepth" => Ok(Datum::Int(32)),
-      "timer" => Ok(Datum::Int(get_ticks() as i32 - self.timer_tick_start as i32)),
+      "timer" => Ok(Datum::Int(utils::get_elapsed_ticks(self.timer_tick_start))),
       _ => Err(ScriptError::new(format!("Unknown anim prop {}", prop_name)))
     }
   }
@@ -872,13 +874,6 @@ async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: Scop
       }
     }
   }
-}
-
-fn get_ticks() -> u32 {
-  let time = Local::now();
-  // 60 ticks per second
-  let millis = time.timestamp_millis();
-  (millis as f32 / (1000.0 / 60.0)) as u32
 }
 
 fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
