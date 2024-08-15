@@ -115,7 +115,6 @@ impl DirPlayer {
   pub fn new<'a>(
     tx: Sender<PlayerVMExecutionItem>,
   ) -> DirPlayer {
-    let timer_tick_start = utils::get_ticks();
     let mut result = DirPlayer {
       movie: Movie { 
         rect: IntRect::from(0, 0, 0, 0),
@@ -130,7 +129,6 @@ impl DirPlayer {
         base_path: "".to_string(),
         file_name: "".to_string(),
         stage_color: (0, 0, 0),
-        timer_tick_start: timer_tick_start,
       },
       net_manager: NetManager {
         base_path: None,
@@ -168,7 +166,7 @@ impl DirPlayer {
       float_precision: 4,
       last_handler_result: DatumRef::Void,
       hovered_sprite: None,
-      timer_tick_start: timer_tick_start,
+      timer_tick_start: utils::get_ticks(),
       allocator: DatumAllocator::default(),
       dir_cache: HashMap::new(),
       scope_count: 0,
