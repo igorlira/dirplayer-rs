@@ -4,7 +4,7 @@ use chrono::Local;
 
 use crate::{director::{file::DirectorFile, lingo::datum::{datum_bool, Datum}}, utils::{self, get_elapsed_ticks, PATH_SEPARATOR}};
 
-use super::{allocator::DatumAllocator, bitmap::manager::BitmapManager, cast_manager::CastManager, geometry::IntRect, net_manager::NetManager, score::Score, ScriptError, ScriptReceiver};
+use super::{allocator::DatumAllocator, bitmap::manager::BitmapManager, cast_manager::CastManager, geometry::IntRect, net_manager::NetManager, reserve_player_mut, score::Score, ScriptError, ScriptReceiver};
 
 pub struct Movie {
   pub rect: IntRect,
@@ -19,7 +19,6 @@ pub struct Movie {
   pub base_path: String,
   pub file_name: String,
   pub stage_color: (u8, u8, u8),
-  pub timer_tick_start: u32,
 }
 
 impl Movie {
@@ -91,7 +90,11 @@ impl Movie {
       "traceLogFile" => Ok(Datum::String("".to_string())), // TODO
       "traceScript" => Ok(Datum::Int(0)), // TODO
       "movieName" => Ok(Datum::String(self.file_name.to_owned())),
-      "ticks" => Ok(Datum::Int(utils::get_elapsed_ticks(self.timer_tick_start))),
+      "ticks" => {
+        reserve_player_mut(|player| {
+          Ok(Datum::Int(utils::get_elapsed_ticks(player.timer_tick_start)))
+        })
+      },
       _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
     }
   }
