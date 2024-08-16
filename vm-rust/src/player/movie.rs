@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use chrono::Local;
 
-use crate::{director::{file::DirectorFile, lingo::datum::{datum_bool, Datum}}, utils::{self, get_elapsed_ticks, PATH_SEPARATOR}};
+use crate::{director::{file::DirectorFile, lingo::datum::{datum_bool, Datum}}, utils::{PATH_SEPARATOR}};
 
-use super::{allocator::DatumAllocator, bitmap::manager::BitmapManager, cast_manager::CastManager, geometry::IntRect, net_manager::NetManager, reserve_player_mut, score::Score, ScriptError, ScriptReceiver};
+use super::{allocator::DatumAllocator, bitmap::manager::BitmapManager, cast_manager::CastManager, geometry::IntRect, net_manager::NetManager, score::Score, ScriptError, ScriptReceiver};
 
 pub struct Movie {
   pub rect: IntRect,
@@ -90,11 +90,6 @@ impl Movie {
       "traceLogFile" => Ok(Datum::String("".to_string())), // TODO
       "traceScript" => Ok(Datum::Int(0)), // TODO
       "movieName" => Ok(Datum::String(self.file_name.to_owned())),
-      "ticks" => {
-        reserve_player_mut(|player| {
-          Ok(Datum::Int(utils::get_elapsed_ticks(player.timer_tick_start)))
-        })
-      },
       _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
     }
   }
