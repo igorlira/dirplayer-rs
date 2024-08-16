@@ -317,7 +317,7 @@ impl GetSetBytecodeHandler {
         };
         let string = player.get_datum(&string_id).string_value()?;
         let chunk_type = StringChunkType::from(&(prop_id - 0x0b));
-        let last_chunk = StringChunkUtils::resolve_last_chunk(&string, chunk_type, &player.movie.item_delimiter)?;
+        let last_chunk = StringChunkUtils::resolve_last_chunk(&string, chunk_type, player.movie.item_delimiter)?;
 
         Ok(player.alloc_datum(Datum::String(last_chunk)))
       } else if prop_type == 0x07 {
@@ -353,7 +353,7 @@ impl GetSetBytecodeHandler {
         };
         let string = player.get_datum(&string_id).string_value()?;
         let chunk_type = StringChunkType::from(&prop_id);
-        let chunks = StringChunkUtils::resolve_chunk_list(&string, chunk_type, &player.movie.item_delimiter)?;
+        let chunks = StringChunkUtils::resolve_chunk_list(&string, chunk_type, player.movie.item_delimiter)?;
         Ok(player.alloc_datum(Datum::Int(chunks.len() as i32)))
       } else {
         Err(ScriptError::new(format!("OpCode.kOpGet call not implemented propertyID={} propertyType={}", prop_id, prop_type)))

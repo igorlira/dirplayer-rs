@@ -99,7 +99,7 @@ impl StringChunkUtils {
     (start + 1, end)
   }
 
-  pub fn resolve_chunk_list(string: &String, chunk_type: StringChunkType, item_delimiter: &String) -> Result<Vec<String>, ScriptError> {
+  pub fn resolve_chunk_list(string: &String, chunk_type: StringChunkType, item_delimiter: char) -> Result<Vec<String>, ScriptError> {
     match chunk_type {
       StringChunkType::Item => {
         Ok(string_get_items(string, item_delimiter))
@@ -119,7 +119,7 @@ impl StringChunkUtils {
     }
   }
 
-  pub fn resolve_last_chunk(string: &String, chunk_type: StringChunkType, item_delimiter: &String) -> Result<String, ScriptError> {
+  pub fn resolve_last_chunk(string: &String, chunk_type: StringChunkType, item_delimiter: char) -> Result<String, ScriptError> {
     match chunk_type {
       StringChunkType::Item => {
         let items = string.split(item_delimiter).map(|x| x.to_string());
@@ -139,10 +139,10 @@ impl StringChunkUtils {
     }
   }
 
-  pub fn resolve_chunk_count(string: &String, chunk_type: StringChunkType, item_delimiter: &String) -> Result<usize, ScriptError> {
+  pub fn resolve_chunk_count(string: &String, chunk_type: StringChunkType, item_delimiter: char) -> Result<usize, ScriptError> {
     match chunk_type {
       StringChunkType::Item => {
-        Ok(string.chars().filter(|c| item_delimiter.chars().next().unwrap() == *c).count() + 1)
+        Ok(string.chars().filter(|c| item_delimiter == *c).count() + 1)
       },
       StringChunkType::Word => {
         Ok(string.split_whitespace().count())
@@ -173,16 +173,17 @@ impl StringChunkUtils {
 
     let result = match chunk_expr.chunk_type {
       StringChunkType::Item => {
-        let chunk_list = Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), &chunk_expr.item_delimiter)?;
+        let chunk_list = Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), chunk_expr.item_delimiter)?;
         let (start, end) = Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
 
         if chunk_list.len() == 0 {
           return Ok("".to_string());
         }
-        chunk_list[start..end].join(&chunk_expr.item_delimiter)
+        let delimiter = chunk_expr.item_delimiter.to_string();
+        chunk_list[start..end].join(&delimiter)
       },
       StringChunkType::Word => {
-        let chunk_list = Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), &chunk_expr.item_delimiter)?;
+        let chunk_list = Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), chunk_expr.item_delimiter)?;
         let (start, end) = Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
 
         if chunk_list.len() == 0 {
@@ -196,7 +197,7 @@ impl StringChunkUtils {
         unsafe { String::from_utf8_unchecked(bytes.collect_vec()) }
       },
       StringChunkType::Line => {
-        let chunk_list = Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), &chunk_expr.item_delimiter)?;
+        let chunk_list = Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), chunk_expr.item_delimiter)?;
         let (start, end) = Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
 
         if chunk_list.len() == 0 {
@@ -218,7 +219,7 @@ impl StringChunkHandlers {
     reserve_player_mut(|player| {
       let value = player.get_datum(datum).string_value()?;
       let operand = player.get_datum(&args[0]).string_value()?;
-      let delimiter = &player.movie.item_delimiter;
+      let delimiter = player.movie.item_delimiter;
       let count = StringChunkUtils::resolve_chunk_count(&value, StringChunkType::from(&operand), delimiter)?;
       Ok(player.alloc_datum(Datum::Int(count as i32)))
     })
@@ -234,7 +235,7 @@ impl StringChunkHandlers {
         chunk_type: StringChunkType::from(&prop_name),
         start,
         end,
-        item_delimiter: player.movie.item_delimiter.clone(),
+        item_delimiter: player.movie.item_delimiter,
       };
 
       let str_value = StringChunkUtils::resolve_chunk_expr_string(&datum.string_value()?, &chunk_expr)?;

@@ -14,7 +14,7 @@ pub struct Movie {
   pub puppet_tempo: u32,
   pub exit_lock: bool,
   pub dir_version: u16,
-  pub item_delimiter: String,
+  pub item_delimiter: char,
   pub alert_hook: Option<ScriptReceiver>,
   pub base_path: String,
   pub file_name: String,
@@ -57,7 +57,7 @@ impl Movie {
         }
       }
       "exitLock" => Ok(datum_bool(self.exit_lock)),
-      "itemDelimiter" => Ok(Datum::String(self.item_delimiter.clone())),
+      "itemDelimiter" => Ok(Datum::String(self.item_delimiter.into())),
       "runMode" => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
       "date" => {
         // TODO localize formatting
@@ -100,7 +100,7 @@ impl Movie {
         self.exit_lock = value.int_value()? == 1;
       },
       "itemDelimiter" => {
-        self.item_delimiter = value.string_value()?;
+        self.item_delimiter = (value.string_value()?).as_bytes()[0] as char;
       },
       "debugPlaybackEnabled" => {
         // TODO

@@ -18,7 +18,7 @@ impl TextMemberHandlers {
               if args.len() != 1 {
                 return Err(ScriptError::new("count requires 1 argument".to_string()));
               }
-              let delimiter = &player.movie.item_delimiter;
+              let delimiter = player.movie.item_delimiter;
               let count = StringChunkUtils::resolve_chunk_count(&text.text, StringChunkType::from(&count_of), delimiter)?;
               Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
