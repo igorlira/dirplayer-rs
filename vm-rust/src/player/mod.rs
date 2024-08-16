@@ -328,6 +328,7 @@ impl DirPlayer {
       "key" => Ok(Datum::String(self.keyboard_manager.key())),
       "floatPrecision" => Ok(Datum::Int(self.float_precision as i32)),
       "doubleClick" => Ok(datum_bool(self.is_double_click)),
+      "ticks" => Ok(Datum::Int(utils::get_elapsed_ticks(self.timer_tick_start))),
       _ => self.movie.get_prop(prop),
     }
   }
