@@ -31,7 +31,7 @@ impl FieldMemberHandlers {
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
-                let delimiter = &player.movie.item_delimiter;
+                let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
                     &field.text,
                     StringChunkType::from(&count_of),

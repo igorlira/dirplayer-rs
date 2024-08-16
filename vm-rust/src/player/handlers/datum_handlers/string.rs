@@ -37,7 +37,7 @@ impl StringDatumHandlers {
     reserve_player_mut(|player| {
       let value = player.get_datum(datum).string_value()?;
       let operand = player.get_datum(&args[0]).string_value()?;
-      let delimiter = &player.movie.item_delimiter;
+      let delimiter = player.movie.item_delimiter;
       let count = string_get_count(&value, &operand, delimiter)?;
       Ok(player.alloc_datum(Datum::Int(count as i32)))
     })
@@ -75,7 +75,7 @@ impl StringDatumHandlers {
   }
 }
 
-pub fn string_get_count(value: &String, operand: &String, delimiter: &String) -> Result<u32, ScriptError> {
+pub fn string_get_count(value: &String, operand: &String, delimiter: char) -> Result<u32, ScriptError> {
   match operand.as_str() {
     "char" => Ok(value.len() as u32),
     "item" => Ok(string_get_items(value, delimiter).len() as u32),
@@ -86,8 +86,8 @@ pub fn string_get_count(value: &String, operand: &String, delimiter: &String) ->
   }
 }
 
-pub fn string_get_items(value: &String, delimiter: &String) -> Vec<String> {
-  if delimiter == "\r" || delimiter == "\n" {
+pub fn string_get_items(value: &String, delimiter: char) -> Vec<String> {
+  if delimiter == '\r' || delimiter == '\n' {
     string_get_lines(value)
   } else {
     value.split(delimiter).map(|s| s.to_string()).collect()

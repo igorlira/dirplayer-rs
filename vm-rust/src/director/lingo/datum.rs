@@ -89,7 +89,7 @@ pub struct  StringChunkExpr {
   pub chunk_type: StringChunkType,
   pub start: i32,
   pub end: i32,
-  pub item_delimiter: String,
+  pub item_delimiter: char,
 }
 
 pub type PropListPair = (DatumRef, DatumRef);
