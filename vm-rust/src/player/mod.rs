@@ -49,7 +49,7 @@ use scope::ScopeResult;
 use script_ref::ScriptInstanceRef;
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
-use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension}};
+use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks, get_ticks}};
 
 use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef, ScriptInstance, ScriptInstanceId}, sprite::{ColorRef, CursorRef}, timeout::TimeoutManager};
 
@@ -166,7 +166,7 @@ impl DirPlayer {
       float_precision: 4,
       last_handler_result: DatumRef::Void,
       hovered_sprite: None,
-      timer_tick_start: utils::get_ticks(),
+      timer_tick_start: get_ticks(),
       allocator: DatumAllocator::default(),
       dir_cache: HashMap::new(),
       scope_count: 0,
@@ -328,7 +328,7 @@ impl DirPlayer {
       "key" => Ok(Datum::String(self.keyboard_manager.key())),
       "floatPrecision" => Ok(Datum::Int(self.float_precision as i32)),
       "doubleClick" => Ok(datum_bool(self.is_double_click)),
-      "ticks" => Ok(Datum::Int(utils::get_elapsed_ticks(self.timer_tick_start))),
+      "ticks" => Ok(Datum::Int(get_elapsed_ticks(self.timer_tick_start))),
       _ => self.movie.get_prop(prop),
     }
   }
@@ -355,7 +355,7 @@ impl DirPlayer {
     let prop_name = get_anim_prop_name(prop_id);
     match prop_name.as_str() {
       "colorDepth" => Ok(Datum::Int(32)),
-      "timer" => Ok(Datum::Int(utils::get_elapsed_ticks(self.timer_tick_start))),
+      "timer" => Ok(Datum::Int(get_elapsed_ticks(self.timer_tick_start))),
       _ => Err(ScriptError::new(format!("Unknown anim prop {}", prop_name)))
     }
   }
