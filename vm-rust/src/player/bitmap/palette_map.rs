@@ -1,3 +1,5 @@
+use fxhash::FxHashMap;
+
 use crate::player::cast_member::PaletteMember;
 
 struct PaletteEntry {
@@ -6,27 +8,24 @@ struct PaletteEntry {
 }
 
 pub struct PaletteMap {
-    pub palettes: Vec<PaletteEntry>,
+    palettes: FxHashMap<u32, PaletteEntry>,
 }
 
 impl PaletteMap {
     pub fn new() -> Self {
         Self {
-            palettes: Vec::new(),
+            palettes: FxHashMap::default(),
         }
     }
 
     pub fn insert(&mut self, number: u32, palette: PaletteMember) {
-        self.palettes.push(PaletteEntry {
+        self.palettes.insert(number, PaletteEntry {
             number: number as u32,
             member: palette,
         });
     }
 
     pub fn get(&self, number: usize) -> Option<&PaletteMember> {
-        self.palettes
-            .iter()
-            .find(|entry| entry.number == number as u32)
-            .map(|entry| &entry.member)
+        self.palettes.get(&(number as u32)).map(|entry| &entry.member)
     }
 }

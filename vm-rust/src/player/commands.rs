@@ -264,7 +264,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let bitmap = member.member_type.as_bitmap().unwrap();
                 let bitmap = player.bitmap_manager.get_bitmap(bitmap.image_ref).unwrap();
                 let bitmap = &bitmap.data;
-                warn!("Bitmap hex: {}", bitmap.to_hex_string());
+                warn!("Bitmap hex: {}", bitmap.borrow().to_hex_string());
             });
         }
         PlayerVMCommand::MouseDown((x, y)) => {

@@ -89,6 +89,7 @@ export interface CastSnapshot {
 }
 
 export interface IBaseMemberSnapshot {
+  formattedType: string;
   number: number;
   name: string;
 }

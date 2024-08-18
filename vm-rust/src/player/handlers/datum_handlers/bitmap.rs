@@ -36,7 +36,7 @@ impl BitmapDatumHandlers {
   pub fn trim_whitespace(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let bitmap = player.get_datum(datum).to_bitmap_ref()?;
-      let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap).unwrap();
+      let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
       bitmap.trim_whitespace(&player.movie.cast_manager.palettes());
       Ok(datum.clone())
     })
@@ -48,10 +48,13 @@ impl BitmapDatumHandlers {
       if args.len() != 0 {
         return Err(ScriptError::new("Invalid number of arguments for createMatte".to_string()));
       }
-      let bitmap = player.get_datum(datum).to_bitmap_ref()?;
-      let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap).unwrap();
-      bitmap.create_matte(&player.movie.cast_manager.palettes());
-      let matte_arc = bitmap.matte.as_ref().unwrap().clone();
+      let matte_arc = {
+        let bitmap = player.get_datum(datum).to_bitmap_ref()?;
+        let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
+        bitmap.create_matte(&player.movie.cast_manager.palettes());
+        let matte = bitmap.matte.borrow();
+        matte.as_ref().unwrap().clone()
+      };
       Ok(player.alloc_datum(Datum::Matte(matte_arc)))
     })
   }
@@ -87,7 +90,7 @@ impl BitmapDatumHandlers {
         blend.int_value()?
       };
 
-      let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
+      let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
       match shape_type.as_str() {
         "rect" => {
           let (x1, y1, x2, y2) = rect;
@@ -114,7 +117,7 @@ impl BitmapDatumHandlers {
         let y = player.get_datum(&args[1]).int_value()?;
         let color_obj_or_int = player.get_datum(&args[2]);
 
-        if x < 0 || y < 0 || x >= bitmap.width as i32 || y >= bitmap.height as i32 {
+        if x < 0 || y < 0 || x >= bitmap.width() as i32 || y >= bitmap.height() as i32 {
           return Ok(player.alloc_datum(datum_bool(false)));
         }
         (x, y, color_obj_or_int.to_owned(), bitmap.bit_depth, &bitmap.palette_ref)
@@ -125,13 +128,13 @@ impl BitmapDatumHandlers {
         }
         let int_value = color_obj_or_int.int_value()? as u8;
         let palettes = player.movie.cast_manager.palettes();
-        let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
+        let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
         bitmap.set_pixel(x, y, (int_value, int_value, int_value), &palettes);
       } else {
         let color = color_obj_or_int.to_color_ref()?;
         let palettes = player.movie.cast_manager.palettes();
         let color = resolve_color_ref(&palettes, &color, &palette_ref);
-        let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
+        let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
         bitmap.set_pixel(x, y, color, &palettes);
       }
       Ok(player.alloc_datum(datum_bool(true)))
@@ -163,7 +166,7 @@ impl BitmapDatumHandlers {
       let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
       let palettes = player.movie.cast_manager.palettes();
       let color = resolve_color_ref(&palettes, &color_ref, &bitmap.palette_ref);
-      let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
+      let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
       bitmap.fill_rect(x1, y1, x2, y2, color, &palettes, 1.0);
       Ok(datum.clone())
     })
@@ -206,7 +209,7 @@ impl BitmapDatumHandlers {
       };
       let src_bitmap = player.bitmap_manager.get_bitmap(*src_bitmap_ref).unwrap().clone();
       let palettes = player.movie.cast_manager.palettes();
-      let dst_bitmap = player.bitmap_manager.get_bitmap_mut(*dst_bitmap_ref).unwrap();
+      let dst_bitmap = player.bitmap_manager.get_bitmap(*dst_bitmap_ref).unwrap();
       dst_bitmap.copy_pixels(&palettes, &src_bitmap, dest_rect, IntRect::from_tuple(src_rect), &param_list_concrete);
       Ok(datum.clone())
     })
@@ -221,13 +224,13 @@ impl BitmapDatumHandlers {
     let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
     let result = match prop.as_str() {
       "width" => {
-        Ok(Datum::Int(bitmap.width as i32))
+        Ok(Datum::Int(bitmap.width() as i32))
       },
       "height" => {
-        Ok(Datum::Int(bitmap.height as i32))
+        Ok(Datum::Int(bitmap.height() as i32))
       },
       "rect" => {
-        Ok(Datum::IntRect((0, 0, bitmap.width as i32, bitmap.height as i32)))
+        Ok(Datum::IntRect((0, 0, bitmap.width() as i32, bitmap.height() as i32)))
       },
       "depth" => {
         Ok(Datum::Int(bitmap.bit_depth as i32))

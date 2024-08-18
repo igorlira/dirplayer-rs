@@ -212,6 +212,10 @@ impl DirPlayer {
         reserve_player_mut(|player| player.on_script_error(&err));
         return;
       }
+      if let Err(err) = player_invoke_global_event(&"startMovie".to_string(), &vec![]).await {
+        reserve_player_mut(|player| player.on_script_error(&err));
+        return;
+      }
       run_frame_loop().await;
     });
   }

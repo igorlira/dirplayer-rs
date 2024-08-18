@@ -1,4 +1,4 @@
-use std::{sync::Arc, vec};
+use std::{cell::RefCell, rc::Rc, vec};
 
 use binary_reader::BinaryReader;
 use log::warn;
@@ -9,8 +9,7 @@ use crate::{
     director::enums::BitmapInfo,
     io::reader::DirectorExt,
     player::{
-        cast_lib::CastMemberRef,
-        handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, sprite::ColorRef,
+        cast_lib::CastMemberRef, cast_member::TextData, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, sprite::ColorRef
     },
 };
 use num::FromPrimitive;
@@ -93,17 +92,45 @@ pub fn get_system_default_palette() -> BuiltInPalette {
 }
 
 #[derive(Clone)]
+pub enum ProceduralBitmapType {
+    Text(Rc<RefCell<TextData>>, RefCell<bool>), // TextData, is_dirty
+}
+
+#[derive(Clone)]
 pub struct Bitmap {
-    pub width: u16,
-    pub height: u16,
+    pub size: RefCell<(u16, u16)>,
+    pub buffer_size: RefCell<(u16, u16)>,
     pub bit_depth: u8,
-    pub data: Vec<u8>, // RGBA
+    pub data: RefCell<Vec<u8>>, // RGBA
     pub palette_ref: PaletteRef,
-    pub matte: Option<Arc<BitmapMask>>,
+    pub matte: RefCell<Option<Rc<BitmapMask>>>,
+    pub procedural_type: Option<ProceduralBitmapType>,
 }
 
 impl Bitmap {
-    pub fn new(width: u16, height: u16, bit_depth: u8, palette_ref: PaletteRef) -> Self {
+    pub fn width(&self) -> u16 {
+        self.size.borrow().0
+    }
+
+    pub fn height(&self) -> u16 {
+        self.size.borrow().1
+    }
+
+    pub fn buffer_width(&self) -> u16 {
+        self.buffer_size.borrow().0
+    }
+
+    pub fn buffer_height(&self) -> u16 {
+        self.buffer_size.borrow().1
+    }
+
+    pub fn new(
+        width: u16, 
+        height: u16, 
+        bit_depth: u8, 
+        palette_ref: PaletteRef,
+        procedural_type: Option<ProceduralBitmapType>,
+    ) -> Self {
         let bytes_per_pixel = bit_depth as usize / 8;
         let initial_color = match bit_depth {
             16 => 255,
@@ -112,13 +139,47 @@ impl Bitmap {
         };
         let data = vec![initial_color; width as usize * height as usize * bytes_per_pixel as usize];
         Self {
-            width,
-            height,
+            size: RefCell::new((width, height)),
+            buffer_size: RefCell::new((width, height)),
             bit_depth,
-            data,
+            data: RefCell::new(data),
             palette_ref,
-            matte: None,
+            matte: RefCell::new(None),
+            procedural_type,
         }
+    }
+
+    pub fn from_data(
+        width: u16,
+        height: u16,
+        bit_depth: u8,
+        data: Vec<u8>,
+        palette_ref: PaletteRef,
+    ) -> Self {
+        Self {
+            size: RefCell::new((width, height)),
+            buffer_size: RefCell::new((width, height)),
+            bit_depth,
+            data: RefCell::new(data),
+            palette_ref,
+            matte: RefCell::new(None),
+            procedural_type: None,
+        }
+    }
+
+    pub fn set_size(&self, width: u16, height: u16, realloc: bool) {
+        let bytes_per_pixel = self.bit_depth as usize / 8;
+        self.size.replace((width, height));
+        if realloc {
+            self.data.replace(vec![0; width as usize * height as usize * bytes_per_pixel]);
+            self.buffer_size.replace((width, height));
+        }
+    }
+
+    pub fn set_size_with_data(&self, width: u16, height: u16, data: Vec<u8>) {
+        self.size.replace((width, height));
+        self.data.replace(data);
+        self.buffer_size.replace((width, height));
     }
 }
 
@@ -171,14 +232,7 @@ fn decode_bitmap_1bit(
         }
     }
 
-    Ok(Bitmap {
-        bit_depth: 8,
-        width,
-        height,
-        data: result,
-        palette_ref,
-        matte: None,
-    })
+    Ok(Bitmap::from_data(width, height, 8, result, palette_ref))
 }
 
 fn decode_bitmap_2bit(
@@ -228,14 +282,7 @@ fn decode_bitmap_2bit(
         }
     }
 
-    Ok(Bitmap {
-        bit_depth: 8,
-        width,
-        height,
-        data: result_bmp,
-        palette_ref,
-        matte: None,
-    })
+    Ok(Bitmap::from_data(width, height, 8, result_bmp, palette_ref))
 }
 
 fn decode_bitmap_4bit(
@@ -277,14 +324,7 @@ fn decode_bitmap_4bit(
         }
     }
 
-    Ok(Bitmap {
-        bit_depth: 4,
-        width,
-        height,
-        data: result_bmp,
-        palette_ref,
-        matte: None,
-    })
+    Ok(Bitmap::from_data(width, height, 4, result_bmp, palette_ref))
 }
 
 fn decode_generic_bitmap(
@@ -306,7 +346,7 @@ fn decode_generic_bitmap(
             scan_width * scan_height * num_channels as u16 * bytes_per_pixel as u16,
             data.len()
         );
-        return Ok(Bitmap::new(width, height, bit_depth, palette_ref));
+        return Ok(Bitmap::new(width, height, bit_depth, palette_ref, None));
     } else {
         let mut result =
             vec![
@@ -338,14 +378,7 @@ fn decode_generic_bitmap(
                 }
             }
         }
-        return Ok(Bitmap {
-            width,
-            height,
-            bit_depth,
-            data: result,
-            palette_ref,
-            matte: None,
-        });
+        return Ok(Bitmap::from_data(width, height, bit_depth, result, palette_ref));
     }
 }
 

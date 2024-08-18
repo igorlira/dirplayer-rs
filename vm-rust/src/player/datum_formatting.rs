@@ -74,7 +74,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
     }
     Datum::BitmapRef(bitmap) => {
       let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
-      format!("<bitmap {}x{}x{}>", bitmap.width, bitmap.height, bitmap.bit_depth)
+      format!("<bitmap {}x{}x{}>", bitmap.width(), bitmap.height(), bitmap.bit_depth)
     }
     Datum::PaletteRef(_) => {
       format!("<palette>")

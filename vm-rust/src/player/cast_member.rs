@@ -1,9 +1,9 @@
 use core::fmt;
-use std::fmt::Formatter;
+use std::{cell::RefCell, fmt::Formatter, rc::Rc};
 
 use crate::director::{chunks::cast_member::CastMemberDef, enums::{MemberType, ScriptType, ShapeInfo}, lingo::script::ScriptContext};
 
-use super::{bitmap::{bitmap::{decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef}, manager::{BitmapManager, BitmapRef}}, sprite::ColorRef, ScriptError};
+use super::{bitmap::{bitmap::{decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef, ProceduralBitmapType}, manager::{BitmapManager, BitmapRef}}, sprite::ColorRef, ScriptError};
 
 #[derive(Clone)]
 pub struct CastMember {
@@ -34,6 +34,12 @@ pub struct FieldMember {
 
 #[derive(Clone)]
 pub struct TextMember {
+  pub text_data: Rc<RefCell<TextData>>,
+  pub image_ref: BitmapRef,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextData {
   pub text: String,
   pub alignment: String,
   pub box_type: String,
@@ -81,19 +87,37 @@ impl FieldMember {
 }
 
 impl TextMember {
-  pub fn new() -> TextMember {
+  pub fn new(bitmap_manager: &mut BitmapManager) -> TextMember {
+    let width = 500;
+    let font_size = 12;
+    let text_data_rc = Rc::new(
+      RefCell::new(
+        TextData {
+          text: "".to_string(),
+          alignment: "left".to_string(),
+          word_wrap: true,
+          font: "Arial".to_string(),
+          font_style: vec!["plain".to_string()],
+          font_size,
+          fixed_line_space: 0,
+          top_spacing: 0,
+          box_type: "adjust".to_string(),
+          anti_alias: false,
+          width,
+        }
+      )
+    );
     TextMember {
-      text: "".to_string(),
-      alignment: "left".to_string(),
-      word_wrap: true,
-      font: "Arial".to_string(),
-      font_style: vec!["plain".to_string()],
-      font_size: 12,
-      fixed_line_space: 0,
-      top_spacing: 0,
-      box_type: "adjust".to_string(),
-      anti_alias: false,
-      width: 100,
+      text_data: text_data_rc.clone(),
+      image_ref: bitmap_manager.add_bitmap(
+        Bitmap::new(
+          width, 
+          font_size, 
+          8, 
+          PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
+          Some(ProceduralBitmapType::Text(text_data_rc, RefCell::new(true)))
+        )
+      ),
     }
   }
 }
@@ -138,7 +162,7 @@ pub enum CastMemberType {
   Bitmap(BitmapMember),
   Palette(PaletteMember),
   Shape(ShapeMember),
-  Unknown
+  Unknown(u32)
 }
 
 #[derive(Debug)]
@@ -161,7 +185,7 @@ impl fmt::Debug for CastMemberType {
       Self::Bitmap(_) => { write!(f, "Bitmap") }
       Self::Palette(_) => { write!(f, "Palette") }
       Self::Shape(_) => { write!(f, "Shape") }
-      Self::Unknown => { write!(f, "Unknown") }
+      Self::Unknown(id) => { write!(f, "Unknown({})", id) }
     }
   }
 }
@@ -189,7 +213,7 @@ impl CastMemberType {
       Self::Bitmap(_) => { CastMemberTypeId::Bitmap }
       Self::Palette(_) => { CastMemberTypeId::Palette }
       Self::Shape(_) => { CastMemberTypeId::Shape }
-      Self::Unknown => { CastMemberTypeId::Unknown }
+      Self::Unknown(_) => { CastMemberTypeId::Unknown }
     }
   }
 
@@ -298,8 +322,7 @@ impl CastMember {
         let bitmap_info = chunk.specific_data.bitmap_info().unwrap();
         let abmp_chunk = member_def.children
           .get(0)
-          .unwrap()
-          .as_ref();
+          .and_then(|x| x.as_ref());
         let new_bitmap_ref = if let Some(abmp_chunk) = abmp_chunk {
           let abmp_chunk = abmp_chunk
             .as_bitmap()
@@ -313,11 +336,11 @@ impl CastMember {
               // warn!("Failed to decompress bitmap. Using an empty image instead. {:?}", e);
               // TODO create error texture?
               // INVALID_BITMAP_REF
-              bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+              bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale), None))
             }
           }
         } else {
-          bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+          bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale), None))
         };
 
         CastMemberType::Bitmap(
@@ -337,7 +360,7 @@ impl CastMember {
         })
       }
       _ => { 
-        CastMemberType::Unknown
+        CastMemberType::Unknown(chunk.member_type_id)
       }
     };
     CastMember {

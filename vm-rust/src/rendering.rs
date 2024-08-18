@@ -22,7 +22,7 @@ pub struct PlayerCanvasRenderer {
     pub bitmap: Bitmap,
 }
 
-pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug_sprite_num: Option<i16>) {
+pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &Bitmap, debug_sprite_num: Option<i16>) {
     let palettes = player.movie.cast_manager.palettes();
     bitmap.clear_rect(
         0,
@@ -56,16 +56,18 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
         let member = member.unwrap();
         match &member.member_type {
             CastMemberType::Bitmap(bitmap_member) => {
-                let sprite_bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_member.image_ref);
+                let sprite_bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref);
                 if sprite_bitmap.is_none() {
                     continue;
                 }
                 let src_bitmap = sprite_bitmap.unwrap();
                 let mask = if should_matte_sprite(sprite.ink as u32) {
-                    if src_bitmap.matte.is_none() {
+                    let has_matte = src_bitmap.matte.borrow().is_some();
+                    if !has_matte {
                         src_bitmap.create_matte(&palettes);
                     }
-                    Some(src_bitmap.matte.as_ref().unwrap())
+                    let matte = src_bitmap.matte.borrow();
+                    Some(matte.as_ref().unwrap().clone())
                 } else {
                     None
                 };
@@ -85,10 +87,7 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
                     bg_color: sprite.bg_color.clone(),
                     mask_image: None,
                 };
-                if let Some(mask) = mask {
-                    let mask_bitmap: &BitmapMask = mask.borrow();
-                    params.mask_image = Some(mask_bitmap);
-                }
+                params.mask_image = mask;
                 bitmap.copy_pixels_with_params(
                     &palettes, 
                     &src_bitmap, 
@@ -113,7 +112,18 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
                 let font = player.font_manager.get_system_font().unwrap(); // TODO
                 let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
-                bitmap.draw_text(&field_member.text, font, font_bitmap, sprite.loc_h, sprite.loc_v, sprite.ink as u32, sprite.bg_color.clone(), &palettes, field_member.fixed_line_space, field_member.top_spacing);
+                bitmap.draw_text(
+                    &field_member.text, 
+                    font, 
+                    font_bitmap, 
+                    sprite.loc_h, 
+                    sprite.loc_v, 
+                    sprite.ink as u32, 
+                    sprite.bg_color.clone(), 
+                    &palettes, 
+                    field_member.fixed_line_space, 
+                    field_member.top_spacing
+                );
 
                 if player.keyboard_focus_sprite == sprite.number as i16 {
                     let cursor_x = sprite.loc_h + (sprite.width / 2);
@@ -164,7 +174,7 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
     draw_cursor(player, bitmap, &palettes);
 }
 
-fn draw_cursor(player: &DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMap) {
+fn draw_cursor(player: &DirPlayer, bitmap: &Bitmap, palettes: &PaletteMap) {
     let hovered_sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
     let cursor_ref = if let Some(hovered_sprite) = hovered_sprite {
         let hovered_sprite = player.movie.score.get_sprite(hovered_sprite as i16).unwrap();
@@ -198,7 +208,7 @@ fn draw_cursor(player: &DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMap) {
         let cursor_bitmap = player.bitmap_manager.get_bitmap(cursor_bitmap_ref).unwrap();
         let mask = if let Some(cursor_mask_bitmap_ref) = cursor_mask_bitmap_ref {
             let cursor_mask_bitmap = player.bitmap_manager.get_bitmap(cursor_mask_bitmap_ref).unwrap();
-            let mask = cursor_mask_bitmap.to_mask();
+            let mask = Rc::new(cursor_mask_bitmap.to_mask());
             Some(mask)
         } else {
             None
@@ -210,16 +220,16 @@ fn draw_cursor(player: &DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMap) {
             IntRect::from_size(
                 player.mouse_loc.0 - cursor_bitmap_member.reg_point.0 as i32,
                 player.mouse_loc.1 - cursor_bitmap_member.reg_point.1 as i32, 
-                cursor_bitmap.width as i32, 
-                cursor_bitmap.height as i32
+                cursor_bitmap.width() as i32, 
+                cursor_bitmap.height() as i32
             ), 
-            IntRect::from_size(0, 0, cursor_bitmap.width as i32, cursor_bitmap.height as i32),
+            IntRect::from_size(0, 0, cursor_bitmap.width() as i32, cursor_bitmap.height() as i32),
             &CopyPixelsParams {
                 blend: 100,
                 ink: 41,
                 bg_color: bitmap.get_bg_color_ref(),
                 color: bitmap.get_fg_color_ref(),
-                mask_image: mask.as_ref(),
+                mask_image: mask,
             }
         );
     }
@@ -278,13 +288,15 @@ impl PlayerCanvasRenderer {
                     return;
                 }
                 let sprite_bitmap = sprite_bitmap.unwrap();
-                let width = sprite_bitmap.width as u32;
-                let height = sprite_bitmap.height as u32;
-                let mut bitmap = Bitmap::new(
+                let size = sprite_bitmap.size.borrow();
+                let width = size.0 as u32;
+                let height = size.1 as u32;
+                let bitmap = Bitmap::new(
                     width as u16,
                     height as u16,
                     32,
                     PaletteRef::BuiltIn(get_system_default_palette()),
+                    None,
                 );
                 let palettes = &player.movie.cast_manager.palettes();
                 bitmap.fill_relative_rect(
@@ -297,26 +309,27 @@ impl PlayerCanvasRenderer {
                         &player.bg_color,
                         &PaletteRef::BuiltIn(get_system_default_palette()),
                     ),
-                    palettes,
+                    &palettes,
                     1.0
                 );
                 bitmap.copy_pixels(
                     &palettes,
                     sprite_bitmap,
-                    IntRect::from(0, 0, sprite_bitmap.width as i32, sprite_bitmap.height as i32),
-                    IntRect::from(0, 0, sprite_bitmap.width as i32, sprite_bitmap.height as i32),
+                    IntRect::from(0, 0, width as i32, height as i32),
+                    IntRect::from(0, 0, width as i32, height as i32),
                     &HashMap::new(),
                 );
-                bitmap.set_pixel(sprite_member.reg_point.0 as i32, sprite_member.reg_point.1 as i32, (255, 0, 255), palettes);
+                bitmap.set_pixel(sprite_member.reg_point.0 as i32, sprite_member.reg_point.1 as i32, (255, 0, 255), &palettes);
 
-                if self.preview_size.0 != bitmap.width as u32 || self.preview_size.1 != bitmap.height as u32 {
-                    self.set_preview_size(bitmap.width as u32, bitmap.height as u32);
+                if self.preview_size.0 != width as u32 || self.preview_size.1 != height as u32 {
+                    self.set_preview_size(width as u32, height as u32);
                 }
-                let slice_data = Clamped(bitmap.data.as_slice());
+                let data = bitmap.data.borrow();
+                let slice_data = Clamped(data.as_slice());
                 let image_data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
                     slice_data,
-                    bitmap.width.into(),
-                    bitmap.height.into(),
+                    width.into(),
+                    height.into(),
                 );
                 self.preview_ctx2d.set_fill_style(&JsValue::from_str("white"));
                 match image_data {
@@ -356,16 +369,15 @@ impl PlayerCanvasRenderer {
 
         let movie_width = player.movie.rect.width();
         let movie_height = player.movie.rect.height();
+        let mut bitmap_width = self.bitmap.width();
+        let mut bitmap_height = self.bitmap.height();
 
-        if self.bitmap.width != movie_width as u16 || self.bitmap.height != movie_height as u16 {
-            self.bitmap = Bitmap::new(
-                movie_width as u16,
-                movie_height as u16,
-                32,
-                PaletteRef::BuiltIn(get_system_default_palette()),
-            );
+        if bitmap_width != movie_width as u16 || bitmap_height != movie_height as u16 {
+            self.bitmap.set_size(movie_width as u16, movie_height as u16, true);
+            bitmap_width = movie_width as u16;
+            bitmap_height = movie_height as u16;
         }
-        let bitmap = &mut self.bitmap;
+        let bitmap = &self.bitmap;
         render_stage_to_bitmap(player, bitmap, self.debug_selected_channel_num);
 
         if let Some(font) = player.font_manager.get_system_font() {
@@ -384,11 +396,12 @@ impl PlayerCanvasRenderer {
                 0
             );
         }
-        let slice_data = Clamped(bitmap.data.as_slice());
+        let data = bitmap.data.borrow();
+        let slice_data = Clamped(data.as_slice());
         let image_data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
             slice_data,
-            bitmap.width.into(),
-            bitmap.height.into(),
+            bitmap_width.into(),
+            bitmap_height.into(),
         );
         self.ctx2d.set_fill_style(&JsValue::from_str("white"));
         match image_data {
@@ -542,7 +555,7 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 preview_size: (1, 1),
                 preview_member_ref: None,
                 debug_selected_channel_num: None,
-                bitmap: Bitmap::new(1, 1, 32, PaletteRef::BuiltIn(get_system_default_palette())),
+                bitmap: Bitmap::new(1, 1, 32, PaletteRef::BuiltIn(get_system_default_palette()), None),
             };
 
             *renderer_lock = Some(renderer);

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use num_derive::FromPrimitive;
 
@@ -129,7 +129,7 @@ pub enum Datum {
   PaletteRef(PaletteRef),
   Xtra(String),
   XtraInstance(String, XtraInstanceId),
-  Matte(Arc<BitmapMask>),
+  Matte(Rc<BitmapMask>),
   PlayerRef,
   MovieRef,
   SoundRef(u16),
@@ -455,7 +455,7 @@ impl Datum {
     }
   }
 
-  pub fn to_mask(&self) -> Result<&BitmapMask, ScriptError> {
+  pub fn to_mask(&self) -> Result<&Rc<BitmapMask>, ScriptError> {
     match self {
       Datum::Matte(mask) => Ok(mask),
       _ => Err(ScriptError::new("Cannot convert datum to mask".to_string())),

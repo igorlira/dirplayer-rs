@@ -176,6 +176,13 @@ impl MultiuserXtraManager {
 
                 Ok(DatumRef::Void)
             },
+            "getNumberWaitingNetMessages" => {
+                let multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_ref().unwrap() };
+                let instance = multiusr_manager.instances.get(&instance_id).unwrap();
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::Int(instance.message_queue.len() as i32)))
+                })
+            },
             "getNetMessage" => {
                 let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();

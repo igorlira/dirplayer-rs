@@ -344,13 +344,17 @@ impl JsApi {
       "type",
       &JsValue::from_str(&member.member_type.type_string()),
     );
+    member_map.str_set(
+      "formattedType", 
+      &JsValue::from_str(format!("{:?}", member.member_type).as_str()),
+    );
 
     match &member.member_type {
       CastMemberType::Field(text_data) => {
         member_map.str_set("text", &ascii_safe(&text_data.text).to_js_value());
       }
       CastMemberType::Text(text_data) => {
-        member_map.str_set("text", &ascii_safe(&text_data.text).to_js_value());
+        member_map.str_set("text", &ascii_safe(&text_data.text_data.borrow().text).to_js_value());
       }
       CastMemberType::Script(script_data) => {
         let lctx = lctx.unwrap();
@@ -362,8 +366,8 @@ impl JsApi {
       }
       CastMemberType::Bitmap(bitmap_data) => {
         let bitmap = player.bitmap_manager.get_bitmap(bitmap_data.image_ref).unwrap();
-        member_map.str_set("width", &JsValue::from(bitmap.width));
-        member_map.str_set("height", &JsValue::from(bitmap.height));
+        member_map.str_set("width", &JsValue::from(bitmap.width()));
+        member_map.str_set("height", &JsValue::from(bitmap.height()));
         member_map.str_set("bitDepth", &JsValue::from(bitmap.bit_depth));
         member_map.str_set("paletteRef", &bitmap.palette_ref.to_js_value());
         member_map.str_set("regX", &JsValue::from(bitmap_data.reg_point.0));

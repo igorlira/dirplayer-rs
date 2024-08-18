@@ -1,6 +1,6 @@
 use log::warn;
 
-use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, CastMemberTypeId, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
+use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, CastMemberTypeId, TextData, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
 
 use super::cast_member::{bitmap::BitmapMemberHandlers, field::FieldMemberHandlers, text::TextMemberHandlers};
 
@@ -18,7 +18,7 @@ pub fn borrow_member_mut<T1, F1, T2, F2>(
   })
 }
 
-fn get_text_member_line_height(text_data: &TextMember) -> u16 {
+fn get_text_member_line_height(text_data: &TextData) -> u16 {
   return text_data.font_size + 3; // TODO: Implement text line height
 }
 
@@ -44,17 +44,21 @@ impl CastMemberRefHandlers {
             Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
             _ => return Err(ScriptError::new("Cannot call charPosToLoc on non-cast-member".to_string())),
           };
-          let cast_member = player.movie.cast_manager.find_member_by_ref(&cast_member_ref).unwrap();
-          let text_data = cast_member.member_type.as_text().unwrap();
-          let char_pos = player.get_datum(&args[0]).int_value()? as u16;
-          let char_width: u16 = 7; // TODO: Implement char width
-          let line_height = get_text_member_line_height(&text_data);
-          let result = if text_data.text.is_empty() || char_pos <= 0 {
-            Datum::IntPoint((0, 0))
-          } else if char_pos > text_data.text.len() as u16 {
-            Datum::IntPoint(((char_width * (text_data.text.len() as u16)) as i32, line_height as i32))
-          } else {
-            Datum::IntPoint(((char_width * (char_pos - 1)) as i32, line_height as i32))
+          let result = {
+            let cast_member = player.movie.cast_manager.find_member_by_ref(&cast_member_ref).unwrap();
+            let text_data = &cast_member.member_type.as_text().unwrap().text_data;
+            let text_data = text_data.borrow();
+            let char_pos = player.get_datum(&args[0]).int_value()? as u16;
+            let char_width: u16 = 7; // TODO: Implement char width
+            let line_height = get_text_member_line_height(&text_data);
+            let result = if text_data.text.is_empty() || char_pos <= 0 {
+              Datum::IntPoint((0, 0))
+            } else if char_pos > text_data.text.len() as u16 {
+              Datum::IntPoint(((char_width * (text_data.text.len() as u16)) as i32, line_height as i32))
+            } else {
+              Datum::IntPoint(((char_width * (char_pos - 1)) as i32, line_height as i32))
+            };
+            result
           };
           // TODO this is a stub!
           Ok(player.alloc_datum(result))

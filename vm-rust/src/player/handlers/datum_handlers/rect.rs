@@ -100,6 +100,9 @@ impl RectDatumHandlers {
       "bottom" => {
         Ok(Datum::Int(*bottom as i32))
       },
+      "ilk" => {
+        Ok(Datum::String("rect".to_string()))
+      }
       _ => {
         Err(ScriptError::new(format!("Cannot get rect property {}", prop)))
       },
