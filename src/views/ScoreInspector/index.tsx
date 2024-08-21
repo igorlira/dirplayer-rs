@@ -41,7 +41,7 @@ export default function ScoreInspector() {
             styles.scriptHeaderCell,
             scriptRef && styles.scripted
           );
-          return <div className={cellClasses}></div>;
+          return <div key={frame} className={cellClasses}></div>;
         })}
       </div>
       <div className={styles.frameHeader} onClick={() => setIsExpanded(value => !value)}>
@@ -50,7 +50,11 @@ export default function ScoreInspector() {
             styles.frameHeaderCell,
             currentFrame === frame && styles.current
           );
-          return <div className={cellClasses}>{frame}</div>;
+          return (
+            <div key={frame} className={cellClasses}>
+              {frame}
+            </div>
+          );
         })}
       </div>
       {isExpanded && <div className={styles.channelList}>
@@ -59,7 +63,11 @@ export default function ScoreInspector() {
             let sprite = channelSnapshots[channel];
             return (
               <button
-                className={classNames([styles.channelRow, selectedChannel === channel && styles.selected])}
+                key={channel}
+                className={classNames([
+                  styles.channelRow,
+                  selectedChannel === channel && styles.selected,
+                ])}
                 onClick={() => onSelectChannel(channel)}
               >
                 ({channel}) {sprite?.displayName}
