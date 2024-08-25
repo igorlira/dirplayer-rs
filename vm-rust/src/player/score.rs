@@ -2,7 +2,7 @@ use std::cmp::max;
 
 use itertools::Itertools;
 
-use crate::{director::{file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi};
+use crate::{director::{chunks::score::FrameLabel, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi};
 
 use super::{cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 
@@ -36,6 +36,7 @@ pub struct ScoreFrameScriptReference {
 pub struct Score {
   pub channels: Vec<SpriteChannel>,
   pub script_references: Vec<ScoreFrameScriptReference>,
+  pub frame_labels: Vec<FrameLabel>,
 }
 
 fn get_sprite_rect(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
@@ -53,6 +54,7 @@ impl Score {
     Score {
       channels: vec![],
       script_references: vec![],
+      frame_labels: vec![],
     }
   }
 
@@ -103,6 +105,11 @@ impl Score {
   pub fn load_from_dir(&mut self, dir: &DirectorFile) {
     let score_chunk = dir.score.as_ref().unwrap();
     self.set_channel_count(score_chunk.frame_data.header.num_channels as usize);
+
+    let frame_labels_chunk = dir.frame_labels.as_ref();
+    if frame_labels_chunk.is_some() {
+      self.frame_labels = frame_labels_chunk.unwrap().labels.clone();
+    }
 
     for i in 0..score_chunk.frame_interval_primaries.len() {
       let primary = &score_chunk.frame_interval_primaries[i];

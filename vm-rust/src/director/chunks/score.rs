@@ -278,3 +278,48 @@ impl ScoreChunk {
     }
   }
 }
+
+#[derive(Clone)]
+pub struct FrameLabel {
+    pub frame_num: i32,
+    pub label: String,
+}
+
+pub struct FrameLabelsChunk {
+  pub labels: Vec<FrameLabel>,
+}
+
+impl FrameLabelsChunk {
+  pub fn from_reader(reader: &mut BinaryReader, _dir_version: u16) -> Result<FrameLabelsChunk, String> {
+    reader.set_endian(binary_reader::Endian::Big);
+
+    let labels_count = reader.read_u16().unwrap() as usize;
+    let label_frames: Vec<(usize, usize)> = (0..labels_count)
+      .map(|_i| {
+          let frame_num = reader.read_u16().unwrap() as usize;
+          let label_offset = reader.read_u16().unwrap() as usize;
+          (label_offset, frame_num)
+      })
+      .collect();
+
+    let labels_size: usize = reader.read_u32().unwrap() as usize;
+    let labels: Vec<FrameLabel> = (0..labels_count)
+      .map(|i| {
+          let (label_offset, frame_num) = label_frames[i];
+          let label_len = if i < labels_count - 1 {
+              label_frames[i + 1].0 - label_offset
+          } else {
+              labels_size - label_offset
+          };
+          let label_str = reader.read_string(label_len).unwrap();
+          // info!("label: {}", label_str);
+          FrameLabel {
+              frame_num: frame_num as i32,
+              label: label_str.to_string()
+          }
+      })
+      .collect();
+
+    Ok(FrameLabelsChunk { labels })
+  }
+}
