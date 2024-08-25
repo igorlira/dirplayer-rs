@@ -329,6 +329,13 @@ impl DirPlayer {
       "floatPrecision" => Ok(Datum::Int(self.float_precision as i32)),
       "doubleClick" => Ok(datum_bool(self.is_double_click)),
       "ticks" => Ok(Datum::Int(get_elapsed_ticks(self.timer_tick_start))),
+      "frameLabel" => {
+        let frame_label = self.movie.score.frame_labels.iter()
+          .filter(|&label| label.frame_num <= self.movie.current_frame as i32)
+          .max_by_key(|label| label.frame_num)
+          .map(|label| label.label.clone());
+        Ok(Datum::String(frame_label.unwrap_or_else(|| "0".to_string())))
+      },
       _ => self.movie.get_prop(prop),
     }
   }
