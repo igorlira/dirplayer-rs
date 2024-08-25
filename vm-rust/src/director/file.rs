@@ -15,6 +15,7 @@ use crate::director::chunks::config::ConfigChunk;
 use crate::utils::log_i;
 
 use super::cast::CastDef;
+use super::chunks::score::FrameLabelsChunk;
 use super::chunks::Chunk;
 use super::chunks::ChunkContainer;
 use super::chunks::ChunkInfo;
@@ -38,6 +39,7 @@ pub struct DirectorFile {
   pub casts: Vec<CastDef>,
   pub config: ConfigChunk,
   pub score: Option<ScoreChunk>,
+  pub frame_labels: Option<FrameLabelsChunk>,
 }
 
 // macro_rules! console_log {
@@ -122,6 +124,8 @@ impl DirectorFile {
 
     let score = get_score_chunk(reader, chunk_container, &mut rifx);
     
+    let frame_labels = get_frame_labels_chunk(reader, chunk_container, &mut rifx);
+
     return Ok(DirectorFile { 
       base_path, 
       file_name, 
@@ -129,7 +133,8 @@ impl DirectorFile {
       casts,
       cast_entries,
       config,
-      score
+      score,
+      frame_labels,
     });
   }
 }
@@ -390,6 +395,26 @@ pub fn get_script_names_chunk(
     return Some(names);
   } else {
     panic!("Not a script names chunk");
+  }
+}
+
+pub fn get_frame_labels_chunk(
+  reader: &mut BinaryReader, 
+  chunk_container: &mut ChunkContainer,
+  rifx: &mut RIFXReaderContext,
+) -> Option<FrameLabelsChunk> {
+  let chunk: Option<Chunk> = get_first_chunk(
+    reader,
+    chunk_container,
+    rifx,
+    FOURCC("VWLB"),
+  );
+  if chunk.is_none() {
+    return None;
+  } else if let Chunk::FrameLabels(labels) = chunk.unwrap() {
+    return Some(labels);
+  } else {
+    panic!("Not a frame labels chunk");
   }
 }
 

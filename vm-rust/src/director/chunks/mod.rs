@@ -22,6 +22,7 @@ use binary_reader::{Endian, BinaryReader};
 use config::ConfigChunk;
 use imap::InitialMapChunk;
 use key_table::KeyTableChunk;
+use score::FrameLabelsChunk;
 
 use self::{bitmap::BitmapChunk, cast::CastChunk, cast_list::CastListChunk, cast_member::CastMemberChunk, lctx::ScriptContextChunk, palette::PaletteChunk, score::ScoreChunk, script::ScriptChunk, script_names::ScriptNamesChunk, text::TextChunk};
 use super::{guid::MoaID, utils::{fourcc_to_string, FOURCC}, rifx::RIFXReaderContext};
@@ -34,17 +35,18 @@ pub struct MemoryMapChunkProps {
 
 #[allow(dead_code)]
 pub enum Chunk {
-	Cast(CastChunk),
+  Cast(CastChunk),
   CastList(CastListChunk),
-	CastMember(CastMemberChunk),
-	CastInfo(CastInfoChunkProps),
-	Config(ConfigChunk),
-	InitialMap(InitialMapChunk),
-	KeyTable(KeyTableChunk),
-	MemoryMap(MemoryMapChunkProps),
-	Script(ScriptChunk),
-	ScriptContext(ScriptContextChunk),
-	ScriptNames(ScriptNamesChunk),
+  CastMember(CastMemberChunk),
+  CastInfo(CastInfoChunkProps),
+  Config(ConfigChunk),
+  InitialMap(InitialMapChunk),
+  KeyTable(KeyTableChunk),
+  MemoryMap(MemoryMapChunkProps),
+  Script(ScriptChunk),
+  ScriptContext(ScriptContextChunk),
+  ScriptNames(ScriptNamesChunk),
+  FrameLabels(FrameLabelsChunk),
   Score(ScoreChunk),
   Text(TextChunk),
   Bitmap(BitmapChunk),
@@ -186,6 +188,13 @@ pub fn make_chunk(
       return Ok(
         Chunk::Score(
           ScoreChunk::read(&mut chunk_reader, version).unwrap()
+        )
+      )
+    }
+    "VWLB" => {
+      return Ok(
+          Chunk::FrameLabels(
+            FrameLabelsChunk::from_reader(&mut chunk_reader, version).unwrap()
         )
       )
     }
