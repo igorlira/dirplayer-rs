@@ -16,4 +16,4 @@ jobs:
     - uses: actions/checkout@v4
     - name: Build
       working-directory: ./vm-rust
-      run: cargo fetch && wasm-pack build --target web
+      run: cargo install wasm-pack && cargo fetch && wasm-pack build --target web
