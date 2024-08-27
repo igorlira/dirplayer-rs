@@ -26,7 +26,7 @@ impl SpriteChannel {
 }
 
 #[derive(Clone)]
-pub struct ScoreFrameScriptReference {
+pub struct ScoreBehaviorReference {
   pub start_frame: u32,
   pub end_frame: u32,
   pub cast_lib: u16,
@@ -35,7 +35,7 @@ pub struct ScoreFrameScriptReference {
 
 pub struct Score {
   pub channels: Vec<SpriteChannel>,
-  pub script_references: Vec<ScoreFrameScriptReference>,
+  pub script_references: Vec<ScoreBehaviorReference>,
   pub frame_labels: Vec<FrameLabel>,
 }
 
@@ -58,7 +58,7 @@ impl Score {
     }
   }
 
-  pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreFrameScriptReference> {
+  pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreBehaviorReference> {
     return self.script_references.iter()
       .find(|x| frame >= x.start_frame && frame <= x.end_frame)
       .map(|x| x.clone())
@@ -120,7 +120,7 @@ impl Score {
       };
 
       self.script_references.push(
-        ScoreFrameScriptReference {
+        ScoreBehaviorReference {
           start_frame: primary.start_frame, 
           end_frame: primary.end_frame, 
           cast_lib: secondary.cast_lib, 
