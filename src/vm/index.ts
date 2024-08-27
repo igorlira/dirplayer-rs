@@ -141,7 +141,7 @@ export interface IUnknownMemberSnapshot {
   type: 'unknown'
 }
 
-export interface IScoreFrameScriptReference {
+export interface IScoreBehaviorReference {
   startFrame: number
   endFrame: number
   castLib: number
@@ -155,7 +155,7 @@ export interface ScoreSpriteSnapshot {
 
 export interface ScoreSnapshot {
   channelCount: number,
-  scriptReferences: IScoreFrameScriptReference[]
+  scriptReferences: IScoreBehaviorReference[]
 }
 
 export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IUnknownMemberSnapshot)
