@@ -231,9 +231,9 @@ impl GetSetBytecodeHandler {
 
   pub fn get_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
-      let param_number = player.get_ctx_current_bytecode(ctx).obj as usize;
+      let param_number = player.get_ctx_current_bytecode(ctx).obj as u32 / get_current_variable_multiplier(player, ctx);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      let result = scope.args.get(param_number).unwrap_or(&DatumRef::Void).clone();
+      let result = scope.args.get(param_number as usize).unwrap_or(&DatumRef::Void).clone();
       scope.stack.push(result);
     });
     Ok(HandlerExecutionResult::Advance)
@@ -241,10 +241,10 @@ impl GetSetBytecodeHandler {
 
   pub fn set_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
-      let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as usize;
+      let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as u32 / get_current_variable_multiplier(player, ctx);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let arg_count = scope.args.len();
-      let arg_index = bytecode_obj;
+      let arg_index = bytecode_obj as usize;
       let value_ref = scope.stack.pop().unwrap();
 
       if arg_index < scope.args.len() {
