@@ -4,7 +4,7 @@ use itertools::Itertools;
 
 use crate::{director::{chunks::score::FrameLabel, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi};
 
-use super::{cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
+use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 
 #[allow(dead_code)]
 pub struct SpriteChannel {
@@ -236,6 +236,13 @@ pub fn sprite_get_prop(
         )
       )
     ),
+    "scriptNum" => {
+      let script_num = sprite
+        .and_then(|sprite| sprite.script_instance_list.first())
+        .map(|script_instance_ref| player.allocator.get_script_instance(&script_instance_ref))
+        .map(|script_instance| script_instance.script.cast_member);
+      Ok(Datum::Int(script_num.unwrap_or(0)))
+    },
     _ => Err(ScriptError::new(format!("Cannot get prop {} of sprite", prop_name))),
   }
 }
