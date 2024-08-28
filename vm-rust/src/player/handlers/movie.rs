@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError}};
+use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, events::player_invoke_global_event, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError}};
 
 pub struct MovieHandlers {}
 
@@ -77,6 +77,15 @@ impl MovieHandlers {
       let sprite_number = player.get_datum(&args[0]).int_value()?;
       Ok(player.alloc_datum(Datum::SpriteRef(sprite_number as i16)))
     })
+  }
+
+  pub async fn send_all_sprites(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    let (message, remaining_args) = reserve_player_mut(|player| {
+      let message = player.get_datum(&args[0]).symbol_value().unwrap();
+      let remaining_args = &args[1..].to_vec();
+      (message.clone(), remaining_args.clone())
+    });
+    player_invoke_global_event(&message, &remaining_args).await
   }
 
   pub fn external_param_value(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
