@@ -33,7 +33,7 @@ export default function ScoreInspector() {
     <div className={styles.container}>
       <div className={styles.scriptHeader}>
         {range(1, framesToRender + 1).map((frame) => {
-          const scriptRef = score?.scriptReferences?.find(
+          const scriptRef = score?.behaviorReferences?.find(
             (element) =>
               frame >= element.startFrame && frame <= element.endFrame
           );

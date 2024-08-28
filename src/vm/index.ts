@@ -155,7 +155,7 @@ export interface ScoreSpriteSnapshot {
 
 export interface ScoreSnapshot {
   channelCount: number,
-  scriptReferences: IScoreBehaviorReference[]
+  behaviorReferences: IScoreBehaviorReference[]
 }
 
 export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IUnknownMemberSnapshot)

@@ -35,7 +35,7 @@ pub struct ScoreBehaviorReference {
 
 pub struct Score {
   pub channels: Vec<SpriteChannel>,
-  pub script_references: Vec<ScoreBehaviorReference>,
+  pub behavior_references: Vec<ScoreBehaviorReference>,
   pub frame_labels: Vec<FrameLabel>,
 }
 
@@ -53,13 +53,13 @@ impl Score {
   pub fn empty() -> Score {
     Score {
       channels: vec![],
-      script_references: vec![],
+      behavior_references: vec![],
       frame_labels: vec![],
     }
   }
 
   pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreBehaviorReference> {
-    return self.script_references.iter()
+    return self.behavior_references.iter()
       .find(|x| frame >= x.start_frame && frame <= x.end_frame)
       .map(|x| x.clone())
   }
@@ -119,7 +119,7 @@ impl Score {
         continue;
       };
 
-      self.script_references.push(
+      self.behavior_references.push(
         ScoreBehaviorReference {
           start_frame: primary.start_frame, 
           end_frame: primary.end_frame, 
