@@ -153,6 +153,51 @@ lazy_static! {
     (0x0a, "abbr date".to_owned()),
     (0x0b, "long date".to_owned()),
   ]);
+
+  pub static ref SPRITE_PROP_NAMES: HashMap<u16, String> = HashMap::from([
+    (0x01, "type".to_owned()),
+    (0x02, "backColor".to_owned()),
+    (0x03, "bottom".to_owned()),
+    (0x04, "castNum".to_owned()),
+    (0x05, "constraint".to_owned()),
+    (0x06, "cursor".to_owned()),
+    (0x07, "foreColor".to_owned()),
+    (0x08, "height".to_owned()),
+    (0x09, "immediate".to_owned()),
+    (0x0a, "ink".to_owned()),
+    (0x0b, "left".to_owned()),
+    (0x0c, "lineSize".to_owned()),
+    (0x0d, "locH".to_owned()),
+    (0x0e, "locV".to_owned()),
+    (0x0f, "movieRate".to_owned()),
+    (0x10, "movieTime".to_owned()),
+    (0x11, "pattern".to_owned()),
+    (0x12, "puppet".to_owned()),
+    (0x13, "right".to_owned()),
+    (0x14, "startTime".to_owned()),
+    (0x15, "stopTime".to_owned()),
+    (0x16, "stretch".to_owned()),
+    (0x17, "top".to_owned()),
+    (0x18, "trails".to_owned()),
+    (0x19, "visible".to_owned()),
+    (0x1a, "volume".to_owned()),
+    (0x1b, "width".to_owned()),
+    (0x1c, "blend".to_owned()),
+    (0x1d, "scriptNum".to_owned()),
+    (0x1e, "moveableSprite".to_owned()),
+    (0x1f, "editableText".to_owned()),
+    (0x20, "scoreColor".to_owned()),
+    (0x21, "loc".to_owned()),
+    (0x22, "rect".to_owned()),
+    (0x23, "memberNum".to_owned()),
+    (0x24, "castLibNum".to_owned()),
+    (0x25, "scriptNum".to_owned()),
+    (0x26, "scriptInstanceList".to_owned()),
+    (0x27, "currentTime".to_owned()),
+    (0x28, "mostRecentCuePoint".to_owned()),
+    (0x29, "tweened".to_owned()),
+    (0x2a, "name".to_string()),
+  ]);
 }
 
 pub fn get_opcode_name(opcode: &OpCode) -> String {
@@ -165,4 +210,8 @@ pub fn get_anim_prop_name(name_id: u16) -> String {
 
 pub fn get_anim2_prop_name(name_id: u16) -> String {
   ANIM2_PROP_NAMES.get(&name_id).unwrap().to_owned()
+}
+
+pub fn get_sprite_prop_name(name_id: u16) -> String {
+  SPRITE_PROP_NAMES.get(&name_id).unwrap().to_owned()
 }
