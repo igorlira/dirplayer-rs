@@ -44,9 +44,7 @@ impl ScriptDatumHandlers {
       let lctx: &crate::director::lingo::script::ScriptContext = get_lctx_for_script(player, script).unwrap();
       let instance = ScriptInstance::new(instance_id, script_ref.to_owned(), script, lctx);
       let instance_ref = player.allocator.alloc_script_instance(instance);
-      let datum_ref = reserve_player_mut(|player| {
-        player.alloc_datum(Datum::ScriptInstanceRef(instance_ref.clone()))
-      });
+      let datum_ref = player.alloc_datum(Datum::ScriptInstanceRef(instance_ref.clone()));
       (instance_ref, datum_ref)
     })
   }
