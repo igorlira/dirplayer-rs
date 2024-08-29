@@ -1,4 +1,4 @@
-use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, MOVIE_PROP_NAMES}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
+use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, movie_prop_names}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -123,7 +123,7 @@ impl GetSetBytecodeHandler {
         0x00 => {
           if property_id <= 0x0b { 
             // movie prop
-            let prop_name = MOVIE_PROP_NAMES.get(&(property_id as u16)).unwrap();
+            let prop_name = movie_prop_names().get(&(property_id as u16)).unwrap();
             GetSetUtils::set_the_built_in_prop(player, ctx, prop_name, value)?;
             Ok(HandlerExecutionResult::Advance)
           } else { 
@@ -303,11 +303,11 @@ impl GetSetBytecodeHandler {
       };
       let prop_id = player.get_datum(&prop_id).int_value()?;
       let prop_type = player.get_ctx_current_bytecode(ctx).obj;
-      let max_movie_prop_id = *MOVIE_PROP_NAMES.keys().max().unwrap();
+      let max_movie_prop_id = *movie_prop_names().keys().max().unwrap();
 
       let result = if prop_type == 0 && prop_id <= max_movie_prop_id as i32 {
         // movie prop
-        let prop_name = MOVIE_PROP_NAMES.get(&(prop_id as u16)).unwrap();
+        let prop_name = movie_prop_names().get(&(prop_id as u16)).unwrap();
         GetSetUtils::get_the_built_in_prop(player, ctx, prop_name)
       } else if prop_type == 0 {
         // last chunk

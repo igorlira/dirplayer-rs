@@ -32,7 +32,7 @@ pub mod allocator;
 pub mod datum_ref;
 pub mod script_ref;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::{Arc, OnceLock}, time::Duration};
 
 use allocator::{DatumAllocator, DatumAllocatorTrait, ResetableAllocator};
 use datum_ref::DatumRef;
@@ -43,7 +43,6 @@ use fxhash::FxHashMap;
 use log::warn;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
-use lazy_static::lazy_static;
 use profiling::{end_profiling, start_profiling};
 use scope::ScopeResult;
 use script_ref::ScriptInstanceRef;
@@ -765,9 +764,10 @@ pub async fn player_is_playing() -> bool {
 static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
 static mut PLAYER_EVENT_TX: Option<Sender<PlayerVMEvent>> = None;
 pub static mut PLAYER_OPT: Option<DirPlayer> = None;
-lazy_static! {
-  // pub static ref PLAYER_LOCK: RwLock<Option<DirPlayer>> = RwLock::new(None);
-  pub static ref PLAYER_SEMAPHONE: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+
+pub fn get_player_semaphone() -> &'static Mutex<()> {
+  static MAP: OnceLock<Mutex<()>> = OnceLock::new();
+  MAP.get_or_init(|| Mutex::new(()))
 }
 
 pub fn init_player() {

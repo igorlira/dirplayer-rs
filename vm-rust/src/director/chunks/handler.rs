@@ -1,7 +1,7 @@
 use binary_reader::BinaryReader;
 use fxhash::FxHashMap;
 
-use crate::director::lingo::{constants::OPCODE_NAMES, opcode::OpCode, script::ScriptContext};
+use crate::director::lingo::{constants::opcode_names, opcode::OpCode, script::ScriptContext};
 
 #[allow(dead_code)]
 pub struct HandlerRecord {
@@ -89,7 +89,7 @@ pub fn get_opcode_name(id: u16) -> String {
   } else {
     id
   };
-  let it = OPCODE_NAMES.get(&OpCode::from(real_id));
+  let it = opcode_names().get(&OpCode::from(real_id));
   return it.unwrap_or(&"UNKOWN_BYTECODE".to_string()).to_owned()
 }
 
