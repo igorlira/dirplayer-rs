@@ -765,7 +765,7 @@ static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
 static mut PLAYER_EVENT_TX: Option<Sender<PlayerVMEvent>> = None;
 pub static mut PLAYER_OPT: Option<DirPlayer> = None;
 
-pub fn get_player_semaphone() -> &'static Mutex<()> {
+pub fn player_semaphone() -> &'static Mutex<()> {
   static MAP: OnceLock<Mutex<()>> = OnceLock::new();
   MAP.get_or_init(|| Mutex::new(()))
 }

@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-    cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils, player_call_script_handler, reserve_player_ref, script::ScriptInstanceId, script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX, get_player_semaphone
+    cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils, player_call_script_handler, reserve_player_ref, script::ScriptInstanceId, script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX, player_semaphone
 };
 
 pub enum PlayerVMEvent {
@@ -249,5 +249,5 @@ pub fn player_unwrap_result(result: Result<DatumRef, ScriptError>) -> DatumRef {
 }
 
 pub async fn player_wait_available() {
-    get_player_semaphone().lock().await;
+    player_semaphone().lock().await;
 }

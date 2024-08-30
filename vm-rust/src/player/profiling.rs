@@ -76,24 +76,24 @@ impl PlayerProfiler {
   }
 }
 
-fn get_profiler() -> &'static Mutex<PlayerProfiler> {
+fn profiler() -> &'static Mutex<PlayerProfiler> {
   static MAP: OnceLock<Mutex<PlayerProfiler>> = OnceLock::new();
   MAP.get_or_init(|| Mutex::new(PlayerProfiler::new()))
 }
 
 #[allow(dead_code)]
 pub fn start_profiling(name: String) -> u32 {
-  let mut profiler = get_profiler().lock().unwrap();
+  let mut profiler = profiler().lock().unwrap();
   profiler.start(name)
 }
 
 #[allow(dead_code)]
 pub fn end_profiling(id: u32) {
-  let mut profiler = get_profiler().lock().unwrap();
+  let mut profiler = profiler().lock().unwrap();
   profiler.end(id)
 }
 
 pub fn get_profiler_report() -> String {
-  let profiler = get_profiler().lock().unwrap();
+  let profiler = profiler().lock().unwrap();
   profiler.report()
 }
