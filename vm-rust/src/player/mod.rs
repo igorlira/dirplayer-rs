@@ -304,8 +304,8 @@ impl DirPlayer {
     return self.allocator.alloc_datum(datum).unwrap()
   }
 
-  fn get_movie_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
-    match prop.as_str() {
+  fn get_movie_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
+    match prop {
       "stage" => Ok(Datum::Stage),
       "time" => Ok(Datum::String(Local::now().format("%H:%M %p").to_string())),
       "milliSeconds" => Ok(Datum::Int(chrono::Local::now().signed_duration_since(self.start_time).num_milliseconds() as i32)),
@@ -359,7 +359,7 @@ impl DirPlayer {
 
   fn get_anim_prop(&self, prop_id: u16) -> Result<Datum, ScriptError> {
     let prop_name = get_anim_prop_name(prop_id);
-    match prop_name.as_str() {
+    match prop_name {
       "colorDepth" => Ok(Datum::Int(32)),
       "timer" => Ok(Datum::Int(get_elapsed_ticks(self.timer_tick_start))),
       _ => Err(ScriptError::new(format!("Unknown anim prop {}", prop_name)))
@@ -368,14 +368,14 @@ impl DirPlayer {
 
   fn get_anim2_prop(&self, prop_id: u16) -> Result<Datum, ScriptError> {
     let prop_name = get_anim2_prop_name(prop_id);
-    match prop_name.as_str() {
+    match prop_name {
       "number of castLibs" => Ok(Datum::Int(self.movie.cast_manager.casts.len() as i32)),
       _ => Err(ScriptError::new(format!("Unknown anim2 prop {}", prop_name)))
     }
   }
 
-  fn set_movie_prop(&mut self, prop: &String, value: Datum) -> Result<(), ScriptError> {
-    match prop.as_str() {
+  fn set_movie_prop(&mut self, prop: &str, value: Datum) -> Result<(), ScriptError> {
+    match prop {
       "keyboardFocusSprite" => {
         // TODO switch focus
         self.keyboard_focus_sprite = value.int_value()? as i16;

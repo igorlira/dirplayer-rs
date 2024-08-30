@@ -83,14 +83,17 @@ impl Bytecode {
   }
 }
 
-pub fn get_opcode_name(id: u16) -> String {
+pub fn get_opcode_name(id: u16) -> Box<str> {
   let real_id = if id >= 0x40 {
     0x40 + (id % 0x40)
   } else {
     id
   };
-  let it = opcode_names().get(&OpCode::from(real_id));
-  return it.unwrap_or(&"UNKOWN_BYTECODE".to_string()).to_owned()
+  if let Some(r) = opcode_names().get(&OpCode::from(real_id)) {
+    r.to_owned()
+  } else {
+    "UNKOWN_BYTECODE".into()
+  }
 }
 
 #[derive(Clone)]

@@ -10,9 +10,9 @@ impl GetSetUtils {
   pub fn get_the_built_in_prop(
       player: &mut DirPlayer,
       ctx: &BytecodeHandlerContext,
-      prop_name: &String,
+      prop_name: &str,
   ) -> Result<DatumRef, ScriptError> {
-      match prop_name.as_str() {
+      match prop_name {
         "paramCount" => Ok(player.alloc_datum(Datum::Int(player.scopes.get(ctx.scope_ref).unwrap().args.len() as i32))),
         "result" => Ok(player.last_handler_result.clone()),
         _ => Ok(player.alloc_datum(player.get_movie_prop(prop_name)?))
@@ -22,10 +22,10 @@ impl GetSetUtils {
   pub fn set_the_built_in_prop(
       player: &mut DirPlayer,
       _ctx: &BytecodeHandlerContext,
-      prop_name: &String,
+      prop_name: &str,
       value: Datum,
   ) -> Result<(), ScriptError> {
-      match prop_name.as_str() {
+      match prop_name {
         _ => player.set_movie_prop(prop_name, value)
       }
   }
