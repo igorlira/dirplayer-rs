@@ -14,6 +14,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - name: Install `wasm-pack`
+      working-directory: ./vm-rust
+      run: cargo install wasm-pack
+    - name: Fetch
+      working-directory: ./vm-rust
+      run: cargo fetch
+    - name: Test (Verbose)
+      working-directory: ./vm-rust
+      run: cargo test --verbose
     - name: Build
       working-directory: ./vm-rust
-      run: cargo install wasm-pack && cargo fetch && wasm-pack build --target web
+      run: wasm-pack build --target web
