@@ -43,35 +43,35 @@ impl Bytecode {
 
     let mut writer = String::new();
     writer.push_str(&Self::pos_to_str(self.pos).as_str());
-    writer.push_str(" ");
-    writer.push_str(&opcode_name);
+    writer.push(' ');
+    writer.push_str(opcode_name);
     match self.opcode {
       OpCode::Jmp | OpCode::JmpIfZ => {
-        writer.push_str(" ");
+        writer.push(' ');
         writer.push_str(&Self::pos_to_str(self.pos + self.obj as usize));
       }
       OpCode::EndRepeat => {
-        writer.push_str(" ");
+        writer.push(' ');
         writer.push_str(&Self::pos_to_str(self.pos - self.obj as usize));
       }
       OpCode::ObjCall | OpCode::ExtCall | OpCode::GetObjProp | OpCode::SetObjProp | OpCode::PushSymb | OpCode::GetProp | OpCode::GetChainedProp => {
         let name = lctx.names.get(self.obj as usize).unwrap();
-        writer.push_str(" ");
+        writer.push(' ');
         writer.push_str(name);
       }
       OpCode::SetLocal | OpCode::GetLocal => {
         let name_id = handler.local_name_ids.get(self.obj as usize).map(|x| *x as usize);
         let name = name_id.and_then(|name_id| lctx.names.get(name_id).map(|x| x.as_str())).unwrap_or("UNKOWN_LOCAL");
-        writer.push_str(" ");
+        writer.push(' ');
         writer.push_str(name);
       }
       OpCode::PushFloat32 => {
-        writer.push_str(" ");
+        writer.push(' ');
         writer.push_str("[TODO pushfloat32]");
       }
       _ => {
         if op_id > 0x40 {
-          writer.push_str(" ");
+          writer.push(' ');
           writer.push_str(self.obj.to_string().as_str())
         }
       }
@@ -83,16 +83,15 @@ impl Bytecode {
   }
 }
 
-pub fn get_opcode_name(id: u16) -> Box<str> {
-  let real_id = if id >= 0x40 {
-    0x40 + (id % 0x40)
+pub fn get_opcode_name(mut id: u16) -> &'static str {
+  if id >= 0x40 {
+    id += 0x40 + (id & 0x40);
+  }
+  
+  if let Some(r) = opcode_names().get(&OpCode::from(id)) {
+    r.as_ref()
   } else {
-    id
-  };
-  if let Some(r) = opcode_names().get(&OpCode::from(real_id)) {
-    r.to_owned()
-  } else {
-    "UNKOWN_BYTECODE".into()
+    "UNKOWN_BYTECODE"
   }
 }
 
