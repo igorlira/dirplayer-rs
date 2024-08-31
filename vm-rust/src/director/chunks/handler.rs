@@ -85,7 +85,7 @@ impl Bytecode {
 
 pub fn get_opcode_name(mut id: u16) -> &'static str {
   if id >= 0x40 {
-    id += 0x40 + (id & 0x40);
+    id = 0x40 + (id % 0x40);
   }
   
   if let Some(r) = opcode_names().get(&OpCode::from(id)) {
