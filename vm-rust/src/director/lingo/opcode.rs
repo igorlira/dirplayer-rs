@@ -2,8 +2,8 @@ use num_derive::{FromPrimitive, ToPrimitive};
 
 #[derive(Copy, Clone, FromPrimitive, ToPrimitive, PartialEq, Eq, Hash)]
 pub enum OpCode {
-  // single-byte
-  Invalid = 0x0,
+	// single-byte
+	Invalid = 0x0,
 	Ret = 0x01,
 	RetFactory = 0x02,
 	PushZero = 0x03,
@@ -84,12 +84,12 @@ pub enum OpCode {
 	NewObj = 0x73
 }
 
-impl OpCode {
-  pub fn from(value: u16) -> OpCode {
-    if let Some(result) = num::FromPrimitive::from_u16(value) {
+impl From<u16> for OpCode {
+	fn from(value: u16) -> Self {
+		if let Some(result) = num::FromPrimitive::from_u16(value) {
 			result
 		} else {
 			panic!("Invalid OpCode: {}", value)
 		}
-  }
+	}
 }

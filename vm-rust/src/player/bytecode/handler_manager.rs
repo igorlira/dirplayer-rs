@@ -21,7 +21,7 @@ pub struct BytecodeHandlerContext {
 pub struct StaticBytecodeHandlerManager {}
 impl StaticBytecodeHandlerManager {
     #[inline(always)]
-    pub fn call_sync_handler(opcode: &OpCode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn call_sync_handler(opcode: OpCode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         match opcode {
             OpCode::Add => ArithmeticsBytecodeHandler::add(ctx),
             OpCode::PushInt8 => StackBytecodeHandler::push_int(ctx),
@@ -81,14 +81,12 @@ impl StaticBytecodeHandlerManager {
             OpCode::PushChunkVarRef => StackBytecodeHandler::push_chunk_var_ref(ctx),
             OpCode::DeleteChunk => StringBytecodeHandler::delete_chunk(ctx),
             OpCode::GetTopLevelProp => GetSetBytecodeHandler::get_top_level_prop(ctx),
-            _ => Err(ScriptError::new(
-                format_args!(
-                    "No handler for opcode {} ({:#04x})",
-                    get_opcode_name(&opcode),
-                    num::ToPrimitive::to_u16(opcode).unwrap()
-                )
-                .to_string(),
-            )),
+            _ => {
+                let prim = num::ToPrimitive::to_u16(&opcode).unwrap();
+                let name = get_opcode_name(opcode);
+                let fmt = format!("No handler for opcode {name} ({prim:#04x})");
+                Err(ScriptError::new(fmt))
+            },
         }
     }
 
@@ -105,21 +103,19 @@ impl StaticBytecodeHandlerManager {
     }
 
     #[inline(always)]
-    pub async fn call_async_handler(opcode: &OpCode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub async fn call_async_handler(opcode: OpCode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         match opcode {
             OpCode::NewObj => StackBytecodeHandler::new_obj(&ctx).await,
             OpCode::ExtCall => FlowControlBytecodeHandler::ext_call(&ctx).await,
             OpCode::ObjCall => FlowControlBytecodeHandler::obj_call(&ctx).await,
             OpCode::LocalCall => FlowControlBytecodeHandler::local_call(&ctx).await,
             OpCode::SetObjProp => GetSetBytecodeHandler::set_obj_prop(&ctx).await,
-            _ => Err(ScriptError::new(
-                format_args!(
-                    "No handler for opcode {} ({:#04x})",
-                    get_opcode_name(&opcode),
-                    num::ToPrimitive::to_u16(opcode).unwrap()
-                )
-                .to_string(),
-            )),
+            _ => {
+                let prim = num::ToPrimitive::to_u16(&opcode).unwrap();
+                let name = get_opcode_name(opcode);
+                let fmt = format!("No handler for opcode {name} ({prim:#04x})");
+                Err(ScriptError::new(fmt))
+            },
         }
     }
 }
@@ -140,8 +136,8 @@ pub async fn player_execute_bytecode<'a>(
     };
 
     if StaticBytecodeHandlerManager::has_async_handler(&opcode) {
-        StaticBytecodeHandlerManager::call_async_handler(&opcode, ctx).await
+        StaticBytecodeHandlerManager::call_async_handler(opcode, ctx).await
     } else {
-        StaticBytecodeHandlerManager::call_sync_handler(&opcode, ctx)
+        StaticBytecodeHandlerManager::call_sync_handler(opcode, ctx)
     }
 }

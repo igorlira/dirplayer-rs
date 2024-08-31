@@ -222,20 +222,20 @@ pub fn sprite_prop_names() -> &'static HashMap<u16, Box<str>> {
 }
 
 #[inline]
-pub fn get_opcode_name(opcode: &OpCode) -> &str {
-  opcode_names().get(opcode).unwrap().as_ref()
+pub fn get_opcode_name(opcode: OpCode) -> &'static str {
+  opcode_names().get(&opcode).unwrap().as_ref()
 }
 
 #[inline]
-pub fn get_anim_prop_name<'a>(name_id: u16) -> &'a str {
+pub fn get_anim_prop_name(name_id: u16) -> &'static str {
   anim_prop_names().get(&name_id).unwrap().as_ref()
 }
 
 #[inline]
-pub fn get_anim2_prop_name<'a>(name_id: u16) -> &'a str {
+pub fn get_anim2_prop_name(name_id: u16) -> &'static str {
   anim2_prop_names().get(&name_id).unwrap().as_ref()
 }
 
-pub fn get_sprite_prop_name<'a>(name_id: u16) -> &'a str {
+pub fn get_sprite_prop_name(name_id: u16) -> &'static str {
   sprite_prop_names().get(&name_id).unwrap().as_ref()
 }
