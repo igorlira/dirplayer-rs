@@ -331,14 +331,14 @@ impl GetSetBytecodeHandler {
         Ok(player.alloc_datum(Datum::String(last_chunk)))
       } else if prop_type == 0x06 {
         // sprite prop
-        let prop_name = sprite_prop_names.get(&(prop_id as u16));
+        let prop_name = sprite_prop_names().get(&(prop_id as u16));
         if prop_name.is_some() {
           let datum_ref = {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.pop().unwrap()
           };
           let sprite_num = player.get_datum(&datum_ref).int_value()?;
-          let result = sprite_get_prop(player, sprite_num as i16, &(prop_name.unwrap().into()))?; 
+          let result = sprite_get_prop(player, sprite_num as i16, prop_name.unwrap())?; 
           Ok(player.alloc_datum(result))
         } else {
           Err(ScriptError::new(format!("kOpGet sprite prop {} not implemented", prop_id)))
