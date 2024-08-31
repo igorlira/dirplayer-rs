@@ -4,7 +4,7 @@ use itertools::Itertools;
 
 use crate::{director::{chunks::score::FrameLabel, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi};
 
-use super::{cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
+use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 
 #[allow(dead_code)]
 pub struct SpriteChannel {
@@ -26,7 +26,7 @@ impl SpriteChannel {
 }
 
 #[derive(Clone)]
-pub struct ScoreFrameScriptReference {
+pub struct ScoreBehaviorReference {
   pub start_frame: u32,
   pub end_frame: u32,
   pub cast_lib: u16,
@@ -35,7 +35,7 @@ pub struct ScoreFrameScriptReference {
 
 pub struct Score {
   pub channels: Vec<SpriteChannel>,
-  pub script_references: Vec<ScoreFrameScriptReference>,
+  pub behavior_references: Vec<ScoreBehaviorReference>,
   pub frame_labels: Vec<FrameLabel>,
 }
 
@@ -53,13 +53,13 @@ impl Score {
   pub fn empty() -> Score {
     Score {
       channels: vec![],
-      script_references: vec![],
+      behavior_references: vec![],
       frame_labels: vec![],
     }
   }
 
-  pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreFrameScriptReference> {
-    return self.script_references.iter()
+  pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreBehaviorReference> {
+    return self.behavior_references.iter()
       .find(|x| frame >= x.start_frame && frame <= x.end_frame)
       .map(|x| x.clone())
   }
@@ -119,8 +119,8 @@ impl Score {
         continue;
       };
 
-      self.script_references.push(
-        ScoreFrameScriptReference {
+      self.behavior_references.push(
+        ScoreBehaviorReference {
           start_frame: primary.start_frame, 
           end_frame: primary.end_frame, 
           cast_lib: secondary.cast_lib, 
@@ -236,6 +236,13 @@ pub fn sprite_get_prop(
         )
       )
     ),
+    "scriptNum" => {
+      let script_num = sprite
+        .and_then(|sprite| sprite.script_instance_list.first())
+        .map(|script_instance_ref| player.allocator.get_script_instance(&script_instance_ref))
+        .map(|script_instance| script_instance.script.cast_member);
+      Ok(Datum::Int(script_num.unwrap_or(0)))
+    },
     _ => Err(ScriptError::new(format!("Cannot get prop {} of sprite", prop_name))),
   }
 }

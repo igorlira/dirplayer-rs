@@ -158,6 +158,7 @@ impl BuiltInHandlerManager {
       "call" => true,
       "new" => true,
       "callAncestor" => true,
+      "sendAllSprites" => true,
       _ => false,
     }
   }
@@ -167,6 +168,7 @@ impl BuiltInHandlerManager {
       "call" => Self::call(args).await,
       "new" => TypeHandlers::new(args).await,
       "callAncestor" => TypeHandlers::call_ancestor(args).await,
+      "sendAllSprites" => MovieHandlers::send_all_sprites(args).await,
       _ => {
         let msg = format!("No built-in async handler: {}", name);
         return Err(ScriptError::new(msg));

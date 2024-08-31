@@ -45,6 +45,7 @@ use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use profiling::{end_profiling, start_profiling};
 use scope::ScopeResult;
+use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
@@ -334,6 +335,23 @@ impl DirPlayer {
           .max_by_key(|label| label.frame_num)
           .map(|label| label.label.clone());
         Ok(Datum::String(frame_label.unwrap_or_else(|| "0".to_string())))
+      },
+      "currentSpriteNum" => {
+        let script_instance_ref = self.scopes
+          .get(self.current_scope_ref())
+          .and_then(|scope| scope.receiver.clone())
+          .unwrap();
+
+        reserve_player_mut(|player| {
+          let datum_ref = script_get_prop_opt(player, &script_instance_ref, &"spriteNum".to_owned());
+          if datum_ref.is_some() {
+            let datum = player.get_datum(&datum_ref.unwrap());
+            let sprite_num = datum.int_value()?;
+            Ok(Datum::Int(sprite_num))
+          } else {
+            Ok(Datum::Int(0))
+          }
+        })
       },
       _ => self.movie.get_prop(prop),
     }

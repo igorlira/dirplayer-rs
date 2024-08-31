@@ -1,7 +1,6 @@
-use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, movie_prop_names}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
+use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, score::{sprite_get_prop, sprite_set_prop}, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
 
 use super::handler_manager::BytecodeHandlerContext;
-
 
 pub struct GetSetBytecodeHandler { }
 pub struct GetSetUtils { }
@@ -130,7 +129,17 @@ impl GetSetBytecodeHandler {
             // last chunk
             Err(ScriptError::new(format!("Invalid propertyType/propertyID for kOpSet: {}", property_type)))
           }
-        }
+        },
+        0x06 => {
+          let prop_name = get_sprite_prop_name(property_id as u16);
+          let datum_ref = {
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.pop().unwrap()
+          };
+          let sprite_num = player.get_datum(&datum_ref).int_value()?;
+          sprite_set_prop(sprite_num as i16, prop_name, value)?;
+          Ok(HandlerExecutionResult::Advance)
+        },
         0x07 => {
           let prop_name = get_anim_prop_name(property_id as u16);
           player.set_movie_prop(&prop_name, value)?;
@@ -231,9 +240,9 @@ impl GetSetBytecodeHandler {
 
   pub fn get_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
-      let param_number = player.get_ctx_current_bytecode(ctx).obj as usize;
+      let param_number = player.get_ctx_current_bytecode(ctx).obj as u32 / get_current_variable_multiplier(player, ctx);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      let result = scope.args.get(param_number).unwrap_or(&DatumRef::Void).clone();
+      let result = scope.args.get(param_number as usize).unwrap_or(&DatumRef::Void).clone();
       scope.stack.push(result);
     });
     Ok(HandlerExecutionResult::Advance)
@@ -241,10 +250,10 @@ impl GetSetBytecodeHandler {
 
   pub fn set_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
-      let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as usize;
+      let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as u32 / get_current_variable_multiplier(player, ctx);
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       let arg_count = scope.args.len();
-      let arg_index = bytecode_obj;
+      let arg_index = bytecode_obj as usize;
       let value_ref = scope.stack.pop().unwrap();
 
       if arg_index < scope.args.len() {
@@ -320,6 +329,20 @@ impl GetSetBytecodeHandler {
         let last_chunk = StringChunkUtils::resolve_last_chunk(&string, chunk_type, player.movie.item_delimiter)?;
 
         Ok(player.alloc_datum(Datum::String(last_chunk)))
+      } else if prop_type == 0x06 {
+        // sprite prop
+        let prop_name = sprite_prop_names.get(&(prop_id as u16));
+        if prop_name.is_some() {
+          let datum_ref = {
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.pop().unwrap()
+          };
+          let sprite_num = player.get_datum(&datum_ref).int_value()?;
+          let result = sprite_get_prop(player, sprite_num as i16, &(prop_name.unwrap().into()))?; 
+          Ok(player.alloc_datum(result))
+        } else {
+          Err(ScriptError::new(format!("kOpGet sprite prop {} not implemented", prop_id)))
+        }
       } else if prop_type == 0x07 {
         // anim prop
         Ok(player.alloc_datum(player.get_anim_prop(prop_id as u16)?))

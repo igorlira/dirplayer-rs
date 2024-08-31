@@ -391,8 +391,8 @@ impl JsApi {
     member_map.str_set("channelCount", &JsValue::from(score.get_channel_count()));
 
     member_map.str_set(
-      "scriptReferences",
-      &js_sys::Array::from_iter(score.script_references.iter().map(|scr_ref| {
+      "behaviorReferences",
+      &js_sys::Array::from_iter(score.behavior_references.iter().map(|scr_ref| {
         let script_ref_map = js_sys::Map::new();
         script_ref_map.str_set("startFrame", &scr_ref.start_frame.to_js_value());
         script_ref_map.str_set("endFrame", &scr_ref.end_frame.to_js_value());
