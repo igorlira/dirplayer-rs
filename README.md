@@ -22,7 +22,7 @@ npm install
 ## Building Rust VM
 
 ```bash
-npm run build-web
+npm run build-vm
 ```
 
 ## Building extension

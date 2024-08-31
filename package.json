@@ -37,7 +37,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "build-extension": "vite build -c vite.config.extension.js",
-    "build-web": "cd vm-rust && wasm-pack build --target web",
+    "build-vm": "cd vm-rust && wasm-pack build --target web",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
