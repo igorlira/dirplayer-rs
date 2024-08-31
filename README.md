@@ -22,8 +22,7 @@ npm install
 ## Building Rust VM
 
 ```bash
-cd vm-rust
-wasm-pack build --target web
+npm run build-web
 ```
 
 ## Building extension
