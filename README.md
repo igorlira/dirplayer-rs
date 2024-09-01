@@ -14,19 +14,36 @@ Download the Chrome Extension at https://chromewebstore.google.com/detail/dirpla
 
 The extension implements a polyfill that replaces all `<embed>` elements that point to a Shockwave file in websites you visit.
 
-## Installing dependencies
-```bash
-npm install
-```
+## Requirements
+- NodeJS
+- - [(LTS or newer)](https://nodejs.org/)
+- RustLang
+- - [(1.70.0 or newer)](https://www.rust-lang.org/)
+- wasm-pack
+- - https://github.com/rustwasm/wasm-pack/releases
 
-## Building Rust VM
+## Building
+> [!NOTE]  
+> Before we can start, we need to load the missing modules for NodeJS with the `npm install` command.
+
+### 🪟 Windows
+Windows users can use our scripts which are located in the [`scripts`](https://github.com/igorlira/dirplayer-rs/tree/main/scripts) folder and end with `.bat`.
+- Build Rust VM with [`scripts/build-vm.bat`](https://github.com/igorlira/dirplayer-rs/blob/main/scripts/build-vm.bat)
+- Build extension with [`scripts/build-extension.bat`](https://github.com/igorlira/dirplayer-rs/blob/main/scripts/build-extension.bat)
+  - [Further information can be found here](https://github.com/igorlira/dirplayer-rs?tab=readme-ov-file#building-extension)
+- Run locally with [`scripts/run.bat`](https://github.com/igorlira/dirplayer-rs/blob/main/scripts/run.bat)
+
+### 🐧 Other platforms
+#### Building Rust VM
 
 ```bash
+# Navigate to the folder "vm-rust".
 cd vm-rust
+# Build with "wasm-pack".
 wasm-pack build --target web
 ```
 
-## Building extension
+#### Building extension
 
 ```bash
 npm run build-extension
@@ -38,7 +55,7 @@ You can install the local build by going to `chrome://extensions`, enabling Deve
 
 Note that the extension is currently only available on Chrome.
 
-## Running locally
+#### Running locally
 
 ```bash
 npm run start
