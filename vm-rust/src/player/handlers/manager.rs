@@ -2,7 +2,7 @@ use log::warn;
 
 use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError}};
 
-use super::{cast::CastHandlers, datum_handlers::{player_call_datum_handler, script_instance::ScriptInstanceUtils}, movie::MovieHandlers, net::NetHandlers, string::StringHandlers, types::TypeHandlers};
+use super::{cast::CastHandlers, datum_handlers::{player_call_datum_handler, point::PointDatumHandlers, prop_list::PropListDatumHandlers, script_instance::ScriptInstanceUtils}, movie::MovieHandlers, net::NetHandlers, string::StringHandlers, types::TypeHandlers};
 
 
 pub struct BuiltInHandlerManager { }
@@ -245,6 +245,21 @@ impl BuiltInHandlerManager {
       "nothing" => TypeHandlers::nothing(args),
       "updateStage" => MovieHandlers::update_stage(args),
       "getaProp" => TypeHandlers::get_a_prop(args),
+      "inside" => {
+        let point = &args[0];
+        let rect = &args[1..].to_vec();
+        PointDatumHandlers::inside(point, rect)
+      },
+      "addProp" => {
+        let item = &args[0];
+        let args = &args[1..].to_vec();
+        PropListDatumHandlers::add_prop(item,  args)
+      },
+      "getProp" => {
+        let item = &args[0];
+        let args = &args[1..].to_vec();
+        PropListDatumHandlers::get_prop(item,  args)
+      },
       "min" => TypeHandlers::min(args),
       "max" => TypeHandlers::max(args),
       "sort" => TypeHandlers::sort(args),
