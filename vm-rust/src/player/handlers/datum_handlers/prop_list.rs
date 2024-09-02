@@ -323,7 +323,7 @@ impl PropListDatumHandlers {
     })
   }
 
-  fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let base_prop_ref = reserve_player_mut(|player| {
       let key = player.get_datum(&args[0]);
       let prop_list = player.get_datum(datum).to_map()?;
@@ -363,7 +363,7 @@ impl PropListDatumHandlers {
     })
   }
 
-  fn add_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn add_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {      
       let prop_name_ref = &args[0];
       let value_ref = &args[1];
