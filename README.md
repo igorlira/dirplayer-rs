@@ -37,10 +37,7 @@ Windows users can use our scripts which are located in the [`scripts`](https://g
 #### Building Rust VM
 
 ```bash
-# Navigate to the folder "vm-rust".
-cd vm-rust
-# Build with "wasm-pack".
-wasm-pack build --target web
+npm run build-vm
 ```
 
 #### Building extension
