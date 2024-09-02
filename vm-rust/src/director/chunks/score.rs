@@ -51,7 +51,8 @@ impl ScoreFrameChannelData {
 
 pub struct ScoreFrameData {
   pub header: ScoreFrameDataHeader,
-  pub uncompressed_data: Vec<u8>,
+  pub decompressed_data: Vec<u8>,
+  pub frame_channel_data: Vec<(u32, u16, ScoreFrameChannelData)>,
 }
 
 pub struct ScoreFrameDataHeader {
@@ -92,24 +93,29 @@ impl ScoreFrameData {
       }
     }
 
-    let uncompressed_data = channel_data;
-
-    let mut channel_reader = BinaryReader::from_vec(&uncompressed_data);
-    channel_reader.set_endian(Endian::Big);
-    for i in 0..header.frame_count {
-      for j in 0..header.num_channels {
-        let pos = channel_reader.pos;
-        let channel_frame_data = ScoreFrameChannelData::read(&mut channel_reader);
-        channel_reader.jmp(pos + header.sprite_record_size as usize);
-        if channel_frame_data.flags != 0 {
-          log_i(format_args!("frame {i} channel {j} flags={}", channel_frame_data.flags).to_string().as_str());
+    let (decompressed_data, frame_channel_data) = {
+      let mut frame_channel_data = vec![];
+      let decompressed_data = channel_data;
+      let mut channel_reader = BinaryReader::from_vec(&decompressed_data);
+      channel_reader.set_endian(Endian::Big);
+      for i in 0..header.frame_count {
+        for j in 0..header.num_channels {
+          let pos = channel_reader.pos;
+          let data = ScoreFrameChannelData::read(&mut channel_reader);
+          channel_reader.jmp(pos + header.sprite_record_size as usize);
+          if data.flags != 0 {
+            log_i(format_args!("frame {i} channel {j} flags={}", data.flags).to_string().as_str());
+            frame_channel_data.push((i, j, data));
+          }
         }
       }
-    }
+      (decompressed_data, frame_channel_data)
+    };
 
     ScoreFrameData {
       header,
-      uncompressed_data
+      decompressed_data,
+      frame_channel_data
     }
   }
 
@@ -147,7 +153,7 @@ pub struct FrameIntervalPrimary {
   pub end_frame: u32,
   pub unk0: u32,
   pub unk1: u32,
-  pub sprite_number: u32,
+  pub channel_number: u32,
   pub unk2: u16,
   pub unk3: u32,
   pub unk4: u16,
@@ -164,7 +170,7 @@ impl FrameIntervalPrimary {
       end_frame: reader.read_u32().map_err(|_| ())?,
       unk0: reader.read_u32().map_err(|_| ())?,
       unk1: reader.read_u32().map_err(|_| ())?,
-      sprite_number: reader.read_u32().map_err(|_| ())?,
+      channel_number: reader.read_u32().map_err(|_| ())?,
       unk2: reader.read_u16().map_err(|_| ())?,
       unk3: reader.read_u32().map_err(|_| ())?,
       unk4: reader.read_u16().map_err(|_| ())?,
