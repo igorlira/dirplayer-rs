@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, events::player_invoke_global_event, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError}};
+use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, events::{player_invoke_event_to_instances, player_invoke_static_event}, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError}};
 
 pub struct MovieHandlers {}
 
@@ -80,12 +80,23 @@ impl MovieHandlers {
   }
 
   pub async fn send_all_sprites(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let (message, remaining_args) = reserve_player_mut(|player| {
+    let (message, remaining_args, receivers) = reserve_player_mut(|player| {
       let message = player.get_datum(&args[0]).symbol_value().unwrap();
       let remaining_args = &args[1..].to_vec();
-      (message.clone(), remaining_args.clone())
+      let receivers = player.movie.score.get_active_script_instance_list();
+      (message.clone(), remaining_args.clone(), receivers)
     });
-    player_invoke_global_event(&message, &remaining_args).await
+    let mut handled_by_sprite = false;
+    for receiver in receivers {
+      let receivers = vec![receiver];
+      handled_by_sprite = player_invoke_event_to_instances(&message, &remaining_args, &receivers).await? || handled_by_sprite;
+    }
+    if !handled_by_sprite {
+      player_invoke_static_event(&message, &remaining_args).await?;
+    }
+    reserve_player_mut(|player: &mut crate::player::DirPlayer| {
+      Ok(player.alloc_datum(Datum::Int(handled_by_sprite as i32)))
+    })
   }
 
   pub fn external_param_value(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

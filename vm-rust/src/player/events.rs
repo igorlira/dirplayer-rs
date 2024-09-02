@@ -105,7 +105,7 @@ pub async fn player_invoke_event_to_instances(
     Ok(handled)
 }
 
-async fn player_invoke_static_event(
+pub async fn player_invoke_static_event(
     handler_name: &String,
     args: &Vec<DatumRef>,
 ) -> Result<bool, ScriptError> {
@@ -154,7 +154,7 @@ async fn player_invoke_static_event(
     Ok(handled)
 }
 
-async fn player_invoke_targeted_event(
+pub async fn player_invoke_targeted_event(
     handler_name: &String,
     args: &Vec<DatumRef>,
     instance_refs: Option<&Vec<ScriptInstanceRef>>,
