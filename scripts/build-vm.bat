@@ -2,7 +2,7 @@
 title build-vm
 
 :: Navigate to the folder of this script.
-cd %cd%
+cd %~dp0
 
 :: Navigate back to the "vm-rust" folder.
 cd .\..\vm-rust\

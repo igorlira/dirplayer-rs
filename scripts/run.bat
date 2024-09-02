@@ -2,7 +2,7 @@
 title run
 
 :: Navigate to the folder of this script.
-cd %cd%
+cd %~dp0
 
 :: Navigate back.
 cd .\..\
