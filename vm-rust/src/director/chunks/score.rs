@@ -2,7 +2,7 @@ use binary_reader::{BinaryReader, Endian};
 use itertools::Itertools;
 use log::error;
 
-use crate::{utils::log_i, io::reader::DirectorExt};
+use crate::{io::{list_readers::read_u16, reader::DirectorExt}, utils::log_i};
 
 #[allow(dead_code)]
 pub struct ScoreFrameDelta {
@@ -22,30 +22,36 @@ const K_CHANNEL_DATA_SIZE: usize = 38664; // (25 * 50);
 
 #[allow(dead_code)]
 pub struct ScoreFrameChannelData {
-  flags: u16,
-  unk0: u16,
-  cast_lib: u16,
-  cast_member: u16,
-  unk1: u16,
-  pos_y: u16,
-  pos_x: u16,
-  height: u16,
-  width: u16,
+  pub sprite_type: u8,
+  pub ink: u8,
+  pub fore_color: u8,
+  pub back_color: u8,
+  pub cast_lib: u16,
+  pub cast_member: u16,
+  pub unk1: u16,
+  pub unk2: u16,
+  pub pos_y: u16,
+  pub pos_x: u16,
+  pub height: u16,
+  pub width: u16,
 }
 
 impl ScoreFrameChannelData {
   pub fn read(reader: &mut BinaryReader) -> ScoreFrameChannelData {
-    let flags = reader.read_u16().unwrap();
-    let unk0 = reader.read_u16().unwrap();
+    let sprite_type = reader.read_u8().unwrap();
+    let ink = reader.read_u8().unwrap();
+    let fore_color = reader.read_u8().unwrap();
+    let back_color = reader.read_u8().unwrap();
     let cast_lib = reader.read_u16().unwrap();
     let cast_member = reader.read_u16().unwrap();
     let unk1 = reader.read_u16().unwrap();
+    let unk2 = reader.read_u16().unwrap();
     let pos_y = reader.read_u16().unwrap();
     let pos_x = reader.read_u16().unwrap();
     let height = reader.read_u16().unwrap();
     let width = reader.read_u16().unwrap();
 
-    ScoreFrameChannelData { flags, unk0, cast_lib, cast_member, unk1, pos_y, pos_x, height, width }
+    ScoreFrameChannelData { sprite_type, ink, fore_color, back_color, cast_lib, cast_member, unk1, unk2, pos_y, pos_x, height, width }
   }
 }
 
@@ -103,8 +109,8 @@ impl ScoreFrameData {
           let pos = channel_reader.pos;
           let data = ScoreFrameChannelData::read(&mut channel_reader);
           channel_reader.jmp(pos + header.sprite_record_size as usize);
-          if data.flags != 0 {
-            log_i(format_args!("frame {i} channel {j} flags={}", data.flags).to_string().as_str());
+          if data.sprite_type != 0 {
+            log_i(format_args!("frame {i} channel {j} sprite_type={} ink={} fore_color={} back_color={} pos_y={} pos_x={} height={} width={}", data.sprite_type, data.ink, data.fore_color, data.back_color, data.pos_y, data.pos_x, data.height, data.width).to_string().as_str());
             frame_channel_data.push((i, j, data));
           }
         }

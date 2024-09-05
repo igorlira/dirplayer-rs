@@ -2,9 +2,9 @@ use std::cmp::max;
 
 use itertools::Itertools;
 
-use crate::{director::{chunks::score::FrameLabel, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi};
+use crate::{director::{chunks::score::FrameLabel, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi, utils::log_i};
 
-use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
+use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, datum_ref::DatumRef, events::{player_dispatch_event_to_sprite, player_dispatch_targeted_event}, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::{cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, script::{self, ScriptDatumHandlers}}, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 
 #[allow(dead_code)]
 pub struct SpriteChannel {
@@ -27,6 +27,7 @@ impl SpriteChannel {
 
 #[derive(Clone)]
 pub struct ScoreBehaviorReference {
+  pub channel_number: u32,
   pub start_frame: u32,
   pub end_frame: u32,
   pub cast_lib: u16,
@@ -64,19 +65,73 @@ impl Score {
       .map(|x| x.clone())
   }
 
+  fn create_behavior(cast_lib: i32, cast_member: i32) -> (ScriptInstanceRef, DatumRef) {
+    let script_ref = CastMemberRef { cast_lib, cast_member };
+    reserve_player_mut(|player| {
+      let _ = player.movie.cast_manager.get_script_by_ref(&script_ref).ok_or(ScriptError::new(format!("Script not found")));
+    });
+    let (script_instance_ref, datum_ref) = ScriptDatumHandlers::create_script_instance(&script_ref);
+    (script_instance_ref.clone(), datum_ref.clone())
+  }
+
+  pub fn end_sprites(&mut self, frame_num: u32) -> Vec<u32> {
+    let channels_to_end: Vec<u32> = self.behavior_references
+      .iter()
+      .filter(|sr| sr.end_frame == frame_num)
+      .map(|behavior_ref| behavior_ref.channel_number)
+      .collect_vec();
+
+    for channel_num in channels_to_end.iter() {
+      player_dispatch_event_to_sprite(&"endSprite".to_owned(), &vec![], channel_num.clone() as u16);
+    }
+    channels_to_end
+  }
+
+  pub fn begin_sprites(&mut self, frame_num: u32) {
+    let new_behaviors: Vec<(u32, ScriptInstanceRef, DatumRef)> = self.behavior_references
+      .iter()
+      .filter(|sr| sr.start_frame == frame_num)
+      .map(|behavior_ref| {
+        let channel_num = behavior_ref.channel_number;
+        let (script_instance_ref, datum_ref) = Self::create_behavior(behavior_ref.cast_lib as i32, behavior_ref.cast_member as i32);
+        // log_i(format_args!("frame {}, creating behavior, chan_num={}, cast_mem={}, cast_lib={} start={} end={}", frame_num, channel_num, behavior_ref.cast_member, behavior_ref.cast_lib, behavior_ref.start_frame, behavior_ref.end_frame).to_string().as_str());
+        // TODO switch to sprite_set_prop(sprite_num, "scriptInstanceList", Datum::List(script_datum_refs))
+        let _ = reserve_player_mut(|player| {
+          let value_ref = player.alloc_datum(Datum::Int(channel_num as i32));
+          script_set_prop(
+            player,
+            &script_instance_ref, 
+            &"spriteNum".to_string(),
+            &value_ref, 
+            false
+          )
+        });
+        (channel_num, script_instance_ref, datum_ref)
+      })
+      .collect();
+
+    for (channel_num, script_instance_ref, _datum_ref) in &new_behaviors {
+      let sprite = self.get_sprite_mut(*channel_num as i16);
+      sprite.script_instance_list.push(script_instance_ref.clone());
+    }
+
+    for (channel_num, _, _) in new_behaviors {
+      player_dispatch_event_to_sprite(&"beginSprite".to_owned(), &vec![], channel_num as u16);
+    }
+  }
+
   pub fn get_channel_count(&self) -> usize {
     return self.channels.len();
   }
 
   pub fn set_channel_count(&mut self, new_count: usize) {
     if new_count > self.channels.len() {
-      let base_number = self.channels.len() + 1;
       let add_count = max(0, new_count - self.channels.len());
-      let mut add_channels = (0..add_count).map(|index| SpriteChannel::new(base_number + index)).collect_vec();
+      let mut add_channels = (0..add_count).map(|index| SpriteChannel::new(index)).collect_vec();
       self.channels.append(&mut add_channels);
     } else if new_count < self.channels.len() {
       let remove_count = self.channels.len() - new_count;
-      for _ in 0..remove_count {
+      for _ in 1..remove_count {
         self.channels.pop();
       }
     }
@@ -86,25 +141,40 @@ impl Score {
 
   #[allow(dead_code)]
   pub fn get_sprite(&self, number: i16) -> Option<&Sprite> {
-    if number <= 0 || number as usize > self.channels.len() {
+    if number < 0 || number as usize > self.channels.len() - 1 {
       return None;
     }
-    let channel = &self.channels.get(number as usize - 1);
+    let channel = &self.channels.get(number as usize);
     return channel.map(|x| &x.sprite);
   }
 
   pub fn get_channel(&self, number: i16) -> &SpriteChannel {
-    return &self.channels[number as usize - 1];
+    return &self.channels[number as usize];
   }
 
   pub fn get_sprite_mut(&mut self, number: i16) -> &mut Sprite {
-    let channel = &mut self.channels[number as usize - 1];
+    let channel = &mut self.channels[number as usize];
     return &mut channel.sprite;
   }
 
   pub fn load_from_dir(&mut self, dir: &DirectorFile) {
     let score_chunk = dir.score.as_ref().unwrap();
     self.set_channel_count(score_chunk.frame_data.header.num_channels as usize);
+
+    for (_frame_num, channel_num, data) in score_chunk.frame_data.frame_channel_data.iter() {
+      let sprite = self.get_sprite_mut(channel_num.to_owned() as i16);
+      sprite.ink = data.ink as i32;
+      sprite.loc_h = data.pos_x as i32;
+      sprite.loc_v = data.pos_y as i32;
+      sprite.width = data.width as i32;
+      sprite.height = data.height as i32;
+      sprite.member = Some(CastMemberRef {
+        cast_lib: data.cast_lib as i32,
+        cast_member: data.cast_member as i32,
+      });
+      sprite.color = ColorRef::PaletteIndex(data.fore_color);
+      sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
+    }
 
     let frame_labels_chunk = dir.frame_labels.as_ref();
     if frame_labels_chunk.is_some() {
@@ -121,6 +191,7 @@ impl Score {
 
       self.behavior_references.push(
         ScoreBehaviorReference {
+          channel_number: primary.channel_number,
           start_frame: primary.start_frame, 
           end_frame: primary.end_frame, 
           cast_lib: secondary.cast_lib, 

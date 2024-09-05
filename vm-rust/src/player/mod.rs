@@ -34,7 +34,7 @@ pub mod script_ref;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use allocator::{DatumAllocator, DatumAllocatorTrait, ResetableAllocator};
+use allocator::{DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptInstanceAllocatorTrait};
 use datum_ref::DatumRef;
 use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
@@ -213,6 +213,9 @@ impl DirPlayer {
         reserve_player_mut(|player| player.on_script_error(&err));
         return;
       }
+      reserve_player_mut(|player| {
+        player.movie.score.begin_sprites(player.movie.current_frame);
+      });
       run_frame_loop().await;
     });
   }
@@ -506,27 +509,40 @@ pub fn player_handle_scope_return(scope: &ScopeResult) {
 }
 
 async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-  let receiver_handlers: Vec<ScriptHandlerRef> = unsafe {
+  let receiver_handlers: Vec<(Option<ScriptInstanceRef>, ScriptHandlerRef)> = unsafe {
     // let player_opt = PLAYER_LOCK.try_read().unwrap();
     let player = PLAYER_OPT.as_ref().unwrap();
   
-    let receiver_refs = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals());
-
     let mut result = vec![];
+
+    let receiver_refs = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals());
+    let instance_receiver_refs = &player.movie.score.get_active_script_instance_list();
+    for instance_receiver_ref in instance_receiver_refs.iter() {
+      let script_instance = player.allocator.get_script_instance(instance_receiver_ref);
+      let script_ref = script_instance.script.clone();
+      let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
+      let handler_pair = script.get_own_handler_ref(&handler_name);
+      if let Some(handler_pair) = handler_pair {
+        result.push((Some(instance_receiver_ref.clone()), handler_pair));
+      }
+    }
+
     for script_ref in receiver_refs {
       let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
       let handler_pair = script.get_own_handler_ref(&handler_name);
 
       if let Some(handler_pair) = handler_pair {
         //player_dispatch_async(PlayerVMCommand::CallHandler).await;
-        result.push(handler_pair);
+        result.push((None, handler_pair));
       }
     }
     result
   };
 
-  if let Some(handler_ref) = receiver_handlers.first() {
-    let scope = player_call_script_handler(None, handler_ref.to_owned(), args).await?;
+  if let Some(handler) = receiver_handlers.first() {
+    let receiver = &handler.0;
+    let handler_ref = &handler.1;
+    let scope = player_call_script_handler_raw_args(receiver.clone(), handler_ref.to_owned(), args, true).await?;
     player_handle_scope_return(&scope);
     return Ok(scope.return_value);
   } else if BuiltInHandlerManager::has_async_handler(handler_name) {
@@ -704,6 +720,10 @@ pub async fn run_frame_loop() {
   while is_playing {
     if !is_script_paused {
       player_wait_available().await;
+      reserve_player_mut(|player| {
+        player.movie.score.begin_sprites(player.movie.current_frame);
+      });
+      player_wait_available().await;
       player_unwrap_result(player_invoke_global_event(&"prepareFrame".to_string(), &vec![]).await);
       player_unwrap_result(player_invoke_global_event(&"enterFrame".to_string(), &vec![]).await);
     }
@@ -746,6 +766,15 @@ pub async fn run_frame_loop() {
       if !frame_skipped {
         // TODO only call this after timeout completes
         player_unwrap_result(player_invoke_global_event(&"exitFrame".to_string(), &vec![]).await);
+        let ended_sprite_nums = reserve_player_mut(|player| {
+          player.movie.score.end_sprites(player.movie.current_frame)
+        });
+        player_wait_available().await;
+        reserve_player_mut(|player| {
+          for sprite_num in ended_sprite_nums.iter() {
+            player.movie.score.get_sprite_mut(*sprite_num as i16).script_instance_list.clear();
+          }
+        });
         (is_playing, is_script_paused) = reserve_player_mut(|player| {
           (player.is_playing, player.is_script_paused)
         });
