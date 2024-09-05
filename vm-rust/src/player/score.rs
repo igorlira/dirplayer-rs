@@ -126,8 +126,9 @@ impl Score {
 
   pub fn set_channel_count(&mut self, new_count: usize) {
     if new_count > self.channels.len() {
+      let base_number = self.channels.len();
       let add_count = max(0, new_count - self.channels.len());
-      let mut add_channels = (0..add_count).map(|index| SpriteChannel::new(index)).collect_vec();
+      let mut add_channels = (0..add_count).map(|index| SpriteChannel::new(base_number + index)).collect_vec();
       self.channels.append(&mut add_channels);
     } else if new_count < self.channels.len() {
       let remove_count = self.channels.len() - new_count;
