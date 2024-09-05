@@ -15,7 +15,7 @@ use crate::{
 };
 use num::FromPrimitive;
 
-use super::{mask::BitmapMask, palette::{SYSTEM_MAC_PALETTE, SYSTEM_WIN_PALETTE}, palette_map::PaletteMap};
+use super::{mask::BitmapMask, palette::{SYSTEM_MAC_PALETTE, SYSTEM_WIN_PALETTE, WEB_216_PALETTE}, palette_map::PaletteMap};
 
 #[derive(Clone)]
 pub enum PaletteRef {
@@ -478,6 +478,9 @@ pub fn resolve_color_ref(
                         .get(*color_index as usize)
                         .map(|x| x.to_owned()),
                     BuiltInPalette::SystemWin => SYSTEM_WIN_PALETTE
+                        .get(*color_index as usize)
+                        .map(|x| x.to_owned()),
+                    BuiltInPalette::Web216 => WEB_216_PALETTE
                         .get(*color_index as usize)
                         .map(|x| x.to_owned()),
                     _ => None,
