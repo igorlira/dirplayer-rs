@@ -1,7 +1,6 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, sync::{Arc, Mutex, OnceLock}, time::Duration};
 use fxhash::FxHashMap;
 use itertools::Itertools;
-use lazy_static::lazy_static;
 
 pub struct ProfilingToken {
   name: String,
@@ -77,23 +76,24 @@ impl PlayerProfiler {
   }
 }
 
-lazy_static! {
-  pub static ref PROFILER: Arc<Mutex<PlayerProfiler>> = Arc::new(Mutex::new(PlayerProfiler::new()));
+fn profiler() -> &'static Mutex<PlayerProfiler> {
+  static MAP: OnceLock<Mutex<PlayerProfiler>> = OnceLock::new();
+  MAP.get_or_init(|| Mutex::new(PlayerProfiler::new()))
 }
 
 #[allow(dead_code)]
 pub fn start_profiling(name: String) -> u32 {
-  let mut profiler = PROFILER.lock().unwrap();
+  let mut profiler = profiler().lock().unwrap();
   profiler.start(name)
 }
 
 #[allow(dead_code)]
 pub fn end_profiling(id: u32) {
-  let mut profiler = PROFILER.lock().unwrap();
+  let mut profiler = profiler().lock().unwrap();
   profiler.end(id)
 }
 
 pub fn get_profiler_report() -> String {
-  let profiler = PROFILER.lock().unwrap();
+  let profiler = profiler().lock().unwrap();
   profiler.report()
 }

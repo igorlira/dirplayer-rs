@@ -1,7 +1,6 @@
-use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, get_sprite_prop_name, MOVIE_PROP_NAMES, SPRITE_PROP_NAMES}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, score::{sprite_get_prop, sprite_set_prop}, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
+use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, score::{sprite_get_prop, sprite_set_prop}, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
 
 use super::handler_manager::BytecodeHandlerContext;
-
 
 pub struct GetSetBytecodeHandler { }
 pub struct GetSetUtils { }
@@ -10,9 +9,9 @@ impl GetSetUtils {
   pub fn get_the_built_in_prop(
       player: &mut DirPlayer,
       ctx: &BytecodeHandlerContext,
-      prop_name: &String,
+      prop_name: &str,
   ) -> Result<DatumRef, ScriptError> {
-      match prop_name.as_str() {
+      match prop_name {
         "paramCount" => Ok(player.alloc_datum(Datum::Int(player.scopes.get(ctx.scope_ref).unwrap().args.len() as i32))),
         "result" => Ok(player.last_handler_result.clone()),
         _ => Ok(player.alloc_datum(player.get_movie_prop(prop_name)?))
@@ -22,10 +21,10 @@ impl GetSetUtils {
   pub fn set_the_built_in_prop(
       player: &mut DirPlayer,
       _ctx: &BytecodeHandlerContext,
-      prop_name: &String,
+      prop_name: &str,
       value: Datum,
   ) -> Result<(), ScriptError> {
-      match prop_name.as_str() {
+      match prop_name {
         _ => player.set_movie_prop(prop_name, value)
       }
   }
@@ -123,7 +122,7 @@ impl GetSetBytecodeHandler {
         0x00 => {
           if property_id <= 0x0b { 
             // movie prop
-            let prop_name = MOVIE_PROP_NAMES.get(&(property_id as u16)).unwrap();
+            let prop_name = movie_prop_names().get(&(property_id as u16)).unwrap();
             GetSetUtils::set_the_built_in_prop(player, ctx, prop_name, value)?;
             Ok(HandlerExecutionResult::Advance)
           } else { 
@@ -138,7 +137,7 @@ impl GetSetBytecodeHandler {
             scope.stack.pop().unwrap()
           };
           let sprite_num = player.get_datum(&datum_ref).int_value()?;
-          sprite_set_prop(sprite_num as i16, &prop_name, value)?;
+          sprite_set_prop(sprite_num as i16, prop_name, value)?;
           Ok(HandlerExecutionResult::Advance)
         },
         0x07 => {
@@ -313,11 +312,11 @@ impl GetSetBytecodeHandler {
       };
       let prop_id = player.get_datum(&prop_id).int_value()?;
       let prop_type = player.get_ctx_current_bytecode(ctx).obj;
-      let max_movie_prop_id = *MOVIE_PROP_NAMES.keys().max().unwrap();
+      let max_movie_prop_id = *movie_prop_names().keys().max().unwrap();
 
       let result = if prop_type == 0 && prop_id <= max_movie_prop_id as i32 {
         // movie prop
-        let prop_name = MOVIE_PROP_NAMES.get(&(prop_id as u16)).unwrap();
+        let prop_name = movie_prop_names().get(&(prop_id as u16)).unwrap();
         GetSetUtils::get_the_built_in_prop(player, ctx, prop_name)
       } else if prop_type == 0 {
         // last chunk
@@ -332,7 +331,7 @@ impl GetSetBytecodeHandler {
         Ok(player.alloc_datum(Datum::String(last_chunk)))
       } else if prop_type == 0x06 {
         // sprite prop
-        let prop_name = SPRITE_PROP_NAMES.get(&(prop_id as u16));
+        let prop_name = sprite_prop_names().get(&(prop_id as u16));
         if prop_name.is_some() {
           let datum_ref = {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();

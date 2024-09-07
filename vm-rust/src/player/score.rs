@@ -261,10 +261,10 @@ pub fn borrow_sprite_mut<T1, F1, T2, F2>(
 
 pub fn sprite_set_prop(
   sprite_id: i16,
-  prop_name: &String,
+  prop_name: &str,
   value: Datum,
 ) -> Result<(), ScriptError> {
-  let result = match prop_name.as_str() {
+  let result = match prop_name {
     "visible" => borrow_sprite_mut(
       sprite_id,
       |_| {}, 

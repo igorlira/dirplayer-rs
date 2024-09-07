@@ -47,8 +47,8 @@ impl Movie {
     self.file_name = file.file_name.to_string();
   }
 
-  pub fn get_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
-    match prop.as_str() {
+  pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
+    match prop {
       "alertHook" => {
         match self.alert_hook.to_owned() {
           Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
@@ -94,8 +94,8 @@ impl Movie {
     }
   }
 
-  pub fn set_prop(&mut self, prop: &String, value: Datum, datums: &DatumAllocator) -> Result<(), ScriptError> {
-    match prop.as_str() {
+  pub fn set_prop(&mut self, prop: &str, value: Datum, datums: &DatumAllocator) -> Result<(), ScriptError> {
+    match prop {
       "exitLock" => {
         self.exit_lock = value.int_value()? == 1;
       },
