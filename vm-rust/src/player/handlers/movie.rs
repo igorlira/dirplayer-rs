@@ -22,6 +22,9 @@ impl MovieHandlers {
         Datum::Int(script_num) => {
           Ok(player.movie.cast_manager.find_member_ref_by_number(*script_num as u32))
         },
+        Datum::CastMember(cast_member_ref) => {
+          Ok(Some(cast_member_ref.clone()))
+        },
         _ => Err(ScriptError::new(format!("Invalid identifier for script: {}", formatted_id))), // TODO
       }?;
       let script = member_ref.to_owned().and_then(|r| player.movie.cast_manager.get_script_by_ref(&r));
