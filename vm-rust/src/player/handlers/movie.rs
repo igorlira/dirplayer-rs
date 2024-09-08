@@ -79,6 +79,29 @@ impl MovieHandlers {
     })
   }
 
+  pub async fn send_sprite(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    let (message, remaining_args, receivers) = reserve_player_mut(|player| {
+      let sprite_num = player.get_datum(&args[0]).int_value().unwrap();
+      let message: String = player.get_datum(&args[1]).symbol_value().unwrap();
+      let remaining_args = &args[2..].to_vec();
+      let sprite = player.movie.score.get_sprite(sprite_num as i16).unwrap();
+      // TODO what is behavior if sprite is null/out of bounds
+      let receivers = sprite.script_instance_list.clone();
+      (message.clone(), remaining_args.clone(), receivers)
+    });
+    let mut handled_by_sprite = false;
+    for receiver in receivers {
+      let receivers = vec![receiver];
+      handled_by_sprite = player_invoke_event_to_instances(&message, &remaining_args, &receivers).await? || handled_by_sprite;
+    }
+    if !handled_by_sprite {
+      player_invoke_static_event(&message, &remaining_args).await?;
+    }
+    reserve_player_mut(|player: &mut crate::player::DirPlayer| {
+      Ok(player.alloc_datum(Datum::Int(handled_by_sprite as i32)))
+    })
+  }
+
   pub async fn send_all_sprites(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let (message, remaining_args, receivers) = reserve_player_mut(|player| {
       let message = player.get_datum(&args[0]).symbol_value().unwrap();
