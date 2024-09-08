@@ -14,6 +14,7 @@ import PropertyInspector from "../PropertyInspector";
 import LoadMovie from "../LoadMovie";
 import { useSelector } from "react-redux";
 import { RootState } from "../../store";
+import { useSelectedObjects } from "../../hooks/selection";
 
 interface DirStudioProps {
   showDebugUi?: boolean;
@@ -23,9 +24,7 @@ export default function DirStudio({
   showDebugUi,
 }: DirStudioProps) {
   const castSnapshots = useAppSelector((state) => state.vm.castSnapshots);
-  const selectedMemberRef = useAppSelector((state) =>
-    selectSelectedMemberRef(state.ui)
-  );
+  const { memberRef: selectedMemberRef } = useSelectedObjects();
   const selectedMemberId: ICastMemberIdentifier | undefined =
     selectedMemberRef && {
       castNumber: selectedMemberRef[0],
@@ -84,7 +83,6 @@ export default function DirStudio({
       <div className={styles.rightContainer}>
         <PropertyInspector
           selectedObject={selectedObject}
-          castSnapshots={castSnapshots}
         />
       </div>
     </div>
