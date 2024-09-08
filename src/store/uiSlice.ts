@@ -11,7 +11,12 @@ export type TSelectedObjectMember = {
   memberRef: ICastMemberRef
 }
 
-export type TSelectedObject = TSelectedObjectSprite | TSelectedObjectMember
+export type TSelectedObjectScoreBehavior = {
+  type: 'scoreBehavior',
+  frameNumber: number
+}
+
+export type TSelectedObject = TSelectedObjectSprite | TSelectedObjectMember | TSelectedObjectScoreBehavior
 
 interface UISliceState {
   selectedObject?: TSelectedObject
@@ -43,11 +48,20 @@ const uiSlice = createSlice({
         }
       }
     },
+    scoreBehaviorSelected(state, action: PayloadAction<{frameNumber: number}>) {
+      return {
+        ...state,
+        selectedObject: {
+          type: 'scoreBehavior',
+          frameNumber: action.payload.frameNumber
+        }
+      }
+    },
   },
 })
 
 export const selectSelectedMemberRef = (state: UISliceState) => state.selectedObject?.type === 'member' ? state.selectedObject.memberRef : undefined
 
 // Action creators are generated for each case reducer function
-export const { onMemberSelected, channelSelected } = uiSlice.actions
+export const { onMemberSelected, channelSelected, scoreBehaviorSelected } = uiSlice.actions
 export default uiSlice.reducer

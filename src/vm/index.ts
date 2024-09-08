@@ -146,6 +146,7 @@ export interface IScoreBehaviorReference {
   endFrame: number
   castLib: number
   castMember: number
+  channelNumber: number
 }
 
 export interface ScoreSpriteSnapshot {
