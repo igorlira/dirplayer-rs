@@ -129,6 +129,7 @@ impl DirPlayer {
         base_path: "".to_string(),
         file_name: "".to_string(),
         stage_color: (0, 0, 0),
+        frame_rate: 30,
       },
       net_manager: NetManager {
         base_path: None,
@@ -241,7 +242,7 @@ impl DirPlayer {
   }
 
   pub fn get_fps(&self) -> u32 {
-    if self.movie.puppet_tempo > 0 { self.movie.puppet_tempo } else { 1 }
+    if self.movie.puppet_tempo > 0 { self.movie.puppet_tempo } else { self.movie.frame_rate as u32 }
   }
 
   pub fn get_hydrated_globals(&self) -> FxHashMap<String, &Datum> {
