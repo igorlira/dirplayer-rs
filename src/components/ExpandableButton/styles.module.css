@@ -1,0 +1,6 @@
+.toggleButton {
+  padding: 8px;
+  text-align: start;
+  background-color: #bbb;
+  cursor: pointer;
+}

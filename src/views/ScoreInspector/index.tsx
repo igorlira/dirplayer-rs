@@ -7,6 +7,7 @@ import { player_set_debug_selected_channel, subscribe_to_channel_names, unsubscr
 import { channelSelected, scoreBehaviorSelected } from "../../store/uiSlice";
 import { useEffect, useState } from "react";
 import { getScoreFrameBehaviorRef } from "../../utils/score";
+import ExpandableButton from "../../components/ExpandableButton";
 
 export default function ScoreInspector() {
   const score = useAppSelector((state) => selectScoreSnapshot(state.vm));
@@ -16,14 +17,14 @@ export default function ScoreInspector() {
   const channelSnapshots = useAppSelector((state) => state.vm.channelSnapshots);
   const selectedChannel = selectedObject?.type === "sprite" && selectedObject.spriteNumber;
   const dispatch = useAppDispatch();
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isShowingChannels, setIsShowingChannels] = useState(false);
 
   useEffect(() => {
-    if (isExpanded) {
+    if (isShowingChannels) {
       subscribe_to_channel_names();
     }
     return () => unsubscribe_from_channel_names();
-  }, [isExpanded]);
+  }, [isShowingChannels]);
 
   const onSelectChannel = (channel: number) => {
     player_set_debug_selected_channel(channel);
@@ -56,7 +57,7 @@ export default function ScoreInspector() {
             return <button key={frame} className={cellClasses} onClick={() => onSelectBehavior(frame)}></button>;
           })}
         </div>
-        <div className={styles.frameHeader} onClick={() => setIsExpanded(value => !value)}>
+        <div className={styles.frameHeader}>
           {range(1, framesToRender + 1).map((frame) => {
             const cellClasses = classNames(
               styles.frameHeaderCell,
@@ -70,25 +71,27 @@ export default function ScoreInspector() {
           })}
         </div>
       </div>
-      {isExpanded && <div className={styles.channelList}>
-        {Array.from({ length: score?.channelCount || 0 }, (_, i) => i + 1).map(
-          (channel) => {
-            let sprite = channelSnapshots[channel];
-            return (
-              <button
-                key={channel}
-                className={classNames([
-                  styles.channelRow,
-                  selectedChannel === channel && styles.selected,
-                ])}
-                onClick={() => onSelectChannel(channel)}
-              >
-                ({channel}) {sprite?.displayName}
-              </button>
-            );
-          }
-        )}
-      </div>}
+      <ExpandableButton label="Channels" className={styles.channelsButton} onStateChange={setIsShowingChannels}>
+        <div className={styles.channelList}>
+          {Array.from({ length: score?.channelCount || 0 }, (_, i) => i + 1).map(
+            (channel) => {
+              let sprite = channelSnapshots[channel];
+              return (
+                <button
+                  key={channel}
+                  className={classNames([
+                    styles.channelRow,
+                    selectedChannel === channel && styles.selected,
+                  ])}
+                  onClick={() => onSelectChannel(channel)}
+                >
+                  ({channel}) {sprite?.displayName}
+                </button>
+              );
+            }
+          )}
+        </div>
+      </ExpandableButton>
     </div>
   );
 }
