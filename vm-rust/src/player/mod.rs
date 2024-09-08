@@ -254,17 +254,24 @@ impl DirPlayer {
     self.globals.get(name).map(|datum_ref| self.get_datum(datum_ref))
   }
 
+  pub fn get_next_frame(&self) -> u32 {
+    if !self.is_playing {
+      return self.movie.current_frame;
+    } else if let Some(next_frame) = self.next_frame {
+      return next_frame;
+    } else {
+      return self.movie.current_frame + 1;
+    }
+  }
+
   pub fn advance_frame(&mut self) {
     if !self.is_playing {
       return;
     }
     let prev_frame = self.movie.current_frame;
-    if let Some(next_frame) = self.next_frame {
-      self.movie.current_frame = next_frame;
-      self.next_frame = None;
-    } else {
-      self.movie.current_frame += 1;
-    }
+    let next_frame = self.get_next_frame();
+    self.next_frame = None;
+    self.movie.current_frame = next_frame;
     if prev_frame != self.movie.current_frame {
       JsApi::dispatch_frame_changed(self.movie.current_frame);
     }
@@ -721,9 +728,10 @@ pub async fn run_frame_loop() {
       }
       prev_frame = player.movie.current_frame;
       if !player.is_script_paused {
-        player.advance_frame();
+        new_frame = player.get_next_frame();
+      } else {
+        new_frame = prev_frame;
       }
-      new_frame = player.movie.current_frame;
     });
     if !is_playing {
       return;
@@ -744,9 +752,9 @@ pub async fn run_frame_loop() {
         player.next_frame.is_some() || !player.is_playing
       });
       if !frame_skipped {
-        // TODO only call this after timeout completes
         player_unwrap_result(player_invoke_global_event(&"exitFrame".to_string(), &vec![]).await);
         (is_playing, is_script_paused) = reserve_player_mut(|player| {
+          player.advance_frame();
           (player.is_playing, player.is_script_paused)
         });
       }
