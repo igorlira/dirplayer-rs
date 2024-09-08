@@ -635,7 +635,13 @@ impl TypeHandlers {
   }
 
   pub fn sort(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    ListDatumHandlers::sort(&args[0], &vec![])
+    reserve_player_mut(|player| {
+      let datum_ref = &args[0];
+      match player.get_datum(datum_ref) {
+        Datum::PropList(_, _) => PropListDatumHandlers::sort(datum_ref, &vec![]),
+        _ => ListDatumHandlers::sort(datum_ref, &vec![])
+      }
+    })
   }
 
   pub fn intersect(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
