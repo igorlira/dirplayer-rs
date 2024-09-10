@@ -356,14 +356,21 @@ impl GetSetBytecodeHandler {
             scope.stack.pop().unwrap()
           };
           let cast_lib_id = player.get_datum(&cast_lib_id);
-          let cast = if cast_lib_id.is_string() {
-            player.movie.cast_manager.get_cast_by_name(&cast_lib_id.string_value()?)
+          let bypass_castlib_selection = cast_lib_id.is_int() && cast_lib_id.int_value()? == 0;
+          if bypass_castlib_selection {
+            player.get_anim2_prop(prop_id as u16)
           } else {
-            player.movie.cast_manager.get_cast_or_null(cast_lib_id.int_value()? as u32)
-          };
-          match cast {
-            Some(cast) => Ok(Datum::Int(cast.max_member_id() as i32)),
-            None => Err(ScriptError::new(format!("kOpSet cast not found")))
+            let cast = {
+              if cast_lib_id.is_string() {
+                player.movie.cast_manager.get_cast_by_name(&cast_lib_id.string_value()?)
+              } else {
+                player.movie.cast_manager.get_cast_or_null(cast_lib_id.int_value()? as u32)
+              }
+            };
+            match cast {
+              Some(cast) => Ok(Datum::Int(cast.max_member_id() as i32)),
+              None => Err(ScriptError::new(format!("kOpSet cast not found")))
+            }
           }
         } else {
           player.get_anim2_prop(prop_id as u16)
