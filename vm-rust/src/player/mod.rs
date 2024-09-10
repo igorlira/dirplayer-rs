@@ -774,7 +774,7 @@ pub async fn run_frame_loop() {
       if !frame_skipped {
         player_unwrap_result(player_invoke_global_event(&"exitFrame".to_string(), &vec![]).await);
         let ended_sprite_nums = reserve_player_mut(|player| {
-          player.movie.score.end_sprites(player.movie.current_frame)
+          player.movie.score.end_sprites(prev_frame)
         });
         player_wait_available().await;
         reserve_player_mut(|player| {
