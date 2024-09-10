@@ -2,7 +2,7 @@ use std::cmp::max;
 
 use itertools::Itertools;
 
-use crate::{director::{chunks::score::FrameLabel, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi, utils::log_i};
+use crate::{director::{chunks::score::{FrameLabel, ScoreFrameChannelData}, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi};
 
 use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, datum_ref::DatumRef, events::{player_dispatch_event_to_sprite, player_dispatch_targeted_event}, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::{cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, script::{self, ScriptDatumHandlers}}, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 
@@ -35,8 +35,11 @@ pub struct ScoreBehaviorReference {
 }
 
 pub struct Score {
+  // the first 6 channels are reserved:
+  // 0 for frame scripts, 1 for tempo, 2 for palette, 3 for transition, 4 for sound 1, 5 for sound 2
   pub channels: Vec<SpriteChannel>,
   pub behavior_references: Vec<ScoreBehaviorReference>,
+  pub channel_initialization_data: Vec<(u32, u16, ScoreFrameChannelData)>,
   pub frame_labels: Vec<FrameLabel>,
 }
 
@@ -50,12 +53,20 @@ fn get_sprite_rect(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
   return (rect.left, rect.top, rect.right, rect.bottom);
 }
 
+fn get_channel_number_from_index(index: u32) -> u32 {
+  match index {
+    0 => 0,
+    index => index - 5,
+  }
+}
+
 impl Score {
   pub fn empty() -> Score {
     Score {
       channels: vec![],
       behavior_references: vec![],
       frame_labels: vec![],
+      channel_initialization_data: vec![],
     }
   }
 
@@ -88,6 +99,29 @@ impl Score {
   }
 
   pub fn begin_sprites(&mut self, frame_num: u32) {
+
+    // TODO check sprite_type?
+    let sprite_init_data = self.channel_initialization_data
+      .iter()
+      .filter(|(frame_index, ..)| *frame_index + 1 == frame_num)
+      .map(|t| t.clone()).collect_vec();
+
+    for (_frame_index, channel_index, data) in sprite_init_data.iter() {
+      let channel_num = get_channel_number_from_index(channel_index.to_owned() as u32);
+      let sprite = self.get_sprite_mut(channel_num.to_owned() as i16);
+      sprite.ink = data.ink as i32;
+      sprite.loc_h = data.pos_x as i32;
+      sprite.loc_v = data.pos_y as i32;
+      sprite.width = data.width as i32;
+      sprite.height = data.height as i32;
+      sprite.member = Some(CastMemberRef {
+        cast_lib: data.cast_lib as i32,
+        cast_member: data.cast_member as i32,
+      });
+      sprite.color = ColorRef::PaletteIndex(data.fore_color);
+      sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
+    }
+
     let new_behaviors: Vec<(u32, ScriptInstanceRef, DatumRef)> = self.behavior_references
       .iter()
       .filter(|sr| sr.start_frame == frame_num)
@@ -162,21 +196,8 @@ impl Score {
     let score_chunk = dir.score.as_ref().unwrap();
     self.set_channel_count(score_chunk.frame_data.header.num_channels as usize);
 
-    for (_frame_num, channel_num, data) in score_chunk.frame_data.frame_channel_data.iter() {
-      let sprite = self.get_sprite_mut(channel_num.to_owned() as i16);
-      sprite.ink = data.ink as i32;
-      sprite.loc_h = data.pos_x as i32;
-      sprite.loc_v = data.pos_y as i32;
-      sprite.width = data.width as i32;
-      sprite.height = data.height as i32;
-      sprite.member = Some(CastMemberRef {
-        cast_lib: data.cast_lib as i32,
-        cast_member: data.cast_member as i32,
-      });
-      sprite.color = ColorRef::PaletteIndex(data.fore_color);
-      sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
-    }
-
+    self.channel_initialization_data = score_chunk.frame_data.frame_channel_data.clone();
+    
     let frame_labels_chunk = dir.frame_labels.as_ref();
     if frame_labels_chunk.is_some() {
       self.frame_labels = frame_labels_chunk.unwrap().labels.clone();
@@ -192,10 +213,10 @@ impl Score {
 
       self.behavior_references.push(
         ScoreBehaviorReference {
-          channel_number: primary.channel_number,
-          start_frame: primary.start_frame, 
-          end_frame: primary.end_frame, 
-          cast_lib: secondary.cast_lib, 
+          channel_number: get_channel_number_from_index(primary.channel_index),
+          start_frame: primary.start_frame,
+          end_frame: primary.end_frame,
+          cast_lib: secondary.cast_lib,
           cast_member: secondary.cast_member,
         }
       );

@@ -21,6 +21,7 @@ impl ScoreFrameDelta {
 const K_CHANNEL_DATA_SIZE: usize = 38664; // (25 * 50);
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct ScoreFrameChannelData {
   pub sprite_type: u8,
   pub ink: u8,
@@ -104,14 +105,14 @@ impl ScoreFrameData {
       let decompressed_data = channel_data;
       let mut channel_reader = BinaryReader::from_vec(&decompressed_data);
       channel_reader.set_endian(Endian::Big);
-      for i in 0..header.frame_count {
-        for j in 0..header.num_channels {
+      for frame_index in 0..header.frame_count {
+        for channel_index in 0..header.num_channels {
           let pos = channel_reader.pos;
           let data = ScoreFrameChannelData::read(&mut channel_reader);
           channel_reader.jmp(pos + header.sprite_record_size as usize);
           if data.sprite_type != 0 {
-            log_i(format_args!("frame {i} channel {j} sprite_type={} ink={} fore_color={} back_color={} pos_y={} pos_x={} height={} width={}", data.sprite_type, data.ink, data.fore_color, data.back_color, data.pos_y, data.pos_x, data.height, data.width).to_string().as_str());
-            frame_channel_data.push((i, j, data));
+            log_i(format_args!("frame_index={frame_index} channel_index={channel_index} sprite_type={} ink={} fore_color={} back_color={} pos_y={} pos_x={} height={} width={}", data.sprite_type, data.ink, data.fore_color, data.back_color, data.pos_y, data.pos_x, data.height, data.width).to_string().as_str());
+            frame_channel_data.push((frame_index, channel_index, data));
           }
         }
       }
@@ -159,7 +160,7 @@ pub struct FrameIntervalPrimary {
   pub end_frame: u32,
   pub unk0: u32,
   pub unk1: u32,
-  pub channel_number: u32,
+  pub channel_index: u32,
   pub unk2: u16,
   pub unk3: u32,
   pub unk4: u16,
@@ -176,7 +177,7 @@ impl FrameIntervalPrimary {
       end_frame: reader.read_u32().map_err(|_| ())?,
       unk0: reader.read_u32().map_err(|_| ())?,
       unk1: reader.read_u32().map_err(|_| ())?,
-      channel_number: reader.read_u32().map_err(|_| ())?,
+      channel_index: reader.read_u32().map_err(|_| ())?,
       unk2: reader.read_u16().map_err(|_| ())?,
       unk3: reader.read_u32().map_err(|_| ())?,
       unk4: reader.read_u16().map_err(|_| ())?,
