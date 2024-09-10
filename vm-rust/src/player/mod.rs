@@ -392,6 +392,7 @@ impl DirPlayer {
     let prop_name = get_anim2_prop_name(prop_id);
     match prop_name.as_str() {
       "number of castLibs" => Ok(Datum::Int(self.movie.cast_manager.casts.len() as i32)),
+      "number of castMembers" => Ok(Datum::Int(self.movie.cast_manager.casts.iter().map(|cast_lib| cast_lib.members.len() as i32).sum())),
       _ => Err(ScriptError::new(format!("Unknown anim2 prop {}", prop_name)))
     }
   }
