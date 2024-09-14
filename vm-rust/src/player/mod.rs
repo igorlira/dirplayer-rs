@@ -348,13 +348,13 @@ impl DirPlayer {
         Ok(Datum::String(frame_label.unwrap_or_else(|| "0".to_string())))
       },
       "currentSpriteNum" => {
+        // TODO: this can also be called by a static script
         let script_instance_ref = self.scopes
           .get(self.current_scope_ref())
-          .and_then(|scope| scope.receiver.clone())
-          .unwrap();
+          .and_then(|scope| scope.receiver.clone());
 
         reserve_player_mut(|player| {
-          let datum_ref = script_get_prop_opt(player, &script_instance_ref, &"spriteNum".to_owned());
+          let datum_ref = script_instance_ref.and_then(|x| script_get_prop_opt(player, &x, &"spriteNum".to_owned()));
           if datum_ref.is_some() {
             let datum = player.get_datum(&datum_ref.unwrap());
             let sprite_num = datum.int_value()?;
