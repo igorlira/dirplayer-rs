@@ -398,7 +398,7 @@ impl JsApi {
         script_ref_map.str_set("endFrame", &scr_ref.end_frame.to_js_value());
         script_ref_map.str_set("castLib", &scr_ref.cast_lib.to_js_value());
         script_ref_map.str_set("castMember", &scr_ref.cast_member.to_js_value());
-        // TODO: script_ref_map.str_set("channelNumber", &scr_ref.channel_number.to_js_value());
+        script_ref_map.str_set("channelNumber", &scr_ref.channel_number.to_js_value());
         script_ref_map.to_js_object()
       })),
     );
