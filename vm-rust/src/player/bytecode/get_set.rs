@@ -1,4 +1,4 @@
-use crate::{console_warn, director::{chunks::handler::Bytecode, lingo::{constants::{get_anim_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names}, datum::{Datum, StringChunkType}}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, score::{sprite_get_prop, sprite_set_prop}, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_set_prop}, DatumRef, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT}};
+use crate::{director::lingo::{constants::{get_anim_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names}, datum::{Datum, StringChunkType}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, score::{sprite_get_prop, sprite_set_prop}, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_get_static_prop, script_set_prop, script_set_static_prop}, DatumRef, DirPlayer, HandlerExecutionResult, ScriptError, PLAYER_OPT}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -33,29 +33,28 @@ impl GetSetUtils {
 impl GetSetBytecodeHandler {
   pub fn get_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
-    let receiver = {
+    let (receiver, script_ref) = {
       let scope = player.scopes.get(ctx.scope_ref).unwrap();
-      scope.receiver.clone()
+      (scope.receiver.clone(), scope.script_ref.clone())
     };
     let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap().clone();
     
-    if let Some(instance_ref) = receiver {
-      let result = script_get_prop(player, &instance_ref, &prop_name)?;
-      
-      let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      scope.stack.push(result);
-      return Ok(HandlerExecutionResult::Advance);
+    let result = if let Some(instance_ref) = receiver {
+      script_get_prop(player, &instance_ref, &prop_name)?
     } else {
-      Err(ScriptError::new(format!("No receiver to get prop {}", prop_name)))
-    }
+      script_get_static_prop(player, &script_ref, &prop_name)?
+    };
+    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+    scope.stack.push(result);
+    return Ok(HandlerExecutionResult::Advance);
   }
 
   pub fn set_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
-      let (value_ref, receiver) = {
+      let (value_ref, receiver, script_ref) = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         let value_red = scope.stack.pop().unwrap();
-        (value_red, scope.receiver.clone())
+        (value_red, scope.receiver.clone(), scope.script_ref.clone())
       };
       let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
       
@@ -67,7 +66,10 @@ impl GetSetBytecodeHandler {
           script_set_prop(player, &instance_ref, &prop_name.to_owned(), &value_ref, false)?;
           Ok(HandlerExecutionResult::Advance)
         },
-        None => Err(ScriptError::new(format!("No receiver to set prop {}", prop_name)))
+        None => {
+          script_set_static_prop(player, &script_ref, &prop_name.to_owned(), &value_ref, true)?;
+          Ok(HandlerExecutionResult::Advance)
+        }
       }
     })
   }
