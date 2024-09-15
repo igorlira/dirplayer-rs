@@ -49,7 +49,7 @@ export default function VMProvider({ children }: VMProviderProps) {
       console.log("Initializing VM");
 
       initVmCallbacks();
-      init().then((vm: Object) => {
+      init({}).then((vm: Object) => {
         console.log("VM initialized", vm);
         send({ type: "INIT_OK" });
 
