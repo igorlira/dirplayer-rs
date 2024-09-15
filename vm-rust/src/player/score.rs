@@ -155,7 +155,7 @@ impl Score {
   }
 
   pub fn get_channel_count(&self) -> usize {
-    return self.channels.len();
+    return self.channels.len() - 1;
   }
 
   pub fn set_channel_count(&mut self, new_count: usize) {
