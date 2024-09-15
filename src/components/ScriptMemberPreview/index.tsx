@@ -82,7 +82,7 @@ export default function ScriptMemberPreview({
           ([name, _, scriptMemRef]) => name === handler.name && memberId.castNumber === scriptMemRef[0] && memberId.memberNumber === scriptMemRef[1]
         );
         return (
-          <div>
+          <div key={handler.name}>
             <button
               className={classNames(
                 styles.handlerName,
