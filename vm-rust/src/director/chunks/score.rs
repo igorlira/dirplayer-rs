@@ -76,8 +76,8 @@ impl ScoreFrameData {
 
     let mut channel_data = vec![0u8; (header.frame_count as usize) * (header.num_channels as usize) * (header.sprite_record_size as usize)];
     
+    let mut frame_index = 0;
     while !reader.eof() {
-      let fd_start = reader.pos as usize;
       let length = reader.read_u16().unwrap();
 
       if length == 0 {
@@ -90,14 +90,18 @@ impl ScoreFrameData {
         let mut frame_chunk_reader = BinaryReader::from_u8(chunk_data);
         frame_chunk_reader.set_endian(Endian::Big);
 
+        let mut channel_index = 0;
         while !frame_chunk_reader.eof() {
+          channel_index = channel_index + 1;
           let channel_size = frame_chunk_reader.read_u16().unwrap() as usize;
           let channel_offset = frame_chunk_reader.read_u16().unwrap() as usize;
           let channel_delta = frame_chunk_reader.read_bytes(channel_size).unwrap();
 
-          channel_data[channel_offset..channel_offset + channel_size].copy_from_slice(channel_delta);
+          let frame_offset = (frame_index as usize) * (header.num_channels as usize) * (header.sprite_record_size as usize);
+          channel_data[frame_offset + channel_offset..frame_offset + channel_offset + channel_size].copy_from_slice(channel_delta);
         }
       }
+      frame_index = frame_index + 1;
     }
 
     let (decompressed_data, frame_channel_data) = {
