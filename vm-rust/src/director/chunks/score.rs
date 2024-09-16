@@ -21,7 +21,7 @@ impl ScoreFrameDelta {
 const K_CHANNEL_DATA_SIZE: usize = 38664; // (25 * 50);
 
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Clone, Default, PartialEq)]
 pub struct ScoreFrameChannelData {
   pub sprite_type: u8,
   pub ink: u8,
@@ -110,7 +110,7 @@ impl ScoreFrameData {
           let pos = channel_reader.pos;
           let data = ScoreFrameChannelData::read(&mut channel_reader);
           channel_reader.jmp(pos + header.sprite_record_size as usize);
-          if data.sprite_type != 0 {
+          if data != ScoreFrameChannelData::default() {
             log_i(format_args!("frame_index={frame_index} channel_index={channel_index} sprite_type={} ink={} fore_color={} back_color={} pos_y={} pos_x={} height={} width={}", data.sprite_type, data.ink, data.fore_color, data.back_color, data.pos_y, data.pos_x, data.height, data.width).to_string().as_str());
             frame_channel_data.push((frame_index, channel_index, data));
           }
