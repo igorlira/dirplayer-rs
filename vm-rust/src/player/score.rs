@@ -72,7 +72,7 @@ impl Score {
 
   pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreBehaviorReference> {
     return self.behavior_references.iter()
-      .find(|x| frame >= x.start_frame && frame <= x.end_frame)
+      .find(|x| x.channel_number == 0 && frame >= x.start_frame && frame <= x.end_frame)
       .map(|x| x.clone())
   }
 
