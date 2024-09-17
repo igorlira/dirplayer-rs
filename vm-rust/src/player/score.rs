@@ -27,18 +27,21 @@ impl SpriteChannel {
 
 #[derive(Clone)]
 pub struct ScoreBehaviorReference {
-  pub channel_number: u32,
-  pub start_frame: u32,
-  pub end_frame: u32,
   pub cast_lib: u16,
   pub cast_member: u16,
 }
 
+#[derive(Clone)]
+pub struct ScoreSpriteSpan {
+  pub channel_number: u32,
+  pub start_frame: u32,
+  pub end_frame: u32,
+  pub scripts: Vec<ScoreBehaviorReference>,
+}
+
 pub struct Score {
-  // the first 6 channels are reserved:
-  // 0 for frame scripts, 1 for tempo, 2 for palette, 3 for transition, 4 for sound 1, 5 for sound 2
   pub channels: Vec<SpriteChannel>,
-  pub behavior_references: Vec<ScoreBehaviorReference>,
+  pub sprite_spans: Vec<ScoreSpriteSpan>,
   pub channel_initialization_data: Vec<(u32, u16, ScoreFrameChannelData)>,
   pub frame_labels: Vec<FrameLabel>,
 }
@@ -64,16 +67,16 @@ impl Score {
   pub fn empty() -> Score {
     Score {
       channels: vec![],
-      behavior_references: vec![],
       frame_labels: vec![],
       channel_initialization_data: vec![],
+      sprite_spans: vec![],
     }
   }
 
   pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreBehaviorReference> {
-    return self.behavior_references.iter()
-      .find(|x| x.channel_number == 0 && frame >= x.start_frame && frame <= x.end_frame)
-      .map(|x| x.clone())
+    return self.sprite_spans.iter()
+      .find(|span| span.channel_number == 0 && frame >= span.start_frame && frame <= span.end_frame)
+      .and_then(|span| span.scripts.first().cloned())
   }
 
   fn create_behavior(cast_lib: i32, cast_member: i32) -> (ScriptInstanceRef, DatumRef) {
@@ -85,73 +88,93 @@ impl Score {
     (script_instance_ref.clone(), datum_ref.clone())
   }
 
-  pub fn end_sprites(&mut self, frame_num: u32) -> Vec<u32> {
-    let channels_to_end: Vec<u32> = self.behavior_references
+  fn is_span_in_frame(behavior: &ScoreSpriteSpan, frame_num: u32) -> bool {
+    behavior.start_frame <= frame_num && behavior.end_frame >= frame_num
+  }
+
+  pub fn begin_sprites(&mut self, frame_num: u32) {
+
+    // clean up behaviors from previous frame
+    let sprites_to_finish = reserve_player_mut(|player| {
+      player.movie.score.channels.iter()
+        .filter_map(|channel| {
+          channel.sprite.exited.then_some(channel.sprite.number)
+        })
+        .collect_vec()
+    });
+  
+    for sprite_num in sprites_to_finish {
+      reserve_player_mut(|player| {
+        let sprite: &mut Sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
+        sprite.reset();
+      });
+    }
+
+    let spans_to_enter: Vec<_> = self.sprite_spans.iter()
+      .filter(|span| Self::is_span_in_frame(span, frame_num))
+      .filter(|span| {
+        reserve_player_mut(|player| {
+          player.movie.score.get_sprite(span.channel_number as i16)
+            .map_or(true, |sprite| !sprite.entered)
+        })
+      })
+      .cloned()
+      .collect();
+
+    let span_init_data: Vec<_> = spans_to_enter.iter()
+      .filter_map(|span| {
+        self.channel_initialization_data
+          .iter()
+          .find(|(_frame_index, channel_index, _data)| {
+            get_channel_number_from_index(*channel_index as u32) == span.channel_number as u32 
+            && Self::is_span_in_frame(span, frame_num)
+          })
+          .map(|(_frame_index, _channel_index, data)| (span, data.clone()))
+      })
+      .collect();
+
+    for (span, data) in span_init_data.iter() {
+      let sprite: &mut Sprite = self.get_sprite_mut(span.channel_number as i16);
+      sprite.entered = true;
+      let is_sprite = span.channel_number > 0;
+      if is_sprite {
+        sprite.member = Some(CastMemberRef {
+          cast_lib: data.cast_lib as i32,
+          cast_member: data.cast_member as i32,
+        });
+        sprite.ink = data.ink as i32;
+        sprite.loc_h = data.pos_x as i32;
+        sprite.loc_v = data.pos_y as i32;
+        sprite.width = data.width as i32;
+        sprite.height = data.height as i32;
+        sprite.color = ColorRef::PaletteIndex(data.fore_color);
+        sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
+      }
+    }
+  
+    for span in spans_to_enter.iter() {
+      if let Some(behavior_ref) = span.scripts.first() {
+        let (_, datum_ref) = Self::create_behavior(behavior_ref.cast_lib as i32, behavior_ref.cast_member as i32);
+        let scripts = Datum::List(DatumType::List, vec![datum_ref], false);
+        let _ = sprite_set_prop(span.channel_number as i16, "scriptInstanceList", scripts);
+        player_dispatch_event_to_sprite(&"beginSprite".to_owned(), &vec![], span.channel_number as u16);
+      }
+    }
+  }
+
+  pub fn end_sprites(&mut self, prev_frame: u32, next_frame: u32) -> Vec<u32> {
+    let channels_to_end: Vec<u32> = self.sprite_spans
       .iter()
-      .filter(|sr| sr.end_frame == frame_num)
-      .map(|behavior_ref| behavior_ref.channel_number)
+      .filter(|span| {
+        Self::is_span_in_frame(span, prev_frame) && !Self::is_span_in_frame(span, next_frame)
+      })
+      .map(|span| span.channel_number)
       .collect_vec();
 
     for channel_num in channels_to_end.iter() {
       player_dispatch_event_to_sprite(&"endSprite".to_owned(), &vec![], channel_num.clone() as u16);
     }
     channels_to_end
-  }
-
-  pub fn begin_sprites(&mut self, frame_num: u32) {
-
-    // TODO check sprite_type?
-    let sprite_init_data = self.channel_initialization_data
-      .iter()
-      .filter(|(frame_index, ..)| *frame_index + 1 == frame_num)
-      .map(|t| t.clone()).collect_vec();
-
-    for (_frame_index, channel_index, data) in sprite_init_data.iter() {
-      let channel_num = get_channel_number_from_index(channel_index.to_owned() as u32);
-      let sprite = self.get_sprite_mut(channel_num.to_owned() as i16);
-      sprite.ink = data.ink as i32;
-      sprite.loc_h = data.pos_x as i32;
-      sprite.loc_v = data.pos_y as i32;
-      sprite.width = data.width as i32;
-      sprite.height = data.height as i32;
-      sprite.member = Some(CastMemberRef {
-        cast_lib: data.cast_lib as i32,
-        cast_member: data.cast_member as i32,
-      });
-      sprite.color = ColorRef::PaletteIndex(data.fore_color);
-      sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
-    }
-
-    let new_behaviors: Vec<(u32, ScriptInstanceRef, DatumRef)> = self.behavior_references
-      .iter()
-      .filter(|sr| sr.start_frame == frame_num)
-      .map(|behavior_ref| {
-        let channel_num = behavior_ref.channel_number;
-        let (script_instance_ref, datum_ref) = Self::create_behavior(behavior_ref.cast_lib as i32, behavior_ref.cast_member as i32);
-        // log_i(format_args!("frame {}, creating behavior, chan_num={}, cast_mem={}, cast_lib={} start={} end={}", frame_num, channel_num, behavior_ref.cast_member, behavior_ref.cast_lib, behavior_ref.start_frame, behavior_ref.end_frame).to_string().as_str());
-        // TODO switch to sprite_set_prop(sprite_num, "scriptInstanceList", Datum::List(script_datum_refs))
-        let _ = reserve_player_mut(|player| {
-          let value_ref = player.alloc_datum(Datum::Int(channel_num as i32));
-          script_set_prop(
-            player,
-            &script_instance_ref, 
-            &"spriteNum".to_string(),
-            &value_ref, 
-            false
-          )
-        });
-        (channel_num, script_instance_ref, datum_ref)
-      })
-      .collect();
-
-    for (channel_num, script_instance_ref, _datum_ref) in &new_behaviors {
-      let sprite = self.get_sprite_mut(*channel_num as i16);
-      sprite.script_instance_list.push(script_instance_ref.clone());
-    }
-
-    for (channel_num, _, _) in new_behaviors {
-      player_dispatch_event_to_sprite(&"beginSprite".to_owned(), &vec![], channel_num as u16);
-    }
   }
 
   pub fn get_channel_count(&self) -> usize {
@@ -206,20 +229,27 @@ impl Score {
     for i in 0..score_chunk.frame_interval_primaries.len() {
       let primary = &score_chunk.frame_interval_primaries[i];
       let secondary = if i < score_chunk.frame_interval_secondaries.len() {
-        &score_chunk.frame_interval_secondaries[i]
+        Some(&score_chunk.frame_interval_secondaries[i])
       } else {
-        continue;
+        None
       };
 
-      self.behavior_references.push(
-        ScoreBehaviorReference {
+      let is_frame_script_or_sprite_script = primary.channel_index == 0 || primary.channel_index > 5;
+      if is_frame_script_or_sprite_script {
+        // TODO support the other 5 reserved channels
+        let sprite_span = ScoreSpriteSpan {
           channel_number: get_channel_number_from_index(primary.channel_index),
           start_frame: primary.start_frame,
           end_frame: primary.end_frame,
-          cast_lib: secondary.cast_lib,
-          cast_member: secondary.cast_member,
-        }
-      );
+          scripts: secondary.map_or_else(Vec::new, |sec| vec![
+            ScoreBehaviorReference {
+                cast_lib: sec.cast_lib,
+                cast_member: sec.cast_member,
+            }
+          ]),
+        };
+        self.sprite_spans.push(sprite_span);
+      }
     }
 
     JsApi::dispatch_score_changed();
