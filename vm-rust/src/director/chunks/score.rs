@@ -90,6 +90,19 @@ impl ScoreFrameData {
         let mut frame_chunk_reader = BinaryReader::from_u8(chunk_data);
         frame_chunk_reader.set_endian(Endian::Big);
 
+        // director reserves the first 6 channels:
+        // note that channel indices are different than channel numbers
+        // ┌───────┬─────────────────┐
+        // │ index │                 │
+        // ├───────┼─────────────────┤
+        // │     0 │ frame script    │
+        // │     1 │ palette         │
+        // │     2 │ transition      │
+        // │     3 │ sound 1         │
+        // │     4 │ sound 2         │
+        // │     5 │ tempo           │
+        // │   N>5 │ sprites         │
+        // └───────┴─────────────────┘
         let mut channel_index = 0;
         while !frame_chunk_reader.eof() {
           channel_index = channel_index + 1;

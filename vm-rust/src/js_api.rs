@@ -392,13 +392,14 @@ impl JsApi {
 
     member_map.str_set(
       "behaviorReferences",
-      &js_sys::Array::from_iter(score.behavior_references.iter().map(|scr_ref| {
+      &js_sys::Array::from_iter(score.sprite_spans.iter().filter(|span| span.scripts.len() > 0).map(|span| {
+        let behavior = span.scripts.first().unwrap();
         let script_ref_map = js_sys::Map::new();
-        script_ref_map.str_set("startFrame", &scr_ref.start_frame.to_js_value());
-        script_ref_map.str_set("endFrame", &scr_ref.end_frame.to_js_value());
-        script_ref_map.str_set("castLib", &scr_ref.cast_lib.to_js_value());
-        script_ref_map.str_set("castMember", &scr_ref.cast_member.to_js_value());
-        script_ref_map.str_set("channelNumber", &scr_ref.channel_number.to_js_value());
+        script_ref_map.str_set("startFrame", &span.start_frame.to_js_value());
+        script_ref_map.str_set("endFrame", &span.end_frame.to_js_value());
+        script_ref_map.str_set("castLib", &behavior.cast_lib.to_js_value());
+        script_ref_map.str_set("castMember", &behavior.cast_member.to_js_value());
+        script_ref_map.str_set("channelNumber", &span.channel_number.to_js_value());
         script_ref_map.to_js_object()
       })),
     );

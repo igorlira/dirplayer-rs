@@ -57,6 +57,8 @@ pub struct Sprite {
   pub script_instance_list: Vec<ScriptInstanceRef>,
   pub cursor_ref: Option<CursorRef>,
   pub editable: bool,
+  pub entered: bool,
+  pub exited: bool,
 }
 
 impl Sprite {
@@ -85,6 +87,8 @@ impl Sprite {
       script_instance_list: vec![],
       cursor_ref: None,
       editable: false,
+      entered: false,
+      exited: false,
     }
   }
 
@@ -111,5 +115,7 @@ impl Sprite {
     self.script_instance_list.clear();
     self.cursor_ref = None;
     self.editable = false;
+    self.entered = false;
+    self.exited = false;
   }
 }
