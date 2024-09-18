@@ -165,6 +165,13 @@ fn decode_bitmap_1bit(
             let scan_index = (y * scan_width + x) as usize;
             if x < width {
                 let pixel_index = (y * width + x) as usize;
+                if scan_index >= scan_data.len() {
+                    return Err(format!(
+                        "decode_bitmap_1bit: scan_index {} >= scan_data.len() {}",
+                        scan_index,
+                        scan_data.len()
+                    ));
+                }
                 let pixel = scan_data[scan_index];
                 result[pixel_index] = pixel;
             }
@@ -265,6 +272,13 @@ fn decode_bitmap_4bit(
             }
             let scan_index = (y * scan_width + x) as usize;
             let pixel_index = (y * width + x) as usize;
+            if scan_index >= decoded_data.len() {
+                return Err(format!(
+                    "decode_bitmap_4bit: scan_index {} >= decoded_data.len() {}",
+                    scan_index,
+                    decoded_data.len()
+                ));
+            }
             let pixel = decoded_data[scan_index];
 
             if pixel_index % 2 == 0 {
@@ -332,6 +346,16 @@ fn decode_generic_bitmap(
                                 + x as usize
                                 + c as usize
                                 + b as usize;
+                            if (scan_index >= data.len()) || (result_index >= result.len()) {
+                                warn!(
+                                    "decode_generic_bitmap: scan_index {} >= data.len() {} or result_index {} >= result.len() {}",
+                                    scan_index,
+                                    data.len(),
+                                    result_index,
+                                    result.len()
+                                );
+                                continue;
+                            }
                             result[result_index as usize] = data[scan_index as usize];
                         }
                     }
