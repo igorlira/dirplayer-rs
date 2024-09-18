@@ -2,7 +2,7 @@ use std::cmp::max;
 
 use itertools::Itertools;
 
-use crate::{director::{chunks::score::{FrameLabel, ScoreFrameChannelData}, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi};
+use crate::{director::{chunks::score::{FrameLabel, ScoreFrameChannelData}, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi, utils::log_i};
 
 use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, datum_ref::DatumRef, events::{player_dispatch_event_to_sprite, player_dispatch_targeted_event}, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::{cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, script::{self, ScriptDatumHandlers}}, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 

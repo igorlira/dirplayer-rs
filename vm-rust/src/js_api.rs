@@ -1,15 +1,15 @@
 use std::{collections::HashMap, iter::FromIterator, sync::Arc};
 
 use itertools::Itertools;
-use js_sys::Array;
+use js_sys::{Array, Object};
 use wasm_bindgen::prelude::*;
 
 use crate::{
     director::{
-        chunks::script::ScriptChunk,
+        chunks::{script::ScriptChunk, ChunkContainer},
         enums::ScriptType,
         file::DirectorFile,
-        lingo::{datum::Datum, script::ScriptContext},
+        lingo::{datum::Datum, script::ScriptContext}, utils::fourcc_to_string,
     }, player::{
         allocator::ScriptInstanceAllocatorTrait, bitmap::bitmap::PaletteRef, cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, ScriptMember}, datum_formatting::{format_concrete_datum, format_datum}, datum_ref::{DatumId, DatumRef}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_ref, score::Score, script::ScriptInstanceId, script_ref::ScriptInstanceRef, DirPlayer, ScriptError, PLAYER_OPT
     }, rendering::RENDERER_LOCK
@@ -156,6 +156,7 @@ impl CastMemberRef {
 #[wasm_bindgen(module = "dirplayer-js-api")]
 extern "C" {
   pub fn onMovieLoaded(test: OnMovieLoadedCallbackData);
+  pub fn onMovieChunkListChanged(chunks: Object);
   pub fn onCastListChanged(names: Array);
   pub fn onCastLibNameChanged(cast_number: u32, name: &str);
   pub fn onCastMemberListChanged(cast_number: u32, members: js_sys::Object);
@@ -211,10 +212,25 @@ impl JsApi {
       .collect_vec()
       .join(", ");
 
+    let chunk_list = Self::get_chunk_container_map(&dir_file.chunk_container);
     onMovieLoaded(OnMovieLoadedCallbackData {
       version: dir_file.version,
       test_val: test,
     });
+    onMovieChunkListChanged(chunk_list.to_js_object())
+  }
+
+  fn get_chunk_container_map(chunk_container: &ChunkContainer) -> js_sys::Map {
+    let result = js_sys::Map::new();
+    for (chunk_id, chunk) in &chunk_container.chunk_info {
+      let fourcc_str = fourcc_to_string(chunk.fourcc);
+      let chunk_map = js_sys::Map::new();
+      chunk_map.str_set("id", &JsValue::from_f64(*chunk_id as f64));
+      chunk_map.str_set("fourcc", &JsValue::from_str(&fourcc_str));
+
+      result.set(&JsValue::from_f64(*chunk_id as f64), &chunk_map.to_js_object());
+    }
+    return result;
   }
 
   pub fn dispatch_cast_name_changed(cast_number: u32) {
@@ -403,6 +419,29 @@ impl JsApi {
         script_ref_map.to_js_object()
       })),
     );
+
+    member_map.str_set(
+      "channelInitData",
+      &js_sys::Array::from_iter(score.channel_initialization_data.iter().map(|(frame_index, channel_number, init_data)| {
+        let channel_map = js_sys::Map::new();
+        channel_map.str_set("frameIndex", &frame_index.to_js_value());
+        channel_map.str_set("channelNumber", &channel_number.to_js_value());
+
+        let init_data_map = js_sys::Map::new();
+        init_data_map.str_set("spriteType", &init_data.sprite_type.to_js_value());
+        init_data_map.str_set("castLib", &init_data.cast_lib.to_js_value());
+        init_data_map.str_set("castMember", &init_data.cast_member.to_js_value());
+        init_data_map.str_set("width", &init_data.width.to_js_value());
+        init_data_map.str_set("height", &init_data.height.to_js_value());
+        init_data_map.str_set("locH", &init_data.pos_x.to_js_value());
+        init_data_map.str_set("locV", &init_data.pos_y.to_js_value());
+        init_data_map.str_set("unk1", &init_data.unk1.to_js_value());
+        init_data_map.str_set("unk2", &init_data.unk2.to_js_value());
+
+        channel_map.str_set("initData", &init_data_map.to_js_object());
+        channel_map.to_js_object()
+      })),
+    );	
 
     return member_map;
   }
@@ -774,6 +813,12 @@ pub trait ToJsValue {
 impl ToJsValue for String {
   fn to_js_value(&self) -> JsValue {
     JsValue::from_str(self)
+  }
+}
+
+impl ToJsValue for u8 {
+  fn to_js_value(&self) -> JsValue {
+    JsValue::from_f64(*self as f64)
   }
 }
 

@@ -23,7 +23,7 @@ interface VMSliceState {
   channelSnapshots: Record<number, ScoreSpriteSnapshot>,
   subscribedMemberTokens: TMemberSubscription[],
   isMovieLoaded: boolean,
-  movieChunkList: JsBridgeChunk[],
+  movieChunkList: Partial<Record<number, JsBridgeChunk>>,
 }
 
 const initialState: VMSliceState = {
@@ -40,7 +40,7 @@ const initialState: VMSliceState = {
   channelSnapshots: {},
   subscribedMemberTokens: [],
   isMovieLoaded: false,
-  movieChunkList: [],
+  movieChunkList: {},
 }
 
 interface CastMemberListChangedPayload {
@@ -58,7 +58,7 @@ const vmSlice = createSlice({
         isReady: true,
       }
     },
-    movieChunkListChanged: (state, action: PayloadAction<JsBridgeChunk[]>) => {
+    movieChunkListChanged: (state, action: PayloadAction<Partial<Record<number, JsBridgeChunk>>>) => {
       return {
         ...state,
         movieChunkList: action.payload,

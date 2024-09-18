@@ -130,6 +130,7 @@ impl DirPlayer {
         file_name: "".to_string(),
         stage_color: (0, 0, 0),
         frame_rate: 30,
+        file: None,
       },
       net_manager: NetManager {
         base_path: None,
@@ -179,7 +180,7 @@ impl DirPlayer {
     result
   }
 
-  pub async fn load_movie_from_file(&mut self, path: &str) -> DirectorFile  {
+  pub async fn load_movie_from_file(&mut self, path: &str) {
     let task_id = self.net_manager.preload_net_thing(path.to_owned());
     self.net_manager.await_task(task_id).await;
     let task = self.net_manager.get_task(task_id).unwrap();
@@ -190,15 +191,14 @@ impl DirPlayer {
       &get_basename_no_extension(task.resolved_url.path()), 
       &get_base_url(&task.resolved_url).to_string(),
     ).unwrap();
-    self.load_movie_from_dir(&movie_file).await;
-    return movie_file;
+    self.load_movie_from_dir(movie_file).await;
   }
 
-  async fn load_movie_from_dir(&mut self, dir: &DirectorFile) {
-    self.movie.load_from_file(&dir, &mut self.net_manager, &mut self.bitmap_manager, &mut self.dir_cache).await;
+  async fn load_movie_from_dir(&mut self, dir: DirectorFile) {
+    self.movie.load_from_file(dir, &mut self.net_manager, &mut self.bitmap_manager, &mut self.dir_cache).await;
     let (r, g, b) = self.movie.stage_color;
     self.bg_color = ColorRef::Rgb(r, g, b);
-    JsApi::dispatch_movie_loaded(&dir);
+    JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
   }
 
   pub fn play(&mut self) {

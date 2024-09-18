@@ -21,7 +21,7 @@ type JsBridgeChunk = {
 
 type TVmCallbacks = {
   onMovieLoaded: Function,
-  onMovieChunkListChanged: (chunkList: JsBridgeChunk[]) => void,
+  onMovieChunkListChanged: (chunks: Partial<Record<number, JsBridgeChunk>>) => void,
   onCastListChanged: Function,
   onCastLibNameChanged: (castLib: number, name: string) => void,
   onCastMemberListChanged: Function,

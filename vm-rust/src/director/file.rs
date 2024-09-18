@@ -40,6 +40,7 @@ pub struct DirectorFile {
   pub config: ConfigChunk,
   pub score: Option<ScoreChunk>,
   pub frame_labels: Option<FrameLabelsChunk>,
+  pub chunk_container: ChunkContainer,
 }
 
 // macro_rules! console_log {
@@ -54,9 +55,14 @@ impl DirectorFile {
     file_name: String,
     base_path: Url,
     reader: &mut BinaryReader,
-    chunk_container: &mut ChunkContainer,
   ) -> Result<DirectorFile, String> {
     reader.set_endian(binary_reader::Endian::Big);
+
+    let mut chunk_container = ChunkContainer {
+      cached_chunk_views: HashMap::new(),
+      chunk_info: HashMap::new(),
+      deserialized_chunks: HashMap::new()
+    };
 
     let meta_fourcc = reader.read_u32().unwrap();
     if meta_fourcc == FOURCC("XFIR") {
@@ -92,13 +98,13 @@ impl DirectorFile {
 
     let key_table = read_key_table(
       reader, 
-      chunk_container,
+      &mut chunk_container,
       &mut rifx,
     ).unwrap();
 
     let config = read_config(
       reader, 
-      chunk_container,
+      &mut chunk_container,
       &mut rifx,
     ).unwrap();
 
@@ -109,7 +115,7 @@ impl DirectorFile {
 
     let (cast_entries, casts) = read_casts(
       reader,  
-      chunk_container,
+      &mut chunk_container,
       &mut rifx,
       &key_table,
       &config,
@@ -122,9 +128,9 @@ impl DirectorFile {
     //   }
     // }
 
-    let score = get_score_chunk(reader, chunk_container, &mut rifx);
+    let score = get_score_chunk(reader, &mut chunk_container, &mut rifx);
     
-    let frame_labels = get_frame_labels_chunk(reader, chunk_container, &mut rifx);
+    let frame_labels = get_frame_labels_chunk(reader, &mut chunk_container, &mut rifx);
 
     return Ok(DirectorFile { 
       base_path, 
@@ -135,6 +141,7 @@ impl DirectorFile {
       config,
       score,
       frame_labels,
+      chunk_container,
     });
   }
 }
@@ -708,17 +715,11 @@ fn read_chunk_data(reader: &mut BinaryReader, fourcc: u32, len: u32) -> Result<V
 
 pub fn read_director_file_bytes(bytes: &Vec<u8>, file_name: &str, base_path: &str) -> Result<DirectorFile, String> {
   let mut reader = binary_reader::BinaryReader::from_vec(bytes);
-  let mut chunk_container = ChunkContainer {
-    cached_chunk_views: HashMap::new(),
-    chunk_info: HashMap::new(),
-    deserialized_chunks: HashMap::new()
-  };
   
   return DirectorFile::read(
     file_name.to_owned(),
     Url::from_str(base_path).unwrap(),
-    &mut reader, 
-    &mut chunk_container
+    &mut reader,
   );
 }
 

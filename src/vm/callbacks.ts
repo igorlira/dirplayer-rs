@@ -12,7 +12,7 @@ export function initVmCallbacks() {
       console.log('onMovieLoaded called!', result.version, result.test_val)
       store.dispatch(movieLoaded());
     },
-    onMovieChunkListChanged: (chunkList: JsBridgeChunk[]) => {
+    onMovieChunkListChanged: (chunkList) => {
       store.dispatch(movieChunkListChanged(chunkList));
     },
     onCastListChanged: (castList: string[]) => {
