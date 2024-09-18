@@ -14,8 +14,14 @@ type JsBridgeBreakpoint = {
   bytecode_index: number,
 }
 
+type JsBridgeChunk = {
+  id: string,
+  fourcc: string,
+}
+
 type TVmCallbacks = {
   onMovieLoaded: Function,
+  onMovieChunkListChanged: (chunkList: JsBridgeChunk[]) => void,
   onCastListChanged: Function,
   onCastLibNameChanged: (castLib: number, name: string) => void,
   onCastMemberListChanged: Function,
