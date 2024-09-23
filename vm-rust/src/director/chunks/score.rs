@@ -235,7 +235,7 @@ pub struct ScoreChunk {
   pub header: ScoreChunkHeader,
   pub entries: Vec<Vec<u8>>,
   pub frame_interval_primaries: Vec<FrameIntervalPrimary>,
-  pub frame_interval_secondaries: Vec<FrameIntervalSecondary>,
+  pub frame_interval_secondaries: Vec<Option<FrameIntervalSecondary>>,
   pub frame_data: ScoreFrameData,
 }
 
@@ -264,25 +264,24 @@ impl ScoreChunk {
     let mut frame_interval_primaries = vec![];
     let mut frame_interval_secondaries = vec![];
 
-    for (i, entry) in frame_interval_entries.iter().enumerate() {
-      if entry.is_empty() {
+    for i in (0..frame_interval_entries.len()).step_by(3) {
+      let primary_entry = &frame_interval_entries[i];
+      if primary_entry.is_empty() {
         continue;
       }
-      let is_primary = i % 3 == 0;
-      let is_secondary = i % 3 == 1;
-      let is_tertiary = i % 3 == 2;
-
-      let mut frame_interval_reader = BinaryReader::from_u8(entry);
-      frame_interval_reader.set_endian(Endian::Big);
-      if is_primary {
-        if let Ok(item) = FrameIntervalPrimary::read(&mut frame_interval_reader) {
-          frame_interval_primaries.push(item);
-        } else {
-          error!("Failed to read FrameIntervalPrimary at index {}", i);
-          break;
-        }
-      } else if is_secondary {
-        frame_interval_secondaries.push(FrameIntervalSecondary::read(&mut frame_interval_reader));
+      let mut primary_reader = BinaryReader::from_u8(primary_entry);
+      if let Ok(item) = FrameIntervalPrimary::read(&mut primary_reader) {
+        frame_interval_primaries.push(item);
+      } else {
+        error!("Failed to read FrameIntervalPrimary at index {}", i);
+        break;
+      }
+      let secondary_entry = &frame_interval_entries[i+1];
+      if secondary_entry.is_empty() {
+        frame_interval_secondaries.push(None);
+      } else {
+        let mut secondary_reader = BinaryReader::from_u8(secondary_entry);
+        frame_interval_secondaries.push(Some(FrameIntervalSecondary::read(&mut secondary_reader)));
       }
       // TODO tertiary
     }
