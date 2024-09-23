@@ -60,8 +60,26 @@ impl MovieHandlers {
 
   pub fn go(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      player.next_frame = Some(player.get_datum(&args[0]).int_value()? as u32);
-      Ok(DatumRef::Void)
+      let datum: &Datum = player.get_datum(&args[0]);
+      let datum_type = datum.type_enum();
+      let destination_frame = match datum_type {
+        DatumType::Int => {
+          Some( datum.int_value()? as u32)
+        },
+        DatumType::String => {
+          let label = datum.string_value()?;
+          let frame_label = player.movie.score.frame_labels.iter().find(|fl| fl.label == label);
+          frame_label.map(|frame_label| frame_label.frame_num as u32)
+        },
+        _ => None,
+      };
+      match destination_frame {
+        Some(frame) => {
+            player.next_frame = Some(frame);
+            Ok(DatumRef::Void)
+        },
+        None => Err(ScriptError::new("Unsupported or invalid frame label passed to go()".to_string()))
+      }
     })
   }
 
