@@ -228,11 +228,7 @@ impl Score {
 
     for i in 0..score_chunk.frame_interval_primaries.len() {
       let primary = &score_chunk.frame_interval_primaries[i];
-      let secondary = if i < score_chunk.frame_interval_secondaries.len() {
-        Some(&score_chunk.frame_interval_secondaries[i])
-      } else {
-        None
-      };
+      let secondary = &score_chunk.frame_interval_secondaries[i];
 
       let is_frame_script_or_sprite_script = primary.channel_index == 0 || primary.channel_index > 5;
       if is_frame_script_or_sprite_script {
@@ -241,12 +237,15 @@ impl Score {
           channel_number: get_channel_number_from_index(primary.channel_index),
           start_frame: primary.start_frame,
           end_frame: primary.end_frame,
-          scripts: secondary.map_or_else(Vec::new, |sec| vec![
-            ScoreBehaviorReference {
+          scripts: match secondary {
+            None => Vec::new(),
+            Some(sec) => vec![
+              ScoreBehaviorReference {
                 cast_lib: sec.cast_lib,
                 cast_member: sec.cast_member,
-            }
-          ]),
+              }
+            ],
+          },
         };
         self.sprite_spans.push(sprite_span);
       }
