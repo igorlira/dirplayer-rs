@@ -127,7 +127,7 @@ impl Score {
           .iter()
           .find(|(_frame_index, channel_index, _data)| {
             get_channel_number_from_index(*channel_index as u32) == span.channel_number as u32 
-            && Self::is_span_in_frame(span, frame_num)
+            && _frame_index + 1 == span.start_frame
           })
           .map(|(_frame_index, _channel_index, data)| (span, data.clone()))
       })
