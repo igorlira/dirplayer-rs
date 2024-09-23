@@ -88,8 +88,8 @@ impl Score {
     (script_instance_ref.clone(), datum_ref.clone())
   }
 
-  fn is_span_in_frame(behavior: &ScoreSpriteSpan, frame_num: u32) -> bool {
-    behavior.start_frame <= frame_num && behavior.end_frame >= frame_num
+  fn is_span_in_frame(span: &ScoreSpriteSpan, frame_num: u32) -> bool {
+    span.start_frame <= frame_num && span.end_frame >= frame_num
   }
 
   pub fn begin_sprites(&mut self, frame_num: u32) {
