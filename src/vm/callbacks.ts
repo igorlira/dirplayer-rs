@@ -1,6 +1,6 @@
-import { ICastMemberRef, JsBridgeBreakpoint, OnScriptErrorData, registerVmCallbacks } from "dirplayer-js-api";
+import { ICastMemberRef, JsBridgeBreakpoint, JsBridgeChunk, OnScriptErrorData, registerVmCallbacks } from "dirplayer-js-api";
 import store from "../store";
-import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, frameChanged, globalsChanged, movieLoaded, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
+import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, frameChanged, globalsChanged, movieChunkListChanged, movieLoaded, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import { OnMovieLoadedCallbackData, trigger_timeout } from 'vm-rust'
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
@@ -11,6 +11,9 @@ export function initVmCallbacks() {
     onMovieLoaded: (result: OnMovieLoadedCallbackData) => {
       console.log('onMovieLoaded called!', result.version, result.test_val)
       store.dispatch(movieLoaded());
+    },
+    onMovieChunkListChanged: (chunkList) => {
+      store.dispatch(movieChunkListChanged(chunkList));
     },
     onCastListChanged: (castList: string[]) => {
       store.dispatch(castListChanged(castList));

@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
@@ -19,6 +19,7 @@ pub struct Script {
     pub script_type: ScriptType,
     pub handlers: FxHashMap<String, Rc<HandlerDef>>,
     pub handler_names: Vec<String>,
+    pub properties: RefCell<FxHashMap<String, DatumRef>>,
 }
 
 pub type ScriptInstanceId = u32;
@@ -103,6 +104,47 @@ pub fn script_get_prop_opt(
         }
     }
 }
+
+pub fn script_get_static_prop(
+    player: &mut DirPlayer,
+    script_ref: &CastMemberRef,
+    prop_name: &String,
+) -> Result<DatumRef, ScriptError> {
+    let script_rc = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
+    let script = script_rc.as_ref();
+    let properties = script.properties.borrow();
+    if let Some(prop) = properties.get(prop_name) {
+        Ok(prop.clone())
+    } else {
+        Err(ScriptError::new(format!(
+            "Cannot get static property {} on script {}",
+            prop_name, script.name
+        )))
+    }
+}
+
+pub fn script_set_static_prop(
+    player: &mut DirPlayer,
+    script_ref: &CastMemberRef,
+    prop_name: &String,
+    value_ref: &DatumRef,
+    required: bool,
+) -> Result<(), ScriptError> {
+    let script_rc = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
+    let script = script_rc.as_ref();
+    let mut properties = script.properties.borrow_mut();
+
+    if required && !properties.contains_key(prop_name) {
+        return Err(ScriptError::new(format!(
+            "Cannot set static property {} on script {}",
+            prop_name, script.name
+        )));
+    } else {
+        properties.insert(prop_name.clone(), value_ref.clone());
+        Ok(())
+    }
+}
+
 
 pub fn script_get_prop(
     player: &mut DirPlayer,

@@ -1,6 +1,8 @@
 use core::fmt;
 use std::fmt::Formatter;
 
+use log::warn;
+
 use crate::director::{chunks::cast_member::CastMemberDef, enums::{MemberType, ScriptType, ShapeInfo}, lingo::script::ScriptContext};
 
 use super::{bitmap::{bitmap::{decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef}, manager::{BitmapManager, BitmapRef}}, sprite::ColorRef, ScriptError};
@@ -298,8 +300,7 @@ impl CastMember {
         let bitmap_info = chunk.specific_data.bitmap_info().unwrap();
         let abmp_chunk = member_def.children
           .get(0)
-          .unwrap()
-          .as_ref();
+          .and_then(|x| x.as_ref());
         let new_bitmap_ref = if let Some(abmp_chunk) = abmp_chunk {
           let abmp_chunk = abmp_chunk
             .as_bitmap()
@@ -317,6 +318,7 @@ impl CastMember {
             }
           }
         } else {
+          warn!("No bitmap chunk found for member {}", number);
           bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
         };
 

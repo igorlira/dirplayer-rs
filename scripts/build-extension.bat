@@ -24,8 +24,8 @@ goto question
 
 :: Navigate to the "dist-extension".
 cd .\dist-extension\
-:: Deletes the "dcr" folder with all its contents.
-rd /s /q .\dcr\
+:: Deletes "dcr*" folders with all its contents.
+powershell -command "Get-ChildItem | Where-Object Name -Like 'dcr*' | ForEach-Object { Remove-Item -Recurse -LiteralPath $_.Name }"
 :: Delete all unnecessary files.
 del loader.html /Q
 del index.html /Q

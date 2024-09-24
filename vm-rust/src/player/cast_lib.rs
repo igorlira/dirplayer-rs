@@ -1,11 +1,11 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use fxhash::FxHashMap;
 use url::Url;
 
 use crate::{director::{cast::CastDef, file::{read_director_file_bytes, DirectorFile}, lingo::{datum::Datum, script::ScriptContext}}, js_api::{self, JsApi}, utils::{get_base_url, get_basename_no_extension, log_i}};
 
-use super::{allocator::DatumAllocator, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, manager::BitmapManager}, cast_member::{BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, net_task::NetResult, reserve_player_mut, script::Script, ScriptError, PLAYER_OPT};
+use super::{allocator::DatumAllocator, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, manager::BitmapManager}, cast_member::{BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember}, datum_ref::DatumRef, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, net_task::NetResult, reserve_player_mut, script::Script, ScriptError, PLAYER_OPT};
 
 #[repr(u8)]
 #[derive(PartialEq)]
@@ -218,6 +218,12 @@ impl CastLib {
         handler_names.push(handler_name.to_owned());
       }
 
+      let property_names = script_def.property_name_ids.iter().map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
+      let mut properties = FxHashMap::default();
+      for name in property_names {
+        properties.insert(name.clone(), DatumRef::Void);
+      }
+
       let script = Script { 
         member_ref: cast_member_ref(self.number as i32, number as i32),
         name: (&member.name).to_owned(),
@@ -225,6 +231,7 @@ impl CastLib {
         script_type: script_member.script_type,
         handlers: handler_name_map,
         handler_names,
+        properties: RefCell::new(properties),
       };
       self.scripts.insert(number, Rc::new(script));
     } else if let CastMemberType::Palette(_) = &member.member_type {

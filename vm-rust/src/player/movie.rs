@@ -20,12 +20,13 @@ pub struct Movie {
   pub file_name: String,
   pub stage_color: (u8, u8, u8),
   pub frame_rate: u16,
+  pub file: Option<DirectorFile>,
 }
 
 impl Movie {
   pub async fn load_from_file(
     &mut self, 
-    file: &DirectorFile, 
+    file: DirectorFile, 
     net_manager: &mut NetManager, 
     bitmap_manager: &mut BitmapManager,
     dir_cache: &mut HashMap<Box<str>, DirectorFile>,
@@ -43,10 +44,11 @@ impl Movie {
       right: file.config.movie_right as i32,
       bottom: file.config.movie_bottom as i32,
     };
-    self.cast_manager.load_from_dir(file, net_manager, bitmap_manager, dir_cache).await;
-    self.score.load_from_dir(file);
+    self.cast_manager.load_from_dir(&file, net_manager, bitmap_manager, dir_cache).await;
+    self.score.load_from_dir(&file);
     self.file_name = file.file_name.to_string();
     self.frame_rate = file.config.frame_rate;
+    self.file = Some(file);
   }
 
   pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {

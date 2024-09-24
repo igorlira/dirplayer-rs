@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "DirPlayer - Shockwave Emulator",
   "short_name": "DirPlayer",
-  "version": "0.0.1",
+  "version": "0.0.4",
   "action": {
     "default_title": "DirPlayer",
     "default_popup": "extension/index.html",
