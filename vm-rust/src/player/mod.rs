@@ -523,7 +523,6 @@ async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>)
   
     let mut result = vec![];
 
-    let receiver_refs = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals());
     let instance_receiver_refs = &player.movie.score.get_active_script_instance_list();
     for instance_receiver_ref in instance_receiver_refs.iter() {
       let script_instance = player.allocator.get_script_instance(instance_receiver_ref);
@@ -535,6 +534,7 @@ async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>)
       }
     }
 
+    let receiver_refs = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals());
     for script_ref in receiver_refs {
       let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
       let handler_pair = script.get_own_handler_ref(&handler_name);
