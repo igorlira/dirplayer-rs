@@ -8,7 +8,7 @@ use crate::io::reader::DirectorExt;
 #[derive(Copy, Clone, FromPrimitive)]
 pub enum MemberType {
 	Null = 0,
-  Bitmap = (1),
+  	Bitmap = (1),
 	FilmLoop = (2),
 	Text = (3),
 	Palette = (4),
