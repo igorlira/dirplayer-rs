@@ -774,23 +774,23 @@ pub async fn run_frame_loop() {
       });
       if !frame_skipped {
         player_unwrap_result(player_invoke_global_event(&"exitFrame".to_string(), &vec![]).await);
-        let ended_sprite_nums = reserve_player_mut(|player| {
-          let next_frame = player.get_next_frame(); // an exitFrame handler may have changed the next frame
-          player.movie.score.end_sprites(prev_frame, next_frame)
-        });
-        player_wait_available().await;
-        reserve_player_mut(|player| {
-          for sprite_num in ended_sprite_nums.iter() {
-            let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
-            sprite.exited = true; 
-          }
-        });
-        (is_playing, is_script_paused) = reserve_player_mut(|player| {
-          player.advance_frame();
-          (player.is_playing, player.is_script_paused)
-        });
       }
-    };   
+      let ended_sprite_nums = reserve_player_mut(|player| {
+        let next_frame = player.get_next_frame(); // an exitFrame handler may have changed the next frame
+        player.movie.score.end_sprites(prev_frame, next_frame)
+      });
+      player_wait_available().await;
+      reserve_player_mut(|player| {
+        for sprite_num in ended_sprite_nums.iter() {
+          let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
+          sprite.exited = true; 
+        }
+      });
+      (is_playing, is_script_paused) = reserve_player_mut(|player| {
+        player.advance_frame();
+        (player.is_playing, player.is_script_paused)
+      });
+    };
   }
 }
 
