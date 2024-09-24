@@ -362,6 +362,9 @@ pub async fn player_set_obj_prop(
         Datum::SoundRef(..) => reserve_player_mut(|player| {
             SoundDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
+        Datum::ScriptRef(script_ref) => reserve_player_mut(|player| {
+            script_set_static_prop(player, &script_ref, prop_name, value_ref, false)
+        }),
         _ => reserve_player_ref(|player| {
             Err(ScriptError::new(
                 format!(
@@ -391,6 +394,9 @@ pub fn get_obj_prop(
         }
         Datum::ScriptInstanceRef(script_instance_id) => {
             script_get_prop(player, &script_instance_id, &prop_name)
+        }
+        Datum::ScriptRef(script_ref) => {
+            script_get_static_prop(player, &script_ref, prop_name)
         }
         Datum::PropList(prop_list, ..) => {
             PropListUtils::get_prop_or_built_in(player, &prop_list, &prop_name)
