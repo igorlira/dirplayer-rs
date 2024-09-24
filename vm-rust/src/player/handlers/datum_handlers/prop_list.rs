@@ -301,7 +301,7 @@ impl PropListDatumHandlers {
     })
   }
 
-  fn duplicate(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn duplicate(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     Ok(player_duplicate_datum(datum))
   }
 
