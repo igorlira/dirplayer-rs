@@ -134,14 +134,16 @@ impl Score {
       .collect();
 
     for (span, data) in span_init_data.iter() {
-      let sprite: &mut Sprite = self.get_sprite_mut(span.channel_number as i16);
+      let sprite_num = span.channel_number as i16;
+      let sprite: &mut Sprite = self.get_sprite_mut(sprite_num);
       sprite.entered = true;
       let is_sprite = span.channel_number > 0;
       if is_sprite {
-        sprite.member = Some(CastMemberRef {
+        let member = CastMemberRef {
           cast_lib: data.cast_lib as i32,
           cast_member: data.cast_member as i32,
-        });
+        };
+        let _ = sprite_set_prop(sprite_num, "member", Datum::CastMember(member));
         sprite.ink = data.ink as i32;
         sprite.loc_h = data.pos_x as i32;
         sprite.loc_v = data.pos_y as i32;
