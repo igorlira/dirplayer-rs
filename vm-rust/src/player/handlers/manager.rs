@@ -2,7 +2,7 @@ use log::warn;
 
 use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError}};
 
-use super::{cast::CastHandlers, datum_handlers::{player_call_datum_handler, point::PointDatumHandlers, prop_list::PropListDatumHandlers, script_instance::ScriptInstanceUtils}, movie::MovieHandlers, net::NetHandlers, string::StringHandlers, types::TypeHandlers};
+use super::{cast::CastHandlers, datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, point::PointDatumHandlers, prop_list::PropListDatumHandlers, script_instance::ScriptInstanceUtils}, movie::MovieHandlers, net::NetHandlers, string::StringHandlers, types::TypeHandlers};
 
 
 pub struct BuiltInHandlerManager { }
@@ -253,14 +253,71 @@ impl BuiltInHandlerManager {
         PointDatumHandlers::inside(point, rect)
       },
       "addProp" => {
-        let item = &args[0];
+        let list = &args[0];
         let args = &args[1..].to_vec();
-        PropListDatumHandlers::add_prop(item,  args)
+        PropListDatumHandlers::add_prop(list,  args)
       },
-      "getProp" => {
+      "deleteAt" => {
+        reserve_player_mut(|player| {
+          let list = &args[0];
+          let args = &args[1..].to_vec();
+          match player.get_datum(list) {
+            Datum::List(..) => {
+              ListDatumHandlers::delete_at(list, args)
+            },
+            Datum::PropList(..) => {
+              PropListDatumHandlers::delete_at(list, args)
+            }
+            _ => {
+              Err(ScriptError::new("Cannot delete at non list".to_string()))
+            },
+          }
+        })
+      },
+      "getOne" => {
+        reserve_player_mut(|player| {
+          let list = &args[0];
+          let args = &args[1..].to_vec();
+          match player.get_datum(list) {
+            Datum::List(..) => {
+              ListDatumHandlers::get_one(list, args)
+            },
+            Datum::PropList(..) => {
+              PropListDatumHandlers::get_one(list, args)
+            }
+            _ => {
+              Err(ScriptError::new("Cannot get one at non list".to_string()))
+            },
+          }
+        })
+      },
+      "addAt" => {
+        let list = &args[0];
+        let args = &args[1..].to_vec();
+        ListDatumHandlers::add_at(list, args)
+      },
+      "duplicate" => {
         let item = &args[0];
         let args = &args[1..].to_vec();
-        PropListDatumHandlers::get_prop(item,  args)
+        reserve_player_mut(|player| {
+          match player.get_datum(item) {
+            Datum::List(..) => {
+              ListDatumHandlers::duplicate(item, args)
+            },
+            Datum::PropList(..) => {
+              PropListDatumHandlers::duplicate(item, args)
+            }
+            _ => {
+              Err(ScriptError::new("duplicate() on non list not implemented".to_string()))
+            },
+          }
+        })
+        
+      }
+      "getProp" => {
+        let list = &args[0];
+        let args = &args[1..].to_vec();
+        PropListDatumHandlers::get_prop(list, args)
       },
       "min" => TypeHandlers::min(args),
       "max" => TypeHandlers::max(args),
