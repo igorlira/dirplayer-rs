@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::Datum, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, events::{player_invoke_event_to_instances, player_invoke_static_event}, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError}};
+use crate::{director::lingo::datum::{Datum, DatumType}, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, events::{player_invoke_event_to_instances, player_invoke_static_event}, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError}};
 
 pub struct MovieHandlers {}
 
