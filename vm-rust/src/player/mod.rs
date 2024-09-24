@@ -535,7 +535,16 @@ async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>)
     }
 
     let receiver_refs = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals());
-    for script_ref in receiver_refs {
+
+    // Lingo appears to support customFunc(script) invocations where customFunc is a handler of script
+    let first_arg_if_script_ref = reserve_player_mut(|player| {
+      args
+      .first()
+      .map(|first_arg| player.get_datum(first_arg))
+      .and_then(|datum| match datum {
+          Datum::ScriptRef(script_ref) => Some(script_ref.clone()),
+          _ => None,
+      })
     });
 
     for script_ref in receiver_refs.iter().chain(first_arg_if_script_ref.iter()) {
