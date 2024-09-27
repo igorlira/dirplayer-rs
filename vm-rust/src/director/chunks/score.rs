@@ -56,12 +56,14 @@ impl ScoreFrameChannelData {
   }
 }
 
+#[derive(Clone)]
 pub struct ScoreFrameData {
   pub header: ScoreFrameDataHeader,
   pub decompressed_data: Vec<u8>,
   pub frame_channel_data: Vec<(u32, u16, ScoreFrameChannelData)>,
 }
 
+#[derive(Clone)]
 pub struct ScoreFrameDataHeader {
   pub frame_count: u32,
   pub sprite_record_size: u16,
@@ -172,6 +174,7 @@ impl ScoreFrameData {
   }
 }
 
+#[derive(Clone)]
 pub struct FrameIntervalPrimary {
   pub start_frame: u32,
   pub end_frame: u32,
@@ -206,6 +209,7 @@ impl FrameIntervalPrimary {
   }
 }
 
+#[derive(Clone)]
 pub struct FrameIntervalSecondary {
   pub cast_lib: u16,
   pub cast_member: u16,
@@ -222,6 +226,7 @@ impl FrameIntervalSecondary {
   }
 }
 
+#[derive(Clone)]
 pub struct ScoreChunkHeader {
   pub total_length: u32,
   pub unk1: u32,
@@ -231,6 +236,7 @@ pub struct ScoreChunkHeader {
   pub entry_size_sum: u32,
 }
 
+#[derive(Clone)]
 pub struct ScoreChunk {
   pub header: ScoreChunkHeader,
   pub entries: Vec<Vec<u8>>,

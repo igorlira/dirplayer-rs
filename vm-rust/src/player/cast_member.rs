@@ -3,7 +3,7 @@ use std::fmt::Formatter;
 
 use log::warn;
 
-use crate::director::{chunks::cast_member::CastMemberDef, enums::{MemberType, ScriptType, ShapeInfo}, lingo::script::ScriptContext};
+use crate::director::{chunks::{cast_member::CastMemberDef, score::ScoreChunk}, enums::{MemberType, ScriptType, ShapeInfo}, lingo::script::ScriptContext};
 
 use super::{bitmap::{bitmap::{decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef}, manager::{BitmapManager, BitmapRef}}, sprite::ColorRef, ScriptError};
 
@@ -131,6 +131,11 @@ impl PaletteMember {
   }
 }
 
+#[derive(Clone)]
+pub struct FilmLoopMember {
+  pub score: ScoreChunk
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum CastMemberType {
@@ -140,6 +145,7 @@ pub enum CastMemberType {
   Bitmap(BitmapMember),
   Palette(PaletteMember),
   Shape(ShapeMember),
+  FilmLoop(FilmLoopMember),
   Unknown
 }
 
@@ -151,6 +157,7 @@ pub enum CastMemberTypeId {
   Bitmap,
   Palette,
   Shape,
+  FilmLoop,
   Unknown
 }
 
@@ -163,6 +170,7 @@ impl fmt::Debug for CastMemberType {
       Self::Bitmap(_) => { write!(f, "Bitmap") }
       Self::Palette(_) => { write!(f, "Palette") }
       Self::Shape(_) => { write!(f, "Shape") }
+      Self::FilmLoop(_) => { write!(f, "FilmLoop") }
       Self::Unknown => { write!(f, "Unknown") }
     }
   }
@@ -177,6 +185,7 @@ impl CastMemberTypeId {
       Self::Bitmap => { Ok("bitmap") }
       Self::Palette => { Ok("palette") }
       Self::Shape => { Ok("shape") }
+      Self::FilmLoop => { Ok("filmLoop") }
       _ => { Err(ScriptError::new("Unknown cast member type".to_string())) }
     }
   }
@@ -191,6 +200,7 @@ impl CastMemberType {
       Self::Bitmap(_) => { CastMemberTypeId::Bitmap }
       Self::Palette(_) => { CastMemberTypeId::Palette }
       Self::Shape(_) => { CastMemberTypeId::Shape }
+      Self::FilmLoop(_) => { CastMemberTypeId::FilmLoop }
       Self::Unknown => { CastMemberTypeId::Unknown }
     }
   }
@@ -203,6 +213,7 @@ impl CastMemberType {
       Self::Bitmap(_) => { "bitmap" }
       Self::Palette(_) => { "palette" }
       Self::Shape(_) => { "shape" }
+      Self::FilmLoop(_) => { "filmLoop" }
       _ => { "unknown" }
     }
   }
@@ -336,6 +347,13 @@ impl CastMember {
       MemberType::Shape => {
         CastMemberType::Shape(ShapeMember {
           shape_info: chunk.specific_data.shape_info().unwrap().clone()
+        })
+      }
+      MemberType::FilmLoop => {
+        let chunk = member_def.children[0].as_ref().unwrap();
+        let score = chunk.as_score().unwrap();
+        CastMemberType::FilmLoop(FilmLoopMember {
+          score: score.clone()
         })
       }
       _ => { 
