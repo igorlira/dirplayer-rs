@@ -1,8 +1,8 @@
 use log::warn;
 
-use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError}};
+use crate::{director::lingo::datum::{Datum, DatumType}, js_api::JsApi, player::{datum_formatting::format_concrete_datum, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError}};
 
-use super::{cast::CastHandlers, datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, point::PointDatumHandlers, prop_list::PropListDatumHandlers, script_instance::ScriptInstanceUtils}, movie::MovieHandlers, net::NetHandlers, string::StringHandlers, types::TypeHandlers};
+use super::{cast::CastHandlers, datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, point::PointDatumHandlers, prop_list::PropListDatumHandlers, script_instance::{ScriptInstanceDatumHandlers, ScriptInstanceUtils}}, movie::MovieHandlers, net::NetHandlers, string::StringHandlers, types::TypeHandlers};
 
 
 pub struct BuiltInHandlerManager { }
@@ -290,6 +290,24 @@ impl BuiltInHandlerManager {
             },
           }
         })
+      },
+      "setaProp" => {
+        let datum = &args[0];
+        let datum_type = reserve_player_ref(|player| {
+          player.get_datum(datum).type_enum()
+        });
+        let args = &args[1..].to_vec();
+        match datum_type {
+          DatumType::PropList => {
+            PropListDatumHandlers::set_opt_prop(datum, args)
+          }
+          DatumType::ScriptInstanceRef => {
+            ScriptInstanceDatumHandlers::set_a_prop(datum, args)
+          }
+          _ => {
+            Err(ScriptError::new("Cannot setaProp on non-prop list or child object".to_string()))
+          }
+        }
       },
       "addAt" => {
         let list = &args[0];
