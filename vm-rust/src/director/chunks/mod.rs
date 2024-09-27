@@ -74,6 +74,13 @@ impl Chunk {
       _ => { None }
     }
   }
+
+  pub fn as_score(&self) -> Option<&ScoreChunk> {
+    match self {
+      Self::Score(data) => { Some(data) }
+      _ => { None }
+    }
+  }
 }
 
 pub struct ChunkInfo {
@@ -185,6 +192,13 @@ pub fn make_chunk(
       //res = CastListChunk(dir: this);
     }
     "VWSC" => {
+      return Ok(
+        Chunk::Score(
+          ScoreChunk::read(&mut chunk_reader, version).unwrap()
+        )
+      )
+    },
+    "SCVW" => {
       return Ok(
         Chunk::Score(
           ScoreChunk::read(&mut chunk_reader, version).unwrap()

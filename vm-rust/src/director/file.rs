@@ -410,7 +410,7 @@ pub fn get_frame_labels_chunk(
   chunk_container: &mut ChunkContainer,
   rifx: &mut RIFXReaderContext,
 ) -> Option<FrameLabelsChunk> {
-  let chunk: Option<Chunk> = get_first_chunk(
+  let chunk = get_first_chunk(
     reader,
     chunk_container,
     rifx,
