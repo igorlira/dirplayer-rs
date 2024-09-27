@@ -136,6 +136,11 @@ pub struct FilmLoopMember {
   pub score: ScoreChunk
 }
 
+#[derive(Clone)]
+pub struct SoundMember {
+  // TODO add fields
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum CastMemberType {
@@ -146,6 +151,7 @@ pub enum CastMemberType {
   Palette(PaletteMember),
   Shape(ShapeMember),
   FilmLoop(FilmLoopMember),
+  Sound(SoundMember),
   Unknown
 }
 
@@ -158,6 +164,7 @@ pub enum CastMemberTypeId {
   Palette,
   Shape,
   FilmLoop,
+  Sound,
   Unknown
 }
 
@@ -171,6 +178,7 @@ impl fmt::Debug for CastMemberType {
       Self::Palette(_) => { write!(f, "Palette") }
       Self::Shape(_) => { write!(f, "Shape") }
       Self::FilmLoop(_) => { write!(f, "FilmLoop") }
+      Self::Sound(_) => { write!(f, "Sound") }
       Self::Unknown => { write!(f, "Unknown") }
     }
   }
@@ -186,6 +194,7 @@ impl CastMemberTypeId {
       Self::Palette => { Ok("palette") }
       Self::Shape => { Ok("shape") }
       Self::FilmLoop => { Ok("filmLoop") }
+      Self::Sound => { Ok("sound") }
       _ => { Err(ScriptError::new("Unknown cast member type".to_string())) }
     }
   }
@@ -201,6 +210,7 @@ impl CastMemberType {
       Self::Palette(_) => { CastMemberTypeId::Palette }
       Self::Shape(_) => { CastMemberTypeId::Shape }
       Self::FilmLoop(_) => { CastMemberTypeId::FilmLoop }
+      Self::Sound(_) => { CastMemberTypeId::Sound }
       Self::Unknown => { CastMemberTypeId::Unknown }
     }
   }
@@ -214,6 +224,7 @@ impl CastMemberType {
       Self::Palette(_) => { "palette" }
       Self::Shape(_) => { "shape" }
       Self::FilmLoop(_) => { "filmLoop" }
+      Self::Sound(_) => { "sound" }
       _ => { "unknown" }
     }
   }
@@ -354,6 +365,11 @@ impl CastMember {
         let score = chunk.as_score().unwrap();
         CastMemberType::FilmLoop(FilmLoopMember {
           score: score.clone()
+        })
+      }
+      MemberType::Sound => {
+        CastMemberType::Sound(SoundMember {
+          // TODO populate fields
         })
       }
       _ => { 
