@@ -347,7 +347,7 @@ impl PropListDatumHandlers {
     }
   }
 
-  fn set_opt_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub fn set_opt_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let formatted_key = format_datum(&args[0], &player);
       let prop_list = player.get_datum(datum);
