@@ -40,6 +40,7 @@ use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync
 use cast_manager::CastPreloadReason;
 use chrono::Local;
 use fxhash::FxHashMap;
+use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
 use log::warn;
 use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
@@ -517,52 +518,65 @@ pub fn player_handle_scope_return(scope: &ScopeResult) {
 }
 
 async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-  let receiver_handlers: Vec<(Option<ScriptInstanceRef>, ScriptHandlerRef)> = unsafe {
+
+  let receiver_handler = unsafe {
     // let player_opt = PLAYER_LOCK.try_read().unwrap();
     let player = PLAYER_OPT.as_ref().unwrap();
-  
-    let mut result = vec![];
 
-    let instance_receiver_refs = &player.movie.score.get_active_script_instance_list();
-    for instance_receiver_ref in instance_receiver_refs.iter() {
-      let script_instance = player.allocator.get_script_instance(instance_receiver_ref);
-      let script_ref = script_instance.script.clone();
-      let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
-      let handler_pair = script.get_own_handler_ref(&handler_name);
-      if let Some(handler_pair) = handler_pair {
-        result.push((Some(instance_receiver_ref.clone()), handler_pair));
+    let mut receiver_handler = None;
+
+    // "new" invocations should always go through the built-in handler
+    if handler_name != "new" {
+
+      // Director appears to support customFunc(firstArg, ..) invocations
+      // where firstArg is a script or script instance
+      receiver_handler = args
+        .first()
+        .and_then(|first_arg: &DatumRef| Some(player.get_datum(first_arg)))
+        .map(|first_arg| match first_arg {
+          Datum::ScriptRef(script_ref) => {
+            let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
+            script.get_own_handler_ref(&handler_name)
+              .map(|handler| (None, handler))
+          }
+          Datum::ScriptInstanceRef(script_instance_ref) => {
+            ScriptInstanceUtils::get_script_instance_handler(handler_name, &script_instance_ref, player)
+              .ok()
+              .flatten()
+              .map(|handler| (Some(script_instance_ref.clone()), handler))
+          }
+          _ => None
+        }).flatten();
+    
+      if receiver_handler.is_none() {
+        receiver_handler = player.movie.score.get_active_script_instance_list()
+          .iter()
+          .find_map(|instance_receiver_ref| {
+            let script_instance = player.allocator.get_script_instance(instance_receiver_ref);
+            let script = player.movie.cast_manager.get_script_by_ref(&script_instance.script).unwrap();
+            script.get_own_handler_ref(&handler_name)
+              .map(|handler_pair| (Some(instance_receiver_ref.clone()), handler_pair))
+          });
+      }
+    
+      if receiver_handler.is_none() {
+        receiver_handler = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals())
+          .iter()
+          .find_map(|script_ref| {
+            let script = player.movie.cast_manager.get_script_by_ref(script_ref).unwrap();
+            script.get_own_handler_ref(&handler_name)
+              .map(|handler_pair| (None, handler_pair))
+        });
       }
     }
 
-    let receiver_refs = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals());
-
-    // Lingo appears to support customFunc(script) invocations where customFunc is a handler of script
-    let first_arg_if_script_ref = reserve_player_mut(|player| {
-      args
-      .first()
-      .map(|first_arg| player.get_datum(first_arg))
-      .and_then(|datum| match datum {
-          Datum::ScriptRef(script_ref) => Some(script_ref.clone()),
-          _ => None,
-      })
-    });
-
-    for script_ref in receiver_refs.iter().chain(first_arg_if_script_ref.iter()) {
-      let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
-      let handler_pair = script.get_own_handler_ref(&handler_name);
-
-      if let Some(handler_pair) = handler_pair {
-        //player_dispatch_async(PlayerVMCommand::CallHandler).await;
-        result.push((None, handler_pair));
-      }
-    }
-    result
+    receiver_handler
   };
 
-  if let Some(handler) = receiver_handlers.first() {
-    let receiver = &handler.0;
-    let handler_ref = &handler.1;
-    let scope = player_call_script_handler_raw_args(receiver.clone(), handler_ref.to_owned(), args, true).await?;
+  if let Some(receiver_handler) = receiver_handler {
+    let receiver = receiver_handler.0;
+    let handler_ref = receiver_handler.1;
+    let scope = player_call_script_handler_raw_args(receiver, handler_ref.to_owned(), args, true).await?;
     player_handle_scope_return(&scope);
     return Ok(scope.return_value);
   } else if BuiltInHandlerManager::has_async_handler(handler_name) {
@@ -612,6 +626,9 @@ pub async fn player_call_script_handler_raw_args(
   arg_list: &Vec<DatumRef>,
   use_raw_arg_list: bool,
 ) -> Result<ScopeResult, ScriptError> {
+  let formatted_args: Vec<String> = reserve_player_ref(|player| {
+  });
+  log_i(format_args!("player_call_script_handler_raw_args: {} receiver={}, arg_list:{}, use_raw_arg_list:{}", handler_ref.1, receiver.is_some(), formatted_args.join(", "), use_raw_arg_list).to_string().as_str());
   let (script_member_ref, handler_name) = &handler_ref;
   let (scope_ref, handler_ptr, script_ptr) = reserve_player_mut(|player| {
     let (script_ptr, handler_ptr, handler_name_id, script_type) = {
@@ -920,10 +937,11 @@ fn get_active_static_script_refs<'a>(
 // }
 
 async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: ScopeRef) -> HandlerExecutionResult {
-  // let formatted_args: Vec<String> = reserve_player_ref(|player| {
   //   args.iter().map(|datum_ref| format_datum(*datum_ref, player)).collect()
   // });
   // warn!("ext_call: {name}({})", formatted_args.join(", "));
+  });
+  log_i(format_args!("ext_call: {name}({})", formatted_args.join(", ")).to_string().as_str());
   match name.as_str() {
     "return" => {
       if let Some(return_value) = args.first() {
