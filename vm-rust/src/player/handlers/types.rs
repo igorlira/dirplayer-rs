@@ -694,7 +694,20 @@ impl TypeHandlers {
   pub async fn call_ancestor(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let (ref_list, handler_name, args) = reserve_player_mut(|player| {
       let handler_name = player.get_datum(&args[0]).string_value()?;
-      let instance_list = player.get_datum(&args[1]).to_list()?.clone();
+
+      let list_or_script_instance = player.get_datum(&args[1]);
+      let instance_list = match list_or_script_instance  {
+        Datum::List(_, list, _) => {
+          list.to_owned()
+        }
+        Datum::ScriptInstanceRef(s) => {
+          vec![args[1].clone()]
+        }
+        _ => {
+          return Err(ScriptError::new(format!("Can only callAncestor on script instances and lists")))
+        }
+      };
+
       let mut ref_list = vec![];
       for instance_ref in instance_list {
         let instance_ref = player.get_datum(&instance_ref).to_script_instance_ref()?;
