@@ -2,7 +2,7 @@ use log::warn;
 
 use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, CastMemberTypeId, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
 
-use super::cast_member::{bitmap::BitmapMemberHandlers, field::FieldMemberHandlers, text::TextMemberHandlers};
+use super::cast_member::{bitmap::BitmapMemberHandlers, field::FieldMemberHandlers, text::TextMemberHandlers, film_loop::FilmLoopMemberHandlers};
 
 pub struct CastMemberRefHandlers {}
 
@@ -175,6 +175,9 @@ impl CastMemberRefHandlers {
       }
       CastMemberTypeId::Text => {
         TextMemberHandlers::get_prop(player, cast_member_ref, prop)
+      }
+      CastMemberTypeId::FilmLoop => {
+        FilmLoopMemberHandlers::get_prop(player, cast_member_ref, prop)
       }
       _ => {
         Err(ScriptError::new(format!("Cannot get castMember prop {} for member of type {:?}", prop, member_type)))
