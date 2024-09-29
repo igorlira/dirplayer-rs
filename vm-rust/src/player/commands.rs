@@ -396,8 +396,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let call_params = reserve_player_mut(|player| {
                 let arg_list = vec![
                     player.alloc_datum(Datum::String("Script Error".to_string())),
-                    player
-                        .alloc_datum(Datum::String("An error occurred in the script".to_string())),
+                    player.alloc_datum(Datum::String("An error occurred in the script".to_string())),
                 ];
                 if let Some(alert_hook) = &player.movie.alert_hook {
                     match alert_hook {
