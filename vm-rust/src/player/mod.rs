@@ -937,11 +937,10 @@ fn get_active_static_script_refs<'a>(
 // }
 
 async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: ScopeRef) -> HandlerExecutionResult {
+  // let formatted_args: Vec<String> = reserve_player_ref(|player| {
   //   args.iter().map(|datum_ref| format_datum(*datum_ref, player)).collect()
   // });
   // warn!("ext_call: {name}({})", formatted_args.join(", "));
-  });
-  log_i(format_args!("ext_call: {name}({})", formatted_args.join(", ")).to_string().as_str());
   match name.as_str() {
     "return" => {
       if let Some(return_value) = args.first() {
