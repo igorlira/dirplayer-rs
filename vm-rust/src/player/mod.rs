@@ -38,7 +38,6 @@ use allocator::{DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptI
 use datum_ref::DatumRef;
 use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
-use chrono::Local;
 use fxhash::FxHashMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
 use log::warn;
@@ -50,7 +49,7 @@ use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
-use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks, get_ticks}};
+use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks}};
 
 use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef, ScriptInstance, ScriptInstanceId}, sprite::{ColorRef, CursorRef}, timeout::TimeoutManager};
 
@@ -105,7 +104,6 @@ pub struct DirPlayer {
   pub float_precision: u8,
   pub last_handler_result: DatumRef,
   pub hovered_sprite: Option<i16>,
-  pub timer_tick_start: u32,
   pub allocator: DatumAllocator,
   pub dir_cache: HashMap<Box<str>, DirectorFile>,
   pub scope_count: u32,
@@ -151,7 +149,7 @@ impl DirPlayer {
       stage_size: (100, 100),
       bitmap_manager: bitmap::manager::BitmapManager::new(),
       cursor: CursorRef::System(0),
-      start_time: chrono::Local::now(),
+      start_time: chrono::Local::now(), // supposed to be time at which computer started, but we don't have access from browser. this is sufficient for calculating elapsed time.
       timeout_manager: TimeoutManager::new(),
       title: "".to_string(),
       bg_color: ColorRef::Rgb(0, 0, 0),
@@ -169,7 +167,6 @@ impl DirPlayer {
       float_precision: 4,
       last_handler_result: DatumRef::Void,
       hovered_sprite: None,
-      timer_tick_start: get_ticks(),
       allocator: DatumAllocator::default(),
       dir_cache: HashMap::new(),
       scope_count: 0,
@@ -320,7 +317,7 @@ impl DirPlayer {
   fn get_movie_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
     match prop {
       "stage" => Ok(Datum::Stage),
-      "time" => Ok(Datum::String(Local::now().format("%H:%M %p").to_string())),
+      "time" => Ok(Datum::String(chrono::Local::now().format("%H:%M %p").to_string())),
       "milliSeconds" => Ok(Datum::Int(chrono::Local::now().signed_duration_since(self.start_time).num_milliseconds() as i32)),
       "keyboardFocusSprite" => Ok(Datum::Int(self.keyboard_focus_sprite as i32)),
       "frameTempo" => Ok(Datum::Int(self.movie.puppet_tempo as i32)),
@@ -340,7 +337,7 @@ impl DirPlayer {
       "key" => Ok(Datum::String(self.keyboard_manager.key())),
       "floatPrecision" => Ok(Datum::Int(self.float_precision as i32)),
       "doubleClick" => Ok(datum_bool(self.is_double_click)),
-      "ticks" => Ok(Datum::Int(get_elapsed_ticks(self.timer_tick_start))),
+      "ticks" => Ok(Datum::Int(get_elapsed_ticks(self.start_time))),
       "frameLabel" => {
         let frame_label = self.movie.score.frame_labels.iter()
           .filter(|&label| label.frame_num <= self.movie.current_frame as i32)
@@ -391,7 +388,7 @@ impl DirPlayer {
     let prop_name = get_anim_prop_name(prop_id);
     match prop_name {
       "colorDepth" => Ok(Datum::Int(32)),
-      "timer" => Ok(Datum::Int(get_elapsed_ticks(self.timer_tick_start))),
+      "timer" => Ok(Datum::Int(get_elapsed_ticks(self.start_time))),
       _ => Err(ScriptError::new(format!("Unknown anim prop {}", prop_name)))
     }
   }
