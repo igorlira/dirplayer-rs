@@ -147,3 +147,48 @@ impl From<&[u8]> for ShapeInfo {
 		};
 	}
 }
+
+#[derive(Clone)]
+pub struct FilmLoopInfo {
+	pub reg_point: (i16, i16),
+	pub width: u16,
+	pub height: u16,
+	pub center: u8,
+	pub crop: u8,
+	pub sound: u8,
+	pub loops: u8, // loop is a reserved keyword in Rust
+}
+
+impl From<&[u8]> for FilmLoopInfo {
+	fn from(bytes: &[u8]) -> FilmLoopInfo {
+		let mut reader = BinaryReader::from_u8(bytes);
+		reader.set_endian(binary_reader::Endian::Big);
+		
+		let reg_y = reader.read_u16().unwrap();
+		let reg_x = reader.read_u16().unwrap();
+		let height = reader.read_u16().unwrap();
+		let width = reader.read_u16().unwrap();
+
+		let _unk0 = reader.read_u24().unwrap(); // typically all zeroes
+
+		let flags = reader.read_u8().unwrap();
+		let center = flags & 0b1;
+		let crop = 1 - ((flags & 0b10) >> 1);
+		let sound = (flags & 0b1000) >> 3;
+		let loops = 1 - ((flags & 0b100000) >> 5);
+		// log_i(format_args!("FilmLoopInfo {reg_y} {reg_x} {height} {width} center={center} crop={crop} sound={sound} loop={loops}").to_string().as_str());
+
+		// believe these bitfields are only for other cast member types
+		let _unk1 = reader.read_u16().unwrap();
+		
+		return FilmLoopInfo {
+			reg_point: (reg_x as i16, reg_y as i16),
+			width,
+			height,
+			center,
+			crop,
+			sound,
+			loops,
+		}
+	}
+}

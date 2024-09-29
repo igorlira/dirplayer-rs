@@ -1,6 +1,6 @@
 use binary_reader::{BinaryReader, Endian};
 
-use crate::director::{chunks::cast_member_info::CastMemberInfoChunk, enums::{BitmapInfo, MemberType, ScriptType, ShapeInfo}};
+use crate::director::{chunks::cast_member_info::CastMemberInfoChunk, enums::{BitmapInfo, FilmLoopInfo, MemberType, ScriptType, ShapeInfo}};
 
 use super::Chunk;
 
@@ -91,6 +91,16 @@ impl CastMemberChunk {
           ShapeInfo::from(specific_data.as_slice())
         );
       }
+      // a few cast member types may share the same memory format
+      // including film loop, movie, digital video, and xtra
+      // according to More Director Movie File Unofficial Documentation:
+      // https://docs.google.com/document/d/1jDBXE4Wv1AEga-o1Wi8xtlNZY4K2fHxW2Xs8RgARrqk/edit
+      MemberType::FilmLoop => {
+        // film loops share the same memory structure as other cast members such as video, digital movie
+        specific_data_parsed = CastMemberSpecificData::FilmLoop(
+          FilmLoopInfo::from(specific_data.as_slice())
+        )
+      }
       _ => {
         specific_data_parsed = CastMemberSpecificData::None;
       }
@@ -108,6 +118,7 @@ pub enum CastMemberSpecificData {
   Script(ScriptType),
   Bitmap(BitmapInfo),
   Shape(ShapeInfo),
+  FilmLoop(FilmLoopInfo),
   None
 }
 
@@ -131,6 +142,14 @@ impl CastMemberSpecificData {
   pub fn shape_info(&self) -> Option<&ShapeInfo> {
     if let CastMemberSpecificData::Shape(shape_info) = self {
       Some(shape_info)
+    } else {
+      None
+    }
+  }
+
+  pub fn film_loop_info(&self) -> Option<&FilmLoopInfo> {
+    if let CastMemberSpecificData::FilmLoop(film_loop_info) = self {
+      Some(film_loop_info)
     } else {
       None
     }
