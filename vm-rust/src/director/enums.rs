@@ -2,7 +2,7 @@ use binary_reader::BinaryReader;
 use log::warn;
 use num_derive::FromPrimitive;
 
-use crate::io::reader::DirectorExt;
+use crate::{io::reader::DirectorExt, utils::log_i};
 
 
 #[derive(Copy, Clone, FromPrimitive)]
@@ -37,6 +37,12 @@ pub enum ScriptType {
 	Parent = (7)
 }
 
+impl ScriptType {
+	pub fn from(val: u16) -> ScriptType {
+	  return num::FromPrimitive::from_u16(val).unwrap();
+	}
+  }
+
 #[derive(Clone)]
 pub struct BitmapInfo {
 	pub width: u16,
@@ -64,12 +70,6 @@ pub struct ShapeInfo {
 	pub width: u16,
 	pub height: u16,
 	pub color: u8,
-}
-
-impl ScriptType {
-  pub fn from(val: u16) -> ScriptType {
-    return num::FromPrimitive::from_u16(val).unwrap();
-  }
 }
 
 impl From<&[u8]> for BitmapInfo {
