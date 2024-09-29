@@ -39,6 +39,7 @@ impl ScriptDatumHandlers {
 
   pub fn create_script_instance(script_ref: &CastMemberRef) -> (ScriptInstanceRef, DatumRef) {
     reserve_player_mut(|player| {
+      // TODO we are allocating two script instance ids here, should only be one
       let instance_id = player.allocator.get_free_script_instance_id();
       let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
       let lctx: &crate::director::lingo::script::ScriptContext = get_lctx_for_script(player, script).unwrap();

@@ -164,6 +164,7 @@ impl From<&[u8]> for FilmLoopInfo {
 		let mut reader = BinaryReader::from_u8(bytes);
 		reader.set_endian(binary_reader::Endian::Big);
 		
+		// based on director 7
 		let reg_y = reader.read_u16().unwrap();
 		let reg_x = reader.read_u16().unwrap();
 		let height = reader.read_u16().unwrap();
