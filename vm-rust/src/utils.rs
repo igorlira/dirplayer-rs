@@ -1,4 +1,4 @@
-use chrono::Local;
+use chrono::{DateTime, Local, TimeDelta};
 use itertools::Itertools;
 use url::Url;
 use wasm_bindgen::JsValue;
@@ -61,13 +61,13 @@ impl ToHexString for Vec<u8> {
     }
 }
 
-pub fn get_ticks() -> u32 {
-  let time: chrono::DateTime<Local> = Local::now();
-  // 60 ticks per second
-  let millis = time.timestamp_millis();
-  (millis as f32 / (1000.0 / 60.0)) as u32
+/// Number of ticks (60 ticks/second) from epoch until endtime
+fn ticks_since_epoch(endtime: DateTime<Local>) -> i64 {
+  endtime.timestamp_nanos_opt().unwrap() / TimeDelta::milliseconds(1000 / 60).num_nanoseconds().unwrap()
 }
 
-pub fn get_elapsed_ticks(tick_start: u32) -> i32 {
-  return get_ticks() as i32 - tick_start as i32;
+pub fn get_elapsed_ticks(start_time: DateTime<chrono::Local>) -> i32 {
+  let current_ticks = ticks_since_epoch(chrono::Local::now());
+  let start_ticks = ticks_since_epoch(start_time);
+  (current_ticks - start_ticks) as i32
 }
