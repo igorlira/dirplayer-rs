@@ -626,9 +626,6 @@ pub async fn player_call_script_handler_raw_args(
   arg_list: &Vec<DatumRef>,
   use_raw_arg_list: bool,
 ) -> Result<ScopeResult, ScriptError> {
-  let formatted_args: Vec<String> = reserve_player_ref(|player| {
-  });
-  log_i(format_args!("player_call_script_handler_raw_args: {} receiver={}, arg_list:{}, use_raw_arg_list:{}", handler_ref.1, receiver.is_some(), formatted_args.join(", "), use_raw_arg_list).to_string().as_str());
   let (script_member_ref, handler_name) = &handler_ref;
   let (scope_ref, handler_ptr, script_ptr) = reserve_player_mut(|player| {
     let (script_ptr, handler_ptr, handler_name_id, script_type) = {
