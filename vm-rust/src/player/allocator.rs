@@ -188,7 +188,7 @@ impl DatumAllocatorTrait for DatumAllocator {
 
 impl ScriptInstanceAllocatorTrait for DatumAllocator {
   fn alloc_script_instance(&mut self, script_instance: ScriptInstance) -> ScriptInstanceRef {
-    let id = self.get_free_script_instance_id();
+    let id = script_instance.instance_id;
     let ref_count = Rc::new(UnsafeCell::<u32>::new(0));
     let ref_count_ptr = ref_count.get();
     self.script_instance_counter += 1;
