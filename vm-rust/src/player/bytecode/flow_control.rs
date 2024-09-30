@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{Datum, DatumType}, player::{compare::datum_is_zero, handlers::datum_handlers::player_call_datum_handler, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}, HandlerExecutionResult, ScriptError, PLAYER_OPT}};
+use crate::{director::lingo::datum::{Datum, DatumType}, player::{compare::datum_is_zero, handlers::datum_handlers::{player_call_datum_handler, script_instance::ScriptInstanceUtils}, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}, HandlerExecutionResult, ScriptError, PLAYER_OPT}};
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -48,13 +48,12 @@ impl FlowControlBytecodeHandler {
   }
 
   pub async fn local_call(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-    let (handler_ref, is_no_ret, args) = reserve_player_mut(|player| {
+    let (handler_ref, is_no_ret, args, receiver) = reserve_player_mut(|player| {
       let arg_list_id = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.pop().unwrap()
       };
       let script = get_current_script(&player, &ctx).unwrap();
-      let handler_ref = script.get_own_handler_ref_at(player.get_ctx_current_bytecode(&ctx).obj as usize).unwrap();
 
       let arg_list_datum = player.get_datum(&arg_list_id);
       let is_no_ret = match arg_list_datum {
@@ -62,12 +61,26 @@ impl FlowControlBytecodeHandler {
         _ => false,
       };
       let args = arg_list_datum.to_list()?.clone();
-      Ok((handler_ref, is_no_ret, args))
+
+      let mut handler_ref = script.get_own_handler_ref_at(player.get_ctx_current_bytecode(&ctx).obj as usize).unwrap();
+      let handler_name = &handler_ref.1;
+
+      // if first arg is a script or script instance and has a handler by the same name
+      // use that handler instead
+      let mut receiver;
+      let receiver_handler = ScriptInstanceUtils::get_handler_from_first_arg(&args, handler_name);
+      if receiver_handler.is_some() {
+        let handler_pair = receiver_handler.unwrap();
+        receiver = handler_pair.0;
+        handler_ref = handler_pair.1;
+      } else {
+        receiver = reserve_player_ref(|player| {
+          let scope = player.scopes.get(ctx.scope_ref).unwrap();
+          scope.receiver.clone()
+        });
+      }
+      Ok((handler_ref, is_no_ret, args, receiver))
     })?;
-    let receiver = reserve_player_ref(|player| {
-      let scope = player.scopes.get(ctx.scope_ref).unwrap();
-      scope.receiver.clone()
-    });
     let scope = player_call_script_handler_raw_args(receiver, handler_ref, &args, true).await?;
     player_handle_scope_return(&scope);
     let result = scope.return_value;
