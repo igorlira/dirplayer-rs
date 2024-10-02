@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::ScriptInstanceAllocatorTrait, handlers::types::TypeUtils, player_call_script_handler, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{script_get_prop, script_set_prop, Script, ScriptHandlerRef}, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode}};
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, handlers::types::TypeUtils, player_call_script_handler, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{script_get_prop, script_set_prop, Script, ScriptHandlerRef}, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode}};
 
 pub struct ScriptInstanceDatumHandlers {}
 pub struct ScriptInstanceUtils {}
@@ -50,6 +50,30 @@ impl ScriptInstanceUtils {
     } else {
       Ok(None)
     }
+  }
+
+  pub fn get_handler_from_first_arg(args: &Vec<DatumRef>, handler_name: &String)
+    -> Option<(Option<ScriptInstanceRef>, (CastMemberRef, String))> {
+    reserve_player_mut(|player| {
+      let receiver_handler = args
+        .first()
+        .and_then(|first_arg| Some(player.get_datum(first_arg)))
+        .map(|first_arg| match first_arg {
+          Datum::ScriptRef(script_ref) => {
+            let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
+            script.get_own_handler_ref(&handler_name)
+              .map(|handler| (None, handler))
+          }
+          Datum::ScriptInstanceRef(script_instance_ref) => {
+            ScriptInstanceUtils::get_script_instance_handler(handler_name, &script_instance_ref, player)
+              .ok()
+              .flatten()
+              .map(|handler| (Some(script_instance_ref.clone()), handler))
+          }
+          _ => None
+        }).flatten();
+      receiver_handler
+    })
   }
 
   pub fn set_at(datum: &DatumRef, key: &String, value: &DatumRef, player: &mut DirPlayer) -> Result<(), ScriptError> {

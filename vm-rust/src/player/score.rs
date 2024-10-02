@@ -4,7 +4,7 @@ use itertools::Itertools;
 
 use crate::{director::{chunks::score::{FrameLabel, ScoreFrameChannelData}, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi, utils::log_i};
 
-use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, datum_ref::DatumRef, events::{player_dispatch_event_to_sprite, player_dispatch_targeted_event}, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::{cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, script::{self, ScriptDatumHandlers}}, reserve_player_mut, script::script_set_prop, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
+use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, datum_ref::DatumRef, events::{player_dispatch_event_to_sprite, player_dispatch_targeted_event}, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::{cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, script::{self, ScriptDatumHandlers}}, reserve_player_mut, script::{script_get_prop_opt, script_set_prop}, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 
 #[allow(dead_code)]
 pub struct SpriteChannel {
@@ -367,7 +367,19 @@ pub fn sprite_get_prop(
         .map(|script_instance| script_instance.script.cast_member);
       Ok(Datum::Int(script_num.unwrap_or(0)))
     },
-    _ => Err(ScriptError::new(format!("Cannot get prop {} of sprite", prop_name))),
+    prop_name => {
+      let datum_ref = sprite.and_then(|sprite| {
+        reserve_player_mut(|player| {
+          sprite.script_instance_list.iter().find_map(|behavior| {
+            script_get_prop_opt(player, behavior, &prop_name.to_string())
+          })
+        })
+      });
+      match datum_ref {
+        Some(ref_) => Ok(player.get_datum(&ref_).clone()),
+        None => return Err(ScriptError::new(format!("Cannot get prop {} of sprite", prop_name))),
+      }
+    }
   }
 }
 
@@ -720,7 +732,22 @@ pub fn sprite_set_prop(
         Ok(())
       }
     ),
-    _ => Err(ScriptError::new(format!("Cannot set prop {} of sprite", prop_name))),
+    prop_name => borrow_sprite_mut(
+      sprite_id,
+      |_| {},
+      |sprite, _| {
+        sprite.script_instance_list.iter().find_map(|behavior| {
+          reserve_player_mut(|player| {
+            let value_ref = player.alloc_datum(value.clone());
+            match script_set_prop(player, behavior, &prop_name.to_string(), &value_ref, true) {
+              Ok(_) => Some(Ok(())),
+              Err(_) => None
+            }
+          })
+        })
+        .unwrap_or_else(|| Err(ScriptError::new(format!("Cannot set prop {} of sprite", prop_name))))
+      }
+    ),
   };
   if result.is_ok() {
     JsApi::dispatch_channel_changed(sprite_id);

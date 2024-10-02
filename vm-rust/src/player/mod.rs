@@ -527,23 +527,7 @@ async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>)
 
       // Director appears to support customFunc(firstArg, ..) invocations
       // where firstArg is a script or script instance
-      receiver_handler = args
-        .first()
-        .and_then(|first_arg: &DatumRef| Some(player.get_datum(first_arg)))
-        .map(|first_arg| match first_arg {
-          Datum::ScriptRef(script_ref) => {
-            let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
-            script.get_own_handler_ref(&handler_name)
-              .map(|handler| (None, handler))
-          }
-          Datum::ScriptInstanceRef(script_instance_ref) => {
-            ScriptInstanceUtils::get_script_instance_handler(handler_name, &script_instance_ref, player)
-              .ok()
-              .flatten()
-              .map(|handler| (Some(script_instance_ref.clone()), handler))
-          }
-          _ => None
-        }).flatten();
+      receiver_handler = ScriptInstanceUtils::get_handler_from_first_arg(&args, handler_name);
     
       if receiver_handler.is_none() {
         receiver_handler = player.movie.score.get_active_script_instance_list()

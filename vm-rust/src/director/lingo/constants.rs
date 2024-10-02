@@ -211,7 +211,7 @@ pub fn sprite_prop_names() -> &'static HashMap<u16, Box<str>> {
       (0x22, "rect".into()),
       (0x23, "memberNum".into()),
       (0x24, "castLibNum".into()),
-      (0x25, "scriptNum".into()),
+      (0x25, "member".into()),
       (0x26, "scriptInstanceList".into()),
       (0x27, "currentTime".into()),
       (0x28, "mostRecentCuePoint".into()),
