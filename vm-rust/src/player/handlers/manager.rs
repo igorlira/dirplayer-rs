@@ -257,6 +257,11 @@ impl BuiltInHandlerManager {
         let args = &args[1..].to_vec();
         PropListDatumHandlers::add_prop(list,  args)
       },
+      "append" => {
+        let list = &args[0];
+        let args = &args[1..].to_vec();
+        ListDatumHandlers::append(list, args)
+      },
       "deleteAt" => {
         reserve_player_mut(|player| {
           let list = &args[0];
