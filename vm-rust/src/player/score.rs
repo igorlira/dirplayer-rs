@@ -4,8 +4,14 @@ use itertools::Itertools;
 
 use crate::{director::{chunks::score::{FrameLabel, ScoreFrameChannelData}, file::DirectorFile, lingo::datum::{datum_bool, Datum, DatumType}}, js_api::JsApi, utils::log_i};
 
-use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, datum_ref::DatumRef, events::{player_dispatch_event_to_sprite, player_dispatch_targeted_event}, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::{cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, script::{self, ScriptDatumHandlers}}, reserve_player_mut, script::{script_get_prop_opt, script_set_prop}, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
+use super::{allocator::ScriptInstanceAllocatorTrait, cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF}, cast_member::CastMemberType, datum_ref::DatumRef, events::{player_dispatch_event_to_sprite, player_dispatch_targeted_event}, geometry::{IntRect, IntRectTuple}, handlers::datum_handlers::{cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, script::{self, ScriptDatumHandlers}}, movie::Movie, reserve_player_mut, script::{script_get_prop_opt, script_set_prop}, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef, Sprite}, DirPlayer, ScriptError};
 
+pub enum ScoreRef {
+  Stage,
+  FilmLoop(CastMemberRef),
+}
+
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct SpriteChannel {
   pub number: usize,
@@ -39,6 +45,7 @@ pub struct ScoreSpriteSpan {
   pub scripts: Vec<ScoreBehaviorReference>,
 }
 
+#[derive(Clone)]
 pub struct Score {
   pub channels: Vec<SpriteChannel>,
   pub sprite_spans: Vec<ScoreSpriteSpan>,
@@ -217,17 +224,11 @@ impl Score {
     return &mut channel.sprite;
   }
 
-  pub fn load_from_dir(&mut self, dir: &DirectorFile) {
-    let score_chunk = dir.score.as_ref().unwrap();
+  pub fn load_from_score_chunk(&mut self, score_chunk: &crate::director::chunks::score::ScoreChunk) {
     self.set_channel_count(score_chunk.frame_data.header.num_channels as usize);
 
     self.channel_initialization_data = score_chunk.frame_data.frame_channel_data.clone();
     
-    let frame_labels_chunk = dir.frame_labels.as_ref();
-    if frame_labels_chunk.is_some() {
-      self.frame_labels = frame_labels_chunk.unwrap().labels.clone();
-    }
-
     for i in 0..score_chunk.frame_interval_primaries.len() {
       let primary = &score_chunk.frame_interval_primaries[i];
       let secondary = &score_chunk.frame_interval_secondaries[i];
@@ -252,7 +253,15 @@ impl Score {
         self.sprite_spans.push(sprite_span);
       }
     }
+  }
 
+  pub fn load_from_dir(&mut self, dir: &DirectorFile) {
+    let score_chunk = dir.score.as_ref().unwrap();
+    let frame_labels_chunk = dir.frame_labels.as_ref();
+    if frame_labels_chunk.is_some() {
+      self.frame_labels = frame_labels_chunk.unwrap().labels.clone();
+    }
+    self.load_from_score_chunk(score_chunk);
     JsApi::dispatch_score_changed();
   }
 
@@ -823,4 +832,49 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
     CastMemberType::Text(text_member) => IntRect::from_size(sprite.loc_h, sprite.loc_v, text_member.width as i32, 12), // TODO
     _ => IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height)
   }
+}
+
+
+pub fn get_score<'a>(movie: &'a Movie, score_source: &ScoreRef) -> Option<&'a Score> {
+  match score_source {
+      ScoreRef::Stage => Some(&movie.score),
+      ScoreRef::FilmLoop(member_ref) => {
+          let member = movie.cast_manager.find_member_by_ref(member_ref);
+          if member.is_none() {
+              return None;
+          }
+          let member = member.unwrap();
+          match &member.member_type {
+              CastMemberType::FilmLoop(film_loop_member) => Some(&film_loop_member.score),
+              _ => return None,
+          }
+      }
+  }
+}
+
+pub fn get_score_mut<'a>(movie: &'a mut Movie, score_source: &ScoreRef) -> Option<&'a mut Score> {
+  match score_source {
+      ScoreRef::Stage => Some(&mut movie.score),
+      ScoreRef::FilmLoop(member_ref) => {
+          let member = movie.cast_manager.find_mut_member_by_ref(member_ref);
+          if member.is_none() {
+              return None;
+          }
+          let member = member.unwrap();
+          match &mut member.member_type {
+              CastMemberType::FilmLoop(film_loop_member) => Some(&mut film_loop_member.score),
+              _ => return None,
+          }
+      }
+  }
+}
+
+pub fn get_score_sprite<'a>(movie: &'a Movie, score_source: &ScoreRef, channel_num: i16) -> Option<&'a Sprite> {
+  let score = get_score(movie, score_source)?;
+  score.get_sprite(channel_num)
+}
+
+pub fn get_score_sprite_mut<'a>(movie: &'a mut Movie, score_source: &ScoreRef, channel_num: i16) -> Option<&'a mut Sprite> {
+  let score = get_score_mut(movie, score_source)?;
+  Some(score.get_sprite_mut(channel_num))
 }

@@ -2,6 +2,7 @@ use log::warn;
 
 use crate::console_warn;
 
+#[derive(Clone)]
 pub struct IntRect {
   pub left: i32,
   pub top: i32,
