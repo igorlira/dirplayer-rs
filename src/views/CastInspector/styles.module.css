@@ -2,14 +2,6 @@
   flex: 1
 }
 
-.container {
-  flex: 1;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-}
-
 .toggleButton {
   padding: 8px;
   text-align: start;

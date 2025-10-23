@@ -1,0 +1,25 @@
+
+.castInspector {
+  flex: 1;
+}
+
+.debugContainer {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.bottomContainer {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+}
+
+.scriptError {
+  display: flex;
+  background-color: yellow;
+  align-items: flex-start;
+  padding: 5px 10px;
+}

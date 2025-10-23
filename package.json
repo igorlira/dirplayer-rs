@@ -20,6 +20,7 @@
     "@uidotdev/usehooks": "^2.4.1",
     "classnames": "^2.3.2",
     "dirplayer-js-api": "file:dirplayer-js-api",
+    "flexlayout-react": "^0.8.17",
     "lodash": "^4.17.21",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -60,9 +61,9 @@
     ]
   },
   "devDependencies": {
-    "vite": "^3.0.0",
-    "vite-plugin-svgr": "^4.2.0",
+    "@crxjs/vite-plugin": "^2.0.0-beta.25",
     "@vitejs/plugin-react": "^2.1.0",
-    "@crxjs/vite-plugin": "^2.0.0-beta.25"
+    "vite": "^3.0.0",
+    "vite-plugin-svgr": "^4.2.0"
   }
 }
