@@ -75,6 +75,9 @@ features = [
   'MessageEvent',
   'ProgressEvent',
   'WebSocket',
+  'CustomEvent',
+  'CustomEventInit',
+  'Event',
 ]
 
 [dependencies.flate2]

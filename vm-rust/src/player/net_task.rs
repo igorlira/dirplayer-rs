@@ -38,18 +38,21 @@ impl NetTaskState {
 }
 
 pub async fn fetch_net_task(task: &NetTask) -> NetResult {
-  log_i(format_args!("execute_task #{} url: {} resolved: {}", task.id, task.url, task.resolved_url.to_string()).to_string().as_str());
+  let resolved_url_str = task.resolved_url.to_string();
+  log_i(format_args!("execute_task #{} url: {} resolved: {}", task.id, task.url, resolved_url_str).to_string().as_str());
 
+  // Normal HTTP(S) fetch
+  // Note: file:// URLs are handled in preload_net_thing and never reach this function
   let task_result: NetResult;
   let window = web_sys::window().unwrap();
-  let resp_result = JsFuture::from(window.fetch_with_str(&task.resolved_url.to_string())).await;
+  let resp_result = JsFuture::from(window.fetch_with_str(&resolved_url_str)).await;
   if let Ok(resp_value) = resp_result {
     assert!(resp_value.is_instance_of::<Response>());
     let resp: Response = resp_value.dyn_into().unwrap();
     if resp.status() == 200 {
       let blob = JsFuture::from(resp.array_buffer().unwrap()).await.unwrap();
       let blob_buffer: Uint8Array = js_sys::Uint8Array::new(&blob);
-      
+
       task_result = Ok(blob_buffer.to_vec().iter().map(|x| *x as u8).collect_vec());
     } else {
       task_result = Err(4); // TODO: Error code

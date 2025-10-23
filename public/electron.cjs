@@ -1,9 +1,11 @@
 const electron = require('electron');
 const app = electron.app;
 const BrowserWindow = electron.BrowserWindow;
+const ipcMain = electron.ipcMain;
+const dialog = electron.dialog;
 
 const path = require('path');
-const url = require('url');
+const fs = require('fs');
 const isDev = require('electron-is-dev').default;
 
 let mainWindow;
@@ -32,5 +34,31 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (mainWindow === null) {
     createWindow();
+  }
+});
+
+// IPC handlers for file operations
+ipcMain.handle('dialog:openFile', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'Director Movies', extensions: ['dir', 'dxr', 'dcr'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    return result.filePaths[0];
+  }
+  return null;
+});
+
+// Read file from local filesystem
+ipcMain.handle('fs:readFile', async (_event, filePath) => {
+  try {
+    const data = fs.readFileSync(filePath);
+    return { success: true, data: Array.from(data) };
+  } catch (error) {
+    return { success: false, error: error.message };
   }
 });

@@ -23,16 +23,40 @@
   gap: 16px;
 }
 
+.inputGroup {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+}
+
 .input {
   padding: 10px;
   border: 1px solid #000;
-  width: 100%;
+  flex: 1;
   text-align: start;
-  margin-top: 4px;
   background-color: #fff;
 
   &:disabled {
     background-color: #ddd;
+  }
+}
+
+.browseButton {
+  padding: 10px 20px;
+  background-color: #555;
+  color: #fff;
+  border: 1px solid #000;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover:not(:disabled) {
+    background-color: #666;
+  }
+
+  &:disabled {
+    background-color: #999;
+    cursor: default;
   }
 }
 

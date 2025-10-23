@@ -112,13 +112,15 @@ impl NetManager {
     if let Some(existing_task) = find_task_with_url(&self.tasks, &url) {
       return existing_task.id;
     }
-    
+
     // If not, construct the task outside of the borrowing scope
     let net_task = {
       let id = self.tasks.len() + 1;
       NetTask::new(id as u32, &url, &normalize_task_url(&url, self.base_path.as_ref()))
     };
     let task_id = net_task.id;
+    let resolved_url_str = net_task.resolved_url.to_string();
+    let is_file_url = resolved_url_str.starts_with("file://");
 
     // Set task initial state
     {
@@ -126,13 +128,28 @@ impl NetManager {
       shared_shared.update_task_state(task_id, NetTaskState { result: None });
     }
 
-    // Push the task and execute it
+    // Push the task
     self.tasks.insert(task_id, net_task.clone());
 
-    let shared_state_arc = Arc::clone(&self.shared_state);
-    async_std::task::spawn_local(async move { 
-      Self::execute_task(task_id.clone(), net_task, shared_state_arc).await; 
-    });
+    // For file:// URLs, don't execute the fetch task - wait for JS to provide data
+    if is_file_url {
+      // Emit event to request file data from Electron
+      let window = web_sys::window().unwrap();
+      let event_init = web_sys::CustomEventInit::new();
+      let detail = js_sys::Object::new();
+      js_sys::Reflect::set(&detail, &"taskId".into(), &task_id.into()).unwrap();
+      js_sys::Reflect::set(&detail, &"url".into(), &resolved_url_str.into()).unwrap();
+      event_init.set_detail(&detail);
+
+      let event = web_sys::CustomEvent::new_with_event_init_dict("dirplayer:netRequest", &event_init).unwrap();
+      window.dispatch_event(&event).unwrap();
+    } else {
+      // Execute normal HTTP fetch
+      let shared_state_arc = Arc::clone(&self.shared_state);
+      async_std::task::spawn_local(async move {
+        Self::execute_task(task_id.clone(), net_task, shared_state_arc).await;
+      });
+    }
 
     task_id
   }

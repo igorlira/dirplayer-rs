@@ -15,7 +15,7 @@ extern crate pest_derive;
 
 mod director;
 
-use player::{cast_lib::{cast_member_ref, CastMemberRef}, commands::{player_dispatch, PlayerVMCommand}, datum_ref::DatumId, init_player, PLAYER_OPT};
+use player::{cast_lib::{cast_member_ref, CastMemberRef}, commands::{player_dispatch, PlayerVMCommand}, datum_ref::DatumId, init_player, reserve_player_ref, PLAYER_OPT};
 
 #[wasm_bindgen]
 extern "C" {
@@ -168,6 +168,20 @@ pub fn unsubscribe_from_channel_names() {
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
 
     player.is_subscribed_to_channel_names = false;
+  });
+}
+
+#[wasm_bindgen]
+pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
+  // Directly fulfill the task without going through the command queue to avoid deadlock
+  // This is safe because we only access the shared state which is behind a mutex
+  async_std::task::spawn_local(async move {
+    let shared_state_arc = reserve_player_ref(|player| {
+      std::sync::Arc::clone(&player.net_manager.shared_state)
+    });
+    let result = Ok(data);
+    let mut shared_state = shared_state_arc.lock().await;
+    shared_state.fulfill_task(task_id, result).await;
   });
 }
 
