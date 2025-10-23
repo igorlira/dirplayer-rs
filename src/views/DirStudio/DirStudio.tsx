@@ -15,6 +15,7 @@ import LoadMovie from "../LoadMovie";
 import { useSelector } from "react-redux";
 import { RootState } from "../../store";
 import { useSelectedObjects } from "../../hooks/selection";
+import { useEffect } from "react";
 
 interface DirStudioProps {
   showDebugUi?: boolean;
@@ -33,9 +34,14 @@ export default function DirStudio({
 
   const dispatch = useAppDispatch();
   const setSelectedMemberId = (memberId: ICastMemberIdentifier) => {
-    player_set_preview_member_ref(memberId.castNumber, memberId.memberNumber);
     dispatch(onMemberSelected([memberId.castNumber, memberId.memberNumber]));
   };
+
+  useEffect(() => {
+    if (selectedMemberId) {
+      player_set_preview_member_ref(selectedMemberId.castNumber, selectedMemberId.memberNumber);
+    }
+  }, [selectedMemberId]);
 
   const isMovieLoaded = useSelector<RootState>((state) => state.vm.isMovieLoaded);
 

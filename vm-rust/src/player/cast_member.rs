@@ -5,7 +5,7 @@ use log::warn;
 
 use crate::director::{chunks::{cast_member::CastMemberDef, score::ScoreChunk}, enums::{FilmLoopInfo, MemberType, ScriptType, ShapeInfo}, lingo::script::ScriptContext};
 
-use super::{bitmap::{bitmap::{decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef}, manager::{BitmapManager, BitmapRef}}, sprite::ColorRef, ScriptError};
+use super::{bitmap::{bitmap::{decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef}, manager::{BitmapManager, BitmapRef}}, score::Score, sprite::ColorRef, ScriptError};
 
 #[derive(Clone)]
 pub struct CastMember {
@@ -134,7 +134,8 @@ impl PaletteMember {
 #[derive(Clone)]
 pub struct FilmLoopMember {
   pub info: FilmLoopInfo,
-  pub score: ScoreChunk
+  pub score_chunk: ScoreChunk,
+  pub score: Score,
 }
 
 #[derive(Clone)]
@@ -293,6 +294,13 @@ impl CastMemberType {
       _ => { None }
     }
   }
+
+  pub fn as_film_loop_mut(&mut self) -> Option<&mut FilmLoopMember> {
+    return match self {
+      Self::FilmLoop(data) => { Some(data) }
+      _ => { None }
+    }
+  }
 }
 
 impl CastMember {
@@ -369,11 +377,14 @@ impl CastMember {
         })
       }
       MemberType::FilmLoop => {
-        let score = member_def.children[0].as_ref().unwrap().as_score().unwrap();
+        let score_chunk = member_def.children[0].as_ref().unwrap().as_score().unwrap();
         let film_loop_info = chunk.specific_data.film_loop_info().unwrap();
+        let mut score = Score::empty();
+        score.load_from_score_chunk(score_chunk);
         CastMemberType::FilmLoop(FilmLoopMember {
           info: film_loop_info.clone(),
-          score: score.clone()
+          score_chunk: score_chunk.clone(),
+          score,
         })
       }
       MemberType::Sound => {

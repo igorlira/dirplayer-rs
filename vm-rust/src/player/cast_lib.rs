@@ -7,6 +7,8 @@ use crate::{director::{cast::CastDef, file::{read_director_file_bytes, DirectorF
 
 use super::{allocator::DatumAllocator, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, manager::BitmapManager}, cast_member::{BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember}, datum_ref::DatumRef, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, net_task::NetResult, reserve_player_mut, script::Script, ScriptError, PLAYER_OPT};
 
+pub type CastLibNumber = u32;
+pub type CastMemberNumber = u32;
 #[repr(u8)]
 #[derive(PartialEq)]
 pub enum CastLibState {

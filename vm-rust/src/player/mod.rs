@@ -35,6 +35,7 @@ pub mod script_ref;
 use std::{collections::HashMap, sync::{Arc, OnceLock}, time::Duration};
 
 use allocator::{DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptInstanceAllocatorTrait};
+use cast_member::{CastMemberType, CastMemberTypeId};
 use datum_ref::DatumRef;
 use async_std::{channel::{self, Receiver, Sender}, future::{self, timeout}, sync::Mutex, task::spawn_local};
 use cast_manager::CastPreloadReason;
@@ -45,8 +46,10 @@ use manual_future::{ManualFutureCompleter, ManualFuture};
 use net_manager::NetManager;
 use profiling::{end_profiling, start_profiling};
 use scope::ScopeResult;
+use score::{get_score_sprite_mut, ScoreRef};
 use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
+use sprite::Sprite;
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
 use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks}};
@@ -212,10 +215,64 @@ impl DirPlayer {
         return;
       }
       reserve_player_mut(|player| {
-        player.movie.score.begin_sprites(player.movie.current_frame);
+        // player.movie.score.begin_sprites(player.movie.current_frame);
+        player.begin_all_sprites();
       });
       run_frame_loop().await;
     });
+  }
+
+  pub fn begin_all_sprites(&mut self) {
+    self.movie.score.begin_sprites(self.movie.current_frame);
+    for channel in self.movie.score.channels.iter() {
+      let member_ref = channel.sprite.member.as_ref();
+      let member_type = member_ref.and_then(|x| self.movie.cast_manager.find_member_by_ref(&x)).map(|x| x.member_type.member_type_id());
+
+      match member_type {
+        Some(CastMemberTypeId::FilmLoop) => {
+          let film_loop = self.movie.cast_manager
+            .find_mut_member_by_ref(member_ref.unwrap())
+            .unwrap()
+            .member_type
+            .as_film_loop_mut()
+            .unwrap();
+          film_loop.score.begin_sprites(self.movie.current_frame);
+        }
+        _ => {}
+      }
+    }
+  }
+
+  pub fn end_all_sprites(&mut self) -> Vec<(ScoreRef, u32)> {
+    let next_frame = self.get_next_frame();
+    let mut all_ended_sprite_nums: Vec<(ScoreRef, u32)> = vec![];
+    let ended_sprite_nums = self.movie.score.end_sprites(self.movie.current_frame, next_frame);
+    all_ended_sprite_nums.extend(ended_sprite_nums.iter().map(|&x| (ScoreRef::Stage, x)));
+
+    for channel in self.movie.score.channels.iter() {
+      let member_ref = channel.sprite.member.as_ref();
+      let member_type = member_ref.and_then(|x| self.movie.cast_manager.find_member_by_ref(&x)).map(|x| x.member_type.member_type_id());
+
+      match member_type {
+        Some(CastMemberTypeId::FilmLoop) => {
+          let next_frame = self.get_next_frame();
+          let film_loop = self.movie.cast_manager
+            .find_mut_member_by_ref(member_ref.unwrap())
+            .unwrap()
+            .member_type
+            .as_film_loop_mut()
+            .unwrap();
+          let ended_sprite_nums = film_loop.score.end_sprites(self.movie.current_frame, next_frame);
+          all_ended_sprite_nums.extend(ended_sprite_nums.iter().map(|&x| (ScoreRef::FilmLoop(member_ref.unwrap().clone()), x)));
+        }
+        _ => {}
+      }
+    }
+    // for sprite_num in ended_sprite_nums.iter() {
+    //   let sprite = self.movie.score.get_sprite_mut(*sprite_num as i16);
+    //   sprite.exited = true;
+    // }
+    all_ended_sprite_nums
   }
 
   pub fn pause_script(&mut self) {
@@ -736,7 +793,8 @@ pub async fn run_frame_loop() {
     if !is_script_paused {
       player_wait_available().await;
       reserve_player_mut(|player| {
-        player.movie.score.begin_sprites(player.movie.current_frame);
+        // player.movie.score.begin_sprites(player.movie.current_frame);
+        player.begin_all_sprites();
       });
       player_wait_available().await;
       player_unwrap_result(player_invoke_global_event(&"prepareFrame".to_string(), &vec![]).await);
@@ -784,13 +842,16 @@ pub async fn run_frame_loop() {
       }
       let ended_sprite_nums = reserve_player_mut(|player| {
         let next_frame = player.get_next_frame(); // an exitFrame handler may have changed the next frame
-        player.movie.score.end_sprites(prev_frame, next_frame)
+        // player.movie.score.end_sprites(prev_frame, next_frame)
+        player.end_all_sprites()
       });
       player_wait_available().await;
       reserve_player_mut(|player| {
-        for sprite_num in ended_sprite_nums.iter() {
-          let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
-          sprite.exited = true; 
+        for (score_source, sprite_num) in ended_sprite_nums.iter() {
+          // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
+          if let Some(sprite) = get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16) {
+            sprite.exited = true; 
+          }
         }
       });
       (is_playing, is_script_paused) = reserve_player_mut(|player| {

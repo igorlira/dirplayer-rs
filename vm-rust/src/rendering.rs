@@ -2,11 +2,12 @@ use std::{borrow::{Borrow, BorrowMut}, cell::RefCell, collections::HashMap, rc::
 
 use async_std::task::spawn_local;
 use chrono::Local;
+use itertools::Itertools;
 use wasm_bindgen::{prelude::*, Clamped};
 
-use crate::{js_api::JsApi, player::{
-    bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, score::{get_concrete_sprite_rect, get_sprite_at}, sprite::CursorRef, DirPlayer, PLAYER_OPT
-}};
+use crate::{console_warn, js_api::JsApi, player::{
+    bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, manager::BitmapManager, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, movie::Movie, score::{get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef}, sprite::{CursorRef, Sprite}, DirPlayer, PLAYER_OPT
+}, utils::log_i};
 
 pub struct PlayerCanvasRenderer {
     pub container_element: Option<web_sys::HtmlElement>,
@@ -24,11 +25,24 @@ pub struct PlayerCanvasRenderer {
 
 pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug_sprite_num: Option<i16>) {
     let palettes = player.movie.cast_manager.palettes();
+    render_score_to_bitmap(player, &ScoreRef::Stage, bitmap, debug_sprite_num, IntRect::from_size(0, 0, player.movie.rect.width(), player.movie.rect.height()));
+    draw_cursor(player, bitmap, &palettes);
+}
+
+pub fn render_score_to_bitmap(
+    player: &DirPlayer, 
+    // bitmap_manager: &mut BitmapManager,
+    score_source: &ScoreRef,
+    bitmap: &mut Bitmap, 
+    debug_sprite_num: Option<i16>,
+    dest_rect: IntRect,
+) {
+    let palettes = player.movie.cast_manager.palettes();
     bitmap.clear_rect(
-        0,
-        0,
-        player.movie.rect.width(),
-        player.movie.rect.height(),
+        dest_rect.left,
+        dest_rect.top,
+        dest_rect.right,
+        dest_rect.bottom,
         resolve_color_ref(
             &palettes,
             &player.bg_color,
@@ -37,30 +51,52 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
         &palettes,
     );
 
-    let sorted_sprites = player
-        .movie
-        .score
-        .get_sorted_channels();
+    let sorted_channel_numbers = {
+        let score = match score_source {
+            ScoreRef::Stage => &player.movie.score,
+            ScoreRef::FilmLoop(member_ref) => {
+                let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                if member.is_none() {
+                    return;
+                }
+                let member = member.unwrap();
+                match &member.member_type {
+                    CastMemberType::FilmLoop(film_loop_member) => {
+                        &film_loop_member.score
+                    }
+                    _ => return,
+                }
+            }
+        };
+        score.get_sorted_channels().iter().map(|x| x.number as i16).collect_vec()
+    };
 
-    for channel in sorted_sprites {
-        let sprite = &channel.sprite;
-        let sprite_rect = get_concrete_sprite_rect(player, sprite);
-        let member_ref = sprite.member.as_ref().unwrap();
+    for channel_num in sorted_channel_numbers {
+        let member_ref = {
+            let score = get_score(&player.movie, score_source).unwrap();
+            let sprite = score.get_sprite(channel_num).unwrap();
+            sprite.member.as_ref().unwrap().clone()
+        };
         let member = player
             .movie
             .cast_manager
-            .find_member_by_ref(member_ref);
+            .find_member_by_ref(&member_ref);
         if member.is_none() {
             continue;
         }
         let member = member.unwrap();
         match &member.member_type {
             CastMemberType::Bitmap(bitmap_member) => {
+                let sprite_rect = {
+                    let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                    get_concrete_sprite_rect(player, sprite).clone()
+                };
                 let sprite_bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_member.image_ref);
                 if sprite_bitmap.is_none() {
                     continue;
                 }
                 let src_bitmap = sprite_bitmap.unwrap();
+                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                 let mask = if should_matte_sprite(sprite.ink as u32) {
                     if src_bitmap.matte.is_none() {
                         src_bitmap.create_matte(&palettes);
@@ -98,6 +134,8 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
                 );
             }
             CastMemberType::Shape(_) => {
+                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                let sprite_rect = get_concrete_sprite_rect(player, sprite);
                 let dst_rect = sprite_rect;
                 bitmap.fill_rect(
                     dst_rect.left, 
@@ -110,6 +148,8 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
                 );
             }
             CastMemberType::Field(field_member) => {
+                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                let sprite_rect = get_concrete_sprite_rect(player, sprite);
                 let font = player.font_manager.get_system_font().unwrap(); // TODO
                 let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
@@ -123,6 +163,21 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
                     
                     bitmap.fill_rect(cursor_x, cursor_y, cursor_x + cursor_width, cursor_y + cursor_height as i32, (0, 0, 0), &palettes, 1.0)
                 }
+            }
+            CastMemberType::FilmLoop(film_loop) => {
+                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                let sprite_rect = get_concrete_sprite_rect(player, sprite);
+                let dest_x = sprite.loc_h;
+                let dest_y = sprite.loc_v;
+                render_score_to_bitmap(
+                    player, 
+                    // &mut player.bitmap_manager,
+                    &ScoreRef::FilmLoop(member_ref.clone()), 
+                    bitmap, 
+                    debug_sprite_num, 
+                    sprite_rect,
+                    // IntRect::from_size(dest_x, dest_y, sprite_rect.width(), sprite_rect.height())
+                )
             }
             _ => {}
         }
@@ -161,7 +216,6 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
             );
         }
     }
-    draw_cursor(player, bitmap, &palettes);
 }
 
 fn draw_cursor(player: &DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMap) {
@@ -237,6 +291,8 @@ impl PlayerCanvasRenderer {
         self.preview_size = (width, height);
         self.preview_canvas.set_width(width);
         self.preview_canvas.set_height(height);
+
+        // console_warn!("Set preview size: {}x{}", width, height);
     }
 
     pub fn set_container_element(&mut self, container_element: web_sys::HtmlElement) {
@@ -258,6 +314,11 @@ impl PlayerCanvasRenderer {
     }
 
     pub fn draw_preview_frame(&mut self, player: &DirPlayer) {
+        // console_warn!("Draw preview frame");
+        // console_warn!("Preview member ref: {:?}", self.preview_member_ref);
+        // console_warn!("Preview container element: {:?}", self.preview_container_element);
+        // console_warn!("Preview ctx2d: {:?}", self.preview_ctx2d);
+
         if self.preview_member_ref.is_none() || self.preview_container_element.is_none() || self.preview_ctx2d.is_null() || self.preview_ctx2d.is_undefined() {
             return;
         }
@@ -309,6 +370,37 @@ impl PlayerCanvasRenderer {
                 );
                 bitmap.set_pixel(sprite_member.reg_point.0 as i32, sprite_member.reg_point.1 as i32, (255, 0, 255), palettes);
 
+                if self.preview_size.0 != bitmap.width as u32 || self.preview_size.1 != bitmap.height as u32 {
+                    self.set_preview_size(bitmap.width as u32, bitmap.height as u32);
+                }
+                let slice_data = Clamped(bitmap.data.as_slice());
+                let image_data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+                    slice_data,
+                    bitmap.width.into(),
+                    bitmap.height.into(),
+                );
+                self.preview_ctx2d.set_fill_style(&JsValue::from_str("white"));
+                match image_data {
+                    Ok(image_data) => {
+                        self.preview_ctx2d.put_image_data(&image_data, 0.0, 0.0).unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            CastMemberType::FilmLoop(_) => {
+                let sprite = get_score_sprite(&player.movie, &ScoreRef::FilmLoop(member_ref.clone()), 1).unwrap();
+                let sprite_rect = get_concrete_sprite_rect(player, sprite);
+                let dest_x = sprite.loc_h;
+                let dest_y = sprite.loc_v;
+                let width = sprite_rect.width();
+                let height = sprite_rect.height();
+                let mut bitmap = Bitmap::new(
+                    width as u16,
+                    height as u16,
+                    32,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                render_score_to_bitmap(player, &ScoreRef::FilmLoop(member_ref.clone()), &mut bitmap, None, IntRect::from_size(0, 0, width, height));
                 if self.preview_size.0 != bitmap.width as u32 || self.preview_size.1 != bitmap.height as u32 {
                     self.set_preview_size(bitmap.width as u32, bitmap.height as u32);
                 }

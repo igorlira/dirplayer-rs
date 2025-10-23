@@ -33,6 +33,7 @@ pub enum CursorRef {
   Member(Vec<i32>),
 }
 
+#[derive(Clone)]
 pub struct Sprite {
   pub number: usize,
   pub name: String,
