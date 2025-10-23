@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "build/electron.cjs",
   "dependencies": {
     "@fortawesome/fontawesome-svg-core": "^6.4.2",
     "@fortawesome/free-solid-svg-icons": "^6.4.2",
@@ -20,6 +21,7 @@
     "@uidotdev/usehooks": "^2.4.1",
     "classnames": "^2.3.2",
     "dirplayer-js-api": "file:dirplayer-js-api",
+    "electron-is-dev": "^3.0.1",
     "flexlayout-react": "^0.8.17",
     "lodash": "^4.17.21",
     "react": "^18.2.0",
@@ -34,13 +36,29 @@
     "vm-rust": "file:vm-rust/pkg",
     "web-vitals": "^2.1.4"
   },
+  "homepage": "./",
+  "productName": "DirPlayer",
+  "build": {
+    "extends": null,
+    "appId": "com.dirplayer.studio",
+    "files": [
+      "build/**/*",
+      "node_modules/**/*"
+    ],
+    "directories": {
+      "buildResources": "assets"
+    }
+  },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
     "build-extension": "vite build -c vite.config.extension.js",
     "build-vm": "cd vm-rust && wasm-pack build --target web",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "electron-dev": "concurrently \"BROWSER=none npm run start\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron-pack": "electron-builder",
+    "preelectron-pack": "npm run build"
   },
   "eslintConfig": {
     "extends": [
@@ -63,7 +81,11 @@
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.25",
     "@vitejs/plugin-react": "^2.1.0",
+    "concurrently": "^9.2.1",
+    "electron": "^38.3.0",
+    "electron-builder": "^26.0.12",
     "vite": "^3.0.0",
-    "vite-plugin-svgr": "^4.2.0"
+    "vite-plugin-svgr": "^4.2.0",
+    "wait-on": "^9.0.1"
   }
 }
