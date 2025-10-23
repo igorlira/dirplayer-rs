@@ -1,7 +1,7 @@
 .castList {
   text-align: start;
   width: 100%;
-  background-color: #ccc;
+  background-color: #fff;
 }
 
 .castItem {
@@ -12,10 +12,10 @@
   min-height: 44px;
   display: flex;
   align-items: center;
-  background-color: #aaa;
+  background-color: #eee;
   padding: 0 8px;
-  border-top: 1px solid #888;
-  border-bottom: 1px solid #888;
+  border-top: 1px solid #ddd;
+  border-bottom: 1px solid #ddd;
 }
 
 .castMemberList {
@@ -29,14 +29,14 @@
   align-items: stretch;
 
   &.selected {
-    background: #aaa
+    background: #eee
   }
 }
 
 .memberNumberLabel {
   width: 32px;
   display: flex;
-  background: #bbb;
+  background: #eee;
   margin-right: 8px;
   align-items: center;
   justify-content: center;

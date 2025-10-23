@@ -15,6 +15,7 @@ interface IMemberInspectorProps {
 const layoutModel = Model.fromJson({
   global: {
     rootOrientationVertical: true,
+    tabEnableClose: false,
   },
   layout: {
     type: "row",

@@ -3,6 +3,7 @@ import { Model } from "flexlayout-react";
 export const studioLayoutModel = Model.fromJson({
   global: {
     rootOrientationVertical: true,
+    tabEnableClose: false,
   },
   borders: [],
   layout: {

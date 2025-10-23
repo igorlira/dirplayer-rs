@@ -41,7 +41,7 @@
     }
   }
   &.selected {
-    background-color: #666;
+    background-color: #ddd;
   }
 }
 
@@ -74,12 +74,12 @@
   height: 20px;
   text-align: start;
   border: 1px solid transparent;
-  &:nth-child(odd) {
-    background-color: #ccc;
+  &:nth-child(even) {
+    background-color: #eee;
   }
 
   &.selected {
-    border: 1px solid red;
+    background-color: #ccc;
   }
 }
 
