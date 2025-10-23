@@ -65,20 +65,31 @@ export const studioLayoutModel = Model.fromJson({
         ]
       },
       {
-        type: "tabset",
+        type: "row",
         weight: 30,
         children: [
           {
-            type: "tab",
-            name: "Debug",
-            component: "debug",
+            type: 'tabset',
+            weight: 30,
+            children: [
+              {
+                type: "tab",
+                name: "Debug",
+                component: "debug",
+              },
+            ],
           },
           {
-            type: "tab",
-            name: "Member",
-            component: "member",
-          }
-        ]
+            type: 'tabset',
+            children: [
+              {
+                type: "tab",
+                name: "Member",
+                component: "member",
+              }
+            ],
+          },
+        ],
       },
     ]
   }

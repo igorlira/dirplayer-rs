@@ -10,10 +10,11 @@ import {
   request_script_instance_snapshot,
   trigger_alert_hook,
 } from "vm-rust";
-import TabView from "../../components/TabView";
 import ListView from "../../components/ListView";
 import { onMemberSelected } from "../../store/uiSlice";
 import { DatumRef, ScriptInstanceId } from "../../vm";
+import { Layout, TabNode } from "flexlayout-react";
+import { debugLayoutModel } from "./layout";
 
 interface DebugInspectorProps {}
 
@@ -148,15 +149,28 @@ function DatumDebugTable({ datums, depth }: DatumDebugTableProps) {
   );
 }
 
-export default function DebugInspector({}: DebugInspectorProps) {
+function DebugControls() {
+  return (
+    <div className={styles.buttonContainer}>
+      <IconButton
+        icon={faPlay}
+        onClick={() => {
+          resume_breakpoint();
+        }}
+      />
+      <IconButton
+        icon={faWarning}
+        onClick={() => {
+          trigger_alert_hook();
+        }}
+      />
+    </div>
+  );
+}
+
+function Scopes({ selectedScopeIndex, setSelectedScopeIndex }: { selectedScopeIndex?: number, setSelectedScopeIndex: (i: number) => void }) {
   const scopes = useAppSelector((state) => selectScopes(state.vm));
-  const casts = useAppSelector((state) => state.vm.castSnapshots);
-  const castNames = useAppSelector((state) => state.vm.castNames);
   const dispatch = useAppDispatch();
-  const [selectedScopeIndex, setSelectedScopeIndex] = useState<number>();
-  const selectedScope =
-    selectedScopeIndex !== undefined ? scopes[selectedScopeIndex] : undefined;
-  const globals = useAppSelector((state) => selectGlobals(state.vm));
 
   const onSelectScope = (index: number) => {
     setSelectedScopeIndex(index);
@@ -164,107 +178,134 @@ export default function DebugInspector({}: DebugInspectorProps) {
     dispatch(onMemberSelected(scope.script_member_ref));
   };
 
+  return <ListView
+    selectedKey={selectedScopeIndex?.toString()}
+    className={styles.listContainer}
+  >
+    {scopes
+      .map((scope, scopeIndex) => {
+        return (
+          <ListView.Item
+            key={
+              scope.script_member_ref[0] +
+              "-" +
+              scope.script_member_ref[1] +
+              "-" +
+              scopeIndex
+            }
+            isSelected={selectedScopeIndex === scopeIndex}
+            onClick={() => onSelectScope(scopeIndex)}
+          >
+            {/* {castNames[scope.script_member_ref[0] - 1]} - {casts[scope.script_member_ref[0] - 1].members[scope.script_member_ref[1]].name} - on {scope.handler_name} */}
+            on {scope.handler_name}
+          </ListView.Item>
+        );
+      })
+      .reverse()}
+  </ListView>
+}
+
+function Locals({ selectedScopeIndex }: { selectedScopeIndex?: number }) {
+  const scopes = useAppSelector((state) => selectScopes(state.vm));
+  const selectedScope =
+    selectedScopeIndex !== undefined ? scopes[selectedScopeIndex] : undefined;
   return (
-    <div className={styles.container}>
-      <div className={styles.buttonContainer}>
-        <IconButton
-          icon={faPlay}
-          onClick={() => {
-            resume_breakpoint();
-          }}
-        />
-        <IconButton
-          icon={faWarning}
-          onClick={() => {
-            trigger_alert_hook();
-          }}
-        />
-      </div>
-      Scopes
-      <ListView
-        selectedKey={selectedScopeIndex?.toString()}
-        className={styles.stackContainer}
-      >
-        {scopes
-          .map((scope, scopeIndex) => {
-            return (
-              <ListView.Item
-                key={
-                  scope.script_member_ref[0] +
-                  "-" +
-                  scope.script_member_ref[1] +
-                  "-" +
-                  scopeIndex
-                }
-                isSelected={selectedScopeIndex === scopeIndex}
-                onClick={() => onSelectScope(scopeIndex)}
-              >
-                {/* {castNames[scope.script_member_ref[0] - 1]} - {casts[scope.script_member_ref[0] - 1].members[scope.script_member_ref[1]].name} - on {scope.handler_name} */}
-                on {scope.handler_name}
-              </ListView.Item>
-            );
-          })
-          .reverse()}
-      </ListView>
-      <TabView className={styles.variablesContainer}>
-        <TabView.Tab tabKey="locals" title="Locals">
-          <ListView>
-            <DatumDebugTable
-              datums={Object.fromEntries(
-                Object.entries(selectedScope?.locals || {}).map(
-                  ([key, value]) => [
-                    key,
-                    {
-                      type: "datum",
-                      datumRef: value,
-                    },
-                  ]
-                )
-              )}
-            />
-          </ListView>
-        </TabView.Tab>
-        <TabView.Tab tabKey="args" title="Args">
-          <ListView>
-            {selectedScope?.args.map((datum, i) => {
-              return (
-                <DatumDebugListItems
-                  key={i}
-                  datumRef={{ type: "datum", datumRef: datum }}
-                />
-              );
-            })}
-          </ListView>
-        </TabView.Tab>
-        <TabView.Tab tabKey="stack" title="Stack">
-          <ListView>
-            {selectedScope &&
-              selectedScope.stack.map((datum, i) => {
-                return (
-                  <DatumDebugListItems
-                    key={i}
-                    datumRef={{ type: "datum", datumRef: datum }}
-                  />
-                );
-              })}
-          </ListView>
-        </TabView.Tab>
-        <TabView.Tab tabKey="globals" title="Globals">
-          <ListView>
-            <DatumDebugTable
-              datums={Object.fromEntries(
-                Object.entries(globals).map(([key, value]) => [
-                  key,
-                  {
-                    type: "datum",
-                    datumRef: value,
-                  },
-                ])
-              )}
-            />
-          </ListView>
-        </TabView.Tab>
-      </TabView>
-    </div>
+    <ListView className={styles.listContainer}>
+      <DatumDebugTable
+        datums={Object.fromEntries(
+          Object.entries(selectedScope?.locals || {}).map(
+            ([key, value]) => [
+              key,
+              {
+                type: "datum",
+                datumRef: value,
+              },
+            ]
+          )
+        )}
+      />
+    </ListView>
   );
+}
+
+function Args({ selectedScopeIndex }: { selectedScopeIndex?: number }) {
+  const scopes = useAppSelector((state) => selectScopes(state.vm));
+  const selectedScope =
+    selectedScopeIndex !== undefined ? scopes[selectedScopeIndex] : undefined;
+
+  return (
+    <ListView className={styles.listContainer}>
+      {selectedScope?.args.map((datum, i) => {
+        return (
+          <DatumDebugListItems
+            key={i}
+            datumRef={{ type: "datum", datumRef: datum }}
+          />
+        );
+      })}
+    </ListView>
+  );
+}
+
+function Stack({ selectedScopeIndex }: { selectedScopeIndex?: number }) {
+  const scopes = useAppSelector((state) => selectScopes(state.vm));
+  const selectedScope =
+    selectedScopeIndex !== undefined ? scopes[selectedScopeIndex] : undefined;
+
+  return (
+    <ListView className={styles.listContainer}>
+      {selectedScope &&
+        selectedScope.stack.map((datum, i) => {
+          return (
+            <DatumDebugListItems
+              key={i}
+              datumRef={{ type: "datum", datumRef: datum }}
+            />
+          );
+        })}
+    </ListView>
+  );
+}
+
+function Globals() {
+  const globals = useAppSelector((state) => selectGlobals(state.vm));
+  return (
+    <ListView className={styles.listContainer}>
+      <DatumDebugTable
+        datums={Object.fromEntries(
+          Object.entries(globals).map(([key, value]) => [
+            key,
+            {
+              type: "datum",
+              datumRef: value,
+            },
+          ])
+        )}
+      />
+    </ListView>
+  );
+}
+
+export default function DebugInspector({}: DebugInspectorProps) {
+  const [selectedScopeIndex, setSelectedScopeIndex] = useState<number>();
+
+  const factory = (node: TabNode) => {
+    const component = node.getComponent();
+    if (component === 'controls') {
+      return <DebugControls />;
+    } else if (component === 'scopes') {
+      return <Scopes selectedScopeIndex={selectedScopeIndex} setSelectedScopeIndex={setSelectedScopeIndex} />;
+    } else if (component === 'locals') {
+      return <Locals selectedScopeIndex={selectedScopeIndex} />;
+    } else if (component === 'args') {
+      return <Args selectedScopeIndex={selectedScopeIndex} />;
+    } else if (component === 'stack') {
+      return <Stack selectedScopeIndex={selectedScopeIndex} />;
+    } else if (component === 'globals') {
+      return <Globals />;
+    } else {
+      return null;
+    }
+  }
+  return <Layout model={debugLayoutModel} factory={factory} />;
 }

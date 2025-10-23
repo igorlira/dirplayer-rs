@@ -6,22 +6,16 @@
   width: 25%;
 }
 
-.stackContainer {
+.listContainer {
   flex: 1;
-  overflow-y: scroll;
-}
-
-.variablesContainer {
-  flex: 1;
-  overflow-y: scroll;
-}
-
-.variablesTabView {
-  flex: 1;
+  text-align: start;
 }
 
 .buttonContainer {
   display: flex;
   flex-direction: row;
   gap: 8px;
+  padding: 8px;
+  height: 100%;
+  align-items: center;
 }

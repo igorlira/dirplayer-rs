@@ -68,7 +68,6 @@ const StudioLayout = () => {
         {scriptError && <p className={styles.scriptError}>{scriptError}</p>}
         <div className={styles.bottomContainer}>
           <DebugInspector />
-          {selectedMemberId && <MemberInspector memberId={selectedMemberId} />}
         </div>
       </div>
     } else if (component === "member") {
