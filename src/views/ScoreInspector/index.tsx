@@ -4,7 +4,7 @@ import { selectCurrentFrame, selectScoreSnapshot } from "../../store/vmSlice";
 import styles from "./styles.module.css";
 import classNames from "classnames";
 import { player_set_debug_selected_channel, subscribe_to_channel_names, unsubscribe_from_channel_names } from "vm-rust";
-import { channelSelected, scoreBehaviorSelected } from "../../store/uiSlice";
+import { channelSelected, scoreSpanSelected, scoreBehaviorSelected } from "../../store/uiSlice";
 import { useEffect, useState } from "react";
 import { getScoreFrameBehaviorRef } from "../../utils/score";
 import ExpandableButton from "../../components/ExpandableButton";
@@ -39,7 +39,7 @@ export default function ScoreInspector() {
   };
 
   const onTimelineCellClick = ({ channel, frame }: { channel: number; frame: number }) => {
-
+    dispatch(scoreSpanSelected({ channelNumber: channel, frameNumber: frame, scoreRef: 'stage' }));
   };
 
   return (

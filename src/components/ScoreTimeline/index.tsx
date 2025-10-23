@@ -3,6 +3,7 @@ import classNames from "classnames";
 import styles from "./styles.module.css";
 import { IScoreSpriteSpan, IScoreChannelInitData, ScoreSpriteSnapshot } from "../../vm";
 import { useState } from "react";
+import { getAggregatedSpriteDataForChannelAtFrame } from "../../utils/score";
 
 export interface ScoreTimelineProps {
   framesToRender: number;
@@ -38,15 +39,12 @@ export default function ScoreTimeline({
   };
 
   const getCastMemberForChannel = (channel: number, frame: number) => {
-    const initData = channelInitData?.filter(
-      (data) => data.channelNumber === channel && data.frameIndex <= frame
-    );
-    return initData?.reduce<string | null>((result, item) => {
-      if (item.initData.castLib || item.initData.castMember) {
-        return `${item.initData.castLib}:${item.initData.castMember}`;
-      }
-      return result;
-    }, null);
+    const memberRef = channelInitData && getAggregatedSpriteDataForChannelAtFrame(channelInitData, channel, frame)?.memberRef;
+    if (memberRef) {
+      return `${memberRef[0]}:${memberRef[1]}`;
+    } else {
+      return null;
+    }
   };
 
   return (

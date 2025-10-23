@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useAppSelector } from "../store/hooks";
-import { getScoreFrameBehaviorRef } from "../utils/score";
+import { getAggregatedSpriteDataForChannelAtFrame, getScoreFrameBehaviorRef } from "../utils/score";
 
 export function useSelectedObjects() {
   const castSnapshots = useAppSelector((state) => state.vm.castSnapshots);
@@ -27,8 +27,10 @@ export function useSelectedObjects() {
       return [scoreBehaviorRef.castLib, scoreBehaviorRef.castMember];
     } else if (selectedObject?.type === "sprite" && selectedSprite) {
       return selectedSprite.memberRef;
+    } else if (selectedObject?.type === "scoreSpan" && selectedObject.spanRef.scoreRef === 'stage' && scoreSnapshot?.channelInitData) {
+      return getAggregatedSpriteDataForChannelAtFrame(scoreSnapshot.channelInitData, selectedObject.spanRef.channelNumber, selectedObject.spanRef.frameNumber)?.memberRef;
     }
-  }, [selectedObject, scoreBehaviorRef, selectedSprite]);
+  }, [selectedObject, scoreBehaviorRef, selectedSprite, scoreSnapshot]);
 
   const member = useMemo(() => {
     if (memberRef) {
