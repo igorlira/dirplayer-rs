@@ -38,8 +38,8 @@ export default function ScoreInspector() {
     dispatch(scoreBehaviorSelected({ frameNumber: behavior }));
   };
 
-  const onTimelineCellClick = () => {
-    console.log('onTimelineCellClick called');
+  const onTimelineCellClick = ({ channel, frame }: { channel: number; frame: number }) => {
+
   };
 
   return (

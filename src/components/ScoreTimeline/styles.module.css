@@ -89,6 +89,19 @@
   background-color: #80c0ff;
 }
 
+.scoreGridCell.spanEnd {
+  border-right: 2px solid #0066cc;
+  background-color: #80c0ff;
+}
+
+.scoreGridCell.emptySelected {
+  background-color: #000;
+}
+
+.scoreGridCell.spanSelected {
+  background-color: #0066cc;
+}
+
 .scoreGridCell.currentFrame {
   border-top: 2px solid red;
   border-bottom: 2px solid red;
@@ -113,5 +126,5 @@
   font-weight: bold;
   white-space: nowrap;
   pointer-events: none;
-  text-shadow: 0 0 2px white;
+  text-shadow: 0 0 2px white;;
 }

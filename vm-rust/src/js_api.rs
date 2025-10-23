@@ -11,6 +11,7 @@ use crate::{
         file::DirectorFile,
         lingo::{datum::Datum, script::ScriptContext}, utils::fourcc_to_string,
     }, player::{
+        score::get_channel_number_from_index,
         allocator::ScriptInstanceAllocatorTrait, bitmap::bitmap::PaletteRef, cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, ScriptMember}, datum_formatting::{format_concrete_datum, format_datum}, datum_ref::{DatumId, DatumRef}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, reserve_player_ref, score::Score, script::ScriptInstanceId, script_ref::ScriptInstanceRef, DirPlayer, ScriptError, PLAYER_OPT
     }, rendering::RENDERER_LOCK
 };
@@ -431,10 +432,11 @@ impl JsApi {
 
     member_map.str_set(
       "channelInitData",
-      &js_sys::Array::from_iter(score.channel_initialization_data.iter().map(|(frame_index, channel_number, init_data)| {
+      &js_sys::Array::from_iter(score.channel_initialization_data.iter().map(|(frame_index, channel_index, init_data)| {
         let channel_map = js_sys::Map::new();
         channel_map.str_set("frameIndex", &frame_index.to_js_value());
-        channel_map.str_set("channelNumber", &channel_number.to_js_value());
+        channel_map.str_set("channelIndex", &channel_index.to_js_value());
+        channel_map.str_set("channelNumber", &get_channel_number_from_index(*channel_index as u32).to_js_value());
 
         let init_data_map = js_sys::Map::new();
         init_data_map.str_set("spriteType", &init_data.sprite_type.to_js_value());

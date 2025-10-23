@@ -2,6 +2,7 @@ import { range } from "lodash";
 import classNames from "classnames";
 import styles from "./styles.module.css";
 import { IScoreSpriteSpan, IScoreChannelInitData, ScoreSpriteSnapshot } from "../../vm";
+import { useState } from "react";
 
 export interface ScoreTimelineProps {
   framesToRender: number;
@@ -12,7 +13,12 @@ export interface ScoreTimelineProps {
   channelSnapshots?: Record<number, ScoreSpriteSnapshot>;
   selectedChannel?: number | false;
   onSelectChannel?: (channel: number) => void;
-  onCellClick?: () => void;
+  onCellClick?: (cell: { channel: number; frame: number }) => void;
+}
+
+interface ITimelineSelection {
+  channel: number;
+  frame: number;
 }
 
 export default function ScoreTimeline({
@@ -26,18 +32,21 @@ export default function ScoreTimeline({
   onSelectChannel,
   onCellClick,
 }: ScoreTimelineProps) {
+  const [selectedCell, setSelectedCell] = useState<ITimelineSelection>();
   const getSpansForChannel = (channel: number) => {
     return spriteSpans?.filter((span) => span.channelNumber === channel) || [];
   };
 
   const getCastMemberForChannel = (channel: number, frame: number) => {
-    const initData = channelInitData?.find(
-      (data) => data.channelNumber === channel && data.frameIndex === frame
+    const initData = channelInitData?.filter(
+      (data) => data.channelNumber === channel && data.frameIndex <= frame
     );
-    if (initData) {
-      return `${initData.initData.castLib}:${initData.initData.castMember}`;
-    }
-    return null;
+    return initData?.reduce<string | null>((result, item) => {
+      if (item.initData.castLib || item.initData.castMember) {
+        return `${item.initData.castLib}:${item.initData.castMember}`;
+      }
+      return result;
+    }, null);
   };
 
   return (
@@ -77,10 +86,14 @@ export default function ScoreTimeline({
                   (s) => frame >= s.startFrame && frame <= s.endFrame
                 );
                 const isSpanStart = span && frame === span.startFrame;
+                const isSpanEnd = span && frame === span.endFrame;
                 const castMember = isSpanStart ? getCastMemberForChannel(channel, frame) : null;
+                const isCellSelected = selectedCell?.channel === channel && selectedCell?.frame === frame;
+                const isSpanSelected = span && selectedCell && channel === selectedCell.channel && (selectedCell.frame >= span.startFrame && selectedCell.frame <= span.endFrame);
 
                 const handleCellClick = () => {
-                  // TODO
+                  onCellClick?.({ channel, frame });
+                  setSelectedCell({ channel, frame });
                 };
 
                 return (
@@ -90,8 +103,11 @@ export default function ScoreTimeline({
                       styles.scoreGridCell,
                       span && styles.hasSprite,
                       isSpanStart && styles.spanStart,
+                      isSpanEnd && styles.spanEnd,
                       currentFrame === frame && styles.currentFrame,
-                      span && onCellClick && styles.clickable
+                      span && onCellClick && styles.clickable,
+                      isCellSelected && !span && styles.emptySelected,
+                      isSpanSelected && styles.spanSelected
                     )}
                     title={castMember || undefined}
                     onClick={handleCellClick}

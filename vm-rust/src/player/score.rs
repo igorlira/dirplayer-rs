@@ -63,7 +63,7 @@ fn get_sprite_rect(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
   return (rect.left, rect.top, rect.right, rect.bottom);
 }
 
-fn get_channel_number_from_index(index: u32) -> u32 {
+pub fn get_channel_number_from_index(index: u32) -> u32 {
   match index {
     0 => 0,
     index => index - 5,
