@@ -128,6 +128,7 @@ export interface IFilmLoopMemberSnapshot {
   height: number
   regX: number
   regY: number
+  score?: ScoreSnapshot
 }
 
 export interface IScriptSnapshot {

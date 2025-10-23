@@ -1,6 +1,7 @@
 import { ICastMemberRef } from "dirplayer-js-api";
 import PreviewCanvas from "../../components/PreviewCanvas";
 import ScriptMemberPreview from "../../components/ScriptMemberPreview";
+import ScoreTimeline from "../../components/ScoreTimeline";
 import { useAppSelector, useMemberSnapshot } from "../../store/hooks";
 import { ICastMemberIdentifier, memberRefEqualsSafe } from "../../vm";
 import styles from "./styles.module.css";
@@ -67,6 +68,16 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
           <div>
             <p>{memberSnapshot.width}x{memberSnapshot.height}</p>
             <p>Reg point: {memberSnapshot.regX}x{memberSnapshot.regY}</p>
+            {memberSnapshot.score && (
+              <div className={styles.filmLoopTimeline}>
+                <ScoreTimeline
+                  framesToRender={Math.min(memberSnapshot.score.spriteSpans?.reduce((max, span) => Math.max(max, span.endFrame), 0) || 30, 100)}
+                  channelCount={memberSnapshot.score.channelCount}
+                  spriteSpans={memberSnapshot.score.spriteSpans}
+                  channelInitData={memberSnapshot.score.channelInitData}
+                />
+              </div>
+            )}
             <PreviewCanvas />
           </div>)}
         {memberSnapshot?.type === "palette" && <div>

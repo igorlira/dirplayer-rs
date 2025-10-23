@@ -391,6 +391,8 @@ impl JsApi {
         member_map.str_set("center", &JsValue::from(film_loop_data.info.center));
         member_map.str_set("regX", &JsValue::from(film_loop_data.info.reg_point.0));
         member_map.str_set("regY", &JsValue::from(film_loop_data.info.reg_point.1));
+        let score_snapshot = Self::get_score_snapshot(player, &film_loop_data.score);
+        member_map.str_set("score", &score_snapshot.to_js_object());
       }
       CastMemberType::Palette(palette) => {
         let colors_array = js_sys::Array::new();
