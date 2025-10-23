@@ -193,3 +193,9 @@
   pointer-events: none;
   text-shadow: 0 0 2px white;
 }
+
+.timelineContainer {
+  position: relative;
+  height: 300px;
+  width: 100%;
+}

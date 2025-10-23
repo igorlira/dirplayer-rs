@@ -100,17 +100,19 @@ export default function ScoreInspector() {
         </div>
       </ExpandableButton>
       <ExpandableButton label="Timeline" className={styles.scoreTimelineButton} onStateChange={setIsShowingscoreTimeline}>
-        <ScoreTimeline
-          framesToRender={framesToRender}
-          currentFrame={currentFrame}
-          channelCount={score?.channelCount || 0}
-          spriteSpans={score?.spriteSpans}
-          channelInitData={score?.channelInitData}
-          channelSnapshots={channelSnapshots}
-          selectedChannel={selectedChannel}
-          onSelectChannel={onSelectChannel}
-          onCellClick={onTimelineCellClick}
-        />
+        <div className={styles.timelineContainer}>
+          <ScoreTimeline
+            framesToRender={framesToRender}
+            currentFrame={currentFrame}
+            channelCount={score?.channelCount || 0}
+            spriteSpans={score?.spriteSpans}
+            channelInitData={score?.channelInitData}
+            channelSnapshots={channelSnapshots}
+            selectedChannel={selectedChannel}
+            onSelectChannel={onSelectChannel}
+            onCellClick={onTimelineCellClick}
+          />
+        </div>
       </ExpandableButton>
     </div>
   );

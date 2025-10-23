@@ -27,16 +27,3 @@
   grid-column-gap: 0px;
   grid-row-gap: 0px;
 }
-
-.filmLoopTimeline {
-  margin-top: 20px;
-  border-top: 1px solid #ccc;
-  padding-top: 10px;
-  height: 150px;
-  overflow-y: scroll;
-}
-
-.filmLoopTimeline h4 {
-  margin: 0 0 10px 0;
-  font-size: 14px;
-}
