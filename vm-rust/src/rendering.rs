@@ -30,7 +30,7 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
 }
 
 pub fn render_score_to_bitmap(
-    player: &DirPlayer, 
+    player: &mut DirPlayer, 
     // bitmap_manager: &mut BitmapManager,
     score_source: &ScoreRef,
     bitmap: &mut Bitmap, 
@@ -218,7 +218,7 @@ pub fn render_score_to_bitmap(
     }
 }
 
-fn draw_cursor(player: &DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMap) {
+fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMap) {
     let hovered_sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
     let cursor_ref = if let Some(hovered_sprite) = hovered_sprite {
         let hovered_sprite = player.movie.score.get_sprite(hovered_sprite as i16).unwrap();
@@ -313,7 +313,7 @@ impl PlayerCanvasRenderer {
         }
     }
 
-    pub fn draw_preview_frame(&mut self, player: &DirPlayer) {
+    pub fn draw_preview_frame(&mut self, player: &mut DirPlayer) {
         // console_warn!("Draw preview frame");
         // console_warn!("Preview member ref: {:?}", self.preview_member_ref);
         // console_warn!("Preview container element: {:?}", self.preview_container_element);
@@ -675,7 +675,7 @@ async fn run_draw_loop() {
             with_canvas_renderer_mut(|renderer| {
                 let renderer = renderer.as_mut().unwrap();
                 renderer.draw_frame(&mut player);
-                renderer.draw_preview_frame(&player);
+                renderer.draw_preview_frame(&mut player);
             });
         }
 
