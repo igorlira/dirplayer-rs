@@ -38,6 +38,10 @@ export default function ScoreInspector() {
     dispatch(scoreBehaviorSelected({ frameNumber: behavior }));
   };
 
+  const onTimelineCellClick = () => {
+    console.log('onTimelineCellClick called');
+  };
+
   return (
     <div className={styles.container}>
       <div className={styles.scoreScrollContainer}>
@@ -105,6 +109,7 @@ export default function ScoreInspector() {
           channelSnapshots={channelSnapshots}
           selectedChannel={selectedChannel}
           onSelectChannel={onSelectChannel}
+          onCellClick={onTimelineCellClick}
         />
       </ExpandableButton>
     </div>

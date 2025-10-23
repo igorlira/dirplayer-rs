@@ -12,6 +12,7 @@ export interface ScoreTimelineProps {
   channelSnapshots?: Record<number, ScoreSpriteSnapshot>;
   selectedChannel?: number | false;
   onSelectChannel?: (channel: number) => void;
+  onCellClick?: () => void;
 }
 
 export default function ScoreTimeline({
@@ -23,6 +24,7 @@ export default function ScoreTimeline({
   channelSnapshots,
   selectedChannel,
   onSelectChannel,
+  onCellClick,
 }: ScoreTimelineProps) {
   const getSpansForChannel = (channel: number) => {
     return spriteSpans?.filter((span) => span.channelNumber === channel) || [];
@@ -77,6 +79,10 @@ export default function ScoreTimeline({
                 const isSpanStart = span && frame === span.startFrame;
                 const castMember = isSpanStart ? getCastMemberForChannel(channel, frame) : null;
 
+                const handleCellClick = () => {
+                  // TODO
+                };
+
                 return (
                   <div
                     key={frame}
@@ -84,9 +90,11 @@ export default function ScoreTimeline({
                       styles.scoreGridCell,
                       span && styles.hasSprite,
                       isSpanStart && styles.spanStart,
-                      currentFrame === frame && styles.currentFrame
+                      currentFrame === frame && styles.currentFrame,
+                      span && onCellClick && styles.clickable
                     )}
                     title={castMember || undefined}
+                    onClick={handleCellClick}
                   >
                     {isSpanStart && castMember && (
                       <div className={styles.castMemberLabel}>{castMember}</div>
