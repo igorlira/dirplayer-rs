@@ -63,6 +63,12 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
             <button onClick={() => player_print_member_bitmap_hex(memberId.castNumber, memberId.memberNumber)}>Print hex</button>
             <PreviewCanvas />
           </div>)}
+        {memberSnapshot?.type === "filmLoop" && (
+          <div>
+            <p>{memberSnapshot.width}x{memberSnapshot.height}</p>
+            <p>Reg point: {memberSnapshot.regX}x{memberSnapshot.regY}</p>
+            <PreviewCanvas />
+          </div>)}
         {memberSnapshot?.type === "palette" && <div>
           Ref id: {memberSnapshot.paletteRef}
           {memberSnapshot.colors && <div className={styles.paletteGrid}>

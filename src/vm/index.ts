@@ -122,6 +122,14 @@ export interface IPaletteMemberSnapshot {
   paletteRef: number
 }
 
+export interface IFilmLoopMemberSnapshot {
+  type: 'filmLoop'
+  width: number
+  height: number
+  regX: number
+  regY: number
+}
+
 export interface IScriptSnapshot {
   handlers: IHandlerSnapshot[]
 }
@@ -159,4 +167,4 @@ export interface ScoreSnapshot {
   behaviorReferences: IScoreBehaviorReference[]
 }
 
-export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IUnknownMemberSnapshot)
+export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)

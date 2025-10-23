@@ -385,6 +385,13 @@ impl JsApi {
         member_map.str_set("regX", &JsValue::from(bitmap_data.reg_point.0));
         member_map.str_set("regY", &JsValue::from(bitmap_data.reg_point.1));
       }
+      CastMemberType::FilmLoop(film_loop_data) => {
+        member_map.str_set("width", &JsValue::from(film_loop_data.info.width));
+        member_map.str_set("height", &JsValue::from(film_loop_data.info.height));
+        member_map.str_set("center", &JsValue::from(film_loop_data.info.center));
+        member_map.str_set("regX", &JsValue::from(film_loop_data.info.reg_point.0));
+        member_map.str_set("regY", &JsValue::from(film_loop_data.info.reg_point.1));
+      }
       CastMemberType::Palette(palette) => {
         let colors_array = js_sys::Array::new();
         for color in palette.colors.iter() {

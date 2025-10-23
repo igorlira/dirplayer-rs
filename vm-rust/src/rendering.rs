@@ -387,13 +387,13 @@ impl PlayerCanvasRenderer {
                     _ => {}
                 }
             }
-            CastMemberType::FilmLoop(_) => {
+            CastMemberType::FilmLoop(loop_member) => {
                 let sprite = get_score_sprite(&player.movie, &ScoreRef::FilmLoop(member_ref.clone()), 1).unwrap();
                 let sprite_rect = get_concrete_sprite_rect(player, sprite);
                 let dest_x = sprite.loc_h;
                 let dest_y = sprite.loc_v;
-                let width = sprite_rect.width();
-                let height = sprite_rect.height();
+                let width = loop_member.info.width as i32;
+                let height = loop_member.info.height as i32;
                 let mut bitmap = Bitmap::new(
                     width as u16,
                     height as u16,
