@@ -5,3 +5,14 @@
   justify-content: center;
   align-items: center;
 }
+
+.controlBar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #eee;
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+}

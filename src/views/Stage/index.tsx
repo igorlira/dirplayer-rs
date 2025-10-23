@@ -1,5 +1,5 @@
 import { useMeasure } from "@uidotdev/usehooks";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   set_stage_size,
   player_create_canvas,
@@ -31,11 +31,28 @@ function onMouseEvent(name: MouseEventName, e: React.MouseEvent) {
   }
 }
 
-export default function Stage() {
+function ZoomSlider({ scale, setScale }: { scale: number; setScale: (scale: number) => void }) {
+  return (
+    <div>
+      <input
+        type="range"
+        min="0.5"
+        max="2"
+        step="0.1"
+        value={scale}
+        onChange={(e) => setScale(parseFloat(e.target.value))}
+      />
+      {Math.round(scale * 100)}%
+    </div>
+  );
+}
+
+export default function Stage({ showControls }: { showControls?: boolean }) {
   const [ref, { width, height }] = useMeasure();
   const isStageCanvasCreated = useRef(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
-
+  const [scale, setScale] = useState(1);
+  
   const onContainerRef = useCallback(
     (element: HTMLDivElement | null) => {
       containerRef.current = element;
@@ -62,6 +79,7 @@ export default function Stage() {
   return (
     <div className={styles.container} ref={onContainerRef}>
       <div
+        style={{ transform: `scale(${scale})` }}
         tabIndex={0}
         id="stage_canvas_container"
         onPointerMove={(e) => onMouseEvent('move', e)}
@@ -73,6 +91,11 @@ export default function Stage() {
         }}
         onKeyUp={e => key_up(e.key, e.keyCode)}
       ></div>
+      {showControls && (
+        <div className={styles.controlBar}>
+          <ZoomSlider scale={scale} setScale={setScale} />
+        </div>
+      )}
     </div>
   );
 }

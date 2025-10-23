@@ -50,7 +50,7 @@ const StudioLayout = () => {
     if (component === "placeholder") {
       return <div>{node.getName()}</div>;
     } else if (component === "stage") {
-      return <Stage />;
+      return <Stage showControls />
     } else if (component === "score") {
       return <ScoreInspector />;
     } else if (component === "playback") {
