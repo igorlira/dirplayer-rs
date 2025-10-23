@@ -82,3 +82,114 @@
     border: 1px solid red;
   }
 }
+
+.scoreTimelineButton {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.scoreTimelineContainer {
+  overflow-x: scroll;
+  overflow-y: scroll;
+  max-height: 400px;
+}
+
+.scoreGrid {
+  display: flex;
+  flex-direction: column;
+  font-size: 10px;
+}
+
+.scoreGridHeader {
+  display: flex;
+  flex-direction: row;
+  position: sticky;
+  top: 0;
+  background-color: #f5f5f5;
+  z-index: 10;
+  border-bottom: 2px solid #333;
+}
+
+.scoreGridRow {
+  display: flex;
+  flex-direction: row;
+  border-bottom: 1px solid #ddd;
+
+  &:nth-child(even) {
+    background-color: #fafafa;
+  }
+}
+
+.channelLabelCell {
+  min-width: 30px;
+  max-width: 30px;
+  padding: 2px 4px;
+  text-align: center;
+  font-weight: bold;
+  border-right: 1px solid #999;
+  position: sticky;
+  left: 0;
+  background-color: #f5f5f5;
+  z-index: 5;
+  cursor: pointer;
+
+  &:hover {
+    background-color: #e0e0e0;
+  }
+
+  &.selected {
+    background-color: #ffcccc;
+    border: 2px solid red;
+  }
+}
+
+.scoreGridFrameCell {
+  min-width: var(--frame-cell-width);
+  max-width: var(--frame-cell-width);
+  text-align: center;
+  padding: 2px 0;
+  border-left: 1px solid #eee;
+
+  &.current {
+    background-color: red;
+    color: white;
+    font-weight: bold;
+  }
+}
+
+.scoreGridCell {
+  position: relative;
+  min-width: var(--frame-cell-width);
+  max-width: var(--frame-cell-width);
+  min-height: 18px;
+  border-left: 1px solid #eee;
+  box-sizing: border-box;
+
+  &.hasSprite {
+    background-color: #a0d0ff;
+  }
+
+  &.spanStart {
+    border-left: 2px solid #0066cc;
+    background-color: #80c0ff;
+  }
+
+  &.currentFrame {
+    border-top: 2px solid red;
+    border-bottom: 2px solid red;
+  }
+}
+
+.castMemberLabel {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  font-size: 8px;
+  color: #003366;
+  font-weight: bold;
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 0 2px white;
+}

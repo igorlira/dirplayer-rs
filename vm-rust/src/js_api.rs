@@ -448,7 +448,18 @@ impl JsApi {
         channel_map.str_set("initData", &init_data_map.to_js_object());
         channel_map.to_js_object()
       })),
-    );	
+    );
+
+    member_map.str_set(
+      "spriteSpans",
+      &js_sys::Array::from_iter(score.sprite_spans.iter().map(|span| {
+        let span_map = js_sys::Map::new();
+        span_map.str_set("startFrame", &span.start_frame.to_js_value());
+        span_map.str_set("endFrame", &span.end_frame.to_js_value());
+        span_map.str_set("channelNumber", &span.channel_number.to_js_value());
+        span_map.to_js_object()
+      })),
+    );
 
     return member_map;
   }

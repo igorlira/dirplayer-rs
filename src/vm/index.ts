@@ -157,6 +157,28 @@ export interface IScoreBehaviorReference {
   channelNumber: number
 }
 
+export interface IScoreSpriteSpan {
+  startFrame: number
+  endFrame: number
+  channelNumber: number
+}
+
+export interface IScoreChannelInitData {
+  frameIndex: number
+  channelNumber: number
+  initData: {
+    spriteType: number
+    castLib: number
+    castMember: number
+    width: number
+    height: number
+    locH: number
+    locV: number
+    unk1: number
+    unk2: number
+  }
+}
+
 export interface ScoreSpriteSnapshot {
   displayName: string
   memberRef: ICastMemberRef
@@ -165,6 +187,8 @@ export interface ScoreSpriteSnapshot {
 export interface ScoreSnapshot {
   channelCount: number,
   behaviorReferences: IScoreBehaviorReference[]
+  spriteSpans?: IScoreSpriteSpan[]
+  channelInitData?: IScoreChannelInitData[]
 }
 
 export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)
