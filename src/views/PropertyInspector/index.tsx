@@ -14,7 +14,7 @@ interface PropertyInspectorProps {
 export default function PropertyInspector({
   selectedObject,
 }: PropertyInspectorProps) {
-  const { scoreBehaviorRef, selectedSprite, member } = useSelectedObjects();
+  const { scoreBehaviorRef, selectedSprite, member, secondaryMember } = useSelectedObjects();
   const movieChunks = useAppSelector((state) => state.vm.movieChunkList);
   const getChunkItemString: ComponentProps<typeof JSONTree>['getItemString'] = (type, data, itemType, itemString, keyPath) => {
     let chunk = data as JsBridgeChunk;
@@ -55,6 +55,11 @@ export default function PropertyInspector({
         {member && (
           <TabView.Tab tabKey="member" title="Member">
             <JSONTree keyPath={["member"]} data={member} />
+          </TabView.Tab>
+        )}
+        {secondaryMember && (
+          <TabView.Tab tabKey="secondaryMember" title="Member">
+            <JSONTree keyPath={["secondaryMember"]} data={secondaryMember} />
           </TabView.Tab>
         )}
         <TabView.Tab tabKey="movie" title="Movie">

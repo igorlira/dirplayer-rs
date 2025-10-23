@@ -20,6 +20,18 @@ export function useSelectedObjects() {
     }
   }, [scoreSnapshot, selectedObject]);
 
+  const selectedScoreRef = useMemo(() => {
+    if (selectedObject?.type === "scoreSpan" && selectedObject.spanRef.scoreRef !== 'stage') {
+      return selectedObject.spanRef.scoreRef;
+    }
+  }, [selectedObject]);
+
+  const selectedScoreSnapshot = useAppSelector((state) => {
+    if (selectedScoreRef) {
+      return castSnapshots[selectedScoreRef[0]]?.members?.[selectedScoreRef[1]];
+    }
+  });
+
   const memberRef = useMemo(() => {
     if (selectedObject?.type === "member") {
       return selectedObject.memberRef;
@@ -29,8 +41,23 @@ export function useSelectedObjects() {
       return selectedSprite.memberRef;
     } else if (selectedObject?.type === "scoreSpan" && selectedObject.spanRef.scoreRef === 'stage' && scoreSnapshot?.channelInitData) {
       return getAggregatedSpriteDataForChannelAtFrame(scoreSnapshot.channelInitData, selectedObject.spanRef.channelNumber, selectedObject.spanRef.frameNumber)?.memberRef;
+    } else if (selectedObject?.type === "scoreSpan" && selectedObject.spanRef.scoreRef !== 'stage') {
+      return selectedObject.spanRef.scoreRef;
     }
   }, [selectedObject, scoreBehaviorRef, selectedSprite, scoreSnapshot]);
+
+  const secondaryMemberRef = useMemo(() => {
+    if (selectedObject?.type === "scoreSpan" && selectedObject.spanRef.scoreRef !== 'stage' && selectedScoreSnapshot?.snapshot?.type === 'filmLoop') {
+      const memberRef = getAggregatedSpriteDataForChannelAtFrame(selectedScoreSnapshot.snapshot.score?.channelInitData || [], selectedObject.spanRef.channelNumber, selectedObject.spanRef.frameNumber)?.memberRef;
+      if (memberRef) {
+        const [castLib, memberNumber] = memberRef;
+        const actualCastLib = (castLib === 65535 || castLib === 0) && selectedScoreRef ? selectedScoreRef[0] : castLib;
+        return [actualCastLib, memberNumber];
+      } else {
+        return undefined;
+      }
+    }
+  }, [selectedObject, selectedScoreSnapshot, selectedScoreRef]);
 
   const member = useMemo(() => {
     if (memberRef) {
@@ -38,10 +65,18 @@ export function useSelectedObjects() {
     }
   }, [memberRef, castSnapshots]);
 
+  const secondaryMember = useMemo(() => {
+    if (secondaryMemberRef) {
+      return castSnapshots[secondaryMemberRef[0]]?.members?.[secondaryMemberRef[1]];
+    }
+  }, [secondaryMemberRef, castSnapshots]);
+
   return {
     scoreBehaviorRef,
     selectedSprite,
     member,
+    secondaryMember,
     memberRef,
+    secondaryMemberRef,
   };
 }

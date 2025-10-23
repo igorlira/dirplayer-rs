@@ -6,6 +6,8 @@ import { useAppSelector, useMemberSnapshot } from "../../store/hooks";
 import { ICastMemberIdentifier, memberRefEqualsSafe } from "../../vm";
 import styles from "./styles.module.css";
 import { player_print_member_bitmap_hex } from 'vm-rust'
+import { useDispatch } from "react-redux";
+import { scoreSpanSelected } from "../../store/uiSlice";
 
 interface IMemberInspectorProps {
   memberId: ICastMemberIdentifier;
@@ -25,6 +27,7 @@ function TextMemberPreview({ text }: ITextMemberPreviewProps) {
 export default function MemberInspector({ memberId }: IMemberInspectorProps) {
   const memberSnapshot = useMemberSnapshot(memberId);
   const scopes = useAppSelector((state) => state.vm.scopes);
+  const dispatch = useDispatch();
   const currentScope = scopes.at(scopes.length - 1);
   const isScriptExecuting = memberRefEqualsSafe(
     memberId,
@@ -75,6 +78,13 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
                   channelCount={memberSnapshot.score.channelCount}
                   spriteSpans={memberSnapshot.score.spriteSpans}
                   channelInitData={memberSnapshot.score.channelInitData}
+                  onCellClick={(cell) => {
+                    dispatch(scoreSpanSelected({
+                      channelNumber: cell.channel,
+                      frameNumber: cell.frame,
+                      scoreRef: [memberId.castNumber, memberId.memberNumber]
+                    }))
+                  }}
                 />
               </div>
             )}
