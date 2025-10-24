@@ -9,6 +9,7 @@ pub trait DirectorExt {
   fn read_string(&mut self, len: usize) -> Result<String, std::io::Error>;
   fn read_apple_float_80(&mut self) -> Result<f64, String>;
   fn eof(&self) -> bool;
+  fn bytes_left(&self) -> usize;
 }
 
 impl DirectorExt for BinaryReader {
@@ -27,12 +28,16 @@ impl DirectorExt for BinaryReader {
     return Ok(val);
   }
 
-  fn read_zlib_bytes(&mut self, length: usize) -> Result<Vec<u8>, std::io::Error> {
-    let compressed_bytes = self.read_bytes(length).unwrap();
-    let mut decompressed = Vec::new();
+  fn bytes_left(&self) -> usize {
+    self.length.saturating_sub(self.pos)
+  }
 
-    let mut decoder = flate2::read::ZlibDecoder::new(compressed_bytes);
-    decoder.read_to_end(&mut decompressed).unwrap();
+  fn read_zlib_bytes(&mut self, length: usize) -> Result<Vec<u8>, std::io::Error> {
+    let compressed_bytes = self.read_bytes(length)?;
+    let mut decompressed = Vec::new();
+    let mut decoder = flate2::read::ZlibDecoder::new(&compressed_bytes[..]);
+
+    decoder.read_to_end(&mut decompressed)?;
 
     return Ok(decompressed);
   }
