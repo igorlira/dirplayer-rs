@@ -9,7 +9,7 @@ impl StringDatumUtils {
   pub fn get_prop_ref(player: &DirPlayer, datum_ref: &DatumRef, prop_name: &String, start: i32, end: i32) -> Result<Datum, ScriptError> {
     let datum = player.get_datum(datum_ref);
     if let Datum::String(str_val) = datum {
-      match prop_name.as_str() {
+      match prop_name.to_lowercase().as_str() {
         "item" | "word" | "char" | "line" => {
           let chunk_expr = StringChunkExpr { chunk_type: StringChunkType::from(prop_name), start, end, item_delimiter: player.movie.item_delimiter.to_owned() };
           let resolved_str = StringChunkUtils::resolve_chunk_expr_string(str_val, &chunk_expr)?;
