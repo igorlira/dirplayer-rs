@@ -114,7 +114,7 @@ impl CastLib {
 
   pub fn find_member_by_name(&self, name: &String) -> Option<&CastMember> {
     for member in self.members.values() {
-      if &member.name == name {
+      if member.name.eq_ignore_ascii_case(name) {
         return Some(member);
       }
     }
