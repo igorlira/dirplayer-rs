@@ -25,6 +25,7 @@ impl ListDatumUtils {
   pub fn get_prop(list_vec: &Vec<DatumRef>, prop_name: &String, _datums: &DatumAllocator) -> Result<Datum, ScriptError> {
     match prop_name.as_str() {
       "count" => Ok(Datum::Int(list_vec.len() as i32)),
+      "length" => Ok(Datum::Int(list_vec.len() as i32)),
       "ilk" => Ok(Datum::Symbol("list".to_string())),
       _ => Err(ScriptError::new(format!("No property {prop_name} for list datum")))
     }
