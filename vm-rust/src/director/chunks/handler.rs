@@ -1,5 +1,6 @@
 use binary_reader::BinaryReader;
 use fxhash::FxHashMap;
+use std::convert::TryInto;
 
 use crate::director::lingo::{constants::opcode_names, opcode::OpCode, script::ScriptContext};
 
@@ -67,7 +68,12 @@ impl Bytecode {
       }
       OpCode::PushFloat32 => {
         writer.push(' ');
-        writer.push_str("[TODO pushfloat32]");
+        if let Ok(bits) = self.obj.try_into() {
+          let f = f32::from_bits(bits);
+          writer.push_str(&f.to_string());
+        } else {
+          writer.push_str("[invalid float bits]");
+        }
       }
       _ => {
         if op_id > 0x40 {
