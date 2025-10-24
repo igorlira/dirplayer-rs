@@ -326,11 +326,16 @@ impl DirPlayer {
     if !self.is_playing {
       return;
     }
+
     let prev_frame = self.movie.current_frame;
     let next_frame = self.get_next_frame();
+
+    // Always advance logic (scripts, behaviors)
     self.next_frame = None;
     self.movie.current_frame = next_frame;
-    if prev_frame != self.movie.current_frame {
+
+    // Only dispatch and render if updateLock is off
+    if !self.movie.update_lock && prev_frame != self.movie.current_frame {
       JsApi::dispatch_frame_changed(self.movie.current_frame);
     }
   }

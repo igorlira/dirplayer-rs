@@ -21,6 +21,7 @@ pub struct Movie {
   pub stage_color: (u8, u8, u8),
   pub frame_rate: u16,
   pub file: Option<DirectorFile>,
+  pub update_lock: bool,
 }
 
 impl Movie {
@@ -94,6 +95,7 @@ impl Movie {
       "traceLogFile" => Ok(Datum::String("".to_string())), // TODO
       "traceScript" => Ok(Datum::Int(0)), // TODO
       "movieName" => Ok(Datum::String(self.file_name.to_owned())),
+      "updateLock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
       _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
     }
   }
@@ -133,6 +135,9 @@ impl Movie {
       "traceLogFile" => {
         // TODO
         return Ok(())
+      },
+      "updateLock" => {
+        self.update_lock = value.int_value()? != 0;
       },
       _ => {
         return Err(ScriptError::new(format!("Cannot set movie prop {prop}")))
