@@ -68,10 +68,18 @@ impl LiteralStore {
           }
           LiteralType::Float => {
             let float_val = if length == 8 {
-              reader.read_f32().unwrap()
+              // Length 8 means f64 (double precision)
+              let bytes = reader.read_bytes(8).unwrap();
+              let val_f64 = f64::from_be_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7]
+              ]);
+              let val = val_f64 as f32;
+              val
             } else if length == 10 {
-              // TODO store as f64?
-              reader.read_apple_float_80().unwrap() as f32
+              // Apple 80-bit extended precision
+              let val = reader.read_apple_float_80().unwrap() as f32;
+              val
             } else {
               0.0
             };
