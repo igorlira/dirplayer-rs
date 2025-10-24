@@ -7,7 +7,7 @@ string_interior =  {
   ~ ANY // consume one character
   )*
 }
-WHITESPACE      = _{ (" " | "\t" | "\r" | "\n") }
+WHITESPACE = _{ " " | "\t" | ("\\" ~ ("\r\n" | "\n" | "\r")) | "\r\n" | "\n" | "\r" }
 
 symbol     =  { "#" ~ (ident) }
 nohash_symbol = { (ident) }
