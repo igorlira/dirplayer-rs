@@ -38,6 +38,7 @@ fxhash = "0.2.1"
 async-recursion = "1.1.1"
 console_log = "1.0.0"
 log = "0.4.22"
+percent-encoding = "2"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
