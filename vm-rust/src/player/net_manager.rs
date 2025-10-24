@@ -167,6 +167,37 @@ impl NetManager {
   // pub fn get_base_path(&self) -> String {
   //   (&self.base_path.as_ref().map_or("".to_owned(), |x| x.to_string())).to_owned()
   // }
+
+  pub fn post_net_text(&mut self, url: String, post_data: String) -> u32 {
+    // For POST, we should create a new task each time
+    
+    let net_task = {
+      let id = self.tasks.len() + 1;
+      NetTask::new_post(
+        id as u32, 
+        &url, 
+        &normalize_task_url(&url, self.base_path.as_ref()),
+        post_data
+      )
+    };
+    let task_id = net_task.id;
+
+    // Set task initial state
+    {
+      let mut shared_shared = self.shared_state.try_lock().unwrap();
+      shared_shared.update_task_state(task_id, NetTaskState { result: None });
+    }
+
+    // Push the task and execute it
+    self.tasks.insert(task_id, net_task.clone());
+
+    let shared_state_arc = Arc::clone(&self.shared_state);
+    async_std::task::spawn_local(async move { 
+      Self::execute_task(task_id.clone(), net_task, shared_state_arc).await; 
+    });
+
+    task_id
+  }
 }
 
 fn normalize_task_url(url: &String, base_path: Option<&Url>) -> Url {

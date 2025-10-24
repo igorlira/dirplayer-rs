@@ -98,4 +98,57 @@ impl NetHandlers {
       Ok(player.alloc_datum(text))
     })
   }
+
+  pub fn post_net_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      if args.is_empty() {
+        return Err(ScriptError::new("postNetText requires at least 1 argument (url)".to_string()));
+      }
+      
+      let url = player.get_datum(&args[0]).string_value()?;
+      
+      // Get the post data (can be a property list or string)
+      let post_data = if args.len() > 1 {
+        let data_datum = player.get_datum(&args[1]);
+        match data_datum {
+          Datum::PropList(prop_list, _) => {
+            // Convert property list to form data
+            let mut form_parts = vec![];
+            for (key_ref, value_ref) in prop_list {
+              let key = player.get_datum(key_ref).string_value()?;
+              let value = player.get_datum(value_ref).string_value()?;
+              // URL encode the key and value using percent_encoding
+              let encoded_key = utf8_percent_encode(&key, NON_ALPHANUMERIC).to_string();
+              let encoded_value = utf8_percent_encode(&value, NON_ALPHANUMERIC).to_string();
+              form_parts.push(format!("{}={}", encoded_key, encoded_value));
+            }
+            form_parts.join("&")
+          }
+          Datum::String(s) => s.clone(),
+          _ => return Err(ScriptError::new(format!("postNetText second argument must be a property list or string, got {}", data_datum.type_str())))
+        }
+      } else {
+        String::new()
+      };
+      
+      // Optional server OS string (3rd argument)
+      let _server_os = if args.len() > 2 {
+        Some(player.get_datum(&args[2]).string_value()?)
+      } else {
+        None
+      };
+      
+      // Optional server charset string (4th argument)
+      let _server_charset = if args.len() > 3 {
+        Some(player.get_datum(&args[3]).string_value()?)
+      } else {
+        None
+      };
+      
+      // Create the network task
+      let task_id = player.net_manager.post_net_text(url, post_data);
+      
+      Ok(player.alloc_datum(Datum::Int(task_id as i32)))
+    })
+  }
 }

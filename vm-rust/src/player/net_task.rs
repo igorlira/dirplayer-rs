@@ -4,6 +4,9 @@ use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::Response;
+use wasm_bindgen::JsValue;
+
+use percent_encoding::percent_decode_str;
 
 use crate::utils::log_i;
 
@@ -19,6 +22,14 @@ pub struct NetTask {
   pub id: u32,
   pub url: String,
   pub resolved_url: Url,
+  pub method: HttpMethod,
+  pub post_data: Option<String>,
+}
+
+#[derive(Clone)]
+pub enum HttpMethod {
+  Get,
+  Post,
 }
 
 impl NetTask {
@@ -27,7 +38,19 @@ impl NetTask {
       id: id.clone().to_owned(),
       url: url.clone().to_owned(),
       resolved_url: resolved_url.clone().to_owned(),
+      method: HttpMethod::Get,
+      post_data: None,
     };
+  }
+
+  pub fn new_post(id: u32, url: &str, resolved_url: &Url, post_data: String) -> NetTask {
+    NetTask {
+      id,
+      url: url.to_owned(),
+      resolved_url: resolved_url.to_owned(),
+      method: HttpMethod::Post,
+      post_data: Some(post_data),
+    }
   }
 }
 
@@ -45,7 +68,28 @@ pub async fn fetch_net_task(task: &NetTask) -> NetResult {
   // Note: file:// URLs are handled in preload_net_thing and never reach this function
   let task_result: NetResult;
   let window = web_sys::window().unwrap();
-  let resp_result = JsFuture::from(window.fetch_with_str(&resolved_url_str)).await;
+
+  let mut url_string = task.resolved_url.to_string();
+  url_string = percent_decode_str(&url_string).decode_utf8().unwrap().to_string();
+
+  let request = match task.method {
+    HttpMethod::Get => {
+      web_sys::Request::new_with_str(&url_string.as_str()).unwrap()
+    }
+    HttpMethod::Post => {
+      let mut opts = web_sys::RequestInit::new();
+      opts.method("POST");
+      
+      if let Some(post_data) = &task.post_data {
+        opts.body(Some(&JsValue::from_str(post_data)));
+      }
+      
+      // Set content type for form data
+      web_sys::Request::new_with_str_and_init(&url_string.as_str(), &opts).unwrap()
+    }
+  };
+
+  let resp_result = JsFuture::from(window.fetch_with_request(&request)).await;
   if let Ok(resp_value) = resp_result {
     assert!(resp_value.is_instance_of::<Response>());
     let resp: Response = resp_value.dyn_into().unwrap();
