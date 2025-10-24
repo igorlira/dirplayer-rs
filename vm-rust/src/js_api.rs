@@ -1,4 +1,4 @@
-use std::{collections::HashMap, iter::FromIterator, sync::Arc};
+use std::{collections::HashMap, iter::FromIterator};
 
 use itertools::Itertools;
 use js_sys::{Array, Object};
@@ -28,6 +28,14 @@ pub fn ascii_safe(string: &str) -> String {
   }).collect()
 }
 
+pub fn safe_string(s: &str) -> String {
+  String::from_utf8_lossy(s.as_bytes()).into_owned()
+}
+
+pub fn safe_js_string(s: &str) -> JsValue {
+  JsValue::from_str(&safe_string(s))
+}
+
 #[wasm_bindgen(getter_with_clone)]
 pub struct OnMovieLoadedCallbackData {
   pub version: u16,
@@ -44,14 +52,14 @@ pub struct OnScriptErrorCallbackData {
 impl Into<js_sys::Map> for OnScriptErrorCallbackData {
   fn into(self) -> js_sys::Map {
     let map = js_sys::Map::new();
-    map.str_set("message", &JsValue::from_str(&self.message));
+    map.str_set("message", &safe_js_string(&self.message));
     if let Some(script_member_ref) = self.script_member_ref {
       map.str_set("script_member_ref", &script_member_ref.to_js_value());
     } else {
       map.str_set("script_member_ref", &JsValue::NULL);
     }
     if let Some(handler_name) = self.handler_name {
-      map.str_set("handler_name", &JsValue::from_str(&handler_name));
+      map.str_set("handler_name", &safe_js_string(&handler_name));
     } else {
       map.str_set("handler_name", &JsValue::NULL);
     }
@@ -70,8 +78,8 @@ pub struct JsBridgeBreakpoint {
 impl Into<js_sys::Map> for JsBridgeBreakpoint {
   fn into(self) -> js_sys::Map {
     let map = js_sys::Map::new();
-    map.str_set("script_name", &JsValue::from_str(&self.script_name));
-    map.str_set("handler_name", &JsValue::from_str(&self.handler_name));
+    map.str_set("script_name", &safe_js_string(&self.script_name));
+    map.str_set("handler_name", &safe_js_string(&self.handler_name));
     map.str_set("bytecode_index", &JsValue::from(self.bytecode_index as u32));
     map
   }
@@ -94,11 +102,11 @@ impl Into<js_sys::Map> for JsBridgeScope {
     let map = js_sys::Map::new();
     map.str_set("script_member_ref", &self.script_member_ref.to_js_value());
     map.str_set("bytecode_index", &JsValue::from(self.bytecode_index));
-    map.str_set("handler_name", &JsValue::from_str(&self.handler_name));
+    map.str_set("handler_name", &safe_js_string(&self.handler_name));
     
     let locals = js_sys::Map::new();
     for (k, v) in self.locals {
-      locals.set(&JsValue::from_str(&k), &v.unwrap().to_js_value());
+      locals.set(&safe_js_string(&k), &v.unwrap().to_js_value());
     }
     map.str_set("locals", &locals.to_js_object());
 
@@ -227,7 +235,7 @@ impl JsApi {
       let fourcc_str = fourcc_to_string(chunk.fourcc);
       let chunk_map = js_sys::Map::new();
       chunk_map.str_set("id", &JsValue::from_f64(*chunk_id as f64));
-      chunk_map.str_set("fourcc", &JsValue::from_str(&fourcc_str));
+      chunk_map.str_set("fourcc", &safe_js_string(&fourcc_str));
 
       result.set(&JsValue::from_f64(*chunk_id as f64), &chunk_map.to_js_object());
     }
@@ -259,7 +267,7 @@ impl JsApi {
       onCastListChanged(
         names
             .into_iter()
-            .map(|x| JsValue::from_str(&x))
+            .map(|x| safe_js_string(&x))
             .collect::<Array>(),
       );
     });
@@ -345,10 +353,10 @@ impl JsApi {
 
   pub fn get_mini_member_snapshot(member: &CastMember) -> js_sys::Map {
     let member_map = js_sys::Map::new();
-    member_map.str_set("name", &JsValue::from_str(&member.name));
+    member_map.str_set("name", &safe_js_string(&member.name));
     member_map.str_set(
       "type",
-      &JsValue::from_str(&member.member_type.type_string()),
+      &safe_js_string(&member.member_type.type_string()),
     );
     return member_map;
   }
@@ -356,10 +364,10 @@ impl JsApi {
   pub fn get_member_snapshot(member: &CastMember, lctx: Option<&ScriptContext>, player: &DirPlayer) -> js_sys::Map {
     let member_map = js_sys::Map::new();
     member_map.str_set("number", &JsValue::from(member.number));
-    member_map.str_set("name", &JsValue::from_str(&member.name));
+    member_map.str_set("name", &safe_js_string(&member.name));
     member_map.str_set(
       "type",
-      &JsValue::from_str(&member.member_type.type_string()),
+      &safe_js_string(&member.member_type.type_string()),
     );
 
     match &member.member_type {
@@ -615,7 +623,7 @@ impl JsApi {
     let globals = js_sys::Map::new();
     for (k, v) in player.globals.iter() {
       globals.set(
-        &JsValue::from_str(&k.to_string()),
+        &safe_js_string(&k.to_string()),
         &v.unwrap().to_js_value(),
       );
     }
@@ -691,7 +699,7 @@ impl JsSerializable for js_sys::Map {
 
 impl JsUtils for js_sys::Map {
   fn str_set(&self, key: &str, value: &JsValue) {
-    self.set(&JsValue::from_str(key), value);
+    self.set(&safe_js_string(key), value);
   }
 }
 
@@ -703,7 +711,7 @@ fn datum_to_js_bridge(datum_ref: &DatumRef, player: &DirPlayer, depth: u8) -> Js
 fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> JsBridgeDatum {
   if depth > 20 {
     let map = js_sys::Map::new();
-    map.str_set("debugDescription", &JsValue::from_str("TOO DEEP"));
+    map.str_set("debugDescription", &safe_js_string("TOO DEEP"));
     return map.to_js_object();
   }
   let map = js_sys::Map::new();
@@ -711,56 +719,56 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
   map.str_set("debugDescription", &ascii_safe(&formatted_value).to_js_value());
   match datum {
     Datum::String(val) => {
-      map.str_set("type", &JsValue::from_str("string"));
-      map.str_set("value", &JsValue::from_str(&ascii_safe(val)));
+      map.str_set("type", &safe_js_string("string"));
+      map.str_set("value", &safe_js_string(&ascii_safe(val)));
     }
     Datum::Int(val) => {
-      map.str_set("type", &JsValue::from_str("number"));
+      map.str_set("type", &safe_js_string("number"));
       map.str_set("value", &JsValue::from_f64(*val as f64));
     }
     Datum::Symbol(val) => {
-      map.str_set("type", &JsValue::from_str("symbol"));
-      map.str_set("value", &JsValue::from_str(val));
+      map.str_set("type", &safe_js_string("symbol"));
+      map.str_set("value", &safe_js_string(val));
     }
     Datum::List(_, item_refs, _) => {
-      map.str_set("type", &JsValue::from_str("list"));
+      map.str_set("type", &safe_js_string("list"));
       map.str_set("items", &item_refs.iter().map(|x| x.unwrap()).collect_vec().to_js_value());
     }
     Datum::VarRef(_) => {
-      map.str_set("type", &JsValue::from_str("var_ref"));
+      map.str_set("type", &safe_js_string("var_ref"));
     }
     Datum::Float(val) => {
-      map.str_set("type", &JsValue::from_str("number"));
+      map.str_set("type", &safe_js_string("number"));
       map.str_set("value", &JsValue::from_f64(*val as f64));
     }
     Datum::Void => {
-      map.str_set("type", &JsValue::from_str("void"));
+      map.str_set("type", &safe_js_string("void"));
     }
     Datum::CastLib(val) => {
-      map.str_set("type", &JsValue::from_str("castLib"));
+      map.str_set("type", &safe_js_string("castLib"));
       map.str_set("value", &JsValue::from_f64(*val as f64));
     }
     Datum::Stage => {
-      map.str_set("type", &JsValue::from_str("stage"));
+      map.str_set("type", &safe_js_string("stage"));
     }
     Datum::PropList(properties, sorted) => {
-      map.str_set("type", &JsValue::from_str("propList"));
+      map.str_set("type", &safe_js_string("propList"));
       let props_map = js_sys::Map::new();
       for (k, v) in properties.iter() {
         let key_str = format_datum(k, player);
-        props_map.set(&JsValue::from_str(&key_str), &v.unwrap().to_js_value());
+        props_map.set(&safe_js_string(&key_str), &v.unwrap().to_js_value());
       }
       map.str_set("properties", &props_map.to_js_object());
       map.str_set("sorted", &JsValue::from_bool(*sorted));
     }
     Datum::StringChunk(..) => {
-      map.str_set("type", &JsValue::from_str("stringChunk"));
+      map.str_set("type", &safe_js_string("stringChunk"));
     }
     Datum::ScriptRef(_) => {
-      map.str_set("type", &JsValue::from_str("scriptRef"));
+      map.str_set("type", &safe_js_string("scriptRef"));
     }
     Datum::ScriptInstanceRef(instance_id) => {
-      map.str_set("type", &JsValue::from_str("scriptInstance"));
+      map.str_set("type", &safe_js_string("scriptInstance"));
       let instance = player.allocator.get_script_instance(&instance_id);
       let ancestor_id = &instance.ancestor;
       match ancestor_id {
@@ -772,57 +780,57 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
 
       let props_map = js_sys::Map::new();
       for (k, v) in instance.properties.iter() {
-        props_map.set(&JsValue::from_str(k), &v.unwrap().to_js_value());
+        props_map.set(&safe_js_string(k), &v.unwrap().to_js_value());
       }
       map.str_set("properties", &props_map.to_js_object());
     }
     Datum::CastMember(_) => {
-      map.str_set("type", &JsValue::from_str("castMember"));
+      map.str_set("type", &safe_js_string("castMember"));
     }
     Datum::SpriteRef(_) => {
-      map.str_set("type", &JsValue::from_str("spriteRef"));
+      map.str_set("type", &safe_js_string("spriteRef"));
     }
     Datum::IntRect(..) => {
-      map.str_set("type", &JsValue::from_str("intRect"));
+      map.str_set("type", &safe_js_string("intRect"));
     }
     Datum::IntPoint(..) => {
-      map.str_set("type", &JsValue::from_str("intPoint"));
+      map.str_set("type", &safe_js_string("intPoint"));
     }
     Datum::CursorRef(_) => {
-      map.str_set("type", &JsValue::from_str("cursorRef"));
+      map.str_set("type", &safe_js_string("cursorRef"));
     }
     Datum::TimeoutRef(_) => {
-      map.str_set("type", &JsValue::from_str("timeout"));
+      map.str_set("type", &safe_js_string("timeout"));
     }
     Datum::ColorRef(_) => {
-      map.str_set("type", &JsValue::from_str("colorRef"));
+      map.str_set("type", &safe_js_string("colorRef"));
     }
     Datum::BitmapRef(_) => {
-      map.str_set("type", &JsValue::from_str("bitmapRef"));
+      map.str_set("type", &safe_js_string("bitmapRef"));
     }
     Datum::PaletteRef(_) => {
-      map.str_set("type", &JsValue::from_str("paletteRef"));
+      map.str_set("type", &safe_js_string("paletteRef"));
     }
     Datum::Xtra(_) => {
-      map.str_set("type", &JsValue::from_str("xtra"));
+      map.str_set("type", &safe_js_string("xtra"));
     }
     Datum::XtraInstance(..) => {
-      map.str_set("type", &JsValue::from_str("xtraInstance"));
+      map.str_set("type", &safe_js_string("xtraInstance"));
     }
     Datum::Matte(..) => {
-      map.str_set("type", &JsValue::from_str("matte"));
+      map.str_set("type", &safe_js_string("matte"));
     }
     Datum::Null => {
-      map.str_set("type", &JsValue::from_str("null"));
+      map.str_set("type", &safe_js_string("null"));
     }
     Datum::PlayerRef => {
-      map.str_set("type", &JsValue::from_str("playerRef"));
+      map.str_set("type", &safe_js_string("playerRef"));
     }
     Datum::MovieRef => {
-      map.str_set("type", &JsValue::from_str("movieRef"));
+      map.str_set("type", &safe_js_string("movieRef"));
     }
-    Datum::SoundRef(_) => {
-      map.str_set("type", &JsValue::from_str("soundRef"));
+    Datum::SoundRef(..) => {
+      map.str_set("type", &safe_js_string("sound"));
     }
   }
   return map.to_js_object();
@@ -834,7 +842,7 @@ pub trait ToJsValue {
 
 impl ToJsValue for String {
   fn to_js_value(&self) -> JsValue {
-    JsValue::from_str(self)
+    safe_js_string(self)
   }
 }
 
@@ -865,8 +873,8 @@ impl ToJsValue for u16 {
 impl ToJsValue for PaletteRef {
   fn to_js_value(&self) -> JsValue {
     match self {
-      PaletteRef::BuiltIn(id) => JsValue::from_str(&id.symbol_string()),
-      PaletteRef::Member(member_ref) => JsValue::from_str(format!("(member {} of castLib {})", member_ref.cast_member, member_ref.cast_lib).as_str()),
+      PaletteRef::BuiltIn(id) => safe_js_string(&id.symbol_string()),
+      PaletteRef::Member(member_ref) => safe_js_string(format!("(member {} of castLib {})", member_ref.cast_member, member_ref.cast_lib).as_str()),
     }
   }
 }

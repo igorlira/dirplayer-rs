@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, TimeDelta};
 use itertools::Itertools;
 use url::Url;
-use wasm_bindgen::JsValue;
+use crate::{js_api::{safe_js_string}};
 
 pub fn set_panic_hook() {
     // When the `console_error_panic_hook` feature is enabled, we can call the
@@ -15,20 +15,20 @@ pub fn set_panic_hook() {
 }
 
 pub fn log_i(value: &str) {
-    web_sys::console::log_1(&JsValue::from_str(value))
+  web_sys::console::log_1(&safe_js_string(value))
 }
 
 #[macro_export]
 macro_rules! console_warn {
   ($($arg:tt)*) => (
-    web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&format_args!($($arg)*).to_string().as_str()))
+    web_sys::console::warn_1(&safe_js_string(&format_args!($($arg)*).to_string().as_str()))
   )
 }
 
 #[macro_export]
 macro_rules! console_error {
   ($($arg:tt)*) => (
-    web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format_args!($($arg)*).to_string().as_str()))
+    web_sys::console::error_1(&safe_js_string(&format_args!($($arg)*).to_string().as_str()))
   )
 }
 
