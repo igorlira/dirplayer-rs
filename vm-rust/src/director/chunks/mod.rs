@@ -222,7 +222,7 @@ pub fn make_chunk(
     "BITD" => {
       return Ok(
         Chunk::Bitmap(
-          BitmapChunk::read(&mut chunk_reader).unwrap()
+          BitmapChunk::read(&mut chunk_reader, version)?
         )
       )
     }
