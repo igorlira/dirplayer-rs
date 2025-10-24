@@ -123,13 +123,13 @@ impl RectDatumHandlers {
       "right" => {
         let value = player.get_datum(value_ref).int_value()?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
-        rect.1 = value;
+        rect.2 = value;
         Ok(())
       },
       "bottom" => {
         let value = player.get_datum(value_ref).int_value()?;
         let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
-        rect.1 = value;
+        rect.3 = value;
         Ok(())
       },
       _ => {
