@@ -16,9 +16,8 @@ impl StackBytecodeHandler {
 
   pub fn push_f32(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
-      let bytes = (player.get_ctx_current_bytecode(ctx).obj as i32).to_be_bytes();
-      let result = f32::from_be_bytes(bytes);
-      
+      let obj_value = player.get_ctx_current_bytecode(ctx).obj as u32;
+      let result = f32::from_bits(obj_value);
       let datum_ref = player.alloc_datum(Datum::Float(result));
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(datum_ref);
