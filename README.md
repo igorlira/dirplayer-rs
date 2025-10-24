@@ -54,6 +54,12 @@ npm run build-vm
 npm run build-extension
 ```
 
+Make sure to build the VM first. The bundled extension will be located in `./dist-extension`. 
+
+You can install the local build by going to `chrome://extensions`, enabling Developer Mode, then clicking the `Load unpacked` button.
+
+Note that the extension is currently only available on Chrome.
+
 #### Building standalone app
 
 Make sure to build the VM before building the standalone app. The build will be located in `./dist`.
@@ -61,12 +67,6 @@ Make sure to build the VM before building the standalone app. The build will be 
 ```bash
 npm run electron-pack
 ```
-
-Make sure to build the VM first. The bundled extension will be located in `./dist-extension`. 
-
-You can install the local build by going to `chrome://extensions`, enabling Developer Mode, then clicking the `Load unpacked` button.
-
-Note that the extension is currently only available on Chrome.
 
 #### Running locally
 
