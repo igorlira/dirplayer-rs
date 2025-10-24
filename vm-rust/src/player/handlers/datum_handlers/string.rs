@@ -77,11 +77,10 @@ impl StringDatumHandlers {
 
 pub fn string_get_count(value: &String, operand: &String, delimiter: char) -> Result<u32, ScriptError> {
   match operand.as_str() {
-    "char" => Ok(value.len() as u32),
-    "item" => Ok(string_get_items(value, delimiter).len() as u32),
-    "items" => Ok(string_get_items(value, delimiter).len() as u32),
-    "word" => Ok(if value.len() > 0 { value.split_whitespace().count() as u32 } else { 0 }),
-    "line" => Ok(string_get_lines(value).len() as u32),
+    "char" | "chars" => Ok(value.len() as u32),
+    "item" | "items" => Ok(string_get_items(value, delimiter).len() as u32),
+    "word" | "words" => Ok(if value.len() > 0 { value.split_whitespace().count() as u32 } else { 0 }),
+    "line" | "lines" => Ok(string_get_lines(value).len() as u32),
     _ => Err(ScriptError::new(format!("Invalid operand {operand} for string_get_count")))
   }
 }
