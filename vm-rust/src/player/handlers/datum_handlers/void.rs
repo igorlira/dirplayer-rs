@@ -21,6 +21,27 @@ impl VoidDatumHandlers {
       "string" => {
         Ok(player.alloc_datum(Datum::String("".to_owned())))
       }
+      // XML-related properties on Void should return empty/void values
+      "childNodes" => {
+        // Return empty list for childNodes on void
+        Ok(player.alloc_datum(Datum::List(
+          crate::director::lingo::datum::DatumType::List,
+          vec![],
+          false
+        )))
+      }
+      "firstChild" | "lastChild" | "parentNode" | "nextSibling" | "previousSibling" => {
+        // Return void for node navigation on void
+        Ok(player.alloc_datum(Datum::Void))
+      }
+      "nodeName" | "nodeValue" => {
+        // Return empty string for node properties on void
+        Ok(player.alloc_datum(Datum::String("".to_owned())))
+      }
+      "attributes" => {
+        // Return void for attributes on void
+        Ok(player.alloc_datum(Datum::Void))
+      }
       _ => {
         Err(ScriptError::new(format!("Cannot get Void property {}", prop)))
       },
