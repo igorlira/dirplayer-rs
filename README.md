@@ -14,6 +14,14 @@ Download the Chrome Extension at https://chromewebstore.google.com/detail/dirpla
 
 The extension implements a polyfill that replaces all `<embed>` elements that point to a Shockwave file in websites you visit.
 
+## Standalone App
+
+Alongside the emulator, DirPlayer comes with a standalone application that provides a complete debugging toolset for Lingo scripts and Shockwave files.
+
+Pre-built binaries can be found at https://github.com/igorlira/dirplayer-rs/releases
+
+![./app-screenshot.png](./app-screenshot.png)
+
 ## Requirements
 - NodeJS
 - - [(LTS or newer)](https://nodejs.org/)
@@ -46,6 +54,14 @@ npm run build-vm
 npm run build-extension
 ```
 
+#### Building standalone app
+
+Make sure to build the VM before building the standalone app. The build will be located in `./dist`.
+
+```bash
+npm run electron-pack
+```
+
 Make sure to build the VM first. The bundled extension will be located in `./dist-extension`. 
 
 You can install the local build by going to `chrome://extensions`, enabling Developer Mode, then clicking the `Load unpacked` button.
@@ -56,6 +72,12 @@ Note that the extension is currently only available on Chrome.
 
 ```bash
 npm run start
+```
+
+#### Running standalone app locally
+
+```bash
+npm run electron-dev
 ```
 
 ## Join our Discord!
