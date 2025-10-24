@@ -17,7 +17,38 @@ impl BitmapDatumHandlers {
       "createMatte" => Self::create_matte(datum, args),
       "trimWhiteSpace" => Self::trim_whitespace(datum, args),
       "getPixel" => Self::get_pixel(datum, args),
-      _ => Err(ScriptError::new(format!("No handler {handler_name} for bitmap datum")))
+      "floodFill" => reserve_player_mut(|player| {
+        // Args: point, color
+        if args.len() != 2 {
+            return Err(ScriptError::new("floodFill requires 2 arguments".to_string()));
+        }
+    
+        let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
+        let point = player.get_datum(&args[0]).to_int_point()?;
+        let color_ref = player.get_datum(&args[1]).to_color_ref()?;
+    
+        // Get palettes once
+        let palettes = player.movie.cast_manager.palettes();
+    
+        // Get bitmap palette and resolve color in one scope
+        let (target_rgb, bitmap_palette) = {
+            let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref)
+                .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+            
+            let palette = bitmap.palette_ref.clone();
+            let rgb = resolve_color_ref(&palettes, &color_ref, &palette, bitmap.original_bit_depth);
+            (rgb, palette)
+        }; // bitmap borrow ends here
+    
+        // Now mutate the bitmap with the resolved color
+        let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref)
+            .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+        
+        bitmap.flood_fill(point, target_rgb, &palettes);
+    
+        Ok(player.alloc_datum(Datum::Void))
+    }),
+     _ => Err(ScriptError::new(format!("No handler {handler_name} for bitmap datum")))
     }
   }
 
