@@ -17,6 +17,7 @@ pub mod color;
 pub mod cast_member;
 pub mod player;
 pub mod date;
+pub mod math;
 pub mod vector;
 
 use player::PlayerDatumHandlers;
@@ -24,6 +25,7 @@ use player::PlayerDatumHandlers;
 use crate::{director::lingo::datum::DatumType, player::{format_datum, reserve_player_ref, xtra::manager::{call_xtra_instance_async_handler, call_xtra_instance_handler, has_xtra_instance_async_handler}, DatumRef, ScriptError, ScriptErrorCode}};
 use self::date::DateDatumHandlers;
 use self::vector::VectorDatumHandlers;
+use self::math::MathDatumHandlers;
 
 pub async fn player_call_datum_handler(
   obj_ref: &DatumRef,
@@ -80,6 +82,7 @@ pub async fn player_call_datum_handler(
     DatumType::ColorRef => color::ColorDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::PlayerRef => PlayerDatumHandlers::call(handler_name, args),
     DatumType::DateRef => DateDatumHandlers::call(obj_ref, handler_name, args),
+    DatumType::MathRef => MathDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::Vector => VectorDatumHandlers::call(obj_ref, handler_name, args),
     _ => reserve_player_ref(|player| {
       let formatted_datum = format_datum(obj_ref, &player);

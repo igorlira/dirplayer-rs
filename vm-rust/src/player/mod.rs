@@ -55,6 +55,7 @@ use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks}};
 
 use crate::player::handlers::datum_handlers::date::DateObject;
+use crate::player::handlers::datum_handlers::math::MathObject;
 
 pub enum HandlerExecutionResult {
   Advance,
@@ -112,6 +113,7 @@ pub struct DirPlayer {
   pub scope_count: u32,
   pub external_params: HashMap<String, String>,
   pub date_objects: HashMap<u32, DateObject>,
+  pub math_objects: HashMap<u32, MathObject>,
 }
 
 impl DirPlayer {
@@ -177,6 +179,8 @@ impl DirPlayer {
       scope_count: 0,
       external_params: HashMap::new(),
       date_objects: HashMap::new(),
+      math_objects: HashMap::new(),
+    };
     for i in 0..MAX_STACK_SIZE {
       result.scopes.push(Scope::default(i));
     }

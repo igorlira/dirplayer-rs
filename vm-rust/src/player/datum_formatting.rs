@@ -98,6 +98,9 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
     Datum::MovieRef => {
       format!("<_movie>")
     }
+    Datum::MathRef(_) => {
+      format!("<math>")
+    }
     Datum::Vector(_) => {
       format!("<vector>")
     }

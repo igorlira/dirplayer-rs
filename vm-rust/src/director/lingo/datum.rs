@@ -39,6 +39,7 @@ pub enum DatumType {
   PlayerRef,
   MovieRef,
   DateRef,
+  MathRef,
   Vector,
 }
 
@@ -134,6 +135,7 @@ pub enum Datum {
   PlayerRef,
   MovieRef,
   DateRef(u32),
+  MathRef(u32),
   Vector([f32; 3]),
   Null,
 }
@@ -173,6 +175,7 @@ impl DatumType {
       DatumType::PlayerRef => "player_ref".to_string(),
       DatumType::MovieRef => "movie_ref".to_string(),
       DatumType::DateRef => "date".to_string(),
+      DatumType::MathRef => "math".to_string(),
       DatumType::Vector => "vector".to_string(),
     }
   }
@@ -209,6 +212,7 @@ impl Datum {
       Datum::PlayerRef => DatumType::PlayerRef,
       Datum::MovieRef => DatumType::MovieRef,
       Datum::DateRef(_) => DatumType::DateRef,
+      Datum::MathRef(_) => DatumType::MathRef,
       Datum::Vector(_) => DatumType::Vector,
       Datum::Null => DatumType::Null,
     }
@@ -485,6 +489,13 @@ impl Datum {
     match self {
         Datum::DateRef(id) => Ok(*id),
         _ => Err(ScriptError::new("Cannot convert datum to date ref".to_string())),
+    }
+  }
+
+  pub fn to_math_ref(&self) -> Result<u32, ScriptError> {
+    match self {
+        Datum::MathRef(id) => Ok(*id),
+        _ => Err(ScriptError::new("Cannot convert datum to math ref".to_string())),
     }
   }
 
