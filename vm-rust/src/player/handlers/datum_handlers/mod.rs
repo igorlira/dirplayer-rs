@@ -17,12 +17,13 @@ pub mod color;
 pub mod cast_member;
 pub mod player;
 pub mod date;
+pub mod vector;
 
 use player::PlayerDatumHandlers;
 
 use crate::{director::lingo::datum::DatumType, player::{format_datum, reserve_player_ref, xtra::manager::{call_xtra_instance_async_handler, call_xtra_instance_handler, has_xtra_instance_async_handler}, DatumRef, ScriptError, ScriptErrorCode}};
 use self::date::DateDatumHandlers;
-use self::{bitmap::BitmapDatumHandlers, list_handlers::ListDatumHandlers, point::PointDatumHandlers, prop_list::PropListDatumHandlers, rect::RectDatumHandlers, script::ScriptDatumHandlers, sprite::SpriteDatumHandlers, string::StringDatumHandlers, string_chunk::StringChunkHandlers, timeout::TimeoutDatumHandlers};
+use self::vector::VectorDatumHandlers;
 
 pub async fn player_call_datum_handler(
   obj_ref: &DatumRef,
@@ -79,6 +80,7 @@ pub async fn player_call_datum_handler(
     DatumType::ColorRef => color::ColorDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::PlayerRef => PlayerDatumHandlers::call(handler_name, args),
     DatumType::DateRef => DateDatumHandlers::call(obj_ref, handler_name, args),
+    DatumType::Vector => VectorDatumHandlers::call(obj_ref, handler_name, args),
     _ => reserve_player_ref(|player| {
       let formatted_datum = format_datum(obj_ref, &player);
       Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("No handler {handler_name} for datum {}", formatted_datum)))

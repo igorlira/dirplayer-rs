@@ -39,6 +39,7 @@ pub enum DatumType {
   PlayerRef,
   MovieRef,
   DateRef,
+  Vector,
 }
 
 #[derive(Clone, FromPrimitive)]
@@ -133,6 +134,7 @@ pub enum Datum {
   PlayerRef,
   MovieRef,
   DateRef(u32),
+  Vector([f32; 3]),
   Null,
 }
 
@@ -171,6 +173,7 @@ impl DatumType {
       DatumType::PlayerRef => "player_ref".to_string(),
       DatumType::MovieRef => "movie_ref".to_string(),
       DatumType::DateRef => "date".to_string(),
+      DatumType::Vector => "vector".to_string(),
     }
   }
 }
@@ -206,6 +209,7 @@ impl Datum {
       Datum::PlayerRef => DatumType::PlayerRef,
       Datum::MovieRef => DatumType::MovieRef,
       Datum::DateRef(_) => DatumType::DateRef,
+      Datum::Vector(_) => DatumType::Vector,
       Datum::Null => DatumType::Null,
     }
   }
@@ -221,6 +225,7 @@ impl Datum {
       Datum::Int(n) => Ok(n.to_string()),
       Datum::Float(n) => Ok(n.to_string()),
       Datum::Symbol(s) => Ok(s.clone()),
+      Datum::Vector(v) => Ok(format!("[{},{},{}]", v[0], v[1], v[2])),
       _ => Err(ScriptError::new(format!("Cannot convert datum type {} to string", self.type_str()))),
     }
   }
@@ -480,6 +485,13 @@ impl Datum {
     match self {
         Datum::DateRef(id) => Ok(*id),
         _ => Err(ScriptError::new("Cannot convert datum to date ref".to_string())),
+    }
+  }
+
+  pub fn to_vector(&self) -> Result<[f32; 3], ScriptError> {
+    match self {
+      Datum::Vector(v) => Ok(*v),
+      _ => Err(ScriptError::new(format!("Expected Vector, got {}", self.type_str()))),
     }
   }
 }

@@ -9,6 +9,7 @@ use crate::director::{
 
 use super::{
     handlers::datum_handlers::date::DateDatumHandlers,
+    handlers::datum_handlers::vector::VectorDatumHandlers,
 };
 
 #[derive(Clone)]
@@ -368,6 +369,9 @@ pub async fn player_set_obj_prop(
         Datum::DateRef(_) => reserve_player_mut(|player| {
             DateDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
+        Datum::Vector(..) => reserve_player_mut(|player| {
+            VectorDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
+        }),
         _ => reserve_player_ref(|player| {
             Err(ScriptError::new(
                 format!(
@@ -429,6 +433,7 @@ pub fn get_obj_prop(
         Datum::ColorRef(_) => ColorDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::PlayerRef => player.get_player_prop(prop_name),
         Datum::DateRef(_) => DateDatumHandlers::get_prop(player, obj_ref, prop_name),
+        Datum::Vector(_) => Ok(player.alloc_datum(VectorDatumHandlers::get_prop(player, obj_ref, prop_name)?)),
         _ => {
             if prop_name == "ilk" {
                 let ilk = TypeUtils::get_datum_ilk(&obj_clone)?;

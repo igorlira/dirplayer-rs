@@ -27,6 +27,7 @@ impl TypeUtils {
       Datum::IntPoint(..) => Ok(vec!["point"]),
       Datum::SpriteRef(..) => Ok(vec!["sprite"]),
       Datum::PaletteRef(..) => Ok(vec!["palette"]),
+      Datum::Vector(..) => Ok(vec!["vector"]),
       _ => Err(ScriptError::new(format!("Getting ilk for unknown type: {}", datum.type_str())))?,
     }
   }
@@ -540,6 +541,23 @@ impl TypeHandlers {
       Ok(player.alloc_datum(Datum::Int(left ^ right)))
     })
   }
+
+  /// vector() or vector(x, y, z)
+  pub fn vector(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let (x, y, z) = match args.len() {
+        0 => (0.0, 0.0, 0.0),
+        3 => (
+          player.get_datum(&args[0]).to_float()?,
+          player.get_datum(&args[1]).to_float()?,
+          player.get_datum(&args[2]).to_float()?,
+        ),
+        _ => return Err(ScriptError::new("vector() expects 0 or 3 arguments".to_string())),
+      };
+      Ok(player.alloc_datum(Datum::Vector([x, y, z])))
+    })
+  }
+
 
   pub fn power(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {

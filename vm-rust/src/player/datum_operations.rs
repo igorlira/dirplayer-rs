@@ -25,6 +25,38 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
         Err(ScriptError::new(format!("Invalid list length for add_datums: {}", ref_list.len())))
       }
     },
+    // Vector combinations
+    (Datum::Vector(a), Datum::Vector(b)) => Ok(Datum::Vector([a[0]+b[0], a[1]+b[1], a[2]+b[2]])),
+    (Datum::Vector(a), Datum::Int(b)) => Ok(Datum::Vector([a[0]+*b as f32, a[1]+*b as f32, a[2]+*b as f32])),
+    (Datum::Vector(a), Datum::Float(b)) => Ok(Datum::Vector([a[0]+*b, a[1]+*b, a[2]+*b])),
+    (Datum::Int(a), Datum::Vector(b)) => Ok(Datum::Vector([*a as f32 + b[0], *a as f32 + b[1], *a as f32 + b[2]])),
+    (Datum::Float(a), Datum::Vector(b)) => Ok(Datum::Vector([*a + b[0], *a + b[1], *a + b[2]])),
+
+    // Vector + List element-wise (3 elements)
+    (Datum::Vector(a), Datum::List(_, list, _)) if list.len() == 3 => {
+        let mut result = [0.0; 3];
+        for i in 0..3 {
+            let val = match player.get_datum(&list[i]) {
+                Datum::Int(n) => *n as f32,
+                Datum::Float(f) => *f,
+                _ => return Err(ScriptError::new("Cannot add Vector to non-numeric list element".to_string())),
+            };
+            result[i] = a[i] + val;
+        }
+        Ok(Datum::Vector(result))
+    }
+    (Datum::List(_, list, _), Datum::Vector(b)) if list.len() == 3 => {
+        let mut result = Vec::with_capacity(3);
+        for i in 0..3 {
+            let val = match player.get_datum(&list[i]) {
+                Datum::Int(n) => Datum::Float(*n as f32 + b[i]),
+                Datum::Float(f) => Datum::Float(*f + b[i]),
+                _ => return Err(ScriptError::new("Cannot add list element to Vector".to_string())),
+            };
+            result.push(player.alloc_datum(val));
+        }
+        Ok(Datum::List(DatumType::List, result, false))
+    }
     (Datum::List(_, list_a, _), Datum::List(_, list_b, _)) => {
       let intersection_count = min(list_a.len(), list_b.len());
       let mut result = Vec::with_capacity(intersection_count);
@@ -110,6 +142,38 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
       } else {
         Err(ScriptError::new(format!("Invalid list length for subtract_datums: {}", ref_list.len())))
       }
+    },
+    // Vector
+    (Datum::Vector(a), Datum::Vector(b)) => Ok(Datum::Vector([a[0]-b[0], a[1]-b[1], a[2]-b[2]])),
+    (Datum::Vector(a), Datum::Int(b)) => Ok(Datum::Vector([a[0]-*b as f32, a[1]-*b as f32, a[2]-*b as f32])),
+    (Datum::Vector(a), Datum::Float(b)) => Ok(Datum::Vector([a[0]-*b, a[1]-*b, a[2]-*b])),
+    (Datum::Int(a), Datum::Vector(b)) => Ok(Datum::Vector([*a as f32 - b[0], *a as f32 - b[1], *a as f32 - b[2]])),
+    (Datum::Float(a), Datum::Vector(b)) => Ok(Datum::Vector([*a - b[0], *a - b[1], *a - b[2]])),
+
+    // Vector <-> List
+    (Datum::Vector(a), Datum::List(_, list, _)) if list.len() == 3 => {
+        let mut result = [0.0;3];
+        for i in 0..3 {
+            let val = match player.get_datum(&list[i]) {
+                Datum::Int(n) => *n as f32,
+                Datum::Float(f) => *f,
+                _ => return Err(ScriptError::new("Cannot subtract non-numeric list element from Vector".to_string())),
+            };
+            result[i] = a[i] - val;
+        }
+        Ok(Datum::Vector(result))
+    },
+    (Datum::List(_, list, _), Datum::Vector(b)) if list.len() == 3 => {
+        let mut result = Vec::with_capacity(3);
+        for i in 0..3 {
+            let val = match player.get_datum(&list[i]) {
+                Datum::Int(n) => Datum::Float(*n as f32 - b[i]),
+                Datum::Float(f) => Datum::Float(*f - b[i]),
+                _ => return Err(ScriptError::new("Cannot subtract Vector from list element".to_string())),
+            };
+            result.push(player.alloc_datum(val));
+        }
+        Ok(Datum::List(DatumType::List, result, false))
     },
     (Datum::List(_, list_a, _), Datum::List(_, list_b, _)) => {
       let intersection_count = min(list_a.len(), list_b.len());

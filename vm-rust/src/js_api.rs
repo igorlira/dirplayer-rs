@@ -835,6 +835,9 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
     Datum::DateRef(_) => {
       map.str_set("type", &safe_js_string("date"));
     }
+    Datum::Vector(_) => {
+      map.str_set("type", &safe_js_string("vector"));
+    }
   }
   return map.to_js_object();
 }
