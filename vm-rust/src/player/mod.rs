@@ -54,7 +54,7 @@ use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
 use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks}};
 
-use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef, ScriptInstance, ScriptInstanceId}, sprite::{ColorRef, CursorRef}, timeout::TimeoutManager};
+use crate::player::handlers::datum_handlers::date::DateObject;
 
 pub enum HandlerExecutionResult {
   Advance,
@@ -111,6 +111,7 @@ pub struct DirPlayer {
   pub dir_cache: HashMap<Box<str>, DirectorFile>,
   pub scope_count: u32,
   pub external_params: HashMap<String, String>,
+  pub date_objects: HashMap<u32, DateObject>,
 }
 
 impl DirPlayer {
@@ -174,7 +175,7 @@ impl DirPlayer {
       dir_cache: HashMap::new(),
       scope_count: 0,
       external_params: HashMap::new(),
-    };
+      date_objects: HashMap::new(),
     for i in 0..MAX_STACK_SIZE {
       result.scopes.push(Scope::default(i));
     }

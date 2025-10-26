@@ -8,7 +8,7 @@ use crate::director::{
 };
 
 use super::{
-    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, sound::SoundDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, scope::Scope, score::{sprite_get_prop, sprite_set_prop}, script_ref::ScriptInstanceRef, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError
+    handlers::datum_handlers::date::DateDatumHandlers,
 };
 
 #[derive(Clone)]
@@ -365,6 +365,9 @@ pub async fn player_set_obj_prop(
         Datum::ScriptRef(script_ref) => reserve_player_mut(|player| {
             script_set_static_prop(player, &script_ref, prop_name, value_ref, false)
         }),
+        Datum::DateRef(_) => reserve_player_mut(|player| {
+            DateDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
+        }),
         _ => reserve_player_ref(|player| {
             Err(ScriptError::new(
                 format!(
@@ -425,7 +428,7 @@ pub fn get_obj_prop(
         Datum::Int(_) => IntDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::ColorRef(_) => ColorDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::PlayerRef => player.get_player_prop(prop_name),
-        Datum::SoundRef(_) => Ok(player.alloc_datum(SoundDatumHandlers::get_prop(player, obj_ref, &prop_name)?)),
+        Datum::DateRef(_) => DateDatumHandlers::get_prop(player, obj_ref, prop_name),
         _ => {
             if prop_name == "ilk" {
                 let ilk = TypeUtils::get_datum_ilk(&obj_clone)?;

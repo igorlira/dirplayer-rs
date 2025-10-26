@@ -38,7 +38,7 @@ pub enum DatumType {
   Matte,
   PlayerRef,
   MovieRef,
-  SoundRef,
+  DateRef,
 }
 
 #[derive(Clone, FromPrimitive)]
@@ -132,7 +132,7 @@ pub enum Datum {
   Matte(Arc<BitmapMask>),
   PlayerRef,
   MovieRef,
-  SoundRef(u16),
+  DateRef(u32),
   Null,
 }
 
@@ -170,7 +170,7 @@ impl DatumType {
       DatumType::Matte => "matte".to_string(),
       DatumType::PlayerRef => "player_ref".to_string(),
       DatumType::MovieRef => "movie_ref".to_string(),
-      DatumType::SoundRef => "sound_ref".to_string(),
+      DatumType::DateRef => "date".to_string(),
     }
   }
 }
@@ -205,7 +205,7 @@ impl Datum {
       Datum::Matte(..) => DatumType::Matte,
       Datum::PlayerRef => DatumType::PlayerRef,
       Datum::MovieRef => DatumType::MovieRef,
-      Datum::SoundRef(_) => DatumType::SoundRef,
+      Datum::DateRef(_) => DatumType::DateRef,
       Datum::Null => DatumType::Null,
     }
   }
@@ -473,6 +473,13 @@ impl Datum {
     match self {
       Datum::CastMember(member_ref) => Ok(member_ref.clone()),
       _ => Err(ScriptError::new("Cannot convert datum to cast member ref".to_string())),
+    }
+  }
+
+  pub fn to_date_ref(&self) -> Result<u32, ScriptError> {
+    match self {
+        Datum::DateRef(id) => Ok(*id),
+        _ => Err(ScriptError::new("Cannot convert datum to date ref".to_string())),
     }
   }
 }

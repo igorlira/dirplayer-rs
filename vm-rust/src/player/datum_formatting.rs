@@ -101,6 +101,9 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
     Datum::SoundRef(_) => {
       format!("<_sound>")
     }
+    Datum::DateRef(_) => {
+      format!("<date>")
+    }
   }
 }
 
