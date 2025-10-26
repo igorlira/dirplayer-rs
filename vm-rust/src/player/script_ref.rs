@@ -1,5 +1,6 @@
 use super::{allocator::ScriptInstanceAllocatorTrait, script::ScriptInstanceId, PLAYER_OPT};
 
+#[derive(Debug)]
 pub struct ScriptInstanceRef(ScriptInstanceId, *mut u32);
 
 impl ScriptInstanceRef {
@@ -11,6 +12,11 @@ impl ScriptInstanceRef {
       *mut_ref += 1;
     }
     Self(val, ref_count)
+  }
+
+  #[inline]
+  pub fn id(&self) -> ScriptInstanceId {
+    self.0
   }
 }
 
