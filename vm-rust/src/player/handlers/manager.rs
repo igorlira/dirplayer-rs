@@ -321,6 +321,7 @@ impl BuiltInHandlerManager {
         let args = &args[1..].to_vec();
         ListDatumHandlers::add_at(list, args)
       },
+      "getNodes" => Self::get_nodes(args),
       "duplicate" => {
         let item = &args[0];
         let args = &args[1..].to_vec();
@@ -421,6 +422,36 @@ impl BuiltInHandlerManager {
         .any(|key| key.code == key_code);
       
       Ok(player.alloc_datum(datum_bool(is_pressed)))
+    })
+  }
+  
+  pub fn get_nodes(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    if args.len() < 2 {
+      return Err(ScriptError::new("getNodes requires 2 arguments: xml_node, node_name".to_string()));
+    }
+    
+    reserve_player_mut(|player| {
+      let xml_node = player.get_datum(&args[0]);
+      let node_name = player.get_datum(&args[1]).string_value()?;
+      
+      web_sys::console::log_1(&format!("🔧 getNodes called for node type: {}", node_name).into());
+      
+      // Get the XML node ID
+      let xml_id = match xml_node {
+        Datum::XmlRef(id) => *id,
+        _ => {
+          return Err(ScriptError::new("First argument must be an XML node reference".to_string()));
+        }
+      };
+      
+      // Use XmlHelper to search for matching nodes
+      let matching_nodes = XmlHelper::find_nodes_by_name(player, xml_id, &node_name);
+      
+      Ok(player.alloc_datum(Datum::List(
+        crate::director::lingo::datum::DatumType::List,
+        matching_nodes,
+        false
+      )))
     })
   }
 }

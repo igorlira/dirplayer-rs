@@ -54,6 +54,7 @@ use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
 use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks}};
 
+use crate::player::handlers::datum_handlers::xml::{XmlDocument, XmlNode};
 use crate::player::handlers::datum_handlers::date::DateObject;
 use crate::player::handlers::datum_handlers::math::MathObject;
 
@@ -112,6 +113,12 @@ pub struct DirPlayer {
   pub dir_cache: HashMap<Box<str>, DirectorFile>,
   pub scope_count: u32,
   pub external_params: HashMap<String, String>,
+  // XML document storage - maps XML document IDs to parsed XML structures
+  pub xml_documents: HashMap<u32, XmlDocument>,
+  // XML node storage - maps node IDs to XML nodes
+  pub xml_nodes: HashMap<u32, XmlNode>,
+  // Counter for generating unique XML IDs
+  pub next_xml_id: u32,
   pub date_objects: HashMap<u32, DateObject>,
   pub math_objects: HashMap<u32, MathObject>,
 }
@@ -178,6 +185,9 @@ impl DirPlayer {
       dir_cache: HashMap::new(),
       scope_count: 0,
       external_params: HashMap::new(),
+      xml_documents: HashMap::new(),
+      xml_nodes: HashMap::new(),
+      next_xml_id: 1000,
       date_objects: HashMap::new(),
       math_objects: HashMap::new(),
     };

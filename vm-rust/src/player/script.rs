@@ -367,6 +367,9 @@ pub async fn player_set_obj_prop(
         Datum::ScriptRef(script_ref) => reserve_player_mut(|player| {
             script_set_static_prop(player, &script_ref, prop_name, value_ref, false)
         }),
+        Datum::XmlRef(_) => reserve_player_mut(|player| {
+            XmlDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
+        }),
         Datum::DateRef(_) => reserve_player_mut(|player| {
             DateDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
@@ -436,6 +439,7 @@ pub fn get_obj_prop(
         Datum::Int(_) => IntDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::ColorRef(_) => ColorDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::PlayerRef => player.get_player_prop(prop_name),
+        Datum::XmlRef(_) => XmlDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::DateRef(_) => DateDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::MathRef(_) => MathDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::Vector(_) => Ok(player.alloc_datum(VectorDatumHandlers::get_prop(player, obj_ref, prop_name)?)),

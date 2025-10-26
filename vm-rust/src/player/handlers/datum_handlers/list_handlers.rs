@@ -35,13 +35,27 @@ impl ListDatumUtils {
 impl ListDatumHandlers {
   pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let list_vec = player.get_datum(datum).to_list()?;
-      let position = player.get_datum(&args[0]).int_value()? - 1;
+      let (list_type, list_vec, _) = player.get_datum(datum).to_list_tuple()?;
+      let index_value = player.get_datum(&args[0]).int_value()?;
+
+      // Handle different indexing schemes based on list type
+      let position = match list_type {
+        crate::director::lingo::datum::DatumType::XmlChildNodes => {
+          // XML childNodes use 0-based indexing (like JavaScript/DOM)
+          index_value
+        },
+        _ => {
+          // Regular Lingo lists use 1-based indexing
+          index_value - 1
+        }
+      };
+
       if position < 0 || position >= list_vec.len() as i32 {
-        return Err(ScriptError::new(format!("Index out of bounds: {}", position)))
+        return Err(ScriptError::new(format!("Index out of bounds: {} (list length: {})", position, list_vec.len())))
       }
 
-      Ok(list_vec[position as usize].clone())
+      let result = list_vec[position as usize].clone();
+      Ok(result)
     })
   }
 

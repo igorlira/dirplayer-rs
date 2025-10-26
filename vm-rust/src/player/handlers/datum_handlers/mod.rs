@@ -16,6 +16,7 @@ pub mod int;
 pub mod color;
 pub mod cast_member;
 pub mod player;
+pub mod xml;
 pub mod date;
 pub mod math;
 pub mod vector;
@@ -26,6 +27,7 @@ use crate::{director::lingo::datum::DatumType, player::{format_datum, reserve_pl
 use self::date::DateDatumHandlers;
 use self::vector::VectorDatumHandlers;
 use self::math::MathDatumHandlers;
+use self::xml::XmlDatumHandlers;
 
 pub async fn player_call_datum_handler(
   obj_ref: &DatumRef,
@@ -39,6 +41,7 @@ pub async fn player_call_datum_handler(
   // let profile_token = start_profiling(format!("{}::{}", datum_type.type_str(), handler_name));
   let result = match datum_type {
     DatumType::List => ListDatumHandlers::call(obj_ref, handler_name, args),
+    DatumType::XmlChildNodes => ListDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::PropList => PropListDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::String => StringDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::StringChunk => StringChunkHandlers::call(obj_ref, handler_name, args),
@@ -81,6 +84,7 @@ pub async fn player_call_datum_handler(
     }
     DatumType::ColorRef => color::ColorDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::PlayerRef => PlayerDatumHandlers::call(handler_name, args),
+    DatumType::XmlRef => XmlDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::DateRef => DateDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::MathRef => MathDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::Vector => VectorDatumHandlers::call(obj_ref, handler_name, args),

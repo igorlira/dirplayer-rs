@@ -87,13 +87,18 @@ impl GetSetBytecodeHandler {
   }
 
   pub fn get_obj_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-    let obj_datum_ref = reserve_player_mut(|player| {
-      let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      Ok(scope.stack.pop().unwrap())
-    })?;
     reserve_player_mut(|player| {
-      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
-      let result_ref = get_obj_prop(player, &obj_datum_ref, &prop_name.to_owned())?;
+      // Pop the object reference from the stack
+      let obj_datum_ref = {
+        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+        scope.stack.pop().unwrap()
+      };
+      
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16)
+        .unwrap()
+        .clone();
+
+      let result_ref = get_obj_prop(player, &obj_datum_ref, &prop_name)?;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_ref);
       Ok(HandlerExecutionResult::Advance)
