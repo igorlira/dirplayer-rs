@@ -1,4 +1,5 @@
 use super::{bytecode::handler_manager::BytecodeHandlerContext, scope::ScopeRef, script::{get_current_handler_def, get_current_variable_multiplier, get_name}, DatumRef, DirPlayer, ScriptError};
+use crate::director::lingo::datum::Datum;
 
 pub fn read_context_var_args(player: &mut DirPlayer, var_type: u32, scope_ref: ScopeRef) -> (DatumRef, Option<DatumRef>) {
   let scope = player.scopes.get_mut(scope_ref).unwrap();
@@ -45,7 +46,17 @@ pub fn player_get_context_var(
     }
     0x6 => {
       // field
-      Err(ScriptError::new("readVar field not implemented".to_string()))
+      // `id_ref` is the field's identifier (e.g. member number)
+      // `_cast_id_ref` might indicate which cast lib to search in
+      let id_datum = player.get_datum(id_ref);
+  
+      let cast_id_datum = _cast_id_ref.map(|r| player.get_datum(r));
+      let cast_id_datum_opt = cast_id_datum.as_ref().map(|d| *d);
+  
+      let text = player.movie.cast_manager
+        .get_field_value_by_identifiers(id_datum, cast_id_datum_opt, &player.allocator)?;
+  
+      Ok(player.alloc_datum(Datum::String(text)))
     }
     _ => Err(ScriptError::new(format!("Invalid context var type: {}", var_type)))
   }
