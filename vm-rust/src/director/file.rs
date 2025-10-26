@@ -29,6 +29,7 @@ use super::chunks::make_chunk;
 use super::chunks::score::ScoreChunk;
 use super::chunks::script::ScriptChunk;
 use super::chunks::script_names::ScriptNamesChunk;
+use super::chunks::media::MediaChunk;
 
 pub struct DirectorFile {
   pub base_path: Url,
@@ -40,6 +41,7 @@ pub struct DirectorFile {
   pub config: ConfigChunk,
   pub score: Option<ScoreChunk>,
   pub frame_labels: Option<FrameLabelsChunk>,
+  pub media: Option<MediaChunk>,
   pub chunk_container: ChunkContainer,
 }
 
@@ -132,6 +134,8 @@ impl DirectorFile {
     
     let frame_labels = get_frame_labels_chunk(reader, &mut chunk_container, &mut rifx);
 
+    let media = get_media_chunk(reader, &mut chunk_container, &mut rifx);
+
     return Ok(DirectorFile { 
       base_path, 
       file_name, 
@@ -141,6 +145,7 @@ impl DirectorFile {
       config,
       score,
       frame_labels,
+      media,
       chunk_container,
     });
   }
@@ -348,6 +353,27 @@ pub fn get_score_chunk(
     panic!("Not a score chunk");
   }
 }
+
+pub fn get_media_chunk( 
+  reader: &mut BinaryReader, 
+  chunk_container: &mut ChunkContainer,
+  rifx: &mut RIFXReaderContext,
+) -> Option<MediaChunk> {
+  let chunk = get_first_chunk(
+    reader, 
+    chunk_container,
+    rifx,
+    FOURCC("ediM"),
+  );
+  if chunk.is_none() {
+    return None;
+  } else if let Chunk::Media(chunk_data) = chunk.unwrap() {
+    return Some(chunk_data);
+  } else {
+    panic!("Not a media chunk");
+  }
+}
+
 
 pub fn get_script_context_key_entry_for_cast<'a>(
   _reader: &mut BinaryReader, 

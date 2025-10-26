@@ -15,6 +15,7 @@ pub mod score;
 pub mod text;
 pub mod bitmap;
 pub mod palette;
+pub mod media;
 
 use std::collections::HashMap;
 
@@ -24,7 +25,7 @@ use imap::InitialMapChunk;
 use key_table::KeyTableChunk;
 use score::FrameLabelsChunk;
 
-use self::{bitmap::BitmapChunk, cast::CastChunk, cast_list::CastListChunk, cast_member::CastMemberChunk, lctx::ScriptContextChunk, palette::PaletteChunk, score::ScoreChunk, script::ScriptChunk, script_names::ScriptNamesChunk, text::TextChunk};
+use self::media::MediaChunk;
 use super::{guid::MoaID, utils::{fourcc_to_string, FOURCC}, rifx::RIFXReaderContext};
 
 pub struct CastInfoChunkProps {
@@ -51,6 +52,7 @@ pub enum Chunk {
   Text(TextChunk),
   Bitmap(BitmapChunk),
   Palette(PaletteChunk),
+  Media(MediaChunk),
 }
 
 impl Chunk {
@@ -207,10 +209,10 @@ pub fn make_chunk(
     }
     "VWLB" => {
       return Ok(
-          Chunk::FrameLabels(
-            FrameLabelsChunk::from_reader(&mut chunk_reader, version).unwrap()
-        )
-      )
+    "ediM" => {
+      return Ok(Chunk::Media(
+        MediaChunk::from_reader(&mut chunk_reader)?
+      ))
     }
     "STXT" => {
       return Ok(
