@@ -20,17 +20,24 @@ impl KeyboardManager {
 
     pub fn key_down(&mut self, key: String, code: u16) {
         let code_mapped = keyboard_map::get_keyboard_key_map_js_to_sw().get(&code);
-        debug!("Key down: {} {} (mapped to: {:?}", key, code, code_mapped);
-        if !self.down_keys.iter().any(|x| x.code == code) {
+        debug!("Key down: {} {} (mapped to: {:?})", key, code, code_mapped);
+        let mapped_code = *code_mapped.unwrap_or(&code);
+        
+        // Check if this code is already in the down_keys list
+        if !self.down_keys.iter().any(|x| x.code == mapped_code) {
             self.down_keys.push(KeyboardKey {
                 key: key,
-                code: *code_mapped.unwrap_or(&code),
+                code: mapped_code,
             });
         }
     }
 
     pub fn key_up(&mut self, _: &String, code: u16) {
-        self.down_keys.retain(|x| x.code != code);
+        // Map the code the same way as key_down does
+        let code_mapped = keyboard_map::get_keyboard_key_map_js_to_sw().get(&code);
+        let code_to_remove = *code_mapped.unwrap_or(&code);
+        
+        self.down_keys.retain(|x| x.code != code_to_remove);
     }
 
     pub fn is_key_down(&self, key: &str) -> bool {
