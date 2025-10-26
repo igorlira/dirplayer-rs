@@ -14,7 +14,7 @@ impl GetSetUtils {
       match prop_name {
         "paramCount" => Ok(player.alloc_datum(Datum::Int(player.scopes.get(ctx.scope_ref).unwrap().args.len() as i32))),
         "result" => Ok(player.last_handler_result.clone()),
-        _ => Ok(player.alloc_datum(player.get_movie_prop(prop_name)?))
+        _ => player.get_movie_prop(prop_name)
       }
   }
 
@@ -102,11 +102,10 @@ impl GetSetBytecodeHandler {
 
   pub fn get_movie_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
-      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
-      let value = player.get_movie_prop(&prop_name)?;
-      let result_id = player.alloc_datum(value);
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap().clone();
+      let result_ref = player.get_movie_prop(&prop_name)?;
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-      scope.stack.push(result_id);
+      scope.stack.push(result_ref);
       Ok(HandlerExecutionResult::Advance)
     })
   }

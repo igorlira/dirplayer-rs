@@ -390,36 +390,36 @@ impl DirPlayer {
     return self.allocator.alloc_datum(datum).unwrap()
   }
 
-  fn get_movie_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
+  fn get_movie_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
     match prop {
-      "stage" => Ok(Datum::Stage),
-      "time" => Ok(Datum::String(chrono::Local::now().format("%H:%M %p").to_string())),
-      "milliSeconds" => Ok(Datum::Int(chrono::Local::now().signed_duration_since(self.start_time).num_milliseconds() as i32)),
-      "keyboardFocusSprite" => Ok(Datum::Int(self.keyboard_focus_sprite as i32)),
-      "frameTempo" => Ok(Datum::Int(self.movie.puppet_tempo as i32)),
-      "mouseLoc" => Ok(Datum::IntPoint(self.mouse_loc)),
-      "mouseH" => Ok(Datum::Int(self.mouse_loc.0 as i32)),
-      "mouseV" => Ok(Datum::Int(self.mouse_loc.1 as i32)),
+      "stage" => Ok(self.alloc_datum(Datum::Stage)),
+      "time" => Ok(self.alloc_datum(Datum::String(chrono::Local::now().format("%H:%M %p").to_string()))),
+      "milliSeconds" => Ok(self.alloc_datum(Datum::Int(chrono::Local::now().signed_duration_since(self.start_time).num_milliseconds() as i32))),
+      "keyboardFocusSprite" => Ok(self.alloc_datum(Datum::Int(self.keyboard_focus_sprite as i32))),
+      "frameTempo" => Ok(self.alloc_datum(Datum::Int(self.movie.puppet_tempo as i32))),
+      "mouseLoc" => Ok(self.alloc_datum(Datum::IntPoint(self.mouse_loc))),
+      "mouseH" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
+      "mouseV" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
       "rollover" => {
         let sprite = get_sprite_at(self, self.mouse_loc.0, self.mouse_loc.1, false);
-        Ok(Datum::Int(sprite.unwrap_or(0) as i32))
+        Ok(self.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
       }
-      "keyCode" => Ok(Datum::Int(self.keyboard_manager.key_code() as i32)),
-      "shiftDown" => Ok(datum_bool(self.keyboard_manager.is_shift_down())),
-      "optionDown" => Ok(datum_bool(self.keyboard_manager.is_alt_down())), // TODO: return true only on mac
-      "commandDown" => Ok(datum_bool(self.keyboard_manager.is_command_down())),
-      "controlDown" => Ok(datum_bool(self.keyboard_manager.is_control_down())),
-      "altDown" => Ok(datum_bool(self.keyboard_manager.is_alt_down())),
-      "key" => Ok(Datum::String(self.keyboard_manager.key())),
-      "floatPrecision" => Ok(Datum::Int(self.float_precision as i32)),
-      "doubleClick" => Ok(datum_bool(self.is_double_click)),
-      "ticks" => Ok(Datum::Int(get_elapsed_ticks(self.start_time))),
+      "keyCode" => Ok(self.alloc_datum(Datum::Int(self.keyboard_manager.key_code() as i32))),
+      "shiftDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_shift_down()))),
+      "optionDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+      "commandDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_command_down()))),
+      "controlDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_control_down()))),
+      "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+      "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
+      "floatPrecision" => Ok(self.alloc_datum(Datum::Int(self.float_precision as i32))),
+      "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
+      "ticks" => Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.start_time)))),
       "frameLabel" => {
         let frame_label = self.movie.score.frame_labels.iter()
           .filter(|&label| label.frame_num <= self.movie.current_frame as i32)
           .max_by_key(|label| label.frame_num)
           .map(|label| label.label.clone());
-        Ok(Datum::String(frame_label.unwrap_or_else(|| "0".to_string())))
+        Ok(self.alloc_datum(Datum::String(frame_label.unwrap_or_else(|| "0".to_string()))))
       },
       "currentSpriteNum" => {
         // TODO: this can also be called by a static script
@@ -427,18 +427,24 @@ impl DirPlayer {
           .get(self.current_scope_ref())
           .and_then(|scope| scope.receiver.clone());
 
-        reserve_player_mut(|player| {
-          let datum_ref = script_instance_ref.and_then(|x| script_get_prop_opt(player, &x, &"spriteNum".to_owned()));
-          if datum_ref.is_some() {
-            let datum = player.get_datum(&datum_ref.unwrap());
-            let sprite_num = datum.int_value()?;
-            Ok(Datum::Int(sprite_num))
-          } else {
-            Ok(Datum::Int(0))
-          }
-        })
+        let datum_ref = script_instance_ref.and_then(|x| script_get_prop_opt(self, &x, &"spriteNum".to_owned()));
+        if let Some(datum_ref) = datum_ref {
+          let datum = self.get_datum(&datum_ref);
+          let sprite_num = datum.int_value()?;
+          Ok(self.alloc_datum(Datum::Int(sprite_num)))
+        } else {
+          Ok(self.alloc_datum(Datum::Int(0)))
+        }
       },
-      _ => self.movie.get_prop(prop),
+      // Return the actual DatumRef from globals
+      "actorList" => {
+        // Return the reference to the global actorList, not a clone of its contents
+        Ok(self.globals.get("actorList").unwrap_or(&DatumRef::Void).clone())
+      },
+      _ => {
+        let datum = self.movie.get_prop(prop)?;
+        Ok(self.alloc_datum(datum))
+      }
     }
   }
 
