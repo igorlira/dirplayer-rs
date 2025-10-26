@@ -29,6 +29,7 @@ use super::chunks::make_chunk;
 use super::chunks::score::ScoreChunk;
 use super::chunks::script::ScriptChunk;
 use super::chunks::script_names::ScriptNamesChunk;
+use super::chunks::score_order::SordChunk;
 use super::chunks::media::MediaChunk;
 
 pub struct DirectorFile {
@@ -41,6 +42,7 @@ pub struct DirectorFile {
   pub config: ConfigChunk,
   pub score: Option<ScoreChunk>,
   pub frame_labels: Option<FrameLabelsChunk>,
+  pub score_order: Option<SordChunk>,
   pub media: Option<MediaChunk>,
   pub chunk_container: ChunkContainer,
 }
@@ -134,6 +136,8 @@ impl DirectorFile {
     
     let frame_labels = get_frame_labels_chunk(reader, &mut chunk_container, &mut rifx);
 
+    let score_order = get_score_order_chunk(reader, &mut chunk_container, &mut rifx);
+
     let media = get_media_chunk(reader, &mut chunk_container, &mut rifx);
 
     return Ok(DirectorFile { 
@@ -145,6 +149,7 @@ impl DirectorFile {
       config,
       score,
       frame_labels,
+      score_order,
       media,
       chunk_container,
     });
@@ -374,6 +379,25 @@ pub fn get_media_chunk(
   }
 }
 
+pub fn get_score_order_chunk( 
+  reader: &mut BinaryReader, 
+  chunk_container: &mut ChunkContainer,
+  rifx: &mut RIFXReaderContext,
+) -> Option<SordChunk> {
+  let chunk = get_first_chunk(
+    reader, 
+    chunk_container,
+    rifx,
+    FOURCC("Sord"),
+  );
+  if chunk.is_none() {
+    return None;
+  } else if let Chunk::ScoreOrder(chunk_data) = chunk.unwrap() {
+    return Some(chunk_data);
+  } else {
+    panic!("Not a score order chunk");
+  }
+}
 
 pub fn get_script_context_key_entry_for_cast<'a>(
   _reader: &mut BinaryReader, 

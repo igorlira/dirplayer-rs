@@ -12,6 +12,7 @@ pub mod script;
 pub mod literal;
 pub mod handler;
 pub mod score;
+pub mod score_order;
 pub mod text;
 pub mod bitmap;
 pub mod palette;
@@ -26,6 +27,7 @@ use key_table::KeyTableChunk;
 use score::FrameLabelsChunk;
 
 use self::media::MediaChunk;
+use self::score_order::SordChunk;
 use super::{guid::MoaID, utils::{fourcc_to_string, FOURCC}, rifx::RIFXReaderContext};
 
 pub struct CastInfoChunkProps {
@@ -49,6 +51,7 @@ pub enum Chunk {
   ScriptNames(ScriptNamesChunk),
   FrameLabels(FrameLabelsChunk),
   Score(ScoreChunk),
+  ScoreOrder(SordChunk),
   Text(TextChunk),
   Bitmap(BitmapChunk),
   Palette(PaletteChunk),
@@ -213,6 +216,13 @@ pub fn make_chunk(
       return Ok(Chunk::Media(
         MediaChunk::from_reader(&mut chunk_reader)?
       ))
+    }
+    "Sord" => {
+      return Ok(
+        Chunk::ScoreOrder(
+          SordChunk::from_reader(&mut chunk_reader)?
+        )
+      )
     }
     "STXT" => {
       return Ok(
