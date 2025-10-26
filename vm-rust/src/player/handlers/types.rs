@@ -558,6 +558,27 @@ impl TypeHandlers {
     })
   }
 
+  pub fn color(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      if args.len() != 3 && args.len() != 4 {
+        return Err(ScriptError::new("color() expects 3 numeric arguments".to_string()));
+      }
+
+      let start = if args.len() == 4 {
+        // First argument is symbol (#rgb), skip it
+        1
+      } else {
+        0
+      };
+
+      let r = player.get_datum(&args[start]).int_value()? as u8;
+      let g = player.get_datum(&args[start + 1]).int_value()? as u8;
+      let b = player.get_datum(&args[start + 2]).int_value()? as u8;
+
+      let color_ref = player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b)));
+      Ok(color_ref)
+    })
+  }
 
   pub fn power(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {

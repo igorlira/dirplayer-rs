@@ -356,6 +356,7 @@ impl BuiltInHandlerManager {
       "cos" => TypeHandlers::cos(args),
       "sound" => TypeHandlers::sound(args),
       "vector" => TypeHandlers::vector(args),
+      "color" => TypeHandlers::color(args),
       _ => {
         let formatted_args = reserve_player_ref(|player| {
           let mut formatted_args = String::new();
