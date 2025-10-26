@@ -122,8 +122,14 @@ pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
 }
 
 pub fn player_dispatch(command: PlayerVMCommand) {
-  let tx = unsafe { PLAYER_TX.clone() }.unwrap();
-  tx.try_send(PlayerVMExecutionItem { command, completer: None }).unwrap();
+  if let Some(tx) = unsafe { PLAYER_TX.clone() } {
+    if let Err(e) = tx.try_send(PlayerVMExecutionItem { command, completer: None }) {
+      // The channel is closed or full
+      eprintln!("Failed to send command to player: {:?}", e);
+    }
+  } else {
+    eprintln!("PLAYER_TX not initialized");
+  }
 }
 
 #[allow(dead_code)]
