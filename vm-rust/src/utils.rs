@@ -21,14 +21,14 @@ pub fn log_i(value: &str) {
 #[macro_export]
 macro_rules! console_warn {
   ($($arg:tt)*) => (
-    web_sys::console::warn_1(&safe_js_string(&format_args!($($arg)*).to_string().as_str()))
+    web_sys::console::warn_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()))
   )
 }
 
 #[macro_export]
 macro_rules! console_error {
   ($($arg:tt)*) => (
-    web_sys::console::error_1(&safe_js_string(&format_args!($($arg)*).to_string().as_str()))
+    web_sys::console::error_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()))
   )
 }
 
