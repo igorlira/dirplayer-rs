@@ -181,6 +181,14 @@ impl DirPlayer {
       date_objects: HashMap::new(),
       math_objects: HashMap::new(),
     };
+
+    // Initialize the actorList as a global variable
+    let actor_list_datum = result.alloc_datum(Datum::List(DatumType::List, vec![], false));
+    result.globals.insert("actorList".to_string(), actor_list_datum);
+
+    // Initialize VOID constant
+    result.globals.insert("VOID".to_string(), DatumRef::Void);
+
     for i in 0..MAX_STACK_SIZE {
       result.scopes.push(Scope::default(i));
     }
