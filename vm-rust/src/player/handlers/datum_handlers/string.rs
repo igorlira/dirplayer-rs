@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType}, player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError}};
+use crate::{director::lingo::datum::{Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType}, player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError}};
 
 use super::string_chunk::StringChunkUtils;
 
@@ -65,11 +65,35 @@ impl StringDatumHandlers {
     })
   }
 
+  pub fn split(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let value = player.get_datum(datum).string_value()?;
+      let delimiter = if args.is_empty() {
+        "&".to_string() // TODO: verify the correct default delimiter
+      } else {
+        player.get_datum(&args[0]).string_value()?
+      };
+
+      let parts: Vec<DatumRef> = value
+        .split(&delimiter)
+        .map(|s| player.alloc_datum(Datum::String(s.to_string())))
+        .collect();
+
+      // Create the list datum properly
+      Ok(player.alloc_datum(Datum::List(
+        DatumType::String, // type of elements
+        parts,
+        false, // not sorted
+      )))
+    })
+  }
+
   pub fn call(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
       "count" => Self::count(datum, args),
       "getPropRef" => Self::get_chunk_prop_ref(datum, args),
       "getProp" => Self::get_chunk_prop(datum, args),
+      "split" => Self::split(datum, args),
       _ => Err(ScriptError::new(format!("No handler {handler_name} for string datum")))
     }
   }
