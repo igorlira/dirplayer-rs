@@ -136,6 +136,26 @@ impl ArithmeticsBytecodeHandler {
         (Datum::Int(left), Datum::Float(right)) => Datum::Float((*left as f32) / right),
         (Datum::Float(left), Datum::Int(right)) => Datum::Float(*left / (*right as f32)),
         (Datum::Float(left), Datum::Float(right)) => Datum::Float(left / right),
+        (Datum::IntPoint((x, y)), Datum::Int(right)) => {
+          Datum::IntPoint((x / *right, y / *right))
+        },
+        (Datum::IntPoint((x, y)), Datum::Float(right)) => {
+          Datum::IntPoint(((*x as f32 / right).round() as i32, (*y as f32 / right).round() as i32))
+        },
+        (Datum::Float(left), Datum::IntPoint((x, y))) => {
+          Datum::IntPoint(((left / *x as f32).round() as i32, (left / *y as f32).round() as i32))
+        },
+        (Datum::IntRect((x1, y1, x2, y2)), Datum::Int(right)) => {
+          Datum::IntRect((x1 / *right, y1 / *right, x2 / *right, y2 / *right))
+        }
+        (Datum::IntRect((x1, y1, x2, y2)), Datum::Float(right)) => {
+          Datum::IntRect((
+            (*x1 as f32 / right).round() as i32,
+            (*y1 as f32 / right).round() as i32,
+            (*x2 as f32 / right).round() as i32,
+            (*y2 as f32 / right).round() as i32,
+          ))
+        },
         (Datum::Int(left), Datum::String(right)) => {
           let right = right.parse::<f32>().map_err(|_| ScriptError::new(format!("Cannot divide int by string: {}", right)))?;
           Datum::Float((*left as f32) / right)
@@ -179,7 +199,32 @@ impl ArithmeticsBytecodeHandler {
         (Datum::Float(left), Datum::Int(right)) => Datum::Float(*left * (*right as f32)),
         (Datum::Float(left), Datum::Float(right)) => Datum::Float(left * right),
         (Datum::IntRect((x1, y1, x2, y2)), Datum::Int(right)) => Datum::IntRect((x1 * *right, y1 * *right, x2 * *right, y2 * *right)),
+        (Datum::IntRect((x1, y1, x2, y2)), Datum::Float(right)) => {
+          Datum::IntRect((
+            (*x1 as f32 * right).round() as i32,
+            (*y1 as f32 * right).round() as i32,
+            (*x2 as f32 * right).round() as i32,
+            (*y2 as f32 * right).round() as i32,
+          ))
+        },
+        (Datum::Float(left), Datum::IntRect((x1, y1, x2, y2))) => {
+          Datum::IntRect((
+            (left * *x1 as f32).round() as i32,
+            (left * *y1 as f32).round() as i32,
+            (left * *x2 as f32).round() as i32,
+            (left * *y2 as f32).round() as i32,
+          ))
+        },
         (Datum::IntPoint((x, y)), Datum::Int(right)) => Datum::IntPoint((x * *right, y * *right)),
+        (Datum::IntPoint((x, y)), Datum::Float(right)) => {
+            Datum::IntPoint(((*x as f32 * right).round() as i32, (*y as f32 * right).round() as i32))
+        }
+        (Datum::Float(left), Datum::IntPoint((x, y))) => {
+            Datum::IntPoint(((left * *x as f32).round() as i32, (left * *y as f32).round() as i32))
+        }
+        (Datum::Int(left), Datum::IntPoint((x, y))) => {
+          Datum::IntPoint((left * *x, left * *y))
+        }
         (Datum::List(_, list, _), Datum::Float(right)) => {
           let mut new_list = vec![];
           for item in list {
