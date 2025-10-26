@@ -220,6 +220,7 @@ impl BuiltInHandlerManager {
       "sprite" => MovieHandlers::sprite(args),
       "point" => TypeHandlers::point(args),
       "cursor" => TypeHandlers::cursor(args),
+      "externalParamName" => MovieHandlers::external_param_name(args),
       "externalParamValue" => MovieHandlers::external_param_value(args),
       "getNetText" => NetHandlers::get_net_text(args),
       "timeout" => TypeHandlers::timeout(args),

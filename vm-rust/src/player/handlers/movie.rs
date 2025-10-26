@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{Datum, DatumType}, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, events::{player_invoke_event_to_instances, player_invoke_static_event}, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError}};
+use crate::{director::lingo::datum::{Datum, DatumType}, player::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, events::{player_invoke_event_to_instances, player_invoke_static_event}, reserve_player_mut, score::get_sprite_at, DatumRef, ScriptError}, utils::log_i};
 
 pub struct MovieHandlers {}
 
@@ -143,13 +143,71 @@ impl MovieHandlers {
     })
   }
 
+  pub fn external_param_name(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let datum = player.get_datum(&args[0]);
+
+      // Case 1: argument is a string (lookup by name, case-insensitive)
+      if let Ok(key) = datum.string_value() {
+        if player
+          .external_params
+          .keys()
+          .any(|k| k.to_lowercase() == key.to_lowercase())
+        {
+          return Ok(player.alloc_datum(Datum::String(key)));
+        } else {
+          return Ok(player.alloc_datum(Datum::Void));
+        }
+      }
+
+      // Case 2: argument is an integer (index)
+      if let Ok(index) = datum.int_value() {
+        if index > 0 && (index as usize) <= player.external_params.len() {
+          if let Some((key, _)) = player.external_params.iter().nth(index as usize - 1) {
+            return Ok(player.alloc_datum(Datum::String(key.clone())));
+          }
+        }
+        return Ok(player.alloc_datum(Datum::Void));
+      }
+
+      // Invalid argument type
+      log_i("external_param_name(): invalid argument type, returning Void");
+      Ok(player.alloc_datum(Datum::Void))
+    })
+  }
+
   pub fn external_param_value(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let key = player.get_datum(&args[0]).string_value()?;
-      let value: String = player.external_params.get(&key)
-        .cloned()
-        .unwrap_or_default();
-      Ok(player.alloc_datum(Datum::String(value)))
+      let datum = player.get_datum(&args[0]);
+
+      // Case 1: argument is a string (lookup by name)
+      if let Ok(key) = datum.string_value() {
+        if let Some((_k, value)) = player
+          .external_params
+          .iter()
+          .find(|(k, _)| k.to_lowercase() == key.to_lowercase())
+        {
+          return Ok(player.alloc_datum(Datum::String(value.clone())));
+        } else {
+          return Ok(player.alloc_datum(Datum::Void));
+        }
+      }
+
+      // Case 2: argument is an integer (index)
+      if let Ok(index) = datum.int_value() {
+        if index > 0 && (index as usize) <= player.external_params.len() {
+          if let Some((_key, value)) = player.external_params.iter().nth(index as usize - 1) {
+            return Ok(player.alloc_datum(Datum::String(value.clone())));
+          }
+        }
+        return Ok(player.alloc_datum(Datum::Void));
+      }
+
+      // Invalid type
+      log_i(&format!(
+        "external_param_value(): invalid argument type, returning Void"
+      ));
+      Ok(player.alloc_datum(Datum::Void))
     })
   }
 
