@@ -112,8 +112,9 @@ impl CastManager {
     return self.casts.get_mut(number as usize - 1).unwrap();
   }
 
-  pub fn get_cast_by_name(&self, name: &String) -> Option<&CastLib> {
-    return self.casts.iter().find(|cast| cast.name == *name);
+  pub fn get_cast_by_name(&self, name: &str) -> Option<&CastLib> {
+    let target = name.to_lowercase();
+    self.casts.iter().find(|c| c.name.to_lowercase() == target)
   }
 
   pub fn find_member_ref_by_number(&self, number: u32) -> Option<CastMemberRef> {
