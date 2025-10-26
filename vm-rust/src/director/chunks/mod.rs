@@ -16,6 +16,7 @@ pub mod score_order;
 pub mod text;
 pub mod bitmap;
 pub mod palette;
+pub mod sound;
 pub mod media;
 
 use std::collections::HashMap;
@@ -28,6 +29,7 @@ use score::FrameLabelsChunk;
 
 use self::media::MediaChunk;
 use self::score_order::SordChunk;
+use self::sound::SoundChunk;
 use super::{guid::MoaID, utils::{fourcc_to_string, FOURCC}, rifx::RIFXReaderContext};
 
 pub struct CastInfoChunkProps {
@@ -55,6 +57,7 @@ pub enum Chunk {
   Text(TextChunk),
   Bitmap(BitmapChunk),
   Palette(PaletteChunk),
+  Sound(SoundChunk),
   Media(MediaChunk),
 }
 
@@ -84,6 +87,13 @@ impl Chunk {
     match self {
       Self::Score(data) => { Some(data) }
       _ => { None }
+    }
+  }
+
+  pub fn as_sound(&self) -> Option<&SoundChunk> {
+    match self {
+      Self::Sound(data) => Some(data),
+      _ => None,
     }
   }
 }
@@ -223,6 +233,11 @@ pub fn make_chunk(
           SordChunk::from_reader(&mut chunk_reader)?
         )
       )
+    }
+    "snd " => {
+      return Ok(Chunk::Sound(
+        SoundChunk::from_snd_chunk(&mut chunk_reader)?
+      ))
     }
     "STXT" => {
       return Ok(

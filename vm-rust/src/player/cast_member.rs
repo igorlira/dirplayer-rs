@@ -3,9 +3,8 @@ use std::fmt::Formatter;
 
 use log::warn;
 
-use crate::director::{chunks::{cast_member::CastMemberDef, score::ScoreChunk}, enums::{FilmLoopInfo, MemberType, ScriptType, ShapeInfo}, lingo::script::ScriptContext};
-
-use super::{bitmap::{bitmap::{decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef}, manager::{BitmapManager, BitmapRef}}, score::Score, sprite::ColorRef, ScriptError};
+use crate::director::chunks::sound::SoundChunk;
+use crate::director::enums::SoundInfo;
 
 #[derive(Clone)]
 pub struct CastMember {
@@ -140,6 +139,8 @@ pub struct FilmLoopMember {
 
 #[derive(Clone)]
 pub struct SoundMember {
+  pub info: SoundInfo,
+  pub sound: SoundChunk,
   // TODO add fields
 }
 
@@ -298,6 +299,13 @@ impl CastMemberType {
   pub fn as_film_loop_mut(&mut self) -> Option<&mut FilmLoopMember> {
     return match self {
       Self::FilmLoop(data) => { Some(data) }
+      _ => { None }
+    }
+  }
+
+  pub fn as_sound(&self) -> Option<&SoundMember> {
+    return match self {
+      Self::Sound(data) => { Some(data) }
       _ => { None }
     }
   }

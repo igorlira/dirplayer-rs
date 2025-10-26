@@ -101,6 +101,9 @@ impl CastMemberChunk {
           FilmLoopInfo::from(specific_data.as_slice())
         )
       }
+      MemberType::Sound => {
+        specific_data_parsed = CastMemberSpecificData::None;
+      }
       _ => {
         specific_data_parsed = CastMemberSpecificData::None;
       }
@@ -119,6 +122,7 @@ pub enum CastMemberSpecificData {
   Bitmap(BitmapInfo),
   Shape(ShapeInfo),
   FilmLoop(FilmLoopInfo),
+  Sound(SoundInfo),
   None
 }
 
@@ -150,6 +154,14 @@ impl CastMemberSpecificData {
   pub fn film_loop_info(&self) -> Option<&FilmLoopInfo> {
     if let CastMemberSpecificData::FilmLoop(film_loop_info) = self {
       Some(film_loop_info)
+    } else {
+      None
+    }
+  }
+
+  pub fn sound_info(&self) -> Option<&SoundInfo> {
+    if let CastMemberSpecificData::Sound(sound_info) = self {
+      Some(sound_info)
     } else {
       None
     }
