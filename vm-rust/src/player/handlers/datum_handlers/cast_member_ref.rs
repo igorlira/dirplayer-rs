@@ -226,14 +226,15 @@ impl CastMemberRefHandlers {
       return Self::get_invalid_member_prop(player, cast_member_ref, prop);
     }
     let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref);
-    let (name, slot_number, member_type, color, bg_color) = match cast_member {
+    let (name, slot_number, member_type, color, bg_color, member_num) = match cast_member {
       Some(cast_member) => {
         let name = cast_member.name.to_owned();
         let slot_number = Self::get_cast_slot_number(cast_member_ref.cast_lib as u32, cast_member_ref.cast_member as u32) as i32;
         let member_type = cast_member.member_type.member_type_id();
+        let member_num = cast_member.number;
         let color = cast_member.color.to_owned();
         let bg_color = cast_member.bg_color.to_owned();
-        (name, slot_number, member_type, color, bg_color)
+        (name, slot_number, member_type, color, bg_color, member_num)
       },
       None => {
         warn!("Getting prop {} of non-existent castMember reference {}, {}", prop, cast_member_ref.cast_lib, cast_member_ref.cast_member);
@@ -243,6 +244,7 @@ impl CastMemberRefHandlers {
 
     match prop.as_str() {
       "name" => Ok(Datum::String(name)),
+      "memberNum" => Ok(Datum::Int(member_num as i32)),
       "number" => Ok(Datum::Int(slot_number)),
       "type" => Ok(Datum::Symbol(member_type.symbol_string()?.to_string())),
       "castLibNum" => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
