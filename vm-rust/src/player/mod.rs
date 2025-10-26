@@ -134,6 +134,7 @@ impl DirPlayer {
         stage_color: (0, 0, 0),
         frame_rate: 30,
         file: None,
+        update_lock: false,
       },
       net_manager: NetManager {
         base_path: None,
