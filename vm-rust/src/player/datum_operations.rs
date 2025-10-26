@@ -220,7 +220,13 @@ pub fn subtract_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Res
       let right_float = right.parse::<f32>().unwrap_or(0.0);
       Ok(Datum::Float((*left as f32) - right_float))
     }
-    (left, Datum::Void) => Ok(left.clone()),
+    (Datum::Void, Datum::Int(r)) => Ok(Datum::Float(0.0 - (*r as f32))),
+    (Datum::Void, Datum::Float(r)) => Ok(Datum::Float(0.0 - r)),
+    (Datum::Void, Datum::Void) => Ok(Datum::Int(0)),
+    (Datum::Int(l), Datum::Void) => Ok(Datum::Float((*l as f32) - 0.0)),
+    (Datum::Float(l), Datum::Void) => Ok(Datum::Float(*l - 0.0)),
+    (Datum::Void, some) => Ok(some.clone()),
+    (some, Datum::Void) => Ok(some.clone()),
     _ => Err(ScriptError::new(format!("Invalid operands for subtract_datums: {}, {}", left.type_str(), right.type_str()))),
   }
 }
