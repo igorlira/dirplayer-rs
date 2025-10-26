@@ -24,18 +24,36 @@ impl PropListUtils {
   }
 
   fn get_key_index(prop_list: &Vec<PropListPair>, key: &Datum, allocator: &DatumAllocator) -> Result<i32, ScriptError> {
-    let mut pos = -1;
     for (i, (k, _)) in prop_list.iter().enumerate() {
       let k_datum = allocator.get_datum(k);
-      if ((key.is_string() && k_datum.is_symbol()) || (key.is_symbol() && k_datum.is_string())) && key.string_value()? == k_datum.string_value()? {
-        pos = i as i32;
-        break;
-      } else if datum_equals(k_datum, key, allocator)? {
-        pos = i as i32;
-        break;
+      // Lookup: exact match only
+      if Self::datum_equals_for_lookup(k_datum, key, allocator)? {
+        return Ok(i as i32);
       }
     }
-    Ok(pos)
+    Ok(-1)
+  }
+
+  fn datum_equals_for_lookup(
+    left: &Datum, 
+    right: &Datum, 
+    allocator: &DatumAllocator
+  ) -> Result<bool, ScriptError> {
+    let result = match (left, right) {
+        (Datum::String(l), Datum::String(r)) => l == r, // exact
+        (Datum::String(l), Datum::Symbol(r)) => l == r, 
+        (Datum::Symbol(l), Datum::String(r)) => l == r,
+        (Datum::Symbol(l), Datum::Symbol(r)) => l == r,
+        
+        // Handle symbol-to-int comparison (e.g., #2 should match key 2)
+        (Datum::Symbol(s), Datum::Int(i)) | (Datum::Int(i), Datum::Symbol(s)) => {
+            s.parse::<i32>().ok() == Some(*i)
+        }
+        
+        _ => datum_equals(left, right, allocator)?,
+    };
+
+    Ok(result)
   }
 
   pub fn get_prop_or_built_in(
@@ -309,17 +327,18 @@ impl PropListDatumHandlers {
     reserve_player_mut(|player| {
       let key = player.get_datum(&args[0]);
       let prop_list = player.get_datum(datum);
+
       match prop_list {
-        Datum::PropList(prop_list, ..) => {
-          let key_index = PropListUtils::get_key_index(prop_list, key, &player.allocator)?;
+        Datum::PropList(ref entries, ..) => {
+          let key_index = PropListUtils::get_key_index(entries, key, &player.allocator)?;
           if key_index >= 0 {
-            return Ok(prop_list[key_index as usize].1.clone());
+            Ok(entries[key_index as usize].1.clone())
           } else {
-            return Ok(DatumRef::Void);
+            Ok(DatumRef::Void)
           }
         },
-        _ => return Err(ScriptError::new("Cannot get a prop of non-prop list".to_string())),
-      };
+        _ => Err(ScriptError::new("Cannot get a prop of non-prop list".to_string())),
+      }
     })
   }
 
