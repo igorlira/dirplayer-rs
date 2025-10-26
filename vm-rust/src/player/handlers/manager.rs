@@ -357,6 +357,7 @@ impl BuiltInHandlerManager {
       "sound" => TypeHandlers::sound(args),
       "vector" => TypeHandlers::vector(args),
       "color" => TypeHandlers::color(args),
+      "keyPressed" => Self::key_pressed(args),
       _ => {
         let formatted_args = reserve_player_ref(|player| {
           let mut formatted_args = String::new();
@@ -373,6 +374,54 @@ impl BuiltInHandlerManager {
         return Err(ScriptError::new(msg));
       }
     }
+  }
+
+  pub fn key_pressed(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let arg_datum = player.get_datum(&args[0]);
+
+      let key_code = if let Ok(key_str) = arg_datum.string_value() {
+        // STRING: First check if it's a single character
+        if key_str.len() == 1 {
+          // Single character - convert to Director key code
+          let ch = key_str.chars().next().unwrap().to_lowercase().next().unwrap();
+          let mapped_code = *keyboard_map::get_char_to_keycode_map().get(&ch).unwrap_or(&0);
+          mapped_code
+        } else {
+          // Try to parse as number string (like "123")
+          if let Ok(code) = key_str.parse::<i32>() {
+            // Check if it's an ASCII letter code that needs mapping
+            let mapped_code = if (65..=90).contains(&code) || (97..=122).contains(&code) {
+              let ch = (code as u8 as char).to_lowercase().next().unwrap();
+              *keyboard_map::get_char_to_keycode_map().get(&ch).unwrap_or(&(code as u16))
+            } else {
+              code as u16
+            };
+            mapped_code
+          } else {
+            return Err(ScriptError::new(format!("keyPressed: cannot parse string '{}'", key_str)));
+          }
+        }
+      } else if let Ok(code) = arg_datum.int_value() {
+        // INTEGER: Check if it's an ASCII code that needs mapping
+        let mapped_code = if (65..=90).contains(&code) || (97..=122).contains(&code) {
+          let ch = (code as u8 as char).to_lowercase().next().unwrap();
+          *keyboard_map::get_char_to_keycode_map().get(&ch).unwrap_or(&(code as u16))
+        } else {
+          code as u16
+        };
+        mapped_code
+      } else {
+        return Err(ScriptError::new("keyPressed expects a string or integer".to_string()));
+      };
+      
+      // Check if any currently pressed key matches this code
+      let is_pressed = player.keyboard_manager.down_keys
+        .iter()
+        .any(|key| key.code == key_code);
+      
+      Ok(player.alloc_datum(datum_bool(is_pressed)))
+    })
   }
 }
 
