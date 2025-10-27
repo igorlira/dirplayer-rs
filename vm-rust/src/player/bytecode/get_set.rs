@@ -303,10 +303,157 @@ impl GetSetBytecodeHandler {
     reserve_player_mut(|player| {
       let obj_ref = {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-        scope.stack.pop().unwrap()
+        scope.stack.pop().unwrap_or(DatumRef::Void)
       };
-      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
-      let result_ref = get_obj_prop(player, &obj_ref, &prop_name.to_owned())?;
+      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap().clone();
+    
+      // Clone the datum type first
+      let obj_type = player.get_datum(&obj_ref).type_enum();
+      
+      // Check if prop_name is a numeric index
+      let is_numeric_index = prop_name.parse::<i32>().is_ok();
+      
+      let result_ref = match obj_type {
+        crate::director::lingo::datum::DatumType::SpriteRef => {
+          // Handle sprite references - resolve to script instance first
+          let sprite_num = player.get_datum(&obj_ref).to_sprite_ref()?;
+          let sprite = player.movie.score.get_sprite(sprite_num);
+          
+          if let Some(sprite) = sprite {
+            // Clone the script instance list to avoid borrow issues
+            let instance_refs = sprite.script_instance_list.clone();
+            
+            // Try to get the property from the first script instance
+            for instance_ref in instance_refs {
+              if let Ok(result) = crate::player::script::script_get_prop(player, &instance_ref, &prop_name) {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.push(result);
+                return Ok(HandlerExecutionResult::Advance);
+              }
+            }
+            
+            // If not found in script instances, try built-in sprite properties
+            match crate::player::score::sprite_get_prop(player, sprite_num as i16, &prop_name) {
+              Ok(datum) => {
+                let result = player.alloc_datum(datum);
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.push(result);
+                return Ok(HandlerExecutionResult::Advance);
+              }
+              Err(_) => {
+                // Property not found anywhere
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.push(DatumRef::Void);
+                return Ok(HandlerExecutionResult::Advance);
+              }
+            }
+          } else {
+            return Err(ScriptError::new(format!("Sprite {} does not exist", sprite_num)));
+          }
+        }
+        crate::director::lingo::datum::DatumType::String => {
+          match prop_name.as_str() {
+            "char" => {
+              use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
+              let (s_len, s_clone) = if let Datum::String(s) = player.get_datum(&obj_ref) {
+                (s.len() as i32, s.clone())
+              } else {
+                unreachable!()
+              };
+              let chunk_expr = StringChunkExpr {
+                chunk_type: StringChunkType::Char,
+                start: 1,
+                end: s_len,
+                item_delimiter: player.movie.item_delimiter,
+              };
+              player.alloc_datum(Datum::StringChunk(
+                crate::director::lingo::datum::StringChunkSource::Datum(obj_ref.clone()),
+                chunk_expr,
+                s_clone
+              ))
+            }
+            _ => get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+          }
+        }
+        crate::director::lingo::datum::DatumType::List => {
+          // Handle numeric indices for lists
+          if is_numeric_index {
+            let index = prop_name.parse::<i32>().unwrap();
+            if let Datum::List(_, list, _) = player.get_datum(&obj_ref) {
+              // Lingo uses 1-based indexing
+              let zero_based_index = (index - 1) as usize;
+              if zero_based_index < list.len() {
+                list[zero_based_index].clone()
+              } else {
+                return Err(ScriptError::new(format!(
+                  "List index {} out of bounds (list has {} items)",
+                  index, list.len()
+                )));
+              }
+            } else {
+              unreachable!()
+            }
+          } else {
+            // Route all property access to ListDatumHandlers
+            ListDatumHandlers::get_prop(player, &obj_ref, &prop_name)?
+          }
+        }
+        crate::director::lingo::datum::DatumType::PropList => {
+          // Route all property access to get_obj_prop which handles PropList properly
+          get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+        }
+        crate::director::lingo::datum::DatumType::ScriptInstanceRef => {
+          // If it's a numeric index, try to find a default indexable property
+          if is_numeric_index {
+            // Common indexable properties in Director scripts
+            let indexable_property_names = vec!["aSquares", "list", "items", "data"];
+            
+            let mut found_indexable = None;
+            for prop in indexable_property_names {
+              if let Ok(prop_ref) = get_obj_prop(player, &obj_ref, &prop.to_string()) {
+                // Check if this property is a list
+                if let Datum::List(_, _, _) = player.get_datum(&prop_ref) {
+                  found_indexable = Some(prop_ref);
+                  break;
+                }
+              }
+            }
+            
+            if let Some(list_ref) = found_indexable {
+              // Now index into the list
+              let index = prop_name.parse::<i32>().unwrap();
+              if let Datum::List(_, list, _) = player.get_datum(&list_ref) {
+                // Lingo uses 1-based indexing
+                let zero_based_index = (index - 1) as usize;
+                if zero_based_index < list.len() {
+                  list[zero_based_index].clone()
+                } else {
+                  return Err(ScriptError::new(format!(
+                    "List index {} out of bounds (list has {} items)",
+                    index, list.len()
+                  )));
+                }
+              } else {
+                return Err(ScriptError::new(format!(
+                  "Internal error: Property was a list but now isn't"
+                )));
+              }
+            } else {
+              return Err(ScriptError::new(format!(
+                "Cannot use numeric index '{}' on script instance - no indexable property found (tried: aSquares, list, items, data)",
+                prop_name
+              )));
+            }
+          } else {
+            // Regular property access
+            get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+          }
+        }
+        _ => {
+          get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+        }
+      };
+
       let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
       scope.stack.push(result_ref);
       Ok(HandlerExecutionResult::Advance)
