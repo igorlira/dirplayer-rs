@@ -13,8 +13,29 @@ impl StringHandlers {
     reserve_player_mut(|player| {
       let str_to_find = player.get_datum(&args[0]).string_value()?;
       let find_in = player.get_datum(&args[1]).string_value()?;
-      let result = find_in.find(&str_to_find).map(|x| x as i32).unwrap_or(-1);
-      Ok(player.alloc_datum(Datum::Int(result + 1)))
+
+      // Lingo edge cases
+      if str_to_find.is_empty() {
+        return Ok(player.alloc_datum(Datum::Int(1)));
+      }
+
+      if find_in.is_empty() {
+        return Ok(player.alloc_datum(Datum::Int(0)));
+      }
+
+      // Case-insensitive search (like Mac Lingo)
+      let find_in_lower = find_in.to_lowercase();
+      let str_to_find_lower = str_to_find.to_lowercase();
+
+      let result = find_in_lower.find(&str_to_find_lower)
+        .map(|byte_index| {
+          // Count characters up to the found byte index
+          let char_index = find_in[..byte_index].chars().count() as i32;
+          char_index + 1 // 1-based indexing
+        })
+        .unwrap_or(0); // Not found → return 0
+
+      Ok(player.alloc_datum(Datum::Int(result)))
     })
   }
 
