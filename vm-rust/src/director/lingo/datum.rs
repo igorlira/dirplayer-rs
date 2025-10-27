@@ -236,6 +236,9 @@ impl Datum {
       Datum::Float(n) => Ok(n.to_string()),
       Datum::Symbol(s) => Ok(s.clone()),
       Datum::Vector(v) => Ok(format!("[{},{},{}]", v[0], v[1], v[2])),
+      Datum::IntRect(r) => Ok(format!("({}, {}, {}, {})", r.0, r.1, r.2, r.3)),
+      Datum::ColorRef(cr) => Ok(format!("{:?}", cr)),
+      Datum::Void => Ok("VOID".to_string()),
       _ => Err(ScriptError::new(format!("Cannot convert datum type {} to string", self.type_str()))),
     }
   }
@@ -256,8 +259,26 @@ impl Datum {
         Ok(s.parse().unwrap_or(0))
       },
       Datum::SpriteRef(n) => Ok(*n as i32),
+      Datum::CastMember(member_ref) => Ok(member_ref.cast_member as i32),
+      Datum::Symbol(_) => Ok(0),
+      Datum::PaletteRef(_) => Ok(0),
       Datum::Void => Ok(0),
       _ => Err(ScriptError::new(format!("Cannot convert datum of type {} to int", self.type_str()))),
+    }
+  }
+
+  pub fn float_value(&self) -> Result<f32, ScriptError> {
+    match self {
+      Datum::Float(n) => Ok(*n),
+      Datum::Int(n) => Ok(*n as f32),
+      Datum::String(s) => Ok(s.parse::<f32>().unwrap_or(0.0)),
+      Datum::StringChunk(_, _, s) => Ok(s.parse::<f32>().unwrap_or(0.0)),
+      Datum::SpriteRef(n) => Ok(*n as f32),
+      Datum::Void => Ok(0.0),
+      _ => Err(ScriptError::new(format!(
+          "Cannot convert datum of type {} to float",
+          self.type_str()
+      ))),
     }
   }
 
