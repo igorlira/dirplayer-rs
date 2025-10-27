@@ -1,6 +1,7 @@
 use crate::{director::lingo::{constants::{get_anim_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names}, datum::{Datum, StringChunkType}}, player::{allocator::DatumAllocatorTrait, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, score::{sprite_get_prop, sprite_set_prop}, script::{get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop, player_set_obj_prop, script_get_prop, script_get_static_prop, script_set_prop, script_set_static_prop}, DatumRef, DirPlayer, HandlerExecutionResult, ScriptError, PLAYER_OPT}};
 
 use super::handler_manager::BytecodeHandlerContext;
+use crate::player::handlers::datum_handlers::list_handlers::ListDatumHandlers;
 
 pub struct GetSetBytecodeHandler { }
 pub struct GetSetUtils { }
@@ -504,7 +505,7 @@ impl GetSetBytecodeHandler {
         Ok(player.alloc_datum(player.get_anim_prop(prop_id as u16)?))
       } else if prop_type == 0x08 {
         // anim2 prop
-        let result = if prop_id == 0x02 && player.movie.dir_version >= 500 {
+        let datum = if prop_id == 0x02 && player.movie.dir_version >= 500 {
           // the number of castMembers supports castLib selection from Director 5.0
           let cast_lib_id = {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -513,7 +514,7 @@ impl GetSetBytecodeHandler {
           let cast_lib_id = player.get_datum(&cast_lib_id);
           let bypass_castlib_selection = cast_lib_id.is_int() && cast_lib_id.int_value()? == 0;
           if bypass_castlib_selection {
-            player.get_anim2_prop(prop_id as u16)
+            player.get_anim2_prop(prop_id as u16)?
           } else {
             let cast = {
               if cast_lib_id.is_string() {
@@ -523,14 +524,14 @@ impl GetSetBytecodeHandler {
               }
             };
             match cast {
-              Some(cast) => Ok(Datum::Int(cast.max_member_id() as i32)),
-              None => Err(ScriptError::new(format!("kOpSet cast not found")))
+              Some(cast) => Datum::Int(cast.max_member_id() as i32),
+              None => return Err(ScriptError::new(format!("kOpSet cast not found")))
             }
           }
         } else {
-          player.get_anim2_prop(prop_id as u16)
-        }?;
-        Ok(player.alloc_datum(result))
+          player.get_anim2_prop(prop_id as u16)?
+        };
+        Ok(player.alloc_datum(datum))
       } else if prop_type == 0x01 {
         // number of chunks
         let string_id = {
