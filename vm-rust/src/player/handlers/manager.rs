@@ -157,6 +157,7 @@ impl BuiltInHandlerManager {
     match name.as_str() {
       "call" => true,
       "new" => true,
+      "newObject" => true,
       "callAncestor" => true,
       "sendSprite" => true,
       "sendAllSprites" => true,
@@ -168,6 +169,7 @@ impl BuiltInHandlerManager {
     match name.as_str() {
       "call" => Self::call(args).await,
       "new" => TypeHandlers::new(args).await,
+      "newObject" => TypeHandlers::new_object(args).await,
       "callAncestor" => TypeHandlers::call_ancestor(args).await,
       "sendSprite" => MovieHandlers::send_sprite(args).await,
       "sendAllSprites" => MovieHandlers::send_all_sprites(args).await,

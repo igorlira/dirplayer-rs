@@ -763,4 +763,64 @@ impl TypeHandlers {
     }
     Ok(result)
   }
+
+  pub async fn new_object(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    if args.is_empty() {
+      return Err(ScriptError::new("newObject requires at least one argument".to_string()));
+    }
+
+    let object_type = reserve_player_ref(|player| {
+      player.get_datum(&args[0]).string_value()
+    })?;
+
+    match object_type.to_lowercase().as_str() {
+      "xml" => {
+        reserve_player_mut(|player| {
+          let xml_id = player.allocator.get_free_script_instance_id();
+          let xml_doc = XmlDocument {
+            id: xml_id,
+            root_element: None,
+            content: String::new(),
+            ignore_white: false,
+          };
+          player.xml_documents.insert(xml_id, xml_doc);
+          Ok(player.alloc_datum(Datum::XmlRef(xml_id)))
+        })
+      },
+      "date" => {
+        reserve_player_mut(|player| {
+          let date_id = player.allocator.get_free_script_instance_id();
+          let date_obj = DateObject::new(date_id);
+          player.date_objects.insert(date_id, date_obj);
+          Ok(player.alloc_datum(Datum::DateRef(date_id)))
+        })
+      },
+      "math" => {
+        reserve_player_mut(|player| {
+          let math_id = player.allocator.get_free_script_instance_id();
+          let math_obj = MathObject::new(math_id);
+          player.math_objects.insert(math_id, math_obj);
+          Ok(player.alloc_datum(Datum::MathRef(math_id)))
+        })
+      },
+      "object" => {
+        reserve_player_mut(|player| {
+          // Allocate an empty prop list, unsorted
+          let obj = Datum::PropList(Vec::new(), false);
+          Ok(player.alloc_datum(obj))
+        })
+      }
+      "string" => {
+        let value = if args.len() > 1 {
+          reserve_player_ref(|player| player.get_datum(&args[1]).string_value())?
+        } else {
+          String::new()
+        };
+        reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(value))))
+      },
+      _ => {
+        Err(ScriptError::new(format!("newObject: Unsupported object type '{}'", object_type)))
+      }
+    }
+  }
 }
