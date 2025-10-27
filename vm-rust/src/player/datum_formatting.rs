@@ -116,6 +116,29 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
   }
 }
 
+pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
+  match datum {
+    Datum::Int(n) => n.to_string(),
+    Datum::Float(f) => format!("{:.3}", f), // or your precision logic
+    Datum::String(s) => s.clone(),
+    Datum::Void => "VOID".to_string(),
+    Datum::Vector(v) => format!("[{},{},{}]", v[0], v[1], v[2]),
+    Datum::IntRect(r) => format!("({}, {}, {}, {})", r.0, r.1, r.2, r.3),
+    Datum::IntPoint(p) => format!("({}, {})", p.0, p.1),
+    Datum::ColorRef(cr) => match cr {
+        ColorRef::PaletteIndex(i) => format!("color({})", i),
+        ColorRef::Rgb(r, g, b) => format!("rgb({}, {}, {})", r, g, b),
+    },
+    Datum::List(_, list, _) => {
+        let elements: Vec<String> = list.iter()
+            .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
+            .collect();
+        elements.join(", ")
+    }
+    _ => "<unknown datum>".to_string(),
+  }
+}
+
 pub fn format_datum(datum_ref: &DatumRef, player: &DirPlayer) -> String {
   let datum = player.get_datum(datum_ref);
   format_concrete_datum(datum, player)

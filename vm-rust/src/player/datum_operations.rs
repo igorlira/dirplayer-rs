@@ -4,6 +4,8 @@ use crate::director::lingo::datum::{Datum, DatumType};
 
 use super::{sprite::ColorRef, DirPlayer, ScriptError};
 
+use crate::player::datum_formatting::datum_to_string_for_concat;
+
 pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<Datum, ScriptError> {
   match (&left, &right) {
     (Datum::Void, some) => Ok(some.clone()),
@@ -80,6 +82,20 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
         result_refs.push(player.alloc_datum(result_datum));
       }
       Ok(Datum::List(DatumType::List, result_refs, false))
+    },
+    (Datum::String(s), Datum::List(_, list, _)) => {
+      let formatted = list.iter()
+        .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
+        .collect::<Vec<_>>()
+        .join(", ");
+      Ok(Datum::String(format!("{}{}", s, formatted)))
+    },
+    (Datum::List(_, list, _), Datum::String(s)) => {
+      let formatted = list.iter()
+        .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
+        .collect::<Vec<_>>()
+        .join(", ");
+      Ok(Datum::String(format!("{}{}", formatted, s)))
     },
     (Datum::IntPoint(a), Datum::IntPoint(b)) => Ok(Datum::IntPoint((a.0 + b.0, a.1 + b.1))),
     (Datum::IntPoint(a), Datum::List(_, ref_list, _)) => {
