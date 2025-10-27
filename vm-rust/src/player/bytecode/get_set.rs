@@ -51,23 +51,26 @@ impl GetSetBytecodeHandler {
 
   pub fn set_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
     reserve_player_mut(|player| {
-      let (value_ref, receiver, script_ref) = {
+      let (value_ref, receiver, script_ref, prop_name) = {
+        let current_obj = player.get_ctx_current_bytecode(ctx).obj as u16;
+        let prop_name = get_name(&player, &ctx, current_obj)
+          .ok_or_else(|| ScriptError::new("Failed to get property name".to_string()))?
+          .to_owned();
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-        let value_red = scope.stack.pop().unwrap();
-        (value_red, scope.receiver.clone(), scope.script_ref.clone())
+        let value_ref = scope.stack.pop().unwrap();
+        (value_ref, scope.receiver.clone(), scope.script_ref.clone(), prop_name)
       };
-      let prop_name = get_name(&player, &ctx, player.get_ctx_current_bytecode(ctx).obj as u16).unwrap();
-      
+
       match receiver {
         Some(instance_ref) => {
           if *instance_ref == 0 {
             return Err(ScriptError::new(format!("Can't set prop {} of Void", prop_name)));
           }
-          script_set_prop(player, &instance_ref, &prop_name.to_owned(), &value_ref, false)?;
+          script_set_prop(player, &instance_ref, &prop_name, &value_ref, false)?;
           Ok(HandlerExecutionResult::Advance)
-        },
+        }
         None => {
-          script_set_static_prop(player, &script_ref, &prop_name.to_owned(), &value_ref, true)?;
+          script_set_static_prop(player, &script_ref, &prop_name, &value_ref, true)?;
           Ok(HandlerExecutionResult::Advance)
         }
       }
