@@ -100,7 +100,9 @@ impl StringHandlers {
   pub fn num_to_char(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let num = player.get_datum(&args[0]).int_value()?;
-      let char_value = std::char::from_u32(num as u32).unwrap().to_string();
+      let char_value = std::char::from_u32(num as u32)
+        .ok_or_else(|| ScriptError::new(format!("Invalid char code: {}", num)))?
+        .to_string();
       Ok(player.alloc_datum(Datum::String(char_value)))
     })
   }
