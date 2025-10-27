@@ -5,7 +5,7 @@ use num_derive::FromPrimitive;
 use crate::player::{bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, datum_ref::DatumRef, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}, ScriptError};
 
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum DatumType {
   Null,
 	Void,
