@@ -69,10 +69,21 @@ impl StringHandlers {
 
   pub fn chars(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let string = player.get_datum(&args[0]).string_value()?;
-      let start = player.get_datum(&args[1]).int_value()? - 1;
-      let end: i32 = player.get_datum(&args[2]).int_value()?;
-      let substr = string.chars().skip(start as usize).take((end - start) as usize).collect::<String>();
+      let string = player.get_datum(&args[0]).string_value().unwrap_or_default();
+      let start = player.get_datum(&args[1]).int_value().unwrap_or(1).saturating_sub(1) as usize;
+      let mut end = player.get_datum(&args[2]).int_value().unwrap_or(0) as usize;
+
+      let len = string.chars().count();
+      end = end.min(len); // clamp to string length
+
+      if start >= len || end < start + 1 {
+        return Ok(player.alloc_datum(Datum::String("".to_string())));
+      }
+
+      let substr: String = string.chars()
+        .skip(start)
+        .take(end - start)
+        .collect();
 
       Ok(player.alloc_datum(Datum::String(substr)))
     })
