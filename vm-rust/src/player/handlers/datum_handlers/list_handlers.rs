@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::{DatumAllocator, DatumAllocatorTrait}, compare::{datum_equals, datum_less_than}, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, ScriptError}};
+use crate::player::datum_formatting::format_concrete_datum;
 
 pub struct ListDatumHandlers {}
 pub struct ListDatumUtils {}
@@ -96,6 +96,7 @@ impl ListDatumHandlers {
       "deleteAt" => Self::delete_at(datum, args),
       "findPos" => Self::find_pos(datum, args),
       "getPos" => Self::find_pos(datum, args),
+      "join" => Self::join(datum, args),
       _ => Err(ScriptError::new(format!("No handler {handler_name} for list datum")))
     }
   }
@@ -238,5 +239,36 @@ impl ListDatumHandlers {
 
   pub fn duplicate(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     Ok(player_duplicate_datum(datum))
+  }
+
+  pub fn join(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    reserve_player_mut(|player| {
+      let (_, list_vec, _) = player.get_datum(datum).to_list_tuple()?;
+
+      // Optional delimiter argument
+      // TODO: verify default delimiter
+      let delimiter = if args.len() >= 1 {
+        match player.get_datum(&args[0]) {
+          Datum::String(s) => s.clone(),
+          _ => "&".to_string(),
+        }
+      } else {
+        "&".to_string()
+      };
+
+      // Convert each element to string safely without extra quotes
+      let pieces: Vec<String> = list_vec.iter().map(|item_ref| {
+        let datum = player.get_datum(item_ref);
+        match datum {
+          Datum::String(s) => s.clone(),
+          Datum::Symbol(sym) => sym.clone(),
+          Datum::Int(n) => n.to_string(),
+          _ => format!("{:?}", format_concrete_datum(&datum, player)),
+        }
+      }).collect();
+
+      let joined = pieces.join(&delimiter);
+      Ok(player.alloc_datum(Datum::String(joined)))
+    })
   }
 }
