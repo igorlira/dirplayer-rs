@@ -44,7 +44,6 @@ impl PropListUtils {
         (Datum::String(l), Datum::String(r)) => l == r, // exact
         (Datum::String(l), Datum::Symbol(r)) => l == r, 
         (Datum::Symbol(l), Datum::String(r)) => l == r,
-        (Datum::Symbol(l), Datum::Symbol(r)) => l == r,
         
         // Handle symbol-to-int comparison (e.g., #2 should match key 2)
         (Datum::Symbol(s), Datum::Int(i)) | (Datum::Int(i), Datum::Symbol(s)) => {
