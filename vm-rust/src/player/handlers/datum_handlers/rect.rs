@@ -17,6 +17,10 @@ impl RectUtils {
     let top = rect1.1.max(rect2.1);
     let right = rect1.2.min(rect2.2);
     let bottom = rect1.3.min(rect2.3);
+    // If rectangles don't overlap, return empty rect (0,0,0,0)
+    if left >= right || top >= bottom {
+      return (0, 0, 0, 0);
+    }
     (left, top, right, bottom)
   }
 }
