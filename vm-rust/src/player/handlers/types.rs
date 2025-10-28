@@ -349,19 +349,32 @@ impl TypeHandlers {
   pub fn float(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let value = player.get_datum(&args[0]);
-      let result = if value.is_number() {
-        Ok(Datum::Float(value.to_float()?))
-      } else if value.is_string() {
-        if let Ok(float_value) = value.string_value()?.parse::<f32>() {
-          Ok(Datum::Float(float_value))
-        } else {
-          Ok(value.to_owned())
+      let result = match value {
+        Datum::Float(f) => Datum::Float(*f),
+        Datum::Int(i) => Datum::Float(*i as f32),
+        Datum::SpriteRef(sprite_num) => Datum::Float(*sprite_num as f32),
+        Datum::String(s) => {
+          if let Ok(float_value) = s.parse::<f32>() {
+            Datum::Float(float_value)
+          } else {
+            value.to_owned()
+          }
+        },
+        Datum::StringChunk(_, _, s) => {
+          if let Ok(float_value) = s.parse::<f32>() {
+            Datum::Float(float_value)
+          } else {
+            value.to_owned()
+          }
+        },
+        Datum::Void => Datum::Void,
+        _ => {
+          return Err(ScriptError::new(format!(
+            "Cannot convert datum of type {} to float",
+            value.type_str()
+          )))
         }
-      } else if value.is_void() {
-        Ok(Datum::Void)
-      } else {
-        Err(ScriptError::new(format!("Cannot create float from datum of type {}", value.type_str())))
-      }?;
+      };
       Ok(player.alloc_datum(result))
     })
   }
