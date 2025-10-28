@@ -18,6 +18,11 @@ pub mod bitmap;
 pub mod palette;
 pub mod sound;
 pub mod media;
+pub mod xmedia;
+pub mod cast_info;
+pub mod effect;
+pub mod thum;
+pub mod pfr_renderer;
 
 use std::collections::HashMap;
 
@@ -32,6 +37,7 @@ use self::score_order::SordChunk;
 use self::sound::SoundChunk;
 use self::{bitmap::BitmapChunk, cast::CastChunk, cast_list::CastListChunk, cast_member::CastMemberChunk, lctx::ScriptContextChunk, palette::PaletteChunk, score::ScoreChunk, script::ScriptChunk, script_names::ScriptNamesChunk, text::TextChunk};
 use super::{guid::MoaID, utils::{fourcc_to_string, FOURCC}, rifx::RIFXReaderContext};
+use self::{xmedia::XMediaChunk, cast_info::CastInfoChunk, effect::EffectChunk, thum::ThumChunk};
 
 pub struct CastInfoChunkProps {
 }
@@ -60,6 +66,10 @@ pub enum Chunk {
   Palette(PaletteChunk),
   Sound(SoundChunk),
   Media(MediaChunk),
+  XMedia(XMediaChunk),
+  CstInfo(CastInfoChunk),
+  Effect(EffectChunk),
+  Thum(ThumChunk),
 }
 
 impl Chunk {
@@ -246,6 +256,34 @@ pub fn make_chunk(
       return Ok(
         Chunk::Bitmap(
           BitmapChunk::read(&mut chunk_reader, version)?
+        )
+      )
+    }
+    "XMED" => {
+      return Ok(
+        Chunk::XMedia(
+          XMediaChunk::from_reader(&mut chunk_reader)?
+        )
+      )
+    }
+    "Cinf" => {
+      return Ok(
+        Chunk::CstInfo(
+          CastInfoChunk::from_reader(&mut chunk_reader)?
+        )
+      )
+    }
+    "FXmp" => {
+      return Ok(
+        Chunk::Effect(
+          EffectChunk::from_reader(&mut chunk_reader)?
+        )
+      )
+    }
+    "Thum" => {
+      return Ok(
+        Chunk::Thum(
+          ThumChunk::from_reader(&mut chunk_reader)?
         )
       )
     }

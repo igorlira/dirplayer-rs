@@ -28,7 +28,7 @@ pub struct FontManager {
     pub font_by_id: HashMap<u16, FontRef>, // Map font_id to FontRef
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BitmapFont {
     pub bitmap_ref: BitmapRef,
     pub char_width: u16,
@@ -123,11 +123,65 @@ impl FontManager {
         for cast_lib in &cast_manager.casts {
             for member in cast_lib.members.values() {
                 if let CastMemberType::Font(font_data) = &member.member_type {
-                    let name_matches = font_data.font_info.name == font_name;
+                    // Check BOTH the font_info.name AND the member.name
+                    let name_matches = font_data.font_info.name == font_name || member.name == font_name;
                     let size_matches = size.is_none() || size == Some(font_data.font_info.size);
                     let style_matches = style.is_none() || style == Some(font_data.font_info.style);
 
                     if name_matches && size_matches && style_matches {
+                        web_sys::console::log_1(&format!(
+                            "✅ Found matching font: member.name='{}', font_info.name='{}'",
+                            member.name, font_data.font_info.name
+                        ).into());
+                        
+                        // Check if this font has a bitmap_ref from PFR parsing
+                        if let Some(bitmap_ref) = font_data.bitmap_ref {
+                            web_sys::console::log_1(&format!(
+                                "✅ Found PFR font with bitmap_ref: {}",
+                                bitmap_ref
+                            ).into());
+
+                            let font = BitmapFont {
+                                bitmap_ref,
+                                char_width: font_data.char_width.unwrap_or(8),
+                                char_height: font_data.char_height.unwrap_or(12),
+                                grid_columns: font_data.grid_columns.unwrap_or(16),
+                                grid_rows: font_data.grid_rows.unwrap_or(8),
+                                grid_cell_width: font_data.char_width.unwrap_or(8),
+                                grid_cell_height: font_data.char_height.unwrap_or(12),
+                                first_char_num: 32,
+                                char_offset_x: 0,  // IMPORTANT: No offset for PFR fonts
+                                char_offset_y: 0,  // IMPORTANT: No offset for PFR fonts
+                                font_name: member.name.clone(),
+                                font_size: font_data.font_info.size,
+                                font_style: font_data.font_info.style,
+                            };
+
+                            let rc_font = Rc::new(font);
+                            
+                            // Cache under ALL name variations
+                            web_sys::console::log_1(&format!(
+                                "📦 Caching font as: '{}', '{}', '{}'",
+                                cache_key, font_name, member.name
+                            ).into());
+                            
+                            self.font_cache.insert(cache_key.clone(), Rc::clone(&rc_font));
+                            self.font_cache.insert(font_name.to_string(), Rc::clone(&rc_font));
+                            self.font_cache.insert(member.name.clone(), Rc::clone(&rc_font));
+                            
+                            if font_data.font_info.name != member.name && font_data.font_info.name != font_name {
+                                self.font_cache.insert(font_data.font_info.name.clone(), Rc::clone(&rc_font));
+                            }
+
+                            let font_ref = self.font_counter;
+                            self.font_counter += 1;
+                            self.fonts.insert(font_ref, Rc::clone(&rc_font));
+                            self.font_by_id.insert(font_data.font_info.font_id, font_ref);
+
+                            return Some(rc_font);
+                        }
+
+                        // Fallback to system font with scaling (shouldn't happen for PFR fonts)
                         if let Some(system_font) = self.get_system_font() {
                             let mut new_font = (*system_font).clone();
                             new_font.font_name = font_data.font_info.name.clone();
@@ -294,16 +348,20 @@ pub fn bitmap_font_copy_char(
     palettes: &PaletteMap,
     draw_params: &CopyPixelsParams,
 ) {
+    // Skip if character is below the font's first character
     if char_num < font.first_char_num {
         return;
     }
-    let char_num = char_num - font.first_char_num;
-    let char_x = char_num % font.grid_columns;
-    let char_y = char_num / font.grid_columns;
-
-    let src_x = char_x as i32 * font.grid_cell_width as i32 + font.char_offset_x as i32;
-    let src_y = char_y as i32 * font.grid_cell_height as i32 + font.char_offset_y as i32;
-
+    let char_index = (char_num - font.first_char_num) as usize;
+    
+    // Calculate grid position
+    let char_x = (char_index % font.grid_columns as usize) as u16;
+    let char_y = (char_index / font.grid_columns as usize) as u16;
+    
+    // Calculate source rectangle in the font bitmap
+    let src_x = (char_x * font.grid_cell_width + font.char_offset_x) as i32;
+    let src_y = (char_y * font.grid_cell_height + font.char_offset_y) as i32;
+    
     dest.copy_pixels_with_params(
         palettes,
         font_bitmap,

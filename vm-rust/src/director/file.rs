@@ -31,6 +31,12 @@ use super::chunks::script::ScriptChunk;
 use super::chunks::script_names::ScriptNamesChunk;
 use super::chunks::score_order::SordChunk;
 use super::chunks::media::MediaChunk;
+use super::chunks::xmedia::XMediaChunk;
+use super::chunks::cast_info::CastInfoChunk;
+use super::chunks::effect::EffectChunk;
+use super::chunks::thum::ThumChunk;
+use binary_reader::Endian;
+use super::chunks::sound::SoundChunk;
 
 pub struct DirectorFile {
   pub base_path: Url,
@@ -44,6 +50,10 @@ pub struct DirectorFile {
   pub frame_labels: Option<FrameLabelsChunk>,
   pub score_order: Option<SordChunk>,
   pub media: Option<MediaChunk>,
+  pub xmedia: Option<XMediaChunk>,
+  pub cast_info: Option<CastInfoChunk>,
+  pub effect: Option<EffectChunk>,
+  pub thum: Option<ThumChunk>,
   pub chunk_container: ChunkContainer,
 }
 
@@ -140,6 +150,14 @@ impl DirectorFile {
 
     let media = get_media_chunk(reader, &mut chunk_container, &mut rifx);
 
+    let xmedia = get_xmedia_chunk(reader, &mut chunk_container, &mut rifx);
+
+    let cast_info = get_cast_info_chunk(reader, &mut chunk_container, &mut rifx);
+
+    let effect = get_effect_chunk(reader, &mut chunk_container, &mut rifx);
+
+    let thum = get_thum_chunk(reader, &mut chunk_container, &mut rifx);
+
     return Ok(DirectorFile { 
       base_path, 
       file_name, 
@@ -151,6 +169,10 @@ impl DirectorFile {
       frame_labels,
       score_order,
       media,
+      xmedia,
+      cast_info,
+      effect,
+      thum,
       chunk_container,
     });
   }
@@ -376,6 +398,86 @@ pub fn get_media_chunk(
     return Some(chunk_data);
   } else {
     panic!("Not a media chunk");
+  }
+}
+
+pub fn get_xmedia_chunk( 
+  reader: &mut BinaryReader, 
+  chunk_container: &mut ChunkContainer,
+  rifx: &mut RIFXReaderContext,
+) -> Option<XMediaChunk> {
+  let chunk = get_first_chunk(
+    reader, 
+    chunk_container,
+    rifx,
+    FOURCC("XMED"),
+  );
+  if chunk.is_none() {
+    return None;
+  } else if let Chunk::XMedia(chunk_data) = chunk.unwrap() {
+    return Some(chunk_data);
+  } else {
+    panic!("Not a xmedia chunk");
+  }
+}
+
+pub fn get_thum_chunk( 
+  reader: &mut BinaryReader, 
+  chunk_container: &mut ChunkContainer,
+  rifx: &mut RIFXReaderContext,
+) -> Option<ThumChunk> {
+  let chunk = get_first_chunk(
+    reader, 
+    chunk_container,
+    rifx,
+    FOURCC("Thum"),
+  );
+  if chunk.is_none() {
+    return None;
+  } else if let Chunk::Thum(chunk_data) = chunk.unwrap() {
+    return Some(chunk_data);
+  } else {
+    panic!("Not a Thum chunk");
+  }
+}
+
+pub fn get_cast_info_chunk( 
+  reader: &mut BinaryReader, 
+  chunk_container: &mut ChunkContainer,
+  rifx: &mut RIFXReaderContext,
+) -> Option<CastInfoChunk> {
+  let chunk = get_first_chunk(
+    reader, 
+    chunk_container,
+    rifx,
+    FOURCC("Cinf"),
+  );
+  if chunk.is_none() {
+    return None;
+  } else if let Chunk::CstInfo(chunk_data) = chunk.unwrap() {
+    return Some(chunk_data);
+  } else {
+    panic!("Not a Cinf chunk");
+  }
+}
+
+pub fn get_effect_chunk( 
+  reader: &mut BinaryReader, 
+  chunk_container: &mut ChunkContainer,
+  rifx: &mut RIFXReaderContext,
+) -> Option<EffectChunk> {
+  let chunk = get_first_chunk(
+    reader, 
+    chunk_container,
+    rifx,
+    FOURCC("FXmp"),
+  );
+  if chunk.is_none() {
+    return None;
+  } else if let Chunk::Effect(chunk_data) = chunk.unwrap() {
+    return Some(chunk_data);
+  } else {
+    panic!("Not a FXmp chunk");
   }
 }
 
@@ -807,8 +909,32 @@ fn get_chunk_data(
           if info.compression_id == ZLIB_COMPRESSION_GUID || info.compression_id == ZLIB_COMPRESSION_GUID2 {
             uncomp_buf = Some(reader.read_zlib_bytes(info.len).unwrap());
           } else if info.compression_id == SND_COMPRESSION_GUID {
-            // TODO line 406-409
-            return Err("TODO".to_owned());
+            // Handle Director SND compressed chunk
+            reader.jmp(info.offset + rifx.ils_body_offset);
+            
+            // Read raw bytes for this chunk
+            let snd_bytes = reader.read_bytes(info.len)
+              .map_err(|e| format!("Failed to read SND chunk bytes: {}", e))?
+              .to_vec();
+
+            // Create a temporary BinaryReader over those bytes
+            let mut chunk_reader = BinaryReader::from_vec(&snd_bytes);
+            chunk_reader.endian = Endian::Big;
+
+            // Try to parse into a SoundChunk (your code)
+            match SoundChunk::from_snd_chunk(&mut chunk_reader) {
+              Ok(sound_chunk) => {
+                let wav_bytes = sound_chunk.to_wav(); // convert to usable PCM
+                chunk_container.cached_chunk_views.insert(id, wav_bytes.clone());
+                return Ok(wav_bytes);
+              }
+              Err(e) => {
+                warn!("Failed to parse SND chunk {}: {}", id, e);
+                // fallback: just insert the raw bytes to avoid crash
+                chunk_container.cached_chunk_views.insert(id, snd_bytes.to_vec());
+                return Ok(snd_bytes.to_vec());
+              }
+            }
           }
           if uncomp_buf.is_none() {
             return Err(format!("Chunk ${id}: Could not decompress").to_string());
@@ -819,7 +945,15 @@ fn get_chunk_data(
           }
           chunk_container.cached_chunk_views.insert(id, uncomp_buf.to_vec());
         } else if info.compression_id == FONTMAP_COMPRESSION_GUID {
-          return Err("TODO".to_owned());
+          warn!("FONTMAP compression not implemented — skipping chunk {}", id);
+
+          // Read and store raw bytes instead of panicking
+          let raw = reader.read_bytes(info.len)
+              .map_err(|e| format!("Failed to read FONTMAP chunk {}: {}", id, e))?
+              .to_vec();
+
+          chunk_container.cached_chunk_views.insert(id, raw.clone());
+          return Ok(raw);
         } else {
           if info.compression_id != NULL_COMPRESSION_GUID {
             warn!("Unhandled compression type {}", info.compression_id)

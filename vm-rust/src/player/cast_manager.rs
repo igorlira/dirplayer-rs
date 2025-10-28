@@ -352,7 +352,16 @@ impl CastManager {
         
       for member in cast_lib.members.values() {
         if let CastMemberType::Font(font_data) = &member.member_type {
-          let font_name = &font_data.font_info.name;
+          if !font_data.preview_text.is_empty() {
+              console::log_1(&format!(
+                  "   ⏭️  Skipping font member #{}: '{}' (has preview text, not a real font)",
+                  member.number, member.name
+              ).into());
+              skipped_count += 1;
+              continue;
+          }
+
+          let font_name = &member.name; // Use member.name, not font_info.name
           let font_size = font_data.font_info.size;
           let font_style = font_data.font_info.style;
           let font_id = font_data.font_info.font_id;
@@ -364,7 +373,7 @@ impl CastManager {
           
           // Skip empty font names
           if font_name.is_empty() {
-            web_sys::console::log_1(&format!(
+            console::log_1(&format!(
               "⊘ Skipping font member {} with empty name",
               member.number
             ).into());
@@ -372,68 +381,127 @@ impl CastManager {
             continue;
           }
           
-          web_sys::console::log_1(&format!(
+          console::log_1(&format!(
             "📝 Loading font '{}' from cast (id: {}, size: {}, style: {}, member: {})",
             font_name, font_id, font_size, font_style, member.number
           ).into());
           
-          // Create a BitmapFont from the FontInfo
-          if let Some(system_font) = font_manager.get_system_font() {
-            // Clone the actual BitmapFont, not the Rc
-            let mut font_data = (*system_font).clone(); // clone inner BitmapFont
-
-            // Now you can mutate freely
-            font_data.font_name = font_name.clone();
-            font_data.font_size = font_size;
-            font_data.font_style = font_style;
-
-            let scale_factor = if font_size > 0 {
-                font_size as f32 / 12.0
-            } else {
-                1.0
+          // Check if this is a PFR font with bitmap_ref
+          if let Some(bitmap_ref) = font_data.bitmap_ref {
+            // This is a PFR font - use its actual dimensions!
+            let char_width = font_data.char_width.unwrap_or(8);
+            let char_height = font_data.char_height.unwrap_or(12);
+            let grid_columns = font_data.grid_columns.unwrap_or(16);
+            let grid_rows = font_data.grid_rows.unwrap_or(8);
+            
+            console::log_1(&format!(
+              "      ✅ PFR font: bitmap_ref={}, dims={}x{}, grid={}x{}",
+              bitmap_ref, char_width, char_height, grid_columns, grid_rows
+            ).into());
+            
+            let font = crate::player::font::BitmapFont {
+              bitmap_ref,
+              char_width,
+              char_height,
+              grid_columns,
+              grid_rows,
+              grid_cell_width: char_width,
+              grid_cell_height: char_height,
+              first_char_num: 32,
+              char_offset_x: 0,
+              char_offset_y: 0,
+              font_name: font_name.clone(),
+              font_size,
+              font_style,
             };
-
-            font_data.char_width = (system_font.char_width as f32 * scale_factor).max(1.0).ceil() as u16;
-            font_data.char_height = (system_font.char_height as f32 * scale_factor).max(1.0).ceil() as u16;
-
-            font_data.grid_cell_width = (system_font.grid_cell_width as f32 * scale_factor).max(1.0).ceil() as u16;
-            font_data.grid_cell_height = (system_font.grid_cell_height as f32 * scale_factor).max(1.0).ceil() as u16;
-
-            // Wrap in Rc for storage
-            let rc_font = Rc::new(font_data.clone());
-
+            
+            let rc_font = Rc::new(font);
+            
             // Create cache keys for different lookup scenarios
             let full_key = format!("{}_{}_{}", font_name, font_size, font_style);
             let size_key = format!("{}_{}_0", font_name, font_size);
             let name_key = font_name.clone();
-
+            
             // Store in cache
             font_manager.font_cache.insert(full_key.clone(), Rc::clone(&rc_font));
             font_manager.font_cache.insert(name_key.clone(), Rc::clone(&rc_font));
             font_manager.font_cache.insert(size_key.clone(), Rc::clone(&rc_font));
-
+            
+            // Also cache font_info.name if different
+            if !font_data.font_info.name.is_empty() && font_data.font_info.name != *font_name {
+              font_manager.font_cache.insert(font_data.font_info.name.clone(), Rc::clone(&rc_font));
+            }
+            
             // Store by FontRef
             let font_ref = font_manager.font_counter;
             font_manager.font_counter += 1;
             font_manager.fonts.insert(font_ref, rc_font);
             
-            // Map the font_id to this FontRef (only if font_id > 0)
+            // Map the font_id to this FontRef
             if font_id > 0 {
               font_manager.font_by_id.insert(font_id, font_ref);
             }
             
             console::log_1(&format!(
-              "      ✅ Loaded: ref={}, scale={:.2}x, char_size={}x{}",
-              font_ref, scale_factor, font_data.char_width, font_data.char_height
+              "      ✅ Loaded PFR: ref={}, char_size={}x{}",
+              font_ref, char_width, char_height
             ).into());
             
             loaded_count += 1;
           } else {
-            web_sys::console::log_1(&format!(
-              "⚠️  Cannot load font '{}': system font not available",
-              font_name
-            ).into());
-            skipped_count += 1;
+            // Not a PFR font - use system font template with scaling
+            if let Some(system_font) = font_manager.get_system_font() {
+              let mut font_data_clone = (*system_font).clone();
+              
+              font_data_clone.font_name = font_name.clone();
+              font_data_clone.font_size = font_size;
+              font_data_clone.font_style = font_style;
+              
+              let scale_factor = if font_size > 0 {
+                font_size as f32 / 12.0
+              } else {
+                1.0
+              };
+              
+              font_data_clone.char_width = (system_font.char_width as f32 * scale_factor).max(1.0).ceil() as u16;
+              font_data_clone.char_height = (system_font.char_height as f32 * scale_factor).max(1.0).ceil() as u16;
+              font_data_clone.grid_cell_width = (system_font.grid_cell_width as f32 * scale_factor).max(1.0).ceil() as u16;
+              font_data_clone.grid_cell_height = (system_font.grid_cell_height as f32 * scale_factor).max(1.0).ceil() as u16;
+              
+              let rc_font = Rc::new(font_data_clone.clone());
+              
+              // Create cache keys
+              let full_key = format!("{}_{}_{}", font_name, font_size, font_style);
+              let size_key = format!("{}_{}_0", font_name, font_size);
+              let name_key = font_name.clone();
+              
+              // Store in cache
+              font_manager.font_cache.insert(full_key, Rc::clone(&rc_font));
+              font_manager.font_cache.insert(name_key, Rc::clone(&rc_font));
+              font_manager.font_cache.insert(size_key, Rc::clone(&rc_font));
+              
+              // Store by FontRef
+              let font_ref = font_manager.font_counter;
+              font_manager.font_counter += 1;
+              font_manager.fonts.insert(font_ref, rc_font);
+              
+              if font_id > 0 {
+                font_manager.font_by_id.insert(font_id, font_ref);
+              }
+              
+              console::log_1(&format!(
+                "      ✅ Loaded (scaled): ref={}, scale={:.2}x, char_size={}x{}",
+                font_ref, scale_factor, font_data_clone.char_width, font_data_clone.char_height
+              ).into());
+              
+              loaded_count += 1;
+            } else {
+              console::log_1(&format!(
+                "⚠️  Cannot load font '{}': system font not available",
+                font_name
+              ).into());
+              skipped_count += 1;
+            }
           }
         }
       }
@@ -453,18 +521,11 @@ impl CastManager {
     console::log_1(&"   Cached fonts:".into());
     for (key, font) in &font_manager.font_cache {
       console::log_1(&format!(
-        "      '{}' -> {} ({}pt, style={})",
-        key, font.font_name, font.font_size, font.font_style
+        "      '{}' -> {} ({}pt, style={}, {}x{})",
+        key, font.font_name, font.font_size, font.font_style,
+        font.char_width, font.char_height
       ).into());
     }
-    
-    web_sys::console::log_1(&format!(
-      "🎨 Font loading complete: {} loaded, {} skipped | {} in cache, {} font_id mappings",
-      loaded_count,
-      skipped_count,
-      font_manager.font_cache.len(),
-      font_manager.font_by_id.len()
-    ).into());
   }
 }
 

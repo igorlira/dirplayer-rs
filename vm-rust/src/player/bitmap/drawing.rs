@@ -600,7 +600,7 @@ impl Bitmap {
         top_spacing: i16,
     ) {
         let mut x = loc_h;
-        let mut y = loc_v;
+        let mut y = loc_v + top_spacing as i32;
         let line_height = font.char_height;
 
         let mut params = CopyPixelsParams::default(&self);
@@ -610,11 +610,15 @@ impl Bitmap {
         for char_num in text.chars() {
             if char_num == '\r' || char_num == '\n' {
                 x = loc_h;
-                y += line_height as i32 + line_spacing as i32 + 1;
+                y += line_height as i32 + line_spacing as i32;
                 continue;
             }
+
             bitmap_font_copy_char(font, font_bitmap, char_num as u8, self, x, y, &palettes, &params);
-            x += font.char_width as i32 + 1;
+            
+            // Use the font's actual char_width, not char_width + 1
+            // PFR fonts already have proper spacing built in
+            x += font.char_width as i32;
         }
     }
 
