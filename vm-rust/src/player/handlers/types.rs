@@ -42,13 +42,26 @@ impl TypeUtils {
 
   pub fn get_sub_prop(datum_ref: &DatumRef, prop_key_ref: &DatumRef, player: &mut DirPlayer) -> Result<DatumRef, ScriptError> {
     let datum = player.get_datum(datum_ref);
+    let prop_key = player.get_datum(prop_key_ref);
+
     let formatted_key = format_datum(prop_key_ref, player);
     let result = match datum {
       Datum::PropList(prop_list, ..) => {
-        PropListUtils::get_prop(prop_list, prop_key_ref, &player.allocator, false, formatted_key)?
+        PropListUtils::get_prop(prop_list, prop_key_ref, &player.allocator, false, formatted_key.clone())?
       },
+      Datum::IntRect((left, top, right, bottom)) => {
+        let index = prop_key.int_value()?;
+        let value = match index {
+            1 => *left,
+            2 => *top,
+            3 => *right,
+            4 => *bottom,
+            _ => return Err(ScriptError::new(format!("Rect index {} out of bounds (must be 1-4)", index)))
+        };
+        player.alloc_datum(Datum::Int(value))
+      }
       Datum::List(_, list, _) => {
-        let position = player.get_datum(prop_key_ref).int_value()?;
+        let position = prop_key.int_value()?;
         let index = position - 1;
         if index < 0 || index >= list.len() as i32 {
           return Err(ScriptError::new(format!("Index out of bounds: {index}")));
@@ -56,7 +69,6 @@ impl TypeUtils {
         list[index as usize].clone()
       }
       Datum::IntPoint((x, y)) => {
-        let prop_key = player.get_datum(prop_key_ref);
         player.alloc_datum(match prop_key {
           Datum::Int(position) => {
             match position {
@@ -68,7 +80,48 @@ impl TypeUtils {
           _ => return Err(ScriptError::new(format!("Invalid sub-prop type for point: {}", prop_key.type_str()))),
         })
       }
-      _ => return Err(ScriptError::new(format!("Cannot get sub-prop `{}` from prop of type {}", formatted_key, datum.type_str()))),
+      Datum::ScriptInstanceRef(instance_ref) => {       
+        // Numeric index
+        if let Ok(index) = prop_key.int_value() {
+          let instance = player.allocator.get_script_instance(instance_ref);
+          let mut property_names: Vec<String> = instance.properties.keys().cloned().collect();
+          property_names.sort();
+          let zero_based_index = (index - 1) as usize;
+          
+          if zero_based_index < property_names.len() {
+            let prop_name = &property_names[zero_based_index];
+            if let Some(prop_ref) = instance.properties.get(prop_name) {
+              return Ok(prop_ref.clone());
+            }
+          }
+          return Ok(DatumRef::Void);
+        }
+        
+        // String key
+        if let Ok(prop_name) = prop_key.string_value() {
+          let instance = player.allocator.get_script_instance(instance_ref);
+          if let Some(prop_ref) = instance.properties.get(&prop_name) {
+            return Ok(prop_ref.clone());
+          }
+        }
+        
+        // Symbol key
+        if let Datum::Symbol(prop_name) = prop_key {
+          let instance = player.allocator.get_script_instance(instance_ref);
+          if let Some(prop_ref) = instance.properties.get(prop_name) {
+            return Ok(prop_ref.clone());
+          }
+        }
+        
+        return Ok(DatumRef::Void);
+      }
+      _ => {
+        web_sys::console::log_1(&format!(
+          "  ❌ Cannot get sub-prop '{}' from type {}",
+          formatted_key, datum.type_str()
+        ).into());
+        return Err(ScriptError::new(format!("Cannot get sub-prop `{}` from prop of type {}", formatted_key, datum.type_str())))
+      },
     };
     Ok(result)
   }
