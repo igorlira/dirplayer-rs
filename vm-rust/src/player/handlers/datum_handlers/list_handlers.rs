@@ -34,6 +34,12 @@ impl ListDatumUtils {
 }
 
 impl ListDatumHandlers {
+  pub fn get_prop(player: &mut DirPlayer, datum_ref: &DatumRef, prop_name: &String) -> Result<DatumRef, ScriptError> {
+    let list_vec = player.get_datum(datum_ref).to_list()?;
+    let result = ListDatumUtils::get_prop(&list_vec, prop_name, &player.allocator)?;
+    Ok(player.alloc_datum(result))
+  }
+
   pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let (list_type, list_vec, _) = player.get_datum(datum).to_list_tuple()?;
