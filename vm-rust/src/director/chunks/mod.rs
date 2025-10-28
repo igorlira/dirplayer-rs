@@ -30,6 +30,7 @@ use score::FrameLabelsChunk;
 use self::media::MediaChunk;
 use self::score_order::SordChunk;
 use self::sound::SoundChunk;
+use self::{bitmap::BitmapChunk, cast::CastChunk, cast_list::CastListChunk, cast_member::CastMemberChunk, lctx::ScriptContextChunk, palette::PaletteChunk, score::ScoreChunk, script::ScriptChunk, script_names::ScriptNamesChunk, text::TextChunk};
 use super::{guid::MoaID, utils::{fourcc_to_string, FOURCC}, rifx::RIFXReaderContext};
 
 pub struct CastInfoChunkProps {
@@ -127,7 +128,7 @@ pub fn is_chunk_writable(chunk_type: Chunk) -> bool {
 pub fn make_chunk(
   endian: Endian,
   rifx: &mut RIFXReaderContext,
-  fourcc: u32, 
+  fourcc: u32,
   view: &Vec<u8>,
 ) -> Result<Chunk, String> {
   let version = rifx.dir_version;
@@ -138,7 +139,7 @@ pub fn make_chunk(
     "imap" => {
       return Ok(
         Chunk::InitialMap(
-          InitialMapChunk::from_reader(&mut chunk_reader, version).unwrap()
+          InitialMapChunk::from_reader(&mut chunk_reader, version)?
         )
       );
     }
@@ -148,21 +149,21 @@ pub fn make_chunk(
     "CAS*" => {
       return Ok(
         Chunk::Cast(
-          CastChunk::from_reader(&mut chunk_reader, version).unwrap()
+          CastChunk::from_reader(&mut chunk_reader, version)?
         )
       );
     }
     "CASt" => {
       return Ok(
         Chunk::CastMember(
-          CastMemberChunk::from_reader(&mut chunk_reader, version).unwrap()
+          CastMemberChunk::from_reader(&mut chunk_reader, version)?
         )
       );
     }
     "KEY*" => {
       return Ok(
         Chunk::KeyTable(
-          KeyTableChunk::from_reader(&mut chunk_reader, version).unwrap()
+          KeyTableChunk::from_reader(&mut chunk_reader, version)?
         )
       );
     }
@@ -170,58 +171,53 @@ pub fn make_chunk(
       rifx.lctx_capital_x = fourcc == FOURCC("LctX");
       return Ok(
         Chunk::ScriptContext(
-          ScriptContextChunk::from_reader(&mut chunk_reader, version).unwrap()
+          ScriptContextChunk::from_reader(&mut chunk_reader, version)?
         )
       );
     }
     "Lnam" => {
       return Ok(
         Chunk::ScriptNames(
-          ScriptNamesChunk::from_reader(&mut chunk_reader, version).unwrap()
+          ScriptNamesChunk::from_reader(&mut chunk_reader, version)?
         )
       );
     }
     "Lscr" => {
       return Ok(
         Chunk::Script(
-          ScriptChunk::from_reader(&mut chunk_reader, version, rifx.lctx_capital_x).unwrap()
+          ScriptChunk::from_reader(&mut chunk_reader, version, rifx.lctx_capital_x)?
         )
       );
     }
-    // "VWCF" => {
-    //   //res = ConfigChunk(dir: this);
-    // }
-    "DRCF" => {
+    "DRCF" | "VWCF" => {
       return Ok(
         Chunk::Config(
-          ConfigChunk::from_reader(&mut chunk_reader, version, endian).unwrap()
+          ConfigChunk::from_reader(&mut chunk_reader, version, endian)?
         )
       );
     }
     "MCsL" => {
       return Ok(
         Chunk::CastList(
-          CastListChunk::from_reader(&mut chunk_reader, version, endian).unwrap()
+          CastListChunk::from_reader(&mut chunk_reader, version, endian)?
         )
       )
       //res = CastListChunk(dir: this);
     }
-    "VWSC" => {
+    "VWSC" | "SCVW" => {
       return Ok(
         Chunk::Score(
           ScoreChunk::read(&mut chunk_reader, version).unwrap()
         )
       )
     },
-    "SCVW" => {
+    "VWLB" => {
       return Ok(
-        Chunk::Score(
-          ScoreChunk::read(&mut chunk_reader, version).unwrap()
+        Chunk::FrameLabels(
+          FrameLabelsChunk::from_reader(&mut chunk_reader, version)?
         )
       )
     }
-    "VWLB" => {
-      return Ok(
     "ediM" => {
       return Ok(Chunk::Media(
         MediaChunk::from_reader(&mut chunk_reader)?
@@ -242,7 +238,7 @@ pub fn make_chunk(
     "STXT" => {
       return Ok(
         Chunk::Text(
-          TextChunk::read(&mut chunk_reader).unwrap()
+          TextChunk::read(&mut chunk_reader)?
         )
       )
     }
@@ -253,7 +249,7 @@ pub fn make_chunk(
         )
       )
     }
-    "CLUT" => Ok(Chunk::Palette(palette::PaletteChunk::from_reader(&mut chunk_reader, version).unwrap())),
+    "CLUT" => Ok(Chunk::Palette(palette::PaletteChunk::from_reader(&mut chunk_reader, version)?)),
     _ => {
       return Err(format_args!("Could not deserialize '{}' chunk", fourcc_to_string(fourcc)).to_string());
     }
