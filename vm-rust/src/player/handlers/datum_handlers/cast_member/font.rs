@@ -1,14 +1,14 @@
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType},
     player::{
-        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, font::{get_text_index_at_pos, BitmapFont, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, DatumRef, DirPlayer, ScriptError
+        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, bitmap::drawing::CopyPixelsParams, bitmap::bitmap, bitmap::mask::BitmapMask, bitmap::palette_map::PaletteMap, cast_lib::CastMemberRef, font::{bitmap_font_copy_char, get_text_index_at_pos, BitmapFont, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, DatumRef, DirPlayer, ScriptError        
     },
 };
 
-use crate::player::bitmap::palette_map::PaletteMap;
 use crate::player::ColorRef;
 use std::convert::TryInto;
 use crate::player::cast_member::CastMemberType;
+use std::borrow::Borrow;
 
 // Simple HTML parser without external dependencies
 #[derive(Clone, Debug)]
@@ -300,6 +300,7 @@ impl FontMemberHandlers {
         fixed_line_space: u16,
         start_x: i32,
         start_y: i32,
+        params: CopyPixelsParams,
     ) -> Result<(), ScriptError> {
         let mut x = start_x;
         let mut y = start_y;
@@ -311,7 +312,7 @@ impl FontMemberHandlers {
 
         for span in spans {
             for ch in span.text.chars() {
-                if ch == '\n' {
+                if ch == '\n' || ch == '\r' {
                     x = start_x;
                     y += line_height;
                     continue;
@@ -321,22 +322,26 @@ impl FontMemberHandlers {
                     continue;
                 }
 
+                // Determine the color for this span
                 let fg_color = if let Some(rgb) = span.style.color {
                     let r = ((rgb >> 16) & 0xFF) as u8;
                     let g = ((rgb >> 8) & 0xFF) as u8;
                     let b = (rgb & 0xFF) as u8;
                     ColorRef::Rgb(r, g, b)
                 } else {
-                    ColorRef::PaletteIndex(255)
+                    // Use sprite's foreground color if no HTML color specified
+                    params.color.clone()
                 };
 
+                // For background, only set if HTML explicitly specifies it
+                // Otherwise use sprite's bg_color (which for matte ink should be transparent)
                 let bg_color = if let Some(rgb) = span.style.bg_color {
                     let r = ((rgb >> 16) & 0xFF) as u8;
                     let g = ((rgb >> 8) & 0xFF) as u8;
                     let b = (rgb & 0xFF) as u8;
                     ColorRef::Rgb(r, g, b)
                 } else {
-                    bitmap.get_bg_color_ref()
+                    params.bg_color.clone()
                 };
 
                 if x >= bitmap.width as i32 {
@@ -348,17 +353,16 @@ impl FontMemberHandlers {
                     break;
                 }
 
-                bitmap.draw_text(
-                    &ch.to_string(),
-                    &font,
+                // Draw single character using bitmap_font_copy_char
+                bitmap_font_copy_char(
+                    font,
                     font_bitmap,
+                    ch as u8,
+                    bitmap,
                     x,
                     y,
-                    36,
-                    bg_color,
                     palettes,
-                    fixed_line_space,
-                    0,
+                    &params,
                 );
 
                 x += font.char_width as i32;
@@ -506,19 +510,24 @@ impl FontMemberHandlers {
                         Self::color_ref_to_u8(bitmap.get_bg_color_ref())
                     };
                     
-                    // Call your existing draw_text but with color override
-                    // This assumes your draw_text can accept a color parameter
-                    // If not, you may need to modify your draw_text signature
-                    bitmap.draw_text_with_color(
+                    let params = CopyPixelsParams {
+                        blend: 100,
+                        ink: 36,
+                        color: ColorRef::PaletteIndex(color_idx),
+                        bg_color: bitmap.get_bg_color_ref(),
+                        mask_image: None,
+                    };
+
+                    bitmap.draw_text(
                         line,
                         &font,
                         font_bitmap,
                         x,
                         y,
-                        ColorRef::PaletteIndex(color_idx), // foreground color
-                        &palettes,                         // palette map
-                        36,                                // ink mode
-                        top_spacing,                       // top spacing
+                        params,
+                        &palettes,
+                        line_height as u16,
+                        top_spacing,
                     );
                     
                     x += line.len() as i32 * 8; // Rough estimate
@@ -639,9 +648,29 @@ impl FontMemberHandlers {
                                     }
                                 }
 
-                                let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref)
-                                    .ok_or_else(|| ScriptError::new("Font bitmap not found".to_string()))?;
+                                let font_bitmap: &mut bitmap::Bitmap = player.bitmap_manager
+                                    .get_bitmap_mut(font.bitmap_ref)
+                                    .unwrap();
+
                                 let palettes = player.movie.cast_manager.palettes();
+
+                                if font_bitmap.matte.is_none() {
+                                    font_bitmap.create_matte_text(&palettes);
+                                }
+                                let mask = Some(font_bitmap.matte.as_ref().unwrap());
+
+                                let mut params = CopyPixelsParams {
+                                    blend: 100,
+                                    ink: 8,
+                                    color: font_bitmap.get_fg_color_ref(),
+                                    bg_color: font_bitmap.get_bg_color_ref(),
+                                    mask_image: None,
+                                };
+
+                                if let Some(mask) = mask {
+                                    let mask_bitmap: &BitmapMask = mask.borrow();
+                                    params.mask_image = Some(mask_bitmap);
+                                }
 
                                 if let Some(spans) = html_spans {
                                     FontMemberHandlers::render_html_text_to_bitmap(
@@ -653,6 +682,7 @@ impl FontMemberHandlers {
                                         fixed_line_space as u16,
                                         0,
                                         top_spacing as i32,
+                                        params,
                                     )?;
                                 } else {
                                     bitmap.draw_text(
@@ -661,8 +691,7 @@ impl FontMemberHandlers {
                                         &font_bitmap,
                                         0,
                                         top_spacing as i32,
-                                        36,
-                                        ColorRef::PaletteIndex(0),
+                                        params,
                                         &palettes,
                                         fixed_line_space,
                                         top_spacing,

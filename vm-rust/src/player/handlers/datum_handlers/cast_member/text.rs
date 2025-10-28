@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType},
     player::{
-        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, font::{get_text_index_at_pos, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, DatumRef, DirPlayer, ScriptError
+        bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, font::{get_text_index_at_pos, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, DatumRef, DirPlayer, ScriptError
     },
 };
 
@@ -124,15 +124,21 @@ impl TextMemberHandlers {
                 let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
                 let palettes = player.movie.cast_manager.palettes();
 
-                let ink = 36;
+                let params = CopyPixelsParams {
+                    blend: 100,
+                    ink: 36,
+                    color: bitmap.get_fg_color_ref(),
+                    bg_color: bitmap.get_bg_color_ref(),
+                    mask_image: None,
+                };
+                
                 bitmap.draw_text(
                     &text_data.text,
                     &font,
                     font_bitmap,
                     0,
                     text_data.top_spacing as i32,
-                    ink,
-                    bitmap.get_bg_color_ref(),
+                    params,
                     &palettes,
                     text_data.fixed_line_space,
                     text_data.top_spacing,

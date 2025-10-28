@@ -7,7 +7,7 @@ use wasm_bindgen::{prelude::*, Clamped};
 use web_sys::console;
 
 use crate::{console_warn, js_api::JsApi, player::{
-    bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, manager::BitmapManager, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, movie::Movie, reserve_player_ref, score::{get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef}, sprite::{CursorRef, Sprite}, DirPlayer, PLAYER_OPT
+    bitmap::{bitmap::{self, get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, manager::BitmapManager, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, movie::Movie, reserve_player_ref, score::{get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef}, sprite::{CursorRef, Sprite}, DirPlayer, PLAYER_OPT
 }, utils::log_i};
 use crate::js_api::{safe_js_string};
 
@@ -212,6 +212,14 @@ pub fn render_score_to_bitmap(
                 
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+
+                    let params = CopyPixelsParams {
+                        blend: sprite.blend as i32,
+                        ink: sprite.ink as u32,
+                        color: sprite.color.clone(),
+                        bg_color: sprite.bg_color.clone(),
+                        mask_image: None,
+                    };
                     
                     bitmap.draw_text(
                         &field_member.text,
@@ -219,8 +227,7 @@ pub fn render_score_to_bitmap(
                         font_bitmap,
                         sprite.loc_h,
                         sprite.loc_v,
-                        sprite.ink as u32,
-                        sprite.bg_color.clone(),
+                        params,
                         &palettes,
                         field_member.fixed_line_space,
                         field_member.top_spacing
@@ -256,7 +263,31 @@ pub fn render_score_to_bitmap(
                     continue;
                 };
                 
-                let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+                let font_bitmap: &mut bitmap::Bitmap = player.bitmap_manager
+                    .get_bitmap_mut(font.bitmap_ref)
+                    .unwrap();
+                
+                let mask = if should_matte_sprite(sprite.ink as u32) {
+                        if font_bitmap.matte.is_none() {
+                        font_bitmap.create_matte_text(&palettes);
+                    }
+                    Some(font_bitmap.matte.as_ref().unwrap())
+                } else {
+                    None
+                };
+
+                let mut params = CopyPixelsParams {
+                    blend: sprite.blend as i32,
+                    ink: sprite.ink as u32,
+                    color: sprite.color.clone(),
+                    bg_color: sprite.bg_color.clone(),
+                    mask_image: None,
+                };
+
+                if let Some(mask) = mask {
+                    let mask_bitmap: &BitmapMask = mask.borrow();
+                    params.mask_image = Some(mask_bitmap);
+                }
                 
                 if !font_member.preview_html_spans.is_empty() {
                     if let Err(e) = FontMemberHandlers::render_html_text_to_bitmap(
@@ -268,6 +299,7 @@ pub fn render_score_to_bitmap(
                         font_member.fixed_line_space,
                         sprite.loc_h as i32,
                         sprite.loc_v as i32 + font_member.top_spacing as i32,
+                        params,
                     ) {
                         console_warn!("HTML render error: {:?}", e);
                     }
@@ -278,11 +310,10 @@ pub fn render_score_to_bitmap(
                         font_bitmap,
                         sprite.loc_h,
                         sprite.loc_v,
-                        sprite.ink as u32,
-                        sprite.bg_color.clone(),
+                        params,
                         &palettes,
                         font.char_height,
-                        0,
+                        font_member.top_spacing,
                     );
                 }
             }
@@ -299,6 +330,15 @@ pub fn render_score_to_bitmap(
                 
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+
+                    let params = CopyPixelsParams {
+                        blend: sprite.blend as i32,
+                        ink: sprite.ink as u32,
+                        color: sprite.color.clone(),
+                        bg_color: sprite.bg_color.clone(),
+                        mask_image: None,
+                    };
+
                     
                     bitmap.draw_text(
                         &text_member.text,
@@ -306,8 +346,7 @@ pub fn render_score_to_bitmap(
                         font_bitmap,
                         sprite.loc_h,
                         sprite.loc_v,
-                        sprite.ink as u32,
-                        sprite.bg_color.clone(),
+                        params,
                         &palettes,
                         text_member.fixed_line_space,
                         text_member.top_spacing,
@@ -615,14 +654,22 @@ impl PlayerCanvasRenderer {
         if let Some(font) = player.font_manager.get_system_font() {
             let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
             let txt = format!("Datum count: {}\nScript count: {}", player.allocator.datum_count(), player.allocator.script_instance_count());
+
+            let params = CopyPixelsParams {
+                blend: 100,
+                ink: 36,
+                color: bitmap.get_fg_color_ref(),
+                bg_color: bitmap.get_bg_color_ref(),
+                mask_image: None,
+            };
+
             bitmap.draw_text(
                 txt.as_str(),
                 &font, 
                 font_bitmap, 
                 0, 
                 0, 
-                36, 
-                bitmap.get_bg_color_ref(),
+                params,
                 &player.movie.cast_manager.palettes(), 
                 0, 
                 0

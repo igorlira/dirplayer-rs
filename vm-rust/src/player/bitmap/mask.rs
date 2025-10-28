@@ -77,6 +77,23 @@ impl Bitmap {
       mask
     }
 
+    pub fn create_matte_text(&mut self, palettes: &PaletteMap) {
+        let bg_color = &self.get_bg_color_ref();
+        
+        // Create matte: true for content (opaque), false for background (transparent)
+        // This automatically handles both exterior background AND interior holes
+        let mut matte = BitmapMask::new(self.width, self.height, false);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let pixel = self.get_pixel_color_ref(x, y);
+                // Opaque if pixel is NOT background color
+                matte.set_bit(x, y, pixel != *bg_color);
+            }
+        }
+        
+        self.matte = Some(Arc::new(matte));
+    }
+
     pub fn create_matte(&mut self, palettes: &PaletteMap) {
       let bg_color = &self.get_bg_color_ref();
       let mut mask = self.get_mask(palettes, bg_color);

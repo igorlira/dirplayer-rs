@@ -3,6 +3,7 @@ use crate::{
     player::{
         cast_lib::CastMemberRef, font::{ measure_text, BitmapFont }, ColorRef,
         bitmap::bitmap::{ Bitmap, PaletteRef, BuiltInPalette },
+        bitmap::drawing::CopyPixelsParams,
         handlers::datum_handlers::{
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
         },
@@ -145,14 +146,21 @@ impl FieldMemberHandlers {
                             .ok_or_else(|| ScriptError::new("Font bitmap not found".to_string()))?;
                         let palettes = player.movie.cast_manager.palettes();
 
+                        let params = CopyPixelsParams {
+                            blend: 100,
+                            ink: 36,
+                            color: bitmap.get_fg_color_ref(),
+                            bg_color: ColorRef::PaletteIndex(0),
+                            mask_image: None,
+                        };
+
                         bitmap.draw_text(
                             &text_clone,
                             &font,
                             &font_bitmap,
                             0,
                             top_spacing as i32,
-                            36,
-                            ColorRef::PaletteIndex(0),
+                            params,
                             &palettes,
                             fixed_line_space,
                             top_spacing,

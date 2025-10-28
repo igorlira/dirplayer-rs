@@ -587,33 +587,6 @@ impl Bitmap {
         self.copy_pixels(palettes, bitmap, dst_rect, src_rect, &params);
     }
 
-    pub fn draw_text_with_color(
-        &mut self,
-        text: &str,
-        font: &BitmapFont,
-        font_bitmap: &Bitmap,
-        x: i32,
-        y: i32,
-        fg_color: ColorRef,
-        palettes: &PaletteMap,
-        line_spacing: u16,
-        top_spacing: i16,
-    ) {
-        // Use `draw_text`, passing `fg_color` as the ink (or bg?) depending on your system
-        self.draw_text(
-            text,
-            &font,
-            font_bitmap,
-            x,
-            y,
-            0,          // ink mode 0 = copy, or choose the ink you want
-            fg_color,   // this sets the foreground
-            palettes,
-            line_spacing,
-            top_spacing,
-        );
-    }
-
     pub fn draw_text(
         &mut self,
         text: &str,
@@ -621,8 +594,7 @@ impl Bitmap {
         font_bitmap: &Bitmap,
         loc_h: i32,
         loc_v: i32,
-        ink: u32,
-        bg_color: ColorRef,
+        params: CopyPixelsParams,
         palettes: &PaletteMap,
         line_spacing: u16,
         top_spacing: i16,
@@ -630,10 +602,6 @@ impl Bitmap {
         let mut x = loc_h;
         let mut y = loc_v + top_spacing as i32;
         let line_height = font.char_height;
-
-        let mut params = CopyPixelsParams::default(&self);
-        params.ink = ink;
-        params.bg_color = bg_color;
 
         for char_num in text.chars() {
             if char_num == '\r' || char_num == '\n' {
