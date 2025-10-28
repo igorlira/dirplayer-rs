@@ -468,18 +468,27 @@ impl CastManager {
   }
 }
 
-fn normalize_cast_lib_path(base_path: &Option<Url>, file_path: &String, ) -> Option<String> {
-  if file_path.is_empty() {
-    return None;
-  }
-  let slash_normalized = file_path.replace("\\", "/");
-  let file_base_name = slash_normalized.split("/").last().unwrap();
-  let file_base_name_without_ext_split = file_base_name.split(".").collect_vec();
-  let file_base_name_without_ext = &file_base_name_without_ext_split[0..(file_base_name_without_ext_split.len() - 1)].join(".");
-  let cast_file_name = format!("{file_base_name_without_ext}.cct");
+fn normalize_cast_lib_path(base_path: &Option<Url>, file_path: &str) -> Option<String> {
+  if file_path.is_empty() { return None; }
 
-  match base_path {
-    Some(base_path) => { Some(base_path.join(&cast_file_name).unwrap().to_string()) }
-    None => { Some(cast_file_name.to_owned()) }
-  }
+  // bind temporary String to a variable so slices can borrow from it
+  let normalized = file_path.replace("\\", "/");
+
+  // split on both slashes and colons
+  let parts: Vec<&str> = normalized.split(&['/', ':'][..]).collect();
+  let file_base_name = parts.last().unwrap_or(&"");
+
+  let cast_file_name = if file_base_name.contains('.') {
+    let dot_parts: Vec<&str> = file_base_name.split('.').collect();
+    format!("{}.cct", dot_parts[..dot_parts.len()-1].join("."))
+  } else {
+    format!("{}.cct", file_base_name)
+  };
+
+  let result = match base_path {
+    Some(base_path) => base_path.join(&cast_file_name).unwrap().to_string(),
+    None => cast_file_name,
+  };
+
+  Some(ascii_safe(&result))
 }
