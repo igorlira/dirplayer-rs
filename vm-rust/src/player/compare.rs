@@ -18,20 +18,22 @@ pub fn datum_equals(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> 
     }
     (Datum::Float(left), Datum::Int(right)) => Ok(*left == (*right as f32)),
     (Datum::Float(left), Datum::Float(right)) => Ok(*left == *right),
-    (Datum::String(left), Datum::String(right)) => Ok(left == right),
-    (Datum::String(left), Datum::StringChunk(..)) => {
-      let right = right.string_value()?;
-      Ok(left.eq(&right))
-    },
+    // String equality: case-insensitive (like Director `=` operator)
+    (Datum::String(l), Datum::String(r)) => Ok(l.eq_ignore_ascii_case(r)),
+    // StringChunk comparison for equality: case-insensitive too
     (Datum::StringChunk(..), Datum::String(right)) => {
-      let left = left.string_value()?;
-      Ok(left.eq(right))
-    },
+      let left_val = left.string_value()?;
+      Ok(left_val.eq_ignore_ascii_case(right))
+    }
+    (Datum::String(left), Datum::StringChunk(..)) => {
+      let right_val = right.string_value()?;
+      Ok(left.eq_ignore_ascii_case(&right_val))
+    }
     (Datum::StringChunk(..), Datum::StringChunk(..)) => {
-      let left = left.string_value()?;
-      let right = right.string_value()?;
-      Ok(left == right)
-    },
+      let left_val = left.string_value()?;
+      let right_val = right.string_value()?;
+      Ok(left_val.eq_ignore_ascii_case(&right_val))
+    }
     (Datum::ScriptInstanceRef(left), Datum::ScriptInstanceRef(right)) => Ok(**left == **right),
     (Datum::Symbol(left), Datum::Symbol(right)) => Ok(left.eq_ignore_ascii_case(right)),
     (Datum::Void, Datum::Void) => Ok(true),
