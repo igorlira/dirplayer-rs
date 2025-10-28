@@ -4,6 +4,7 @@ use binary_reader::BinaryReader;
 use log::warn;
 use num::ToPrimitive;
 use num_derive::{FromPrimitive, ToPrimitive};
+use std::convert::TryInto;
 
 use crate::{
     director::enums::BitmapInfo,
@@ -15,7 +16,7 @@ use crate::{
 };
 use num::FromPrimitive;
 
-use super::{mask::BitmapMask, palette::{SYSTEM_MAC_PALETTE, SYSTEM_WIN_PALETTE, WEB_216_PALETTE}, palette_map::PaletteMap};
+use super::{mask::BitmapMask, palette::{SYSTEM_MAC_PALETTE, MAC_16_PALETTE, SYSTEM_WIN_PALETTE, WIN_16_PALETTE, GRAYSCALE_PALETTE, GRAYSCALE_4_PALETTE, GRAYSCALE_16_PALETTE, RAINBOW_PALETTE, RAINBOW16_PALETTE, PASTELS_PALETTE, PASTELS16_PALETTE, VIVID_PALETTE, VIVID16_PALETTE, NTSC_PALETTE, NTSC16_PALETTE, METALLIC_PALETTE, METALLIC16_PALETTE, WEB_216_PALETTE}, palette_map::PaletteMap};
 
 #[derive(Clone)]
 pub enum PaletteRef {
@@ -96,28 +97,42 @@ pub fn get_system_default_palette() -> BuiltInPalette {
 pub struct Bitmap {
     pub width: u16,
     pub height: u16,
-    pub bit_depth: u8,
+    pub bit_depth: u8, // Current storage format
+    pub original_bit_depth: u8, // Original format (for palette selection)
     pub data: Vec<u8>, // RGBA
     pub palette_ref: PaletteRef,
     pub matte: Option<Arc<BitmapMask>>,
 }
 
 impl Bitmap {
-    pub fn new(width: u16, height: u16, bit_depth: u8, palette_ref: PaletteRef) -> Self {
+    pub fn new(width: u16, height: u16, bit_depth: u8, original_bit_depth: u8, alpha_depth: u8, palette_ref: PaletteRef) -> Self {
         let bytes_per_pixel = bit_depth as usize / 8;
         let initial_color = match bit_depth {
-            16 => 255,
-            32 => 255,
+            16 | 32 => 255,
             _ => 0,
         };
-        let data = vec![initial_color; width as usize * height as usize * bytes_per_pixel as usize];
+
+        let data = vec![initial_color; width as usize * height as usize * bytes_per_pixel];
+
+        // For 32-bit images, always create a matte OR handle alpha in the data
+        let matte = if alpha_depth > 0 || bit_depth == 32 {
+            Some(Arc::new(BitmapMask::new(
+                width.try_into().unwrap(),
+                height.try_into().unwrap(),
+                true, // fill mask if alpha exists
+            )))
+        } else {
+            None
+        };
+
         Self {
             width,
             height,
             bit_depth,
+            original_bit_depth,
             data,
             palette_ref,
-            matte: None,
+            matte,
         }
     }
 }
@@ -180,6 +195,7 @@ fn decode_bitmap_1bit(
 
     Ok(Bitmap {
         bit_depth: 8,
+        original_bit_depth: 8,
         width,
         height,
         data: result,
@@ -237,6 +253,7 @@ fn decode_bitmap_2bit(
 
     Ok(Bitmap {
         bit_depth: 8,
+        original_bit_depth: 8,
         width,
         height,
         data: result_bmp,
@@ -253,6 +270,7 @@ fn decode_bitmap_4bit(
     palette_ref: PaletteRef,
     data: &[u8],
 ) -> Result<Bitmap, String> {
+    // Decode 4-bit data to 8-bit indexed (each nibble becomes a byte with value 0-15)
     let mut decoded_data = Vec::new();
 
     for i in 0..data.len() {
@@ -264,14 +282,13 @@ fn decode_bitmap_4bit(
         decoded_data.push(right_value);
     }
 
-    let mut result_bmp = Vec::new();
-    for y in 0..scan_height {
-        for x in 0..scan_width {
-            if x >= width {
-                continue;
-            }
+    // Create result as 8-bit indexed (one byte per pixel)
+    let mut result_bmp = vec![0; width as usize * height as usize];
+    
+    for y in 0..height {
+        for x in 0..width {
             let scan_index = (y * scan_width + x) as usize;
-            let pixel_index = (y * width + x) as usize;
+            
             if scan_index >= decoded_data.len() {
                 return Err(format!(
                     "decode_bitmap_4bit: scan_index {} >= decoded_data.len() {}",
@@ -279,20 +296,18 @@ fn decode_bitmap_4bit(
                     decoded_data.len()
                 ));
             }
+            
             let pixel = decoded_data[scan_index];
-
-            if pixel_index % 2 == 0 {
-                let new_pixel = (pixel << 4) as u16;
-                result_bmp.push(new_pixel as u8);
-            } else {
-                let last_pixel = result_bmp.pop().unwrap();
-                result_bmp.push(last_pixel | (pixel & 0xF));
-            }
+            let pixel_index = (y * width + x) as usize;
+            
+            // Store as 8-bit indexed (values 0-15)
+            result_bmp[pixel_index] = pixel;
         }
     }
 
     Ok(Bitmap {
-        bit_depth: 4,
+        bit_depth: 8,              // Stored as 8-bit
+        original_bit_depth: 4,     // But was originally 4-bit
         width,
         height,
         data: result_bmp,
@@ -311,7 +326,6 @@ fn decode_generic_bitmap(
     palette_ref: PaletteRef,
     data: &[u8],
 ) -> Result<Bitmap, String> {
-    // TODO the 16bit parsing is broken, look into that
     let bytes_per_pixel = bit_depth / 8;
     if scan_width as usize * scan_height as usize * num_channels as usize * bytes_per_pixel as usize != data.len()
     {
@@ -320,52 +334,55 @@ fn decode_generic_bitmap(
             scan_width * scan_height * num_channels as u16 * bytes_per_pixel as u16,
             data.len()
         );
-        return Ok(Bitmap::new(width, height, bit_depth, palette_ref));
+        let actual_bit_depth = bit_depth * num_channels;
+        return Ok(Bitmap::new(width, height, actual_bit_depth, 0, bit_depth, palette_ref));
     } else {
         let mut result =
             vec![
                 0;
                 width as usize * height as usize * num_channels as usize * bytes_per_pixel as usize
             ];
+        
+        // FIX: The indexing was wrong - channels and bytes should be multiplied, not added
         for y in 0..scan_height {
             for x in 0..scan_width {
+                if x >= width {
+                    continue;
+                }
                 for c in 0..num_channels {
                     for b in 0..bytes_per_pixel {
-                        let scan_index = (y as usize
-                            * scan_width as usize
-                            * num_channels as usize
-                            * bytes_per_pixel as usize)
-                            + x as usize
-                            + c as usize
+                        let scan_index = (y as usize * scan_width as usize * num_channels as usize * bytes_per_pixel as usize)
+                            + (x as usize * num_channels as usize * bytes_per_pixel as usize)
+                            + (c as usize * bytes_per_pixel as usize)
                             + b as usize;
-                        if x < width {
-                            let result_index = (y as usize
-                                * width as usize
-                                * num_channels as usize
-                                * bytes_per_pixel as usize)
-                                + x as usize
-                                + c as usize
-                                + b as usize;
-                            if (scan_index >= data.len()) || (result_index >= result.len()) {
-                                warn!(
-                                    "decode_generic_bitmap: scan_index {} >= data.len() {} or result_index {} >= result.len() {}",
-                                    scan_index,
-                                    data.len(),
-                                    result_index,
-                                    result.len()
-                                );
-                                continue;
-                            }
-                            result[result_index as usize] = data[scan_index as usize];
+                        
+                        let result_index = (y as usize * width as usize * num_channels as usize * bytes_per_pixel as usize)
+                            + (x as usize * num_channels as usize * bytes_per_pixel as usize)
+                            + (c as usize * bytes_per_pixel as usize)
+                            + b as usize;
+                        
+                        if scan_index >= data.len() || result_index >= result.len() {
+                            warn!(
+                                "decode_generic_bitmap: scan_index {} >= data.len() {} or result_index {} >= result.len() {}",
+                                scan_index,
+                                data.len(),
+                                result_index,
+                                result.len()
+                            );
+                            continue;
                         }
+                        result[result_index] = data[scan_index];
                     }
                 }
             }
         }
+        
+        let actual_bit_depth = bit_depth * num_channels;
         return Ok(Bitmap {
             width,
             height,
-            bit_depth,
+            bit_depth: actual_bit_depth,
+            original_bit_depth: bit_depth,
             data: result,
             palette_ref,
             matte: None,
@@ -373,8 +390,28 @@ fn decode_generic_bitmap(
     }
 }
 
+pub fn bitmap_to_hex_string(bitmap: &Bitmap) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "# width={} height={} bit_depth={} data_len={}\n",
+        bitmap.width, bitmap.height, bitmap.bit_depth, bitmap.data.len()
+    ));
+
+    let bytes_per_row = (bitmap.data.len() as f64 / bitmap.height as f64).ceil() as usize;
+    for (i, b) in bitmap.data.iter().enumerate() {
+        s.push_str(&format!("{:02X}", b));
+        if (i + 1) % bytes_per_row == 0 {
+            s.push('\n');
+        } else {
+            s.push(' ');
+        }
+    }
+
+    s
+}
+
 // Converts a NUU-encoded bitmap to a raw bitmap
-pub fn decompress_bitmap(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bitmap, String> {
+pub fn decompress_bitmap(data: &[u8], info: &BitmapInfo, cast_lib: u32, version: u16) -> Result<Bitmap, String> {
     let mut result = Vec::new();
     let mut _current_index = 0;
     let num_channels = get_num_channels(info.bit_depth)?;
@@ -467,16 +504,86 @@ pub fn decompress_bitmap(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Resul
             PaletteRef::from(info.palette_id, cast_lib),
             &result,
         ),
-        32 => decode_generic_bitmap(
-            info.width,
-            info.height,
-            8,
-            4,
-            scan_width,
-            scan_height,
-            PaletteRef::from(info.palette_id, cast_lib),
-            &result,
-        ),
+        32 => {
+            // For 32-bit bitmaps in Director, the encoding is special:
+            // - In D3 and below: ARGB pixels in a row (skipCompression = true)
+            // - In D4+: RLE encoded, with each line containing A R G B channels separately
+            
+            let skip_compression = if version < 300 {
+                result.len() >= (info.width as usize * info.height as usize * 4)
+            } else if version < 400 {
+                result.len() == (info.width as usize * info.height as usize * 4)
+            } else {
+                false
+            };
+            
+            if skip_compression {
+                // Direct ARGB format (mainly D3)
+                let result_bitmap = decode_generic_bitmap(
+                    info.width,
+                    info.height,
+                    8,
+                    4,
+                    scan_width,
+                    scan_height,
+                    PaletteRef::from(info.palette_id, cast_lib),
+                    &result,
+                )?;
+                
+                Ok(Bitmap {
+                    width: result_bitmap.width,
+                    height: result_bitmap.height,
+                    bit_depth: 32,
+                    original_bit_depth: 32,
+                    data: result_bitmap.data,
+                    palette_ref: PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+                    matte: None,
+                })
+            } else {
+                // D4+ format: each scanline has channels laid out as A R G B sequentially
+                // We need to reorder from [A...A][R...R][G...G][B...B] per line to ARGB per pixel
+                
+                let mut final_data = vec![0u8; info.width as usize * info.height as usize * 4];
+                
+                for y in 0..info.height as usize {
+                    for x in 0..info.width as usize {
+                        let line_offset = y * scan_width as usize * 4;
+                        let pixel_idx = (y * info.width as usize + x) * 4;
+                        
+                        // Check bounds
+                        if line_offset + x + 3 * scan_width as usize >= result.len() {
+                            warn!(
+                                "32-bit decode: Out of bounds access at y={}, x={}. line_offset={}, result.len()={}",
+                                y, x, line_offset, result.len()
+                            );
+                            continue;
+                        }
+                        
+                        // Read from separate channels
+                        let a = result[line_offset + x];                                    // Alpha
+                        let r = result[line_offset + x + scan_width as usize];            // Red
+                        let g = result[line_offset + x + 2 * scan_width as usize];        // Green
+                        let b = result[line_offset + x + 3 * scan_width as usize];        // Blue
+                        
+                        // Write as ARGB (or RGBA depending on your rendering system)
+                        final_data[pixel_idx] = r;
+                        final_data[pixel_idx + 1] = g;
+                        final_data[pixel_idx + 2] = b;
+                        final_data[pixel_idx + 3] = a;
+                    }
+                }
+                
+                Ok(Bitmap {
+                    width: info.width,
+                    height: info.height,
+                    bit_depth: 32,
+                    original_bit_depth: 32,
+                    data: final_data,
+                    palette_ref: PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+                    matte: None,
+                })
+            }
+        }
         _ => Err(format!(
             "Decompression not implemented for bitmap width {}, height {}, bit depth {}",
             info.width, info.height, info.bit_depth
@@ -488,6 +595,7 @@ pub fn resolve_color_ref(
     palettes: &PaletteMap,
     color_ref: &ColorRef,
     palette_ref: &PaletteRef,
+    original_bit_depth: u8,
 ) -> (u8, u8, u8) {
     match color_ref {
         ColorRef::Rgb(r, g, b) => (*r, *g, *b),
@@ -495,18 +603,75 @@ pub fn resolve_color_ref(
             let color = match palette_ref {
                 PaletteRef::BuiltIn(palette) => match palette {
                     BuiltInPalette::GrayScale => {
-                        let value = (*color_index) as u8;
-                        Some((255 - value, 255 - value, 255 - value))
+                        // Uses 4-color palette for 2-bit images and 16-color palette for 4-bit images
+                        if original_bit_depth == 2 {
+                            GRAYSCALE_4_PALETTE.get(*color_index as usize).copied()
+                        }
+                        else if original_bit_depth == 4 {
+                            GRAYSCALE_16_PALETTE.get(*color_index as usize).copied()
+                        } else {
+                            GRAYSCALE_PALETTE.get(*color_index as usize).copied()
+                        }
                     }
-                    BuiltInPalette::SystemMac => SYSTEM_MAC_PALETTE
-                        .get(*color_index as usize)
-                        .map(|x| x.to_owned()),
-                    BuiltInPalette::SystemWin => SYSTEM_WIN_PALETTE
-                        .get(*color_index as usize)
-                        .map(|x| x.to_owned()),
+                    BuiltInPalette::SystemMac => {
+                        // Use 16-color palette for 4-bit images
+                        if original_bit_depth == 4 {
+                            MAC_16_PALETTE.get(*color_index as usize).copied()
+                        } else {
+                            SYSTEM_MAC_PALETTE.get(*color_index as usize).copied()
+                        }
+                    }
+                    BuiltInPalette::SystemWin => {
+                        // Use 16-color palette for 4-bit images
+                        if original_bit_depth == 4 {
+                            WIN_16_PALETTE.get(*color_index as usize).copied()
+                        } else {
+                            SYSTEM_WIN_PALETTE.get(*color_index as usize).copied()
+                        }
+                    }
+                    BuiltInPalette::Rainbow => {
+                        // Use 16-color palette for 4-bit images
+                        if original_bit_depth == 4 {
+                            RAINBOW16_PALETTE.get(*color_index as usize).copied()
+                        } else {
+                            RAINBOW_PALETTE.get(*color_index as usize).copied()
+                        }
+                    }
+                    BuiltInPalette::Pastels => {
+                        // Use 16-color palette for 4-bit images
+                        if original_bit_depth == 4 {
+                            PASTELS16_PALETTE.get(*color_index as usize).copied()
+                        } else {
+                            PASTELS_PALETTE.get(*color_index as usize).copied()
+                        }
+                    }
+                    BuiltInPalette::Vivid => {
+                        // Use 16-color palette for 4-bit images
+                        if original_bit_depth == 4 {
+                            VIVID16_PALETTE.get(*color_index as usize).copied()
+                        } else {
+                            VIVID_PALETTE.get(*color_index as usize).copied()
+                        }
+                    }
+                    BuiltInPalette::Ntsc => {
+                        // Use 16-color palette for 4-bit images
+                        if original_bit_depth == 4 {
+                            NTSC16_PALETTE.get(*color_index as usize).copied()
+                        } else {
+                            NTSC_PALETTE.get(*color_index as usize).copied()
+                        }
+                    }
+                    BuiltInPalette::Metallic => {
+                        // Use 16-color palette for 4-bit images
+                        if original_bit_depth == 4 {
+                            METALLIC16_PALETTE.get(*color_index as usize).copied()
+                        } else {
+                            METALLIC_PALETTE.get(*color_index as usize).copied()
+                        }
+                    }
                     BuiltInPalette::Web216 => WEB_216_PALETTE
                         .get(*color_index as usize)
-                        .map(|x| x.to_owned()),
+                        .copied(),
                     _ => None,
                 },
                 PaletteRef::Member(palette_ref) => {
@@ -517,19 +682,82 @@ pub fn resolve_color_ref(
                     let palette_member = palettes.get(palette_member as usize);
                     palette_member
                         .and_then(|x| x.colors.get(*color_index as usize))
-                        .map(|x| x.to_owned())
+                        .copied()
                 }
             };
 
-            if let Some(color) = color {
-                return color.clone();
-            } else if *color_index == 0 {
-                return (255, 255, 255);
-            } else if *color_index == 255 {
-                return (0, 0, 0);
-            } else {
-                return (255, 0, 255);
-            }
+            color.unwrap_or((255, 0, 255)) // magenta for missing colors
         }
     }
+}
+
+pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo) -> Result<Bitmap, String> {
+    use image::ImageDecoder;
+    use std::io::Cursor;
+    
+    // Use the `image` crate to decode JPEG
+    let cursor = Cursor::new(data);
+    let decoder = image::codecs::jpeg::JpegDecoder::new(cursor)
+        .map_err(|e| format!("Failed to create JPEG decoder: {}", e))?;
+    
+    let (width, height) = decoder.dimensions();
+    let color_type = decoder.color_type();
+    
+    let mut image_data = vec![0u8; decoder.total_bytes() as usize];
+    decoder.read_image(&mut image_data)
+        .map_err(|e| format!("Failed to read JPEG image: {}", e))?;
+    
+    // Convert to RGBA if needed
+    let rgba_data = match color_type {
+        image::ColorType::Rgb8 => {
+            // Convert RGB to RGBA
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for chunk in image_data.chunks(3) {
+                rgba.push(chunk[0]); // R
+                rgba.push(chunk[1]); // G
+                rgba.push(chunk[2]); // B
+                rgba.push(255);      // A (fully opaque)
+            }
+            rgba
+        }
+        image::ColorType::Rgba8 => {
+            // Already RGBA
+            image_data
+        }
+        image::ColorType::L8 => {
+            // Grayscale to RGBA
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for &gray in &image_data {
+                rgba.push(gray); // R
+                rgba.push(gray); // G
+                rgba.push(gray); // B
+                rgba.push(255);  // A
+            }
+            rgba
+        }
+        image::ColorType::La8 => {
+            // Grayscale + Alpha to RGBA
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for chunk in image_data.chunks(2) {
+                rgba.push(chunk[0]); // R
+                rgba.push(chunk[0]); // G
+                rgba.push(chunk[0]); // B
+                rgba.push(chunk[1]); // A
+            }
+            rgba
+        }
+        _ => {
+            return Err(format!("Unsupported JPEG color type: {:?}", color_type));
+        }
+    };
+    
+    Ok(Bitmap {
+        width: width as u16,
+        height: height as u16,
+        bit_depth: 32,
+        original_bit_depth: 32,
+        data: rgba_data,
+        palette_ref: PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+        matte: None,
+    })
 }

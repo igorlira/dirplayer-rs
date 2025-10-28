@@ -39,7 +39,7 @@ impl TextMemberHandlers {
             "locToCharPos" => {
                 let (x, y) = player.get_datum(&args[0]).to_int_point()?;
                 let params = DrawTextParams {
-                    font: player.font_manager.get_system_font().unwrap(),
+                    font: &player.font_manager.get_system_font().unwrap(),
                     line_height: None,
                     line_spacing: text.fixed_line_space,
                     top_spacing: text.top_spacing,
@@ -117,6 +117,8 @@ impl TextMemberHandlers {
                     width,
                     height,
                     8,
+                    0,
+                    8,
                     PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
                 );
                 let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
@@ -125,7 +127,7 @@ impl TextMemberHandlers {
                 let ink = 36;
                 bitmap.draw_text(
                     &text_data.text,
-                    font,
+                    &font,
                     font_bitmap,
                     0,
                     text_data.top_spacing as i32,

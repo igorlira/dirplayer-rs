@@ -8,6 +8,7 @@ use wasm_bindgen::{prelude::*, Clamped};
 use crate::{console_warn, js_api::JsApi, player::{
     bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, manager::BitmapManager, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, movie::Movie, score::{get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef}, sprite::{CursorRef, Sprite}, DirPlayer, PLAYER_OPT
 }, utils::log_i};
+use crate::js_api::{safe_js_string};
 
 pub struct PlayerCanvasRenderer {
     pub container_element: Option<web_sys::HtmlElement>,
@@ -31,7 +32,6 @@ pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug
 
 pub fn render_score_to_bitmap(
     player: &mut DirPlayer, 
-    // bitmap_manager: &mut BitmapManager,
     score_source: &ScoreRef,
     bitmap: &mut Bitmap, 
     debug_sprite_num: Option<i16>,
@@ -47,6 +47,7 @@ pub fn render_score_to_bitmap(
             &palettes,
             &player.bg_color,
             &PaletteRef::BuiltIn(get_system_default_palette()),
+            bitmap.original_bit_depth
         ),
         &palettes,
     );
@@ -314,11 +315,6 @@ impl PlayerCanvasRenderer {
     }
 
     pub fn draw_preview_frame(&mut self, player: &mut DirPlayer) {
-        // console_warn!("Draw preview frame");
-        // console_warn!("Preview member ref: {:?}", self.preview_member_ref);
-        // console_warn!("Preview container element: {:?}", self.preview_container_element);
-        // console_warn!("Preview ctx2d: {:?}", self.preview_ctx2d);
-
         if self.preview_member_ref.is_none() || self.preview_container_element.is_none() || self.preview_ctx2d.is_null() || self.preview_ctx2d.is_undefined() {
             return;
         }
@@ -345,6 +341,8 @@ impl PlayerCanvasRenderer {
                     width as u16,
                     height as u16,
                     32,
+                    0,
+                    32,
                     PaletteRef::BuiltIn(get_system_default_palette()),
                 );
                 let palettes = &player.movie.cast_manager.palettes();
@@ -357,6 +355,7 @@ impl PlayerCanvasRenderer {
                         &palettes,
                         &player.bg_color,
                         &PaletteRef::BuiltIn(get_system_default_palette()),
+                        sprite_bitmap.original_bit_depth
                     ),
                     palettes,
                     1.0
@@ -379,7 +378,7 @@ impl PlayerCanvasRenderer {
                     bitmap.width.into(),
                     bitmap.height.into(),
                 );
-                self.preview_ctx2d.set_fill_style(&JsValue::from_str("white"));
+                self.preview_ctx2d.set_fill_style(&safe_js_string("white"));
                 match image_data {
                     Ok(image_data) => {
                         self.preview_ctx2d.put_image_data(&image_data, 0.0, 0.0).unwrap();
@@ -397,6 +396,8 @@ impl PlayerCanvasRenderer {
                 let mut bitmap = Bitmap::new(
                     width as u16,
                     height as u16,
+                    32,
+                    0,
                     32,
                     PaletteRef::BuiltIn(get_system_default_palette()),
                 );
@@ -454,6 +455,8 @@ impl PlayerCanvasRenderer {
                 movie_width as u16,
                 movie_height as u16,
                 32,
+                0,
+                32,
                 PaletteRef::BuiltIn(get_system_default_palette()),
             );
         }
@@ -465,7 +468,7 @@ impl PlayerCanvasRenderer {
             let txt = format!("Datum count: {}\nScript count: {}", player.allocator.datum_count(), player.allocator.script_instance_count());
             bitmap.draw_text(
                 txt.as_str(),
-                font, 
+                &font, 
                 font_bitmap, 
                 0, 
                 0, 
@@ -482,7 +485,7 @@ impl PlayerCanvasRenderer {
             bitmap.width.into(),
             bitmap.height.into(),
         );
-        self.ctx2d.set_fill_style(&JsValue::from_str("white"));
+        self.ctx2d.set_fill_style(&safe_js_string("white"));
         match image_data {
             Ok(image_data) => {
                 self.ctx2d.put_image_data(&image_data, 0.0, 0.0).unwrap();
@@ -634,7 +637,7 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 preview_size: (1, 1),
                 preview_member_ref: None,
                 debug_selected_channel_num: None,
-                bitmap: Bitmap::new(1, 1, 32, PaletteRef::BuiltIn(get_system_default_palette())),
+                bitmap: Bitmap::new(1, 1, 32, 0, 32, PaletteRef::BuiltIn(get_system_default_palette())),
             };
 
             *renderer_lock = Some(renderer);

@@ -8,7 +8,7 @@ impl ColorDatumHandlers {
       "hexString" => {
         reserve_player_mut(|player| {
           let color_ref = player.get_datum(datum).to_color_ref()?;
-          let (r, g, b) = resolve_color_ref(&player.movie.cast_manager.palettes(), color_ref, &PaletteRef::BuiltIn(get_system_default_palette()));
+          let (r, g, b) = resolve_color_ref(&player.movie.cast_manager.palettes(), color_ref, &PaletteRef::BuiltIn(get_system_default_palette()), 8);
           let hex_string = format!("#{:02x}{:02x}{:02x}", r, g, b);
           Ok(player.alloc_datum(Datum::String(hex_string)))
         })

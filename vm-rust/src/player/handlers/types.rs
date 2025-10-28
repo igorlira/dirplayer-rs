@@ -1,9 +1,8 @@
 use itertools::Itertools;
 
-use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{allocator::ScriptInstanceAllocatorTrait, bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::format_datum, eval::eval_lingo, geometry::IntRect, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DirPlayer, ScriptError}};
+use crate::{director::lingo::datum::{datum_bool, Datum, DatumType}, player::{allocator::ScriptInstanceAllocatorTrait, MathObject, XmlDocument, bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef}, compare::sort_datums, datum_formatting::format_datum, eval::eval_lingo, geometry::IntRect, reserve_player_mut, reserve_player_ref, sprite::{ColorRef, CursorRef}, xtra::manager::{create_xtra_instance, is_xtra_registered}, DatumRef, DirPlayer, ScriptError}};
 
-use super::datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, prop_list::{PropListDatumHandlers, PropListUtils}, rect::RectUtils};
-
+use super::datum_handlers::{list_handlers::ListDatumHandlers, player_call_datum_handler, prop_list::{PropListDatumHandlers, PropListUtils}, rect::RectUtils, date::DateObject};
 
 pub struct TypeHandlers {}
 pub struct TypeUtils {}
@@ -539,23 +538,65 @@ impl TypeHandlers {
 
   pub fn image(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
-      let width = player.get_datum(&args[0]).int_value()?;
-      let height = player.get_datum(&args[1]).int_value()?;
-      let bit_depth = player.get_datum(&args[2]).int_value()?;
-      let palette_ref = match args.get(3) {
-        Some(palette_ref) => {
-          let palette_ref = player.get_datum(palette_ref);
-          match palette_ref {
-            Datum::Symbol(s) => PaletteRef::BuiltIn(BuiltInPalette::from_symbol_string(s).unwrap()),
-            Datum::PaletteRef(palette_ref) => palette_ref.clone(),
-            Datum::CastMember(member_ref) => PaletteRef::Member(member_ref.clone()),
-            _ => return Err(ScriptError::new(format!("Invalid palette argument of type {} for image", palette_ref.type_str()))),
-          }
+      // TODO: Palette ref can be on args[3], need to handle it
+      if args.len() < 3 {
+        return Err(ScriptError::new(
+          format!("image() expects at least 3 arguments: width, height, bitDepth, optional alphaDepth, got {}", args.len())
+        ));
+      }
+      
+      let width_datum = player.get_datum(&args[0]);
+      let height_datum = player.get_datum(&args[1]);
+      
+      let width = match width_datum {
+        Datum::Int(i) => {
+          *i as u16
         },
-        None => PaletteRef::BuiltIn(get_system_default_palette()),
+        Datum::Float(f) => {
+          let rounded = f.round() as u16;
+          rounded
+        },
+        _ => {
+          let val = width_datum.int_value()? as u16;
+          val
+        }
+      };
+      
+      let height = match height_datum {
+        Datum::Int(i) => {
+          *i as u16
+        },
+        Datum::Float(f) => {
+          let rounded = f.round() as u16;
+          rounded
+        },
+        _ => {
+          let val = height_datum.int_value()? as u16;
+          val
+        }
+      };
+      
+      let bit_depth = player.get_datum(&args[2]).int_value()? as u8;
+      let alpha_depth = if args.len() >= 4 {
+        player.get_datum(&args[3]).int_value()? as u8
+      } else {
+        0
+      };
+      
+      let palette_ref = if args.len() >= 5 {
+        match player.get_datum(&args[4]) {
+          Datum::Symbol(s) => PaletteRef::BuiltIn(BuiltInPalette::from_symbol_string(s).unwrap()),
+          Datum::PaletteRef(p) => p.clone(),
+          Datum::CastMember(m) => PaletteRef::Member(m.clone()),
+          other => return Err(ScriptError::new(format!(
+            "Invalid palette argument of type {} for image", other.type_str()
+          ))),
+        }
+      } else {
+        PaletteRef::BuiltIn(get_system_default_palette())
       };
 
-      let bitmap = Bitmap::new(width as u16, height as u16, bit_depth as u8, palette_ref);
+      let bitmap = Bitmap::new(width, height, bit_depth, alpha_depth, bit_depth, palette_ref);
       let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
       Ok(player.alloc_datum(Datum::BitmapRef(bitmap_ref)))
     })

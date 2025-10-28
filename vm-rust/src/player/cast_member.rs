@@ -106,7 +106,7 @@ pub struct ScriptMember {
   pub name: String
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct BitmapMember {
   pub image_ref: BitmapRef,
   pub reg_point: (i16, i16),
@@ -418,6 +418,40 @@ impl CastMember {
     }
   }
 
+  fn decode_bitmap_from_bitd(
+    member_def: &CastMemberDef,
+    bitmap_info: &BitmapInfo,
+    cast_lib: u32,
+    number: u32,
+    bitmap_manager: &mut BitmapManager,
+  ) -> BitmapRef {
+    let abmp_chunk = member_def.children
+      .get(0)
+      .and_then(|x| x.as_ref());
+    
+    if let Some(abmp_chunk) = abmp_chunk {
+      let abmp_chunk = abmp_chunk.as_bitmap().unwrap();
+      let decompressed = decompress_bitmap(
+        &abmp_chunk.data, 
+        &bitmap_info, 
+        cast_lib,
+        abmp_chunk.version
+      );
+      match decompressed {
+        Ok(new_bitmap) => {
+          bitmap_manager.add_bitmap(new_bitmap)
+        },
+        Err(e) => {
+          warn!("Failed to decompress bitmap {}: {:?}. Using empty image.", number, e);
+          bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 0, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+        }
+      }
+    } else {
+      warn!("No bitmap chunk found for member {}", number);
+      bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 0, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+    }
+  }
+
   pub fn from(
     cast_lib: u32,
     number: u32, 
@@ -450,28 +484,57 @@ impl CastMember {
       }
       MemberType::Bitmap => {
         let bitmap_info = chunk.specific_data.bitmap_info().unwrap();
-        let abmp_chunk = member_def.children
-          .get(0)
-          .and_then(|x| x.as_ref());
-        let new_bitmap_ref = if let Some(abmp_chunk) = abmp_chunk {
-          let abmp_chunk = abmp_chunk
-            .as_bitmap()
-            .unwrap();
-          let decompressed = decompress_bitmap(&abmp_chunk.data, &bitmap_info, cast_lib);
-          match decompressed {
-            Ok(new_bitmap) => {
-              bitmap_manager.add_bitmap(new_bitmap)
-            },
-            Err(_e) => {
-              // warn!("Failed to decompress bitmap. Using an empty image instead. {:?}", e);
-              // TODO create error texture?
-              // INVALID_BITMAP_REF
-              bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+        
+        // First, check if there's a Media (ediM) chunk with JPEG data
+        let media_chunk = member_def.children.iter()
+          .find_map(|c| c.as_ref().and_then(|chunk| {
+            match chunk {
+              Chunk::Media(m) => Some(m),
+              _ => None,
             }
+          }));
+        
+        let new_bitmap_ref = if let Some(media) = media_chunk {
+          // Check if the media chunk contains JPEG data
+          let is_jpeg = if media.audio_data.len() >= 4 {
+            let header = u32::from_be_bytes([
+              media.audio_data[0],
+              media.audio_data[1],
+              media.audio_data[2],
+              media.audio_data[3],
+            ]);
+            // JPEG magic numbers: FFD8FFE0, FFD8FFE1, FFD8FFE2, FFD8FFDB
+            (header & 0xFFFFFF00) == 0xFFD8FF00
+          } else {
+            false
+          };
+          
+          if is_jpeg && !media.audio_data.is_empty() {
+            web_sys::console::log_1(&format!(
+              "Found JPEG data in Media chunk for bitmap {}, size: {} bytes",
+              number, media.audio_data.len()
+            ).into());
+            
+            match decode_jpeg_bitmap(&media.audio_data, &bitmap_info) {
+              Ok(new_bitmap) => {
+                web_sys::console::log_1(&format!(
+                    "Successfully decoded JPEG: {}x{}, bit_depth: {}",
+                    new_bitmap.width, new_bitmap.height, new_bitmap.bit_depth
+                ).into());
+                bitmap_manager.add_bitmap(new_bitmap)
+              },
+              Err(e) => {
+                warn!("Failed to decode JPEG bitmap {}: {:?}. Using empty image.", number, e);
+                bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 0, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+              }
+            }
+          } else {
+            // Media chunk exists but doesn't contain JPEG, fall back to BITD
+            Self::decode_bitmap_from_bitd(member_def, &bitmap_info, cast_lib, number, bitmap_manager)
           }
         } else {
-          warn!("No bitmap chunk found for member {}", number);
-          bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+          // No Media chunk, use BITD
+          Self::decode_bitmap_from_bitd(member_def, &bitmap_info, cast_lib, number, bitmap_manager)
         };
 
         CastMemberType::Bitmap(

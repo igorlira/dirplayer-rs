@@ -25,6 +25,8 @@ pub fn get_stage_prop(
         player.movie.rect.width() as u16, 
         player.movie.rect.height() as u16, 
         32, 
+        0,
+        32,
         PaletteRef::BuiltIn(get_system_default_palette()),
       );
       let bitmap_id = player.bitmap_manager.add_bitmap(new_bitmap);

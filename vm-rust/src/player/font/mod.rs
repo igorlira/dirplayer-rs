@@ -103,10 +103,12 @@ pub async fn player_load_system_font(path: &str) {
                 width: image_data.width() as u16,
                 height: image_data.height() as u16,
                 data: image_data.data().0,
-                bit_depth: 32, // TODO use a smaller bit depth
+                bit_depth: 32,
+                original_bit_depth: 32,
                 palette_ref: PaletteRef::BuiltIn(get_system_default_palette()),
                 matte: None,
             };
+            
             reserve_player_mut(|player| {
                 let grid_columns = 18;
                 let grid_rows = 7;

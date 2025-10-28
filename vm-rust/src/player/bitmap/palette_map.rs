@@ -1,8 +1,8 @@
 use crate::player::cast_member::PaletteMember;
 
-struct PaletteEntry {
-    number: u32,
-    member: PaletteMember,
+pub struct PaletteEntry {
+    pub number: u32,
+    pub member: PaletteMember,
 }
 
 pub struct PaletteMap {

@@ -52,27 +52,33 @@ fn blend_pixel(
     src: (u8, u8, u8), 
     ink: u32,
     bg_color: (u8, u8, u8),
-    alpha: f32,
+    blend_alpha: f32, // This is params.blend / 100.0
+    src_alpha: f32,   // Alpha from the source pixel (0.0 to 1.0)
 ) -> (u8, u8, u8) {
+    
+    // Calculate the effective alpha: combination of native source alpha and blend parameter
+    let effective_alpha = src_alpha * blend_alpha;
+
     match ink {
         0 => {
             // Copy
-            blend_color_alpha(dst, src, alpha)
+            blend_color_alpha(dst, src, effective_alpha)
         }
+        // ... (other ink modes use effective_alpha too, just like 'Copy')
         7 => {
             // Not Ghost
             // TODO
-            blend_color_alpha(dst, src, alpha)
+            blend_color_alpha(dst, src, effective_alpha)
         }
         8 => {
             // Matte
             // TODO
-            blend_color_alpha(dst, src, alpha)
+            blend_color_alpha(dst, src, effective_alpha)
         }
         9 => {
             // Mask
             // TODO
-            blend_color_alpha(dst, src, alpha)
+            blend_color_alpha(dst, src, effective_alpha)
         }
         33 => {
             // Add pin
@@ -93,7 +99,7 @@ fn blend_pixel(
             if src == bg_color {
                 dst
             } else {
-                blend_color_alpha(dst, src, alpha)
+                blend_color_alpha(dst, src, effective_alpha)
             }
         }
         41 => {
@@ -104,13 +110,30 @@ fn blend_pixel(
             let g = (src.1 as f32 / 255.0) * (bg_color.1 as f32 / 255.0) * 255.0;
             let b = (src.2 as f32 / 255.0) * (bg_color.2 as f32 / 255.0) * 255.0;
             let color = (r as u8, g as u8, b as u8);
-            blend_color_alpha(dst, color, alpha)
+            blend_color_alpha(dst, color, effective_alpha)
         }
-        _ => blend_color_alpha(dst, src, alpha),
+        _ => blend_color_alpha(dst, src, effective_alpha),
     }
 }
 
 impl Bitmap {
+    pub fn get_pixel_color_with_alpha(&self, palettes: &PaletteMap, x: u16, y: u16) -> (u8, u8, u8, u8) {
+        let color_ref = self.get_pixel_color_ref(x, y);
+        let (r, g, b) = resolve_color_ref(palettes, &color_ref, &self.palette_ref, self.original_bit_depth);
+
+        if self.bit_depth == 32 {
+            let x_usize = x as usize;
+            let y_usize = y as usize;
+            if x_usize < self.width as usize && y_usize < self.height as usize {
+                let index = (y_usize * self.width as usize + x_usize) * 4;
+                // The alpha component is the 4th byte for 32-bit data (R, G, B, A)
+                let a = self.data[index + 3];
+                return (r, g, b, a);
+            }
+        }
+        // Default to fully opaque
+        (r, g, b, 0xFF) 
+    }
     pub fn set_pixel(&mut self, x: i32, y: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
@@ -138,46 +161,47 @@ impl Bitmap {
                 }
                 4 => {
                     let bit_index = (y * self.width as usize + x) * 4;
-                    let index = bit_index / 8;
-                    let value = self.data[index];
+                    let byte_index = bit_index / 8;
+                    let value = self.data[byte_index];
                     
                     let own_palette = &self.palette_ref;
-                    let mut result_index = 0;
-                    let mut result_distance = 0;
-                    for index in 0..=255 {
-                        let palette_color = resolve_color_ref(palettes, &ColorRef::PaletteIndex(index as u8), &own_palette);
-                        let distance = (r as i32 - palette_color.0 as i32).abs() + (g as i32 - palette_color.1 as i32).abs() + (b as i32 - palette_color.2 as i32).abs();
-                        if index == 0 || distance < result_distance {
-                            result_index = index;
+                    let mut result_index: u8 = 0;
+                    let mut result_distance = i32::MAX;
+                    
+                    // For 4-bit, only search palette indices 0-15
+                    for palette_idx in 0..16u8 {
+                        let palette_color = resolve_color_ref(palettes, &ColorRef::PaletteIndex(palette_idx), &own_palette, self.original_bit_depth);
+                        let distance = (r as i32 - palette_color.0 as i32).abs() 
+                                    + (g as i32 - palette_color.1 as i32).abs() 
+                                    + (b as i32 - palette_color.2 as i32).abs();
+                        if distance < result_distance {
+                            result_index = palette_idx;
                             result_distance = distance;
                         }
                     }
                     
-                    let left = value >> 4;
-                    let right = value & 0x0F;
-
-                    let left = if x % 2 == 0 {
-                        result_index
+                    // Pack the 4-bit value into the byte
+                    let new_value = if x % 2 == 0 {
+                        // High nibble
+                        (result_index << 4) | (value & 0x0F)
                     } else {
-                        left
+                        // Low nibble
+                        (value & 0xF0) | result_index
                     };
-                    let right = if x % 2 == 1 {
-                        result_index
-                    } else {
-                        right
-                    };
-
-                    let value = (left << 4) | right;
-                    self.data[index] = value;
+                    
+                    self.data[byte_index] = new_value;
                 }
                 8 => {
                     let own_palette = &self.palette_ref;
                     let mut result_index = 0;
-                    let mut result_distance = 0;
+                    let mut result_distance = i32::MAX;
+                    
                     for index in 0..=255 {
-                        let palette_color = resolve_color_ref(palettes, &ColorRef::PaletteIndex(index as u8), &own_palette);
-                        let distance = (r as i32 - palette_color.0 as i32).abs() + (g as i32 - palette_color.1 as i32).abs() + (b as i32 - palette_color.2 as i32).abs();
-                        if index == 0 || distance < result_distance {
+                        let palette_color = resolve_color_ref(palettes, &ColorRef::PaletteIndex(index as u8), &own_palette, self.original_bit_depth);
+                        let distance = (r as i32 - palette_color.0 as i32).abs() 
+                                    + (g as i32 - palette_color.1 as i32).abs() 
+                                    + (b as i32 - palette_color.2 as i32).abs();
+                        if distance < result_distance {
                             result_index = index;
                             result_distance = distance;
                         }
@@ -217,19 +241,17 @@ impl Bitmap {
         match self.bit_depth {
             4 => {
                 let bit_index = (y * self.width as usize + x) * 4;
-                let index = bit_index / 8;
-                let value = self.data[index];
-                if x % 2 == 0 {
-                    let left = value >> 4;
-                    let left = (left as f32 / 15.0 * 255.0) as u8;
-                    let left = left;
-                    ColorRef::PaletteIndex(left)
+                let byte_index = bit_index / 8;
+                let value = self.data[byte_index];
+                
+                let nibble = if x % 2 == 0 {
+                    value >> 4  // High nibble (0-15)
                 } else {
-                    let right = value & 0x0F;
-                    let right = (right as f32 / 15.0 * 255.0) as u8;
-                    let right = right;
-                    ColorRef::PaletteIndex(right)
-                }
+                    value & 0x0F  // Low nibble (0-15)
+                };
+                
+                // 4-bit uses 16-color palette, values are 0-15
+                ColorRef::PaletteIndex(nibble)
             }
             8 => {
                 let index = y * self.width as usize + x;
@@ -258,7 +280,7 @@ impl Bitmap {
 
     pub fn get_pixel_color(&self, palettes: &PaletteMap, x: u16, y: u16) -> (u8, u8, u8) {
         let color_ref = self.get_pixel_color_ref(x, y);
-        resolve_color_ref(palettes, &color_ref, &self.palette_ref)
+        resolve_color_ref(palettes, &color_ref, &self.palette_ref, self.original_bit_depth)
     }
 
     pub const fn has_palette(&self) -> bool {
@@ -476,15 +498,22 @@ impl Bitmap {
         for dst_y in min_dst_y..max_dst_y {
             let mut src_x = if dst_rect.width() < 0 { src_rect.right } else { src_rect.left } as f32;
             for dst_x in min_dst_x..max_dst_x {
+                let src_x_int = src_x.floor() as u16;
+                let src_y_int = src_y.floor() as u16;
                 if let Some(mask_image) = mask_image {
-                    if !mask_image.get_bit(src_x as u16, src_y as u16) {
+                    if !mask_image.get_bit(src_x_int, src_y_int) {
                         src_x += step_x;
                         continue;
                     }
                 }
-                let src_color = src.get_pixel_color(palettes, src_x.floor() as u16, src_y.floor() as u16);
+                
+                let (src_r, src_g, src_b, src_a) = src.get_pixel_color_with_alpha(palettes, src_x_int, src_y_int);
+                let src_color = (src_r, src_g, src_b);
+                let src_alpha = src_a as f32 / 255.0;
+
                 let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
-                let blended_color = blend_pixel(dst_color, src_color, ink, bg_color, alpha);
+                
+                let blended_color = blend_pixel(dst_color, src_color, ink, bg_color, alpha, src_alpha);
 
                 self.set_pixel(dst_x, dst_y, blended_color, palettes);
                 src_x += step_x;
@@ -515,6 +544,33 @@ impl Bitmap {
         let src_rect = IntRect::from_tuple((0, 0, bitmap.width as i32, bitmap.height as i32));
         let dst_rect = IntRect::from_tuple((loc_h, loc_v, loc_h + width as i32, loc_v + height as i32));
         self.copy_pixels(palettes, bitmap, dst_rect, src_rect, &params);
+    }
+
+    pub fn draw_text_with_color(
+        &mut self,
+        text: &str,
+        font: &BitmapFont,
+        font_bitmap: &Bitmap,
+        x: i32,
+        y: i32,
+        fg_color: ColorRef,
+        palettes: &PaletteMap,
+        line_spacing: u16,
+        top_spacing: i16,
+    ) {
+        // Use `draw_text`, passing `fg_color` as the ink (or bg?) depending on your system
+        self.draw_text(
+            text,
+            &font,
+            font_bitmap,
+            x,
+            y,
+            0,          // ink mode 0 = copy, or choose the ink you want
+            fg_color,   // this sets the foreground
+            palettes,
+            line_spacing,
+            top_spacing,
+        );
     }
 
     pub fn draw_text(
@@ -619,7 +675,7 @@ impl Bitmap {
         let width = right - left;
         let height = bottom - top;
 
-        let mut trimmed = Bitmap::new(width as u16, height as u16, self.bit_depth, self.palette_ref.clone());
+        let mut trimmed = Bitmap::new(width as u16, height as u16, self.bit_depth, 0, self.original_bit_depth, self.palette_ref.clone());
         let params = CopyPixelsParams::default(&self);
         trimmed.copy_pixels_with_params(palettes, &self, IntRect::from(0, 0, width, height), IntRect::from(left, top, right, bottom), &params);
         
