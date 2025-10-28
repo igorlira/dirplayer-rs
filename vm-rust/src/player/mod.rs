@@ -1010,34 +1010,36 @@ fn get_active_static_script_refs<'a>(
 //   return active_scripts;
 // }
 
-async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: ScopeRef) -> HandlerExecutionResult {
+async fn player_ext_call<'a>(name: String, args: &Vec<DatumRef>, scope_ref: ScopeRef) -> (HandlerExecutionResult, DatumRef) {
   // let formatted_args: Vec<String> = reserve_player_ref(|player| {
   //   args.iter().map(|datum_ref| format_datum(*datum_ref, player)).collect()
   // });
   // warn!("ext_call: {name}({})", formatted_args.join(", "));
   match name.as_str() {
     "return" => {
-      if let Some(return_value) = args.first() {
+      let return_value = if let Some(return_value) = args.first() {
         reserve_player_mut(|player| {
           player.scopes.get_mut(scope_ref).unwrap().return_value = return_value.clone();
         });
-      }
-
-      HandlerExecutionResult::Stop
+        return_value.clone()
+      } else {
+        DatumRef::Void
+      };
+      (HandlerExecutionResult::Stop, return_value)
     }
     _ => {
       let result = player_call_global_handler(&name, args).await;
 
       match result {
-        Ok(result) => {
+        Ok(result_datum_ref) => {
           reserve_player_mut(|player| {
-            player.last_handler_result = result.clone();
-            player.scopes.get_mut(scope_ref).unwrap().return_value = result;
+            player.last_handler_result = result_datum_ref.clone();
+            player.scopes.get_mut(scope_ref).unwrap().return_value = result_datum_ref.clone();
           });
-          HandlerExecutionResult::Advance
+          (HandlerExecutionResult::Advance, result_datum_ref)
         }
         Err(err) => {
-          HandlerExecutionResult::Error(err)
+          (HandlerExecutionResult::Error(err), DatumRef::Void)
         }
       }
     }

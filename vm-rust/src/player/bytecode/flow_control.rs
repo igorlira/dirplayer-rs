@@ -37,11 +37,11 @@ impl FlowControlBytecodeHandler {
       }
     };
     
-    let result_ctx = player_ext_call(name.clone(), &arg_ref_list, ctx.scope_ref).await; // Change ctx to &mut ctx
+    let (result_ctx, return_value) = player_ext_call(name.clone(), &arg_ref_list, ctx.scope_ref).await;
     if !is_no_ret {
       reserve_player_mut(|player| {
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-        scope.stack.push(scope.return_value.clone());
+        scope.stack.push(return_value);
       });
     }
     return Ok(result_ctx);
