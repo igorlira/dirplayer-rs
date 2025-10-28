@@ -9,12 +9,9 @@ pub fn datum_equals(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> 
     (Datum::Int(left), Datum::Int(right)) => Ok(*left == *right),
     (Datum::Int(left), Datum::Float(right)) => Ok((*left as f32) == *right), // TODO: is this correct? Flutter compares ints instead
     (Datum::Int(left), Datum::Void) => Ok(*left == 0),
-    (Datum::Int(left), Datum::String(right)) => {
-      if let Ok(right_number) = right.parse::<i32>() {
-        Ok(*left == right_number)
-      } else {
-        Ok(false)
-      }
+    // Handle string-to-int comparison (e.g., "2" should match key 2)
+    (Datum::String(s), Datum::Int(i)) | (Datum::Int(i), Datum::String(s)) => {
+      Ok(s.parse::<i32>().ok() == Some(*i))
     }
     (Datum::Float(left), Datum::Int(right)) => Ok(*left == (*right as f32)),
     (Datum::Float(left), Datum::Float(right)) => Ok(*left == *right),
