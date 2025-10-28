@@ -680,9 +680,18 @@ pub fn resolve_color_ref(
                         palette_ref.cast_member as u32,
                     );
                     let palette_member = palettes.get(palette_member as usize);
-                    palette_member
-                        .and_then(|x| x.colors.get(*color_index as usize))
-                        .copied()
+                    match palette_member {
+                        Some(member) => member.colors.get(*color_index as usize).copied(),
+                        None => {
+                            // If a member is not found, use the system palette
+                            Some(resolve_color_ref(
+                                palettes,
+                                color_ref,
+                                &PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+                                original_bit_depth,
+                            ))
+                        }
+                    }
                 }
             };
 
