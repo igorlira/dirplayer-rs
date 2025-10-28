@@ -167,23 +167,38 @@ impl CastManager {
     None
   }
 
-  pub fn find_member_ref_by_identifiers(&self, member_name_or_num: &Datum, cast_name_or_num: Option<&Datum>, datums: &DatumAllocator) -> Result<Option<CastMemberRef>, ScriptError> {
-    let cast_lib = if cast_name_or_num.is_some_and(|x| x.is_string()) {
-      self.get_cast_by_name(&cast_name_or_num.unwrap().string_value().unwrap())
+  pub fn find_member_ref_by_identifiers(
+    &self,
+    member_name_or_num: &Datum,
+    cast_name_or_num: Option<&Datum>,
+    datums: &DatumAllocator
+  ) -> Result<Option<CastMemberRef>, ScriptError> {
+    // --- Determine cast library ---
+    let cast_lib = if cast_name_or_num.is_none()
+      || cast_name_or_num.is_some_and(|x| matches!(x, Datum::Void))
+    {
+      None
+    } else if cast_name_or_num.is_some_and(|x| x.is_string()) {
+      if let Ok(cast_name) = cast_name_or_num
+        .unwrap()
+        .string_value() {
+        self.get_cast_by_name(&cast_name)
+      } else {
+        warn!("Invalid cast name: {}", cast_name_or_num.unwrap().type_str());
+        None
+      }
     } else if cast_name_or_num.is_some_and(|x| x.is_number()) {
-      let int_val = cast_name_or_num.unwrap().int_value().unwrap();
+      let int_val = cast_name_or_num.unwrap().int_value().unwrap_or(-1);
       if int_val > 0 {
         self.get_cast_or_null(int_val as u32)
       } else {
         None
       }
-    } else if cast_name_or_num.is_none() {
-      None
     } else {
       panic!("Cast number or name invalid: {}", cast_name_or_num.map(|x| x.type_str()).unwrap_or("None".to_string()))
     };
 
-    let member_ref = match (&member_name_or_num, cast_lib) {
+    let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
       (Datum::String(name), Some(cast_lib)) => cast_lib.find_member_by_name(name).map(|member| {
         Ok(Some(CastMemberRef {
           cast_lib: cast_lib.number as i32,
