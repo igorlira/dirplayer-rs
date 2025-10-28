@@ -37,10 +37,16 @@ pub struct ScriptInstance {
 impl ScriptInstance {
     pub fn new(instance_id: ScriptInstanceId, script_ref: CastMemberRef, script_def: &Script, lctx: &ScriptContext) -> ScriptInstance {
         let mut properties = FxHashMap::default();
-        for name_id in script_def.chunk.property_name_ids.iter() {
-            let name = lctx.names[*name_id as usize].clone();
-            properties.insert(name, DatumRef::Void);
+
+        for prop_name_id in &script_def.chunk.property_name_ids {
+            let prop_name = lctx.names
+                .get(*prop_name_id as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("prop_{}", prop_name_id));
+            
+            properties.insert(prop_name, DatumRef::Void);
         }
+
         ScriptInstance {
             instance_id,
             script: script_ref,
