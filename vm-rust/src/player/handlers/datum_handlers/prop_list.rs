@@ -41,7 +41,7 @@ impl PropListUtils {
     allocator: &DatumAllocator
   ) -> Result<bool, ScriptError> {
     let result = match (left, right) {
-        (Datum::String(l), Datum::String(r)) => l == r, // exact
+        (Datum::String(l), Datum::String(r)) => l == r, // exact (case-sensitive for keys)
         (Datum::String(l), Datum::Symbol(r)) => l == r, 
         (Datum::Symbol(l), Datum::String(r)) => l == r,
         
@@ -93,6 +93,13 @@ impl PropListUtils {
     formatted_key: String,
   ) -> Result<DatumRef, ScriptError> {
     let key = allocator.get_datum(&key_ref);
+    // First try key-based lookup (works for all types including Int)
+    let key_index = Self::get_key_index(prop_list, key, &allocator)?;
+    if key_index >= 0 {
+      return Ok(prop_list[key_index as usize].1.clone());
+    }
+    
+    // If not found and key is an Int, try as positional index
     if let Datum::Int(position) = key {
       let index = *position - 1;
       if index >= 0 && index < prop_list.len() as i32 {
@@ -101,15 +108,10 @@ impl PropListUtils {
         return Err(ScriptError::new(format!("Index out of range: {}", index)));
       }
     }
-    let key_index = Self::get_key_index(prop_list, key, &allocator)?;
-    if is_required && key_index < 0 {
+    if is_required {
       return Err(ScriptError::new(format!("Prop not found: {}", formatted_key)));
     }
-    if key_index >= 0 {
-      Ok(prop_list[key_index as usize].1.clone())
-    } else {
-      Ok(DatumRef::Void)
-    }
+    Ok(DatumRef::Void)
   }
 
   pub fn set_prop(
