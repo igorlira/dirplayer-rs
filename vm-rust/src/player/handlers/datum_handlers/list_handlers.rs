@@ -97,8 +97,45 @@ impl ListDatumHandlers {
       "findPos" => Self::find_pos(datum, args),
       "getPos" => Self::find_pos(datum, args),
       "join" => Self::join(datum, args),
+      "getPropRef" => Self::get_prop_ref(datum, args),
       _ => Err(ScriptError::new(format!("No handler {handler_name} for list datum")))
     }
+  }
+
+  pub fn get_prop_ref(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    if args.is_empty() {
+      return Err(ScriptError::new("getPropRef requires at least one argument".to_string()));
+    }
+
+    let key = args[0].clone();
+
+    let result = reserve_player_mut(|player| {
+      let items = player.get_datum(datum).to_list()?;
+      let index = player.get_datum(&key).int_value()?;
+
+      // Support both 0-based and 1-based indexing
+      let actual_index = if index == 0 {
+        0
+      } else if index >= 1 {
+        (index - 1) as usize
+      } else {
+        return Err(ScriptError::new(format!("Index out of bounds: {}", index)));
+      };
+      
+      if actual_index >= items.len() {
+        return Err(ScriptError::new(format!("Index out of bounds: {}", index)));
+      }
+
+      let result = items[actual_index].clone();
+      // If there are more keys, recursively resolve
+      if args.len() > 2 {
+        TypeUtils::get_sub_prop(&result, &args[2], player)
+      } else {
+        Ok(result)
+      }
+    });
+
+    result
   }
 
   fn count(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
