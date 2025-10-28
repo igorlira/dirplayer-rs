@@ -1,8 +1,8 @@
 use log::warn;
 
-use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, CastMemberTypeId, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
+use crate::{director::lingo::datum::Datum, js_api::JsApi, player::{cast_lib::CastMemberRef, cast_member::{CastMember, BitmapMember, CastMemberType, CastMemberTypeId, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
 
-use super::cast_member::{bitmap::BitmapMemberHandlers, field::FieldMemberHandlers, text::TextMemberHandlers, film_loop::FilmLoopMemberHandlers, sound::SoundMemberHandlers};
+use super::cast_member::{bitmap::BitmapMemberHandlers, field::FieldMemberHandlers, text::TextMemberHandlers, film_loop::FilmLoopMemberHandlers, sound::SoundMemberHandlers, font::FontMemberHandlers};
 
 pub struct CastMemberRefHandlers {}
 
@@ -222,7 +222,29 @@ impl CastMemberRefHandlers {
         BitmapMemberHandlers::set_prop(member_ref, prop, value)
       }
       _ => {
-        Err(ScriptError::new(format!("Cannot set castMember prop {} for member of type {:?}", prop, member_type)))
+        // Check if this is a bitmap-specific property being set on a non-bitmap
+        if prop == "image" || prop == "regPoint" || prop == "paletteRef" || prop == "palette" {
+          // Director allows setting bitmap properties on non-bitmap members
+          // by implicitly converting them to bitmap members
+          reserve_player_mut(|player| {
+            let cast_member = player.movie.cast_manager.find_mut_member_by_ref(member_ref).unwrap();
+
+            // If not already a bitmap, convert it
+            if cast_member.member_type.as_bitmap().is_none() {
+              // Create a new empty/default bitmap member
+              let new_bitmap = BitmapMember::default();
+
+              // Replace the member type
+              cast_member.member_type = CastMemberType::Bitmap(new_bitmap);
+            }
+
+            Ok(())
+          })?;
+          // Now try setting the property again
+          BitmapMemberHandlers::set_prop(member_ref, prop, value)
+        } else {
+          Err(ScriptError::new(format!("Cannot set castMember prop {} for member of type {:?}", prop, member_type)))
+        }
       }
     }
   }
