@@ -60,42 +60,68 @@ fn blend_pixel(
     let effective_alpha = src_alpha * blend_alpha;
 
     match ink {
+        // 0 = Copy (Director semantics: copy source over destination)
+        // If fully opaque/effective_alpha==1 => hard copy, otherwise alpha-blend.
         0 => {
-            // Copy
-            blend_color_alpha(dst, src, effective_alpha)
+            if (effective_alpha - 1.0).abs() < 1e-6 {
+                src
+            } else {
+                blend_color_alpha(dst, src, effective_alpha)
+            }
         }
         // ... (other ink modes use effective_alpha too, just like 'Copy')
+        // 7 = Not Ghost
+        // Approximation: similar to copy but skip bg_color (like ink 36),
+        // many implementations treat this as a matte-related/alpha-preserving ink.
+        // We'll behave like "if src == bg_color -> dst, else blend normally".
         7 => {
-            // Not Ghost
-            // TODO
-            blend_color_alpha(dst, src, effective_alpha)
-        }
-        8 => {
-            // Matte
-            // TODO
-            blend_color_alpha(dst, src, effective_alpha)
-        }
-        9 => {
-            // Mask
-            // TODO
-            blend_color_alpha(dst, src, effective_alpha)
-        }
-        33 => {
-            // Add pin
             if src == bg_color {
                 dst
             } else {
-                let r = dst.0 as i32 + src.0 as i32;
-                let g = dst.1 as i32 + src.1 as i32;
-                let b = dst.2 as i32 + src.2 as i32;
-                let r = r.min(255).max(0) as u8;
-                let g = g.min(255).max(0) as u8;
-                let b = b.min(255).max(0) as u8;
-                (r, g, b)
+                blend_color_alpha(dst, src, effective_alpha)
             }
         }
+        // 8 = Matte
+        // Use source alpha (or mask) as matte. If fully opaque, copy; otherwise blend.
+        8 => {
+            if src_alpha <= 0.001 {
+                dst
+            } else if (effective_alpha - 1.0).abs() < 1e-6 {
+                src
+            } else {
+                blend_color_alpha(dst, src, effective_alpha)
+            }
+        }
+        // 9 = Mask
+        // Mask typically means use mask to determine copy. Here we assume mask was applied earlier,
+        // so treat it as a hard copy when present (i.e. if we've reached here, copy).
+        9 => {
+            if src_alpha <= 0.001 {
+                dst
+            } else {
+                // If blend < 1, respect it.
+                if effective_alpha >= 1.0 {
+                    src
+                } else {
+                    blend_color_alpha(dst, src, effective_alpha)
+                }
+            }
+        }
+        // 33 = Add Pin (additive but skip background color)
+        // Add source color to destination (optionally modulated by effective alpha).
+        33 => {
+            if src == bg_color {
+                dst
+            } else {
+                let r = (dst.0 as f32 + (src.0 as f32 * effective_alpha)).min(255.0);
+                let g = (dst.1 as f32 + (src.1 as f32 * effective_alpha)).min(255.0);
+                let b = (dst.2 as f32 + (src.2 as f32 * effective_alpha)).min(255.0);
+                (r as u8, g as u8, b as u8)
+            }
+        }
+        // 36 = Background Transparent
+        // If the source equals the bg_color, skip; otherwise blend normally.
         36 => {
-            // Background transparent
             if src == bg_color {
                 dst
             } else {
