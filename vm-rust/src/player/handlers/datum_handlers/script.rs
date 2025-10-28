@@ -92,19 +92,44 @@ impl ScriptDatumHandlers {
   }
 
   pub async fn new(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let (script_ref, new_handler_ref) = reserve_player_mut(|player| {
+    let (script_ref, new_handler_ref, expected_param_count, script_name) = reserve_player_mut(|player| {
       let script_ref = match player.get_datum(datum) {
         Datum::ScriptRef(script_ref) => script_ref,
         _ => return Err(ScriptError::new("Cannot create new instance of non-script".to_string())),
       };
       let script = player.movie.cast_manager.get_script_by_ref(script_ref).unwrap();
       let new_handler_ref = script.get_own_handler_ref(&"new".to_string());
-      Ok((script_ref.clone(), new_handler_ref))
+      
+      let param_count = if let Some(_) = &new_handler_ref {
+        let handler_def = script.get_own_handler(&"new".to_string()).unwrap();
+        handler_def.argument_name_ids.len()
+      } else {
+        0
+      };
+      
+      Ok((script_ref.clone(), new_handler_ref, param_count, script.name.clone()))
     })?;
 
     let (instance_ref, datum_ref) = Self::create_script_instance(&script_ref);
+    
     if let Some(new_handler_ref) = new_handler_ref {
-      let result_scope = player_call_script_handler(Some(instance_ref), new_handler_ref, args).await?;
+      let mut padded_args = args.clone();
+      while padded_args.len() < expected_param_count {
+        padded_args.push(DatumRef::Void);
+      }
+
+      let result_scope = match player_call_script_handler(Some(instance_ref), new_handler_ref, &padded_args).await {
+        Ok(scope) => scope,
+        Err(err) => {
+          web_sys::console::log_1(&format!(
+            "❌ Error in {}.new(): {}",
+            script_name,
+            err.message
+          ).into());
+          return Err(err);
+        }
+      };
+      
       player_handle_scope_return(&result_scope);
       return Ok(result_scope.return_value);
     } else {
