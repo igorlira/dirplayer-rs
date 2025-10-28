@@ -1,19 +1,61 @@
-use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, player_call_script_handler, player_handle_scope_return, reserve_player_mut, script::{get_lctx_for_script, ScriptInstance}, script_ref::ScriptInstanceRef, DatumRef, ScriptError}};
-
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, player_call_script_handler, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_lctx_for_script, ScriptInstance}, script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode}};
 pub struct ScriptDatumHandlers {}
 
 impl ScriptDatumHandlers {
-  pub fn has_async_handler(name: &String) -> bool {
+  pub fn has_async_handler(obj_ref: &DatumRef, name: &String) -> bool {
     match name.as_str() {
       "new" => true,
-      _ => false,
+      "handler" => false,
+      _ => {
+        // Check if the script has a handler with this name
+        reserve_player_ref(|player| {
+          if let Datum::ScriptRef(script_ref) = player.get_datum(obj_ref) {
+            if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(script_ref) {
+              let script = script_rc.as_ref();
+              return script.get_own_handler(name).is_some();
+            }
+          }
+          false
+        })
+      }
     }
   }
 
-  pub async fn call_async(datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+  pub async fn call_async(obj_ref: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     match handler_name.as_str() {
-      "new" => Self::new(datum, &args).await,
-      _ => Err(ScriptError::new(format!("No async handler {handler_name} for script datum")))
+      "new" => Self::new(obj_ref, args).await,
+      _ => {
+        // Try to call a handler defined in the script itself
+        let handler_ref = reserve_player_ref(|player| {
+          let script_ref = match player.get_datum(obj_ref) {
+            Datum::ScriptRef(script_ref) => script_ref.clone(),
+            _ => return Err(ScriptError::new("Expected script reference".to_string())),
+          };
+          Ok::<_, ScriptError>((script_ref, handler_name.clone()))
+        })?;
+        
+        // Check if the script actually has this handler
+        let has_handler = reserve_player_ref(|player| {
+          if let Datum::ScriptRef(script_ref) = player.get_datum(obj_ref) {
+            if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(script_ref) {
+              let script = script_rc.as_ref();
+              return script.get_own_handler(handler_name).is_some();
+            }
+          }
+          false
+        });
+        
+        if !has_handler {
+          return Err(ScriptError::new_code(
+            ScriptErrorCode::HandlerNotFound,
+            format!("No handler {} for script datum", handler_name)
+          ));
+        }
+        
+        // Call with no receiver (None) - the script itself becomes "me"
+        let result = player_call_script_handler(None, handler_ref, args).await?;
+        Ok(result.return_value)
+      }
     }
   }
 

@@ -46,7 +46,7 @@ pub async fn player_call_datum_handler(
     DatumType::String => StringDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::StringChunk => StringChunkHandlers::call(obj_ref, handler_name, args),
     DatumType::ScriptRef => {
-      if ScriptDatumHandlers::has_async_handler(handler_name) {
+      if ScriptDatumHandlers::has_async_handler(obj_ref, handler_name) {
         ScriptDatumHandlers::call_async(obj_ref, handler_name, args).await
       } else {
         ScriptDatumHandlers::call(obj_ref, handler_name, args)
