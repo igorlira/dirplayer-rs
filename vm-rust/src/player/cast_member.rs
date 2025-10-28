@@ -312,6 +312,112 @@ impl CastMemberType {
 }
 
 impl CastMember {
+  fn chunk_type_name(c: &Chunk) -> &'static str {
+      match c {
+        Chunk::Cast(_) => "Cast",
+        Chunk::CastList(_) => "CastList",
+        Chunk::CastMember(_) => "CastMember",
+        Chunk::CastInfo(_) => "CastInfo",
+        Chunk::Config(_) => "Config",
+        Chunk::InitialMap(_) => "InitialMap",
+        Chunk::KeyTable(_) => "KeyTable",
+        Chunk::MemoryMap(_) => "MemoryMap",
+        Chunk::Script(_) => "Script",
+        Chunk::ScriptContext(_) => "ScriptContext",
+        Chunk::ScriptNames(_) => "ScriptNames",
+        Chunk::FrameLabels(_) => "FrameLabels",
+        Chunk::Score(_) => "Score",
+        Chunk::ScoreOrder(_) => "ScoreOrder",
+        Chunk::Text(_) => "Text",
+        Chunk::Bitmap(_) => "Bitmap",
+        Chunk::Palette(_) => "Palette",
+        Chunk::Sound(_) => "Sound",
+        Chunk::Media(_) => "Media",
+      }
+  }
+
+  /// Recursively searches children of a CastMemberDef for a sound chunk
+  fn find_sound_chunk_in_def(def: &CastMemberDef) -> Option<SoundChunk> {
+    for child_opt in &def.children {
+      if let Some(child) = child_opt {
+        match child {
+          Chunk::Sound(s) => return Some(s.clone()),
+          Chunk::Media(m) => {
+            if !m.audio_data.is_empty() {
+              let mut sc = SoundChunk::new(m.audio_data.clone());
+              sc.set_metadata(m.sample_rate, 1, if m.is_compressed { 0 } else { 16 });
+              return Some(sc);
+            }
+          }
+          Chunk::CastMember(_) => {
+            // `CastMemberChunk` has no children, so nothing to recurse into
+            continue;
+          }
+          _ => {}
+        }
+      }
+    }
+    None
+  }
+
+  fn child_has_sound_in_def(def: &CastMemberDef) -> bool {
+    def.children.iter().any(|c| {
+      match c {
+        Some(Chunk::Sound(_)) => true,
+        Some(Chunk::Media(m)) => !m.audio_data.is_empty(),
+        Some(Chunk::CastMember(_)) => false,
+        _ => false,
+      }
+    })
+  }
+
+  /// Recursively find a SoundChunk in a Chunk (handles Media & nested CastMembers)
+  fn find_sound_chunk_in_chunk(chunk: &Chunk) -> Option<SoundChunk> {
+    match chunk {
+      Chunk::Sound(s) => Some(s.clone()),
+      Chunk::Media(m) if !m.audio_data.is_empty() => {
+        let mut sc = SoundChunk::new(m.audio_data.clone());
+        sc.set_metadata(m.sample_rate, 1, if m.is_compressed { 0 } else { 16 });
+        Some(sc)
+      }
+      Chunk::CastMember(cm) => {
+        // CastMemberChunk has no children; nothing to recurse
+        None
+      }
+      _ => None,
+    }
+  }
+
+  // Check if an Option<Chunk> contains sound
+  fn chunk_has_sound(chunk_opt: &Option<Chunk>) -> bool {
+    match chunk_opt {
+      Some(c) => match c {
+        Chunk::Sound(_) => true,
+        Chunk::Media(m) => !m.audio_data.is_empty(),
+        _ => false,
+      },
+      None => false,
+    }
+  }
+
+  // Extract SoundChunk from an Option<Chunk>
+  fn find_sound_chunk(chunk_opt: &Option<Chunk>) -> Option<SoundChunk> {
+    match chunk_opt {
+      Some(c) => match c {
+        Chunk::Sound(s) => Some(s.clone()),
+        Chunk::Media(m) => {
+          if !m.audio_data.is_empty() {
+            Some(SoundChunk::from_media(m))
+          } else {
+            None
+          }
+        }
+        _ => None,
+      },
+      None => None,
+    }
+  }
+
   pub fn from(
     cast_lib: u32,
     number: u32, 

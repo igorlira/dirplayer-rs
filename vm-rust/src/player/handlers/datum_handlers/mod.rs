@@ -16,6 +16,7 @@ pub mod int;
 pub mod color;
 pub mod cast_member;
 pub mod player;
+pub mod sound_channel;
 pub mod xml;
 pub mod date;
 pub mod math;
@@ -23,11 +24,12 @@ pub mod vector;
 
 use player::PlayerDatumHandlers;
 
-use crate::{director::lingo::datum::DatumType, player::{format_datum, reserve_player_ref, xtra::manager::{call_xtra_instance_async_handler, call_xtra_instance_handler, has_xtra_instance_async_handler}, DatumRef, ScriptError, ScriptErrorCode}};
+use crate::{director::lingo::datum::DatumType, player::{format_datum, reserve_player_ref, reserve_player_mut, xtra::manager::{call_xtra_instance_async_handler, call_xtra_instance_handler, has_xtra_instance_async_handler}, DatumRef, ScriptError, ScriptErrorCode}};
 use self::date::DateDatumHandlers;
 use self::vector::VectorDatumHandlers;
 use self::math::MathDatumHandlers;
 use self::xml::XmlDatumHandlers;
+use self::{bitmap::BitmapDatumHandlers, list_handlers::ListDatumHandlers, point::PointDatumHandlers, prop_list::PropListDatumHandlers, rect::RectDatumHandlers, script::ScriptDatumHandlers, sprite::SpriteDatumHandlers, string::StringDatumHandlers, string_chunk::StringChunkHandlers, timeout::TimeoutDatumHandlers, sound_channel::SoundChannelDatumHandlers};
 
 pub async fn player_call_datum_handler(
   obj_ref: &DatumRef,
@@ -88,6 +90,9 @@ pub async fn player_call_datum_handler(
     DatumType::DateRef => DateDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::MathRef => MathDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::Vector => VectorDatumHandlers::call(obj_ref, handler_name, args),
+    DatumType::SoundChannel => reserve_player_mut(|player| {
+      SoundChannelDatumHandlers::call(player, obj_ref, handler_name, args)
+    }),
     _ => reserve_player_ref(|player| {
       let formatted_datum = format_datum(obj_ref, &player);
       Err(ScriptError::new_code(ScriptErrorCode::HandlerNotFound, format!("No handler {handler_name} for datum {}", formatted_datum)))

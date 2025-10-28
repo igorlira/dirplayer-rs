@@ -792,7 +792,11 @@ impl TypeHandlers {
   pub fn sound(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let channel_num = player.get_datum(&args[0]).int_value()? as u16;
-      Ok(player.alloc_datum(Datum::SoundRef(channel_num)))
+      // Validate the channel exists
+      if channel_num == 0 || channel_num as usize > player.sound_manager.num_channels() {
+        return Err(ScriptError::new(format!("Invalid sound channel: {}", channel_num)));
+      }
+      Ok(player.alloc_datum(Datum::SoundChannel(channel_num)))
     })
   }
 

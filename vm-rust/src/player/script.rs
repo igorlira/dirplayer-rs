@@ -11,6 +11,8 @@ use super::{
     handlers::datum_handlers::date::DateDatumHandlers,
     handlers::datum_handlers::vector::VectorDatumHandlers,
     handlers::datum_handlers::math::MathDatumHandlers,
+    handlers::datum_handlers::xml::XmlDatumHandlers,
+    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, bytecode::handler_manager::BytecodeHandlerContext, cast_lib::{player_cast_lib_set_prop, CastMemberRef}, datum_formatting::{format_concrete_datum, format_datum}, handlers::{datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils, point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers, string::StringDatumUtils, string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers, timeout::TimeoutDatumHandlers, void::VoidDatumHandlers, sound_channel::SoundChannelDatumHandlers}, types::TypeUtils}, reserve_player_mut, reserve_player_ref, scope::Scope, score::{sprite_get_prop, sprite_set_prop}, script_ref::ScriptInstanceRef, stage::{get_stage_prop, set_stage_prop}, DatumRef, DirPlayer, ScriptError
 };
 
 #[derive(Clone)]
@@ -367,9 +369,6 @@ pub async fn player_set_obj_prop(
         Datum::MovieRef => reserve_player_mut(|player| {
             player.set_movie_prop(prop_name, player.get_datum(value_ref).clone())
         }),
-        Datum::SoundRef(..) => reserve_player_mut(|player| {
-            SoundDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
-        }),
         Datum::ScriptRef(script_ref) => reserve_player_mut(|player| {
             script_set_static_prop(player, &script_ref, prop_name, value_ref, false)
         }),
@@ -384,6 +383,9 @@ pub async fn player_set_obj_prop(
         }),
         Datum::Vector(..) => reserve_player_mut(|player| {
             VectorDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
+        }),
+        Datum::SoundChannel(_) => reserve_player_mut(|player| {
+            SoundChannelDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
         _ => reserve_player_ref(|player| {
             Err(ScriptError::new(
@@ -449,6 +451,7 @@ pub fn get_obj_prop(
         Datum::DateRef(_) => DateDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::MathRef(_) => MathDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::Vector(_) => Ok(player.alloc_datum(VectorDatumHandlers::get_prop(player, obj_ref, prop_name)?)),
+        Datum::SoundChannel(_) => Ok(player.alloc_datum(SoundChannelDatumHandlers::get_prop(player, obj_ref, &prop_name)?)),
         _ => {
             if prop_name == "ilk" {
                 let ilk = TypeUtils::get_datum_ilk(&obj_clone)?;

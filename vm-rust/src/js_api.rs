@@ -832,6 +832,9 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
     Datum::SoundRef(..) => {
       map.str_set("type", &safe_js_string("sound"));
     }
+    Datum::SoundChannel(..) => {
+      map.str_set("type", &safe_js_string("soundChannel"));
+    }
     Datum::XmlRef(id) => {
       map.str_set("type", &safe_js_string("xmlRef"));
       map.str_set("id", &JsValue::from_f64(*id as f64));

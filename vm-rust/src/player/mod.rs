@@ -55,6 +55,7 @@ use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks}};
 
 use crate::player::handlers::datum_handlers::xml::{XmlDocument, XmlNode};
+use crate::player::handlers::datum_handlers::sound_channel::{SoundManager, AudioData, SoundChannelDatumHandlers};
 use crate::player::handlers::datum_handlers::date::DateObject;
 use crate::player::handlers::datum_handlers::math::MathObject;
 
@@ -119,6 +120,7 @@ pub struct DirPlayer {
   pub xml_nodes: HashMap<u32, XmlNode>,
   // Counter for generating unique XML IDs
   pub next_xml_id: u32,
+  pub sound_manager: SoundManager,
   pub date_objects: HashMap<u32, DateObject>,
   pub math_objects: HashMap<u32, MathObject>,
 }
@@ -127,6 +129,8 @@ impl DirPlayer {
   pub fn new<'a>(
     tx: Sender<PlayerVMExecutionItem>,
   ) -> DirPlayer {
+    let sound_manager = SoundManager::new(8).expect("Sound manager failed to initialize"); // 8 sound channels (Director standard)
+
     let mut result = DirPlayer {
       movie: Movie { 
         rect: IntRect::from(0, 0, 0, 0),
@@ -188,6 +192,7 @@ impl DirPlayer {
       xml_documents: HashMap::new(),
       xml_nodes: HashMap::new(),
       next_xml_id: 1000,
+      sound_manager: sound_manager,
       date_objects: HashMap::new(),
       math_objects: HashMap::new(),
     };
@@ -562,6 +567,48 @@ impl DirPlayer {
   pub fn current_scope_ref(&self) -> ScopeRef {
     (self.scope_count - 1) as ScopeRef
   }
+
+  // Lingo: sound(channelNum)
+  pub fn get_sound_channel(&mut self, channel_num: i32) -> Result<DatumRef, ScriptError> {
+    // if channel_num < 1 || channel_num > self.sound_manager.num_channels() as i32 {
+    //     return Err(ScriptError::new(format!(
+    //         "Sound channel {} out of range (1-{})",
+    //         channel_num,
+    //         self.sound_manager.num_channels()
+    //     )));
+    // }
+    
+    // Channel numbers in Lingo are 1-based, convert to 0-based index
+    let channel_idx = (channel_num - 1) as usize;
+    Ok(self.alloc_datum(Datum::SoundChannel(channel_idx as u16)))
+  }
+
+  // Lingo: puppetSound channelNum, memberRef
+  pub fn puppet_sound(&mut self, channel_num: i32, member_ref: DatumRef) -> Result<(), ScriptError> {
+    let sound_channel = self.get_sound_channel(channel_num)?;
+    SoundChannelDatumHandlers::handle_play_file(self, &sound_channel, &member_ref)
+  }
+
+  // Lingo: sound stop channelNum
+  pub fn sound_stop(&mut self, channel_num: i32) -> Result<(), ScriptError> {
+    let sound_channel = self.get_sound_channel(channel_num)?;
+    SoundChannelDatumHandlers::handle_stop(self, &sound_channel)
+  }
+
+  pub fn load_sound_member(&self, member_ref: &DatumRef) -> Result<AudioData, ScriptError> {
+    // TODO: Get the cast member from your cast storage
+    // let cast_member = self.get_cast_member(member_ref)?;
+    
+    // Get the raw sound data
+    // let sound_data = cast_member.get_sound_data()?;
+    
+    // Load and decode it
+    // load_director_sound(sound_data)
+    //     .map_err(|e| ScriptError::new(format!("Failed to load sound: {}", e)))
+    
+    Err(ScriptError::new("Not implemented".to_string()))
+  }
+
 }
 
 pub fn player_alloc_datum(datum: Datum) -> DatumRef {

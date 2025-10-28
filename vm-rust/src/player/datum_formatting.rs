@@ -56,6 +56,9 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
     Datum::IntPoint((x, y)) => {
       format!("point({}, {})", x, y)
     }
+    Datum::SoundChannel(_) => {
+      format!("<soundChannel>")
+    }
     Datum::CursorRef(_) => {
       format!("<cursor>")
     }
