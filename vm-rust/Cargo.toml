@@ -19,7 +19,7 @@ wasm-bindgen = "0.2.84"
 # code size when deploying.
 console_error_panic_hook = { version = "0.1.7", optional = true }
 wasm-bindgen-futures = "0.4.37"
-js-sys = "0.3.64"
+js-sys = "0.3.81"
 binary-reader = "0.4.5"
 num = "0.4.1"
 num-derive = "0.4.0"
@@ -80,6 +80,20 @@ features = [
   'CustomEvent',
   'CustomEventInit',
   'Event',
+  'AudioContext',
+  'AudioBuffer',
+  'AudioBufferSourceNode',
+  'GainNode',
+  'StereoPannerNode',
+  'AudioParam',
+  'AudioNode',
+  'AudioDestinationNode',
+  'Blob',
+  'BlobPropertyBag',
+  'Url',
+  'HtmlAudioElement',
+  'OfflineAudioContext',
+  'AudioContextState',
 ]
 
 [dependencies.flate2]
