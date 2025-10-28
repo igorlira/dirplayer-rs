@@ -1,16 +1,24 @@
 use async_recursion::async_recursion;
 
 use crate::{
-    director::{chunks::handler::HandlerDef, lingo::{constants::get_opcode_name, opcode::OpCode}},
+    director::{
+        chunks::handler::HandlerDef,
+        lingo::{constants::get_opcode_name, opcode::OpCode},
+    },
     player::{
         bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
-        }, scope::ScopeRef, script::Script, HandlerExecutionResult, ScriptError, PLAYER_OPT
+        },
+        scope::ScopeRef,
+        script::Script,
+        HandlerExecutionResult, ScriptError, PLAYER_OPT,
     },
 };
 
-use super::{compare::CompareBytecodeHandler, get_set::GetSetBytecodeHandler, string::StringBytecodeHandler};
+use super::{
+    compare::CompareBytecodeHandler, get_set::GetSetBytecodeHandler, string::StringBytecodeHandler,
+};
 
 #[derive(Clone)]
 pub struct BytecodeHandlerContext {
@@ -21,7 +29,10 @@ pub struct BytecodeHandlerContext {
 pub struct StaticBytecodeHandlerManager {}
 impl StaticBytecodeHandlerManager {
     #[inline(always)]
-    pub fn call_sync_handler(opcode: OpCode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn call_sync_handler(
+        opcode: OpCode,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         match opcode {
             OpCode::Add => ArithmeticsBytecodeHandler::add(ctx),
             OpCode::PushInt8 => StackBytecodeHandler::push_int(ctx),
@@ -86,7 +97,7 @@ impl StaticBytecodeHandlerManager {
                 let name = get_opcode_name(opcode);
                 let fmt = format!("No handler for opcode {name} ({prim:#04x})");
                 Err(ScriptError::new(fmt))
-            },
+            }
         }
     }
 
@@ -103,7 +114,10 @@ impl StaticBytecodeHandlerManager {
     }
 
     #[inline(always)]
-    pub async fn call_async_handler(opcode: OpCode, ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub async fn call_async_handler(
+        opcode: OpCode,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         match opcode {
             OpCode::NewObj => StackBytecodeHandler::new_obj(&ctx).await,
             OpCode::ExtCall => FlowControlBytecodeHandler::ext_call(&ctx).await,
@@ -115,7 +129,7 @@ impl StaticBytecodeHandlerManager {
                 let name = get_opcode_name(opcode);
                 let fmt = format!("No handler for opcode {name} ({prim:#04x})");
                 Err(ScriptError::new(fmt))
-            },
+            }
         }
     }
 }

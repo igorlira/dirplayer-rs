@@ -1,4 +1,9 @@
-use std::{borrow::{Borrow, BorrowMut}, cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    borrow::{Borrow, BorrowMut},
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+};
 
 use async_std::task::spawn_local;
 use chrono::Local;
@@ -6,15 +11,36 @@ use itertools::Itertools;
 use wasm_bindgen::{prelude::*, Clamped};
 use web_sys::console;
 
-use crate::{console_warn, js_api::JsApi, player::{
-    bitmap::{bitmap::{self, get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, manager::BitmapManager, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, movie::Movie, reserve_player_ref, score::{get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef}, sprite::{CursorRef, Sprite}, DirPlayer, PLAYER_OPT
-}, utils::log_i};
-use crate::js_api::{safe_js_string};
+use crate::js_api::safe_js_string;
+use crate::{
+    console_warn,
+    js_api::JsApi,
+    player::{
+        bitmap::{
+            bitmap::{self, get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef},
+            drawing::{should_matte_sprite, CopyPixelsParams},
+            manager::BitmapManager,
+            mask::BitmapMask,
+            palette_map::PaletteMap,
+        },
+        cast_lib::CastMemberRef,
+        cast_member::CastMemberType,
+        geometry::IntRect,
+        movie::Movie,
+        reserve_player_ref,
+        score::{
+            get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef,
+        },
+        sprite::{CursorRef, Sprite},
+        DirPlayer, PLAYER_OPT,
+    },
+    utils::log_i,
+};
 
-use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
+use crate::player::cast_manager::CastManager;
 use crate::player::font::BitmapFont;
 use crate::player::font::FontManager;
-use crate::player::cast_manager::CastManager;
+use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
 
 pub struct PlayerCanvasRenderer {
     pub container_element: Option<web_sys::HtmlElement>,
@@ -41,10 +67,19 @@ fn get_or_load_font(
         return font_manager.get_system_font();
     }
 
-    let cache_key = format!("{}_{}_{}", font_name, font_size.unwrap_or(0), font_style.unwrap_or(0));
+    let cache_key = format!(
+        "{}_{}_{}",
+        font_name,
+        font_size.unwrap_or(0),
+        font_style.unwrap_or(0)
+    );
 
     console::log_1(
-        &format!("🔍 Looking for font: '{}' (key: '{}')", font_name, cache_key).into(),
+        &format!(
+            "🔍 Looking for font: '{}' (key: '{}')",
+            font_name, cache_key
+        )
+        .into(),
     );
 
     if let Some(font) = font_manager.font_cache.get(&cache_key) {
@@ -57,34 +92,52 @@ fn get_or_load_font(
         return Some(Rc::clone(font));
     }
 
-    console::log_1(&format!(
-        "⚠️  Font '{}' not in cache, attempting to load from cast...",
-        font_name
-    ).into());
+    console::log_1(
+        &format!(
+            "⚠️  Font '{}' not in cache, attempting to load from cast...",
+            font_name
+        )
+        .into(),
+    );
 
-    if let Some(loaded_font) = font_manager.get_font_with_cast(font_name, Some(cast_manager), font_size, font_style) {
+    if let Some(loaded_font) =
+        font_manager.get_font_with_cast(font_name, Some(cast_manager), font_size, font_style)
+    {
         console::log_1(&format!("✅ Loaded font '{}' from cast", font_name).into());
         return Some(loaded_font);
     }
 
-    console::log_1(&format!(
-        "❌ Could not find font '{}', falling back to system font",
-        font_name
-    ).into());
+    console::log_1(
+        &format!(
+            "❌ Could not find font '{}', falling back to system font",
+            font_name
+        )
+        .into(),
+    );
 
     font_manager.get_system_font()
 }
 
-pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug_sprite_num: Option<i16>) {
+pub fn render_stage_to_bitmap(
+    player: &mut DirPlayer,
+    bitmap: &mut Bitmap,
+    debug_sprite_num: Option<i16>,
+) {
     let palettes = player.movie.cast_manager.palettes();
-    render_score_to_bitmap(player, &ScoreRef::Stage, bitmap, debug_sprite_num, IntRect::from_size(0, 0, player.movie.rect.width(), player.movie.rect.height()));
+    render_score_to_bitmap(
+        player,
+        &ScoreRef::Stage,
+        bitmap,
+        debug_sprite_num,
+        IntRect::from_size(0, 0, player.movie.rect.width(), player.movie.rect.height()),
+    );
     draw_cursor(player, bitmap, &palettes);
 }
 
 pub fn render_score_to_bitmap(
-    player: &mut DirPlayer, 
+    player: &mut DirPlayer,
     score_source: &ScoreRef,
-    bitmap: &mut Bitmap, 
+    bitmap: &mut Bitmap,
     debug_sprite_num: Option<i16>,
     dest_rect: IntRect,
 ) {
@@ -98,7 +151,7 @@ pub fn render_score_to_bitmap(
             &palettes,
             &player.bg_color,
             &PaletteRef::BuiltIn(get_system_default_palette()),
-            bitmap.original_bit_depth
+            bitmap.original_bit_depth,
         ),
         &palettes,
     );
@@ -113,14 +166,16 @@ pub fn render_score_to_bitmap(
                 }
                 let member = member.unwrap();
                 match &member.member_type {
-                    CastMemberType::FilmLoop(film_loop_member) => {
-                        &film_loop_member.score
-                    }
+                    CastMemberType::FilmLoop(film_loop_member) => &film_loop_member.score,
                     _ => return,
                 }
             }
         };
-        score.get_sorted_channels().iter().map(|x| x.number as i16).collect_vec()
+        score
+            .get_sorted_channels()
+            .iter()
+            .map(|x| x.number as i16)
+            .collect_vec()
     };
 
     for channel_num in sorted_channel_numbers {
@@ -129,10 +184,7 @@ pub fn render_score_to_bitmap(
             let sprite = score.get_sprite(channel_num).unwrap();
             sprite.member.as_ref().unwrap().clone()
         };
-        let member = player
-            .movie
-            .cast_manager
-            .find_member_by_ref(&member_ref);
+        let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
         if member.is_none() {
             continue;
         }
@@ -140,10 +192,13 @@ pub fn render_score_to_bitmap(
         match &member.member_type {
             CastMemberType::Bitmap(bitmap_member) => {
                 let sprite_rect = {
-                    let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                    let sprite =
+                        get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                     get_concrete_sprite_rect(player, sprite).clone()
                 };
-                let sprite_bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_member.image_ref);
+                let sprite_bitmap = player
+                    .bitmap_manager
+                    .get_bitmap_mut(bitmap_member.image_ref);
                 if sprite_bitmap.is_none() {
                     continue;
                 }
@@ -160,10 +215,26 @@ pub fn render_score_to_bitmap(
                 let src_rect = IntRect::from(0, 0, sprite.width as i32, sprite.height as i32);
                 let dst_rect = sprite_rect;
                 let dst_rect = IntRect::from(
-                    if sprite.flip_h { dst_rect.right } else { dst_rect.left },
-                    if sprite.flip_v { dst_rect.bottom } else { dst_rect.top },
-                    if sprite.flip_h { dst_rect.left } else { dst_rect.right },
-                    if sprite.flip_v { dst_rect.top } else { dst_rect.bottom },
+                    if sprite.flip_h {
+                        dst_rect.right
+                    } else {
+                        dst_rect.left
+                    },
+                    if sprite.flip_v {
+                        dst_rect.bottom
+                    } else {
+                        dst_rect.top
+                    },
+                    if sprite.flip_h {
+                        dst_rect.left
+                    } else {
+                        dst_rect.right
+                    },
+                    if sprite.flip_v {
+                        dst_rect.top
+                    } else {
+                        dst_rect.bottom
+                    },
                 );
 
                 let mut params = CopyPixelsParams {
@@ -177,39 +248,38 @@ pub fn render_score_to_bitmap(
                     let mask_bitmap: &BitmapMask = mask.borrow();
                     params.mask_image = Some(mask_bitmap);
                 }
-                bitmap.copy_pixels_with_params(
-                    &palettes, 
-                    &src_bitmap, 
-                    dst_rect, 
-                    src_rect,
-                    &params,
-                );
+                bitmap.copy_pixels_with_params(&palettes, &src_bitmap, dst_rect, src_rect, &params);
             }
             CastMemberType::Shape(_) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                 let sprite_rect = get_concrete_sprite_rect(player, sprite);
                 let dst_rect = sprite_rect;
                 bitmap.fill_rect(
-                    dst_rect.left, 
-                    dst_rect.top, 
-                    dst_rect.right, 
-                    dst_rect.bottom, 
-                    resolve_color_ref(&palettes, &sprite.color, &PaletteRef::BuiltIn(get_system_default_palette()), bitmap.original_bit_depth), 
-                    &palettes, 
+                    dst_rect.left,
+                    dst_rect.top,
+                    dst_rect.right,
+                    dst_rect.bottom,
+                    resolve_color_ref(
+                        &palettes,
+                        &sprite.color,
+                        &PaletteRef::BuiltIn(get_system_default_palette()),
+                        bitmap.original_bit_depth,
+                    ),
+                    &palettes,
                     sprite.blend as f32 / 100.0,
                 );
             }
             CastMemberType::Field(field_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
-                
+
                 let font_opt = get_or_load_font(
                     &mut player.font_manager,
                     &player.movie.cast_manager,
                     &field_member.font,
                     Some(field_member.font_size),
-                    None
+                    None,
                 );
-                
+
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
@@ -220,7 +290,7 @@ pub fn render_score_to_bitmap(
                         bg_color: sprite.bg_color.clone(),
                         mask_image: None,
                     };
-                    
+
                     bitmap.draw_text(
                         &field_member.text,
                         &font,
@@ -230,15 +300,15 @@ pub fn render_score_to_bitmap(
                         params,
                         &palettes,
                         field_member.fixed_line_space,
-                        field_member.top_spacing
+                        field_member.top_spacing,
                     );
-                    
+
                     if player.keyboard_focus_sprite == sprite.number as i16 {
                         let cursor_x = sprite.loc_h + (sprite.width / 2);
                         let cursor_y = sprite.loc_v;
                         let cursor_width = 1;
                         let cursor_height = font.char_height as i32;
-                        
+
                         bitmap.fill_rect(
                             cursor_x,
                             cursor_y,
@@ -246,29 +316,31 @@ pub fn render_score_to_bitmap(
                             cursor_y + cursor_height,
                             (0, 0, 0),
                             &palettes,
-                            1.0
+                            1.0,
                         );
                     }
                 }
             }
             CastMemberType::Font(font_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
-                
+
                 // Get font by info with fallback
-                let font: Rc<BitmapFont> = if let Some(f) = player.font_manager.get_font_by_info(&font_member.font_info) {
-                    Rc::new(f.clone())  // wrap &BitmapFont in Rc
-                } else if let Some(f) = player.font_manager.get_system_font() {
-                    f  // already Rc<BitmapFont>
-                } else {
-                    continue;
-                };
-                
-                let font_bitmap: &mut bitmap::Bitmap = player.bitmap_manager
+                let font: Rc<BitmapFont> =
+                    if let Some(f) = player.font_manager.get_font_by_info(&font_member.font_info) {
+                        Rc::new(f.clone()) // wrap &BitmapFont in Rc
+                    } else if let Some(f) = player.font_manager.get_system_font() {
+                        f // already Rc<BitmapFont>
+                    } else {
+                        continue;
+                    };
+
+                let font_bitmap: &mut bitmap::Bitmap = player
+                    .bitmap_manager
                     .get_bitmap_mut(font.bitmap_ref)
                     .unwrap();
-                
+
                 let mask = if should_matte_sprite(sprite.ink as u32) {
-                        if font_bitmap.matte.is_none() {
+                    if font_bitmap.matte.is_none() {
                         font_bitmap.create_matte_text(&palettes);
                     }
                     Some(font_bitmap.matte.as_ref().unwrap())
@@ -288,7 +360,7 @@ pub fn render_score_to_bitmap(
                     let mask_bitmap: &BitmapMask = mask.borrow();
                     params.mask_image = Some(mask_bitmap);
                 }
-                
+
                 if !font_member.preview_html_spans.is_empty() {
                     if let Err(e) = FontMemberHandlers::render_html_text_to_bitmap(
                         bitmap,
@@ -319,15 +391,15 @@ pub fn render_score_to_bitmap(
             }
             CastMemberType::Text(text_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
-                
+
                 let font_opt = get_or_load_font(
                     &mut player.font_manager,
                     &player.movie.cast_manager,
                     &text_member.font,
                     Some(text_member.font_size),
-                    None
+                    None,
                 );
-                
+
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
@@ -339,7 +411,6 @@ pub fn render_score_to_bitmap(
                         mask_image: None,
                     };
 
-                    
                     bitmap.draw_text(
                         &text_member.text,
                         &font,
@@ -359,11 +430,11 @@ pub fn render_score_to_bitmap(
                 let dest_x = sprite.loc_h;
                 let dest_y = sprite.loc_v;
                 render_score_to_bitmap(
-                    player, 
+                    player,
                     // &mut player.bitmap_manager,
-                    &ScoreRef::FilmLoop(member_ref.clone()), 
-                    bitmap, 
-                    debug_sprite_num, 
+                    &ScoreRef::FilmLoop(member_ref.clone()),
+                    bitmap,
+                    debug_sprite_num,
                     sprite_rect,
                     // IntRect::from_size(dest_x, dest_y, sprite_rect.width(), sprite_rect.height())
                 )
@@ -376,32 +447,37 @@ pub fn render_score_to_bitmap(
     if let Some(sprite) = debug_sprite_num.and_then(|x| player.movie.score.get_sprite(x)) {
         let sprite_rect = get_concrete_sprite_rect(player, sprite);
         bitmap.stroke_rect(
-            sprite_rect.left, 
-            sprite_rect.top, 
-            sprite_rect.right, 
-            sprite_rect.bottom, 
-            (255, 0, 0), 
-            &palettes, 
-            1.0
+            sprite_rect.left,
+            sprite_rect.top,
+            sprite_rect.right,
+            sprite_rect.bottom,
+            (255, 0, 0),
+            &palettes,
+            1.0,
         );
         bitmap.set_pixel(sprite.loc_h, sprite.loc_v, (0, 255, 0), &palettes);
     }
 
     // Draw pick rect
-    let is_picking_sprite = player.keyboard_manager.is_alt_down() && (player.keyboard_manager.is_control_down() || player.keyboard_manager.is_command_down());
+    let is_picking_sprite = player.keyboard_manager.is_alt_down()
+        && (player.keyboard_manager.is_control_down() || player.keyboard_manager.is_command_down());
     if is_picking_sprite {
         let hovered_sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
         if let Some(hovered_sprite) = hovered_sprite {
-            let sprite = player.movie.score.get_sprite(hovered_sprite as i16).unwrap();
+            let sprite = player
+                .movie
+                .score
+                .get_sprite(hovered_sprite as i16)
+                .unwrap();
             let sprite_rect = get_concrete_sprite_rect(player, sprite);
             bitmap.stroke_rect(
-                sprite_rect.left, 
-                sprite_rect.top, 
-                sprite_rect.right, 
-                sprite_rect.bottom, 
-                (0, 255, 0), 
-                &palettes, 
-                1.0
+                sprite_rect.left,
+                sprite_rect.top,
+                sprite_rect.right,
+                sprite_rect.bottom,
+                (0, 255, 0),
+                &palettes,
+                1.0,
             );
         }
     }
@@ -410,37 +486,50 @@ pub fn render_score_to_bitmap(
 fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMap) {
     let hovered_sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
     let cursor_ref = if let Some(hovered_sprite) = hovered_sprite {
-        let hovered_sprite = player.movie.score.get_sprite(hovered_sprite as i16).unwrap();
+        let hovered_sprite = player
+            .movie
+            .score
+            .get_sprite(hovered_sprite as i16)
+            .unwrap();
         hovered_sprite.cursor_ref.as_ref()
     } else {
         None
     };
     let cursor_ref = cursor_ref.or(Some(&player.cursor));
-    let cursor_list = cursor_ref
-        .and_then(|x| {
-            match x {
-                CursorRef::Member(x) => Some(x),
-                _ => None,
-            }
-        });
+    let cursor_list = cursor_ref.and_then(|x| match x {
+        CursorRef::Member(x) => Some(x),
+        _ => None,
+    });
     let cursor_bitmap_member = cursor_list
         .and_then(|x| x.first().map(|x| *x)) // TODO: what to do with other values? maybe animate?
-        .and_then(|x| player.movie.cast_manager.find_member_by_slot_number(x as u32))
+        .and_then(|x| {
+            player
+                .movie
+                .cast_manager
+                .find_member_by_slot_number(x as u32)
+        })
         .and_then(|x| x.member_type.as_bitmap());
 
-    let cursor_bitmap_ref = cursor_bitmap_member
-        .and_then(|x| Some(x.image_ref));
+    let cursor_bitmap_ref = cursor_bitmap_member.and_then(|x| Some(x.image_ref));
 
     let cursor_mask_bitmap_ref = cursor_list
         .and_then(|x| x.get(1).map(|x| *x)) // TODO: what to do with other values? maybe animate?
-        .and_then(|x| player.movie.cast_manager.find_member_by_slot_number(x as u32))
+        .and_then(|x| {
+            player
+                .movie
+                .cast_manager
+                .find_member_by_slot_number(x as u32)
+        })
         .and_then(|x| x.member_type.as_bitmap())
         .and_then(|x| Some(x.image_ref));
 
     if let Some(cursor_bitmap_ref) = cursor_bitmap_ref {
         let cursor_bitmap = player.bitmap_manager.get_bitmap(cursor_bitmap_ref).unwrap();
         let mask = if let Some(cursor_mask_bitmap_ref) = cursor_mask_bitmap_ref {
-            let cursor_mask_bitmap = player.bitmap_manager.get_bitmap(cursor_mask_bitmap_ref).unwrap();
+            let cursor_mask_bitmap = player
+                .bitmap_manager
+                .get_bitmap(cursor_mask_bitmap_ref)
+                .unwrap();
             let mask = cursor_mask_bitmap.to_mask();
             Some(mask)
         } else {
@@ -448,22 +537,27 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
         };
         let cursor_bitmap_member = cursor_bitmap_member.unwrap();
         bitmap.copy_pixels_with_params(
-            &palettes, 
-            cursor_bitmap, 
+            &palettes,
+            cursor_bitmap,
             IntRect::from_size(
                 player.mouse_loc.0 - cursor_bitmap_member.reg_point.0 as i32,
-                player.mouse_loc.1 - cursor_bitmap_member.reg_point.1 as i32, 
-                cursor_bitmap.width as i32, 
-                cursor_bitmap.height as i32
-            ), 
-            IntRect::from_size(0, 0, cursor_bitmap.width as i32, cursor_bitmap.height as i32),
+                player.mouse_loc.1 - cursor_bitmap_member.reg_point.1 as i32,
+                cursor_bitmap.width as i32,
+                cursor_bitmap.height as i32,
+            ),
+            IntRect::from_size(
+                0,
+                0,
+                cursor_bitmap.width as i32,
+                cursor_bitmap.height as i32,
+            ),
             &CopyPixelsParams {
                 blend: 100,
                 ink: 41,
                 bg_color: bitmap.get_bg_color_ref(),
                 color: bitmap.get_fg_color_ref(),
                 mask_image: mask.as_ref(),
-            }
+            },
         );
     }
 }
@@ -492,26 +586,32 @@ impl PlayerCanvasRenderer {
         self.container_element = Some(container_element);
     }
 
-    pub fn set_preview_container_element(&mut self, container_element: Option<web_sys::HtmlElement>) {
+    pub fn set_preview_container_element(
+        &mut self,
+        container_element: Option<web_sys::HtmlElement>,
+    ) {
         if self.preview_canvas.parent_node().is_some() {
             self.preview_canvas.remove();
         }
         if let Some(container_element) = container_element {
-            container_element.append_child(&self.preview_canvas).unwrap();
+            container_element
+                .append_child(&self.preview_canvas)
+                .unwrap();
             self.preview_container_element = Some(container_element);
         }
     }
 
     pub fn draw_preview_frame(&mut self, player: &mut DirPlayer) {
-        if self.preview_member_ref.is_none() || self.preview_container_element.is_none() || self.preview_ctx2d.is_null() || self.preview_ctx2d.is_undefined() {
+        if self.preview_member_ref.is_none()
+            || self.preview_container_element.is_none()
+            || self.preview_ctx2d.is_null()
+            || self.preview_ctx2d.is_undefined()
+        {
             return;
         }
 
         let member_ref = self.preview_member_ref.as_ref().unwrap();
-        let member = player
-            .movie
-            .cast_manager
-            .find_member_by_ref(member_ref);
+        let member = player.movie.cast_manager.find_member_by_ref(member_ref);
         if member.is_none() {
             return;
         }
@@ -543,21 +643,38 @@ impl PlayerCanvasRenderer {
                         &palettes,
                         &player.bg_color,
                         &PaletteRef::BuiltIn(get_system_default_palette()),
-                        sprite_bitmap.original_bit_depth
+                        sprite_bitmap.original_bit_depth,
                     ),
                     palettes,
-                    1.0
+                    1.0,
                 );
                 bitmap.copy_pixels(
                     &palettes,
                     sprite_bitmap,
-                    IntRect::from(0, 0, sprite_bitmap.width as i32, sprite_bitmap.height as i32),
-                    IntRect::from(0, 0, sprite_bitmap.width as i32, sprite_bitmap.height as i32),
+                    IntRect::from(
+                        0,
+                        0,
+                        sprite_bitmap.width as i32,
+                        sprite_bitmap.height as i32,
+                    ),
+                    IntRect::from(
+                        0,
+                        0,
+                        sprite_bitmap.width as i32,
+                        sprite_bitmap.height as i32,
+                    ),
                     &HashMap::new(),
                 );
-                bitmap.set_pixel(sprite_member.reg_point.0 as i32, sprite_member.reg_point.1 as i32, (255, 0, 255), palettes);
+                bitmap.set_pixel(
+                    sprite_member.reg_point.0 as i32,
+                    sprite_member.reg_point.1 as i32,
+                    (255, 0, 255),
+                    palettes,
+                );
 
-                if self.preview_size.0 != bitmap.width as u32 || self.preview_size.1 != bitmap.height as u32 {
+                if self.preview_size.0 != bitmap.width as u32
+                    || self.preview_size.1 != bitmap.height as u32
+                {
                     self.set_preview_size(bitmap.width as u32, bitmap.height as u32);
                 }
                 let slice_data = Clamped(bitmap.data.as_slice());
@@ -569,13 +686,17 @@ impl PlayerCanvasRenderer {
                 self.preview_ctx2d.set_fill_style(&safe_js_string("white"));
                 match image_data {
                     Ok(image_data) => {
-                        self.preview_ctx2d.put_image_data(&image_data, 0.0, 0.0).unwrap();
+                        self.preview_ctx2d
+                            .put_image_data(&image_data, 0.0, 0.0)
+                            .unwrap();
                     }
                     _ => {}
                 }
             }
             CastMemberType::FilmLoop(loop_member) => {
-                let sprite = get_score_sprite(&player.movie, &ScoreRef::FilmLoop(member_ref.clone()), 1).unwrap();
+                let sprite =
+                    get_score_sprite(&player.movie, &ScoreRef::FilmLoop(member_ref.clone()), 1)
+                        .unwrap();
                 let sprite_rect = get_concrete_sprite_rect(player, sprite);
                 let dest_x = sprite.loc_h;
                 let dest_y = sprite.loc_v;
@@ -589,8 +710,16 @@ impl PlayerCanvasRenderer {
                     0,
                     PaletteRef::BuiltIn(get_system_default_palette()),
                 );
-                render_score_to_bitmap(player, &ScoreRef::FilmLoop(member_ref.clone()), &mut bitmap, None, IntRect::from_size(0, 0, width, height));
-                if self.preview_size.0 != bitmap.width as u32 || self.preview_size.1 != bitmap.height as u32 {
+                render_score_to_bitmap(
+                    player,
+                    &ScoreRef::FilmLoop(member_ref.clone()),
+                    &mut bitmap,
+                    None,
+                    IntRect::from_size(0, 0, width, height),
+                );
+                if self.preview_size.0 != bitmap.width as u32
+                    || self.preview_size.1 != bitmap.height as u32
+                {
                     self.set_preview_size(bitmap.width as u32, bitmap.height as u32);
                 }
                 let slice_data = Clamped(bitmap.data.as_slice());
@@ -599,10 +728,13 @@ impl PlayerCanvasRenderer {
                     bitmap.width.into(),
                     bitmap.height.into(),
                 );
-                self.preview_ctx2d.set_fill_style(&JsValue::from_str("white"));
+                self.preview_ctx2d
+                    .set_fill_style(&JsValue::from_str("white"));
                 match image_data {
                     Ok(image_data) => {
-                        self.preview_ctx2d.put_image_data(&image_data, 0.0, 0.0).unwrap();
+                        self.preview_ctx2d
+                            .put_image_data(&image_data, 0.0, 0.0)
+                            .unwrap();
                     }
                     _ => {}
                 }
@@ -653,7 +785,11 @@ impl PlayerCanvasRenderer {
 
         if let Some(font) = player.font_manager.get_system_font() {
             let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
-            let txt = format!("Datum count: {}\nScript count: {}", player.allocator.datum_count(), player.allocator.script_instance_count());
+            let txt = format!(
+                "Datum count: {}\nScript count: {}",
+                player.allocator.datum_count(),
+                player.allocator.script_instance_count()
+            );
 
             let params = CopyPixelsParams {
                 blend: 100,
@@ -665,14 +801,14 @@ impl PlayerCanvasRenderer {
 
             bitmap.draw_text(
                 txt.as_str(),
-                &font, 
-                font_bitmap, 
-                0, 
-                0, 
+                &font,
+                font_bitmap,
+                0,
+                0,
                 params,
-                &player.movie.cast_manager.palettes(), 
-                0, 
-                0
+                &player.movie.cast_manager.palettes(),
+                0,
+                0,
             );
         }
         let slice_data = Clamped(bitmap.data.as_slice());
@@ -710,15 +846,16 @@ pub fn with_canvas_renderer_mut<F, R>(f: F) -> R
 where
     F: FnOnce(&mut Option<PlayerCanvasRenderer>) -> R,
 {
-    RENDERER_LOCK.with_borrow_mut(|renderer_lock| {
-        f(renderer_lock)
-    })
+    RENDERER_LOCK.with_borrow_mut(|renderer_lock| f(renderer_lock))
 }
 
 #[wasm_bindgen]
 pub fn player_set_preview_member_ref(cast_lib: i32, cast_num: i32) -> Result<(), JsValue> {
     with_canvas_renderer_mut(|renderer| {
-        renderer.as_mut().unwrap().preview_member_ref = Some(CastMemberRef { cast_lib, cast_member: cast_num });
+        renderer.as_mut().unwrap().preview_member_ref = Some(CastMemberRef {
+            cast_lib,
+            cast_member: cast_num,
+        });
     });
     Ok(())
 }
@@ -726,7 +863,7 @@ pub fn player_set_preview_member_ref(cast_lib: i32, cast_num: i32) -> Result<(),
 #[wasm_bindgen]
 pub fn player_set_debug_selected_channel(channel_num: i16) -> Result<(), JsValue> {
     with_canvas_renderer_mut(|renderer| {
-        renderer.as_mut().unwrap().debug_selected_channel_num = Some(channel_num );
+        renderer.as_mut().unwrap().debug_selected_channel_num = Some(channel_num);
     });
     JsApi::dispatch_channel_changed(channel_num);
     Ok(())
@@ -736,7 +873,10 @@ pub fn player_set_debug_selected_channel(channel_num: i16) -> Result<(), JsValue
 pub fn player_set_preview_parent(parent_selector: &str) -> Result<(), JsValue> {
     if parent_selector.is_empty() {
         with_canvas_renderer_mut(|renderer| {
-            renderer.as_mut().unwrap().set_preview_container_element(None);
+            renderer
+                .as_mut()
+                .unwrap()
+                .set_preview_container_element(None);
         });
         return Ok(());
     }
@@ -750,7 +890,10 @@ pub fn player_set_preview_parent(parent_selector: &str) -> Result<(), JsValue> {
         .dyn_into::<web_sys::HtmlElement>()?;
 
     with_canvas_renderer_mut(|renderer| {
-        renderer.as_mut().unwrap().set_preview_container_element(Some(parent_element));
+        renderer
+            .as_mut()
+            .unwrap()
+            .set_preview_container_element(Some(parent_element));
     });
 
     Ok(())
@@ -789,7 +932,10 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 .unwrap();
 
             let canvas_size = reserve_player_ref(|player| {
-                (player.movie.rect.width() as u32, player.movie.rect.height() as u32)
+                (
+                    player.movie.rect.width() as u32,
+                    player.movie.rect.height() as u32,
+                )
             });
 
             canvas.set_width(canvas_size.0);
@@ -798,13 +944,31 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
             preview_canvas.set_width(1);
             preview_canvas.set_height(1);
 
-            canvas.style().set_property("image-rendering", "pixelated").unwrap_or(());
-            canvas.style().set_property("image-rendering", "-moz-crisp-edges").unwrap_or(());
-            canvas.style().set_property("image-rendering", "crisp-edges").unwrap_or(());
+            canvas
+                .style()
+                .set_property("image-rendering", "pixelated")
+                .unwrap_or(());
+            canvas
+                .style()
+                .set_property("image-rendering", "-moz-crisp-edges")
+                .unwrap_or(());
+            canvas
+                .style()
+                .set_property("image-rendering", "crisp-edges")
+                .unwrap_or(());
 
-            preview_canvas.style().set_property("image-rendering", "pixelated").unwrap_or(());
-            preview_canvas.style().set_property("image-rendering", "-moz-crisp-edges").unwrap_or(());
-            preview_canvas.style().set_property("image-rendering", "crisp-edges").unwrap_or(());
+            preview_canvas
+                .style()
+                .set_property("image-rendering", "pixelated")
+                .unwrap_or(());
+            preview_canvas
+                .style()
+                .set_property("image-rendering", "-moz-crisp-edges")
+                .unwrap_or(());
+            preview_canvas
+                .style()
+                .set_property("image-rendering", "crisp-edges")
+                .unwrap_or(());
 
             let ctx = canvas
                 .get_context("2d")
@@ -834,7 +998,14 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 preview_size: (1, 1),
                 preview_member_ref: None,
                 debug_selected_channel_num: None,
-                bitmap: Bitmap::new(1, 1, 32, 32, 0, PaletteRef::BuiltIn(get_system_default_palette())),
+                bitmap: Bitmap::new(
+                    1,
+                    1,
+                    32,
+                    32,
+                    0,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                ),
             };
 
             *renderer_lock = Some(renderer);

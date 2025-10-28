@@ -1,9 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{
-        cast_lib::CastMemberRef,
-        DirPlayer, ScriptError,
-    },
+    player::{cast_lib::CastMemberRef, DirPlayer, ScriptError},
 };
 
 pub struct SoundMemberHandlers {}

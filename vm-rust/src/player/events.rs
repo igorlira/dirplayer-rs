@@ -4,11 +4,15 @@ use log::warn;
 use crate::{
     console_warn,
     director::lingo::datum::{Datum, VarRef},
-    player::{handlers::datum_handlers::player_call_datum_handler, player_is_playing, reserve_player_mut},
+    player::{
+        handlers::datum_handlers::player_call_datum_handler, player_is_playing, reserve_player_mut,
+    },
 };
 
 use super::{
-    cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils, player_call_script_handler, reserve_player_ref, script::ScriptInstanceId, script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX, player_semaphone
+    cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils,
+    player_call_script_handler, player_semaphone, reserve_player_ref, script::ScriptInstanceId,
+    script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX,
 };
 
 pub enum PlayerVMEvent {
@@ -26,7 +30,11 @@ pub fn player_dispatch_global_event(handler_name: &String, args: &Vec<DatumRef>)
     .unwrap();
 }
 
-pub fn player_dispatch_callback_event(receiver: DatumRef, handler_name: &String, args: &Vec<DatumRef>) {
+pub fn player_dispatch_callback_event(
+    receiver: DatumRef,
+    handler_name: &String,
+    args: &Vec<DatumRef>,
+) {
     let tx = unsafe { PLAYER_EVENT_TX.clone() }.unwrap();
     tx.try_send(PlayerVMEvent::Callback(
         receiver,
@@ -86,7 +94,11 @@ pub async fn player_invoke_event_to_instances(
         // let receiver_refs = get_active_scripts(&player.movie, &player.get_hydrated_globals());
         let mut result = vec![];
         for instance_ref in instance_refs {
-            let handler_pair = ScriptInstanceUtils::get_script_instance_handler(&handler_name, instance_ref, player)?;
+            let handler_pair = ScriptInstanceUtils::get_script_instance_handler(
+                &handler_name,
+                instance_ref,
+                player,
+            )?;
             if let Some(handler_pair) = handler_pair {
                 result.push((instance_ref.clone(), handler_pair));
             }
@@ -95,7 +107,8 @@ pub async fn player_invoke_event_to_instances(
     })?;
     let mut handled = false;
     for (script_instance_ref, handler_ref) in recv_instance_handlers {
-        let scope = player_call_script_handler(Some(script_instance_ref), handler_ref, args).await?;
+        let scope =
+            player_call_script_handler(Some(script_instance_ref), handler_ref, args).await?;
         if !scope.passed {
             handled = true;
             break;
@@ -134,18 +147,19 @@ pub async fn player_invoke_static_event(
     let mut handled = false;
     for script_member_ref in active_static_scripts {
         let has_handler = reserve_player_ref(|player| {
-            let script = player.movie.cast_manager.get_script_by_ref(&script_member_ref);
+            let script = player
+                .movie
+                .cast_manager
+                .get_script_by_ref(&script_member_ref);
             let handler = script.and_then(|x| x.get_handler(handler_name));
             handler.is_some()
         });
         if !has_handler {
             continue;
         }
-        let result = player_call_script_handler(
-            None, 
-            (script_member_ref, handler_name.to_owned()), 
-            args
-        ).await?;
+        let result =
+            player_call_script_handler(None, (script_member_ref, handler_name.to_owned()), args)
+                .await?;
         if !result.passed {
             handled = true;
             break;

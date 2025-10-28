@@ -26,14 +26,18 @@ impl BitmapMask {
         if x >= self.width || y >= self.height {
             return false;
         }
-        *self.data.get((y as usize * self.width as usize) + (x as usize)).unwrap()
+        *self
+            .data
+            .get((y as usize * self.width as usize) + (x as usize))
+            .unwrap()
     }
 
     pub fn set_bit(&mut self, x: u16, y: u16, value: bool) {
         if x >= self.width || y >= self.height {
             return;
         }
-        self.data.set((y as usize * self.width as usize) + (x as usize), value);
+        self.data
+            .set((y as usize * self.width as usize) + (x as usize), value);
     }
 
     pub fn flood_matte(&mut self, points: Vec<(u16, u16)>, from: bool, to: bool) -> BitmapMask {
@@ -67,19 +71,19 @@ impl BitmapMask {
 
 impl Bitmap {
     pub fn get_mask(&self, palettes: &PaletteMap, bg_color: &ColorRef) -> BitmapMask {
-      let mut mask = BitmapMask::new(self.width, self.height, false);
-      for y in 0..self.height {
-          for x in 0..self.width {
-              let pixel = self.get_pixel_color_ref(x, y);
-              mask.set_bit(x, y, pixel != *bg_color);
-          }
-      }
-      mask
+        let mut mask = BitmapMask::new(self.width, self.height, false);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let pixel = self.get_pixel_color_ref(x, y);
+                mask.set_bit(x, y, pixel != *bg_color);
+            }
+        }
+        mask
     }
 
     pub fn create_matte_text(&mut self, palettes: &PaletteMap) {
         let bg_color = &self.get_bg_color_ref();
-        
+
         // Create matte: true for content (opaque), false for background (transparent)
         // This automatically handles both exterior background AND interior holes
         let mut matte = BitmapMask::new(self.width, self.height, false);
@@ -90,37 +94,37 @@ impl Bitmap {
                 matte.set_bit(x, y, pixel != *bg_color);
             }
         }
-        
+
         self.matte = Some(Arc::new(matte));
     }
 
     pub fn create_matte(&mut self, palettes: &PaletteMap) {
-      let bg_color = &self.get_bg_color_ref();
-      let mut mask = self.get_mask(palettes, bg_color);
-      let mut outside_pixels = vec![];
-      for y in 0..self.height {
-          let left_pixel = self.get_pixel_color_ref(0, y);
-          let right_pixel = self.get_pixel_color_ref(self.width - 1, y);
+        let bg_color = &self.get_bg_color_ref();
+        let mut mask = self.get_mask(palettes, bg_color);
+        let mut outside_pixels = vec![];
+        for y in 0..self.height {
+            let left_pixel = self.get_pixel_color_ref(0, y);
+            let right_pixel = self.get_pixel_color_ref(self.width - 1, y);
 
-          if left_pixel == *bg_color {
-            outside_pixels.push((0, y));
-          }
-          if right_pixel == *bg_color {
-            outside_pixels.push((self.width - 1, y));
-          }
-      }
-      for x in 0..self.width {
-          let top_pixel = self.get_pixel_color_ref(x, 0);
-          let bottom_pixel = self.get_pixel_color_ref(x, self.height - 1);
+            if left_pixel == *bg_color {
+                outside_pixels.push((0, y));
+            }
+            if right_pixel == *bg_color {
+                outside_pixels.push((self.width - 1, y));
+            }
+        }
+        for x in 0..self.width {
+            let top_pixel = self.get_pixel_color_ref(x, 0);
+            let bottom_pixel = self.get_pixel_color_ref(x, self.height - 1);
 
-          if top_pixel == *bg_color {
-            outside_pixels.push((x, 0));
-          }
-          if bottom_pixel == *bg_color {
-            outside_pixels.push((x, self.height - 1));
-          }
-      }
-      let matte = mask.flood_matte(outside_pixels, false, true);
-      self.matte = Some(Arc::new(matte));
+            if top_pixel == *bg_color {
+                outside_pixels.push((x, 0));
+            }
+            if bottom_pixel == *bg_color {
+                outside_pixels.push((x, self.height - 1));
+            }
+        }
+        let matte = mask.flood_matte(outside_pixels, false, true);
+        self.matte = Some(Arc::new(matte));
     }
 }

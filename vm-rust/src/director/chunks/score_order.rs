@@ -44,7 +44,9 @@ impl SordChunk {
 
         // Optional: save remaining bytes for later
         let extra_data = &raw_data[20..];
-        web_sys::console::log_1(&format!("Extra {} bytes remaining in Sord chunk", extra_data.len()).into());
+        web_sys::console::log_1(
+            &format!("Extra {} bytes remaining in Sord chunk", extra_data.len()).into(),
+        );
 
         Ok(SordChunk { raw_data })
     }

@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut},
+    player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
 };
 
 use std::f64::consts::PI;

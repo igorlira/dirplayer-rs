@@ -1,13 +1,13 @@
 use fxhash::FxHashMap;
 use log::warn;
+use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use std::rc::Rc;
 
 use crate::player::{
-    CastManager, cast_member::CastMemberType, 
     bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
-    reserve_player_mut,
+    cast_member::CastMemberType,
+    reserve_player_mut, CastManager,
 };
 
 use std::collections::HashMap;
@@ -24,8 +24,8 @@ pub struct FontManager {
     pub fonts: FxHashMap<FontRef, Rc<BitmapFont>>,
     pub system_font: Option<Rc<BitmapFont>>,
     pub font_counter: FontRef,
-    pub font_cache: HashMap<String, Rc<BitmapFont>>,  // Cache for loaded fonts by name
-    pub font_by_id: HashMap<u16, FontRef>, // Map font_id to FontRef
+    pub font_cache: HashMap<String, Rc<BitmapFont>>, // Cache for loaded fonts by name
+    pub font_by_id: HashMap<u16, FontRef>,           // Map font_id to FontRef
 }
 
 #[derive(Clone, Debug)]
@@ -72,7 +72,7 @@ impl FontManager {
         if let Some(font_ref) = self.font_by_id.get(&font_info.font_id) {
             return self.fonts.get(font_ref).map(|v| &**v);
         }
-        
+
         // Fall back to name lookup
         self.get_font_immutable(&font_info.name)
     }
@@ -96,12 +96,15 @@ impl FontManager {
         // 1. Search through cast members for a Font type with matching name
         // 2. Extract font metrics from FontInfo
         // 3. Create or reference a BitmapFont
-        
-        web_sys::console::log_1(&format!(
-            "FontManager: Attempted to load font '{}' - not implemented yet",
-            font_name
-        ).into());
-        
+
+        web_sys::console::log_1(
+            &format!(
+                "FontManager: Attempted to load font '{}' - not implemented yet",
+                font_name
+            )
+            .into(),
+        );
+
         None
     }
 
@@ -124,22 +127,26 @@ impl FontManager {
             for member in cast_lib.members.values() {
                 if let CastMemberType::Font(font_data) = &member.member_type {
                     // Check BOTH the font_info.name AND the member.name
-                    let name_matches = font_data.font_info.name == font_name || member.name == font_name;
+                    let name_matches =
+                        font_data.font_info.name == font_name || member.name == font_name;
                     let size_matches = size.is_none() || size == Some(font_data.font_info.size);
                     let style_matches = style.is_none() || style == Some(font_data.font_info.style);
 
                     if name_matches && size_matches && style_matches {
-                        web_sys::console::log_1(&format!(
-                            "✅ Found matching font: member.name='{}', font_info.name='{}'",
-                            member.name, font_data.font_info.name
-                        ).into());
-                        
+                        web_sys::console::log_1(
+                            &format!(
+                                "✅ Found matching font: member.name='{}', font_info.name='{}'",
+                                member.name, font_data.font_info.name
+                            )
+                            .into(),
+                        );
+
                         // Check if this font has a bitmap_ref from PFR parsing
                         if let Some(bitmap_ref) = font_data.bitmap_ref {
-                            web_sys::console::log_1(&format!(
-                                "✅ Found PFR font with bitmap_ref: {}",
-                                bitmap_ref
-                            ).into());
+                            web_sys::console::log_1(
+                                &format!("✅ Found PFR font with bitmap_ref: {}", bitmap_ref)
+                                    .into(),
+                            );
 
                             let font = BitmapFont {
                                 bitmap_ref,
@@ -150,33 +157,43 @@ impl FontManager {
                                 grid_cell_width: font_data.char_width.unwrap_or(8),
                                 grid_cell_height: font_data.char_height.unwrap_or(12),
                                 first_char_num: 32,
-                                char_offset_x: 0,  // IMPORTANT: No offset for PFR fonts
-                                char_offset_y: 0,  // IMPORTANT: No offset for PFR fonts
+                                char_offset_x: 0, // IMPORTANT: No offset for PFR fonts
+                                char_offset_y: 0, // IMPORTANT: No offset for PFR fonts
                                 font_name: member.name.clone(),
                                 font_size: font_data.font_info.size,
                                 font_style: font_data.font_info.style,
                             };
 
                             let rc_font = Rc::new(font);
-                            
+
                             // Cache under ALL name variations
-                            web_sys::console::log_1(&format!(
-                                "📦 Caching font as: '{}', '{}', '{}'",
-                                cache_key, font_name, member.name
-                            ).into());
-                            
-                            self.font_cache.insert(cache_key.clone(), Rc::clone(&rc_font));
-                            self.font_cache.insert(font_name.to_string(), Rc::clone(&rc_font));
-                            self.font_cache.insert(member.name.clone(), Rc::clone(&rc_font));
-                            
-                            if font_data.font_info.name != member.name && font_data.font_info.name != font_name {
-                                self.font_cache.insert(font_data.font_info.name.clone(), Rc::clone(&rc_font));
+                            web_sys::console::log_1(
+                                &format!(
+                                    "📦 Caching font as: '{}', '{}', '{}'",
+                                    cache_key, font_name, member.name
+                                )
+                                .into(),
+                            );
+
+                            self.font_cache
+                                .insert(cache_key.clone(), Rc::clone(&rc_font));
+                            self.font_cache
+                                .insert(font_name.to_string(), Rc::clone(&rc_font));
+                            self.font_cache
+                                .insert(member.name.clone(), Rc::clone(&rc_font));
+
+                            if font_data.font_info.name != member.name
+                                && font_data.font_info.name != font_name
+                            {
+                                self.font_cache
+                                    .insert(font_data.font_info.name.clone(), Rc::clone(&rc_font));
                             }
 
                             let font_ref = self.font_counter;
                             self.font_counter += 1;
                             self.fonts.insert(font_ref, Rc::clone(&rc_font));
-                            self.font_by_id.insert(font_data.font_info.font_id, font_ref);
+                            self.font_by_id
+                                .insert(font_data.font_info.font_id, font_ref);
 
                             return Some(rc_font);
                         }
@@ -189,19 +206,24 @@ impl FontManager {
                             new_font.font_style = font_data.font_info.style;
 
                             let scale_factor = font_data.font_info.size as f32 / 12.0;
-                            new_font.char_width = (new_font.char_width as f32 * scale_factor) as u16;
-                            new_font.char_height = (new_font.char_height as f32 * scale_factor) as u16;
+                            new_font.char_width =
+                                (new_font.char_width as f32 * scale_factor) as u16;
+                            new_font.char_height =
+                                (new_font.char_height as f32 * scale_factor) as u16;
 
                             let rc_font = Rc::new(new_font);
-                            self.font_cache.insert(cache_key.clone(), Rc::clone(&rc_font));
+                            self.font_cache
+                                .insert(cache_key.clone(), Rc::clone(&rc_font));
                             if !self.font_cache.contains_key(font_name) {
-                                self.font_cache.insert(font_name.to_string(), Rc::clone(&rc_font));
+                                self.font_cache
+                                    .insert(font_name.to_string(), Rc::clone(&rc_font));
                             }
 
                             let font_ref = self.font_counter;
                             self.font_counter += 1;
                             self.fonts.insert(font_ref, Rc::clone(&rc_font));
-                            self.font_by_id.insert(font_data.font_info.font_id, font_ref);
+                            self.font_by_id
+                                .insert(font_data.font_info.font_id, font_ref);
 
                             return Some(rc_font);
                         }
@@ -292,7 +314,7 @@ pub async fn player_load_system_font(path: &str) {
                 palette_ref: PaletteRef::BuiltIn(get_system_default_palette()),
                 matte: None,
             };
-            
+
             reserve_player_mut(|player| {
                 let grid_columns = 18;
                 let grid_rows = 7;
@@ -320,12 +342,18 @@ pub async fn player_load_system_font(path: &str) {
 
                 let font_ref = player.font_manager.font_counter;
                 player.font_manager.font_counter += 1;
-                player.font_manager.fonts.insert(font_ref, Rc::clone(&rc_font));
+                player
+                    .font_manager
+                    .fonts
+                    .insert(font_ref, Rc::clone(&rc_font));
                 player.font_manager.system_font = Some(rc_font);
-                
+
                 // Add to font_cache where rendering code looks for it
-                player.font_manager.font_cache.insert("System".to_string(), font.into());
-                
+                player
+                    .font_manager
+                    .font_cache
+                    .insert("System".to_string(), font.into());
+
                 web_sys::console::log_1(&"✅ System font loaded successfully".into());
             });
 
@@ -353,15 +381,15 @@ pub fn bitmap_font_copy_char(
         return;
     }
     let char_index = (char_num - font.first_char_num) as usize;
-    
+
     // Calculate grid position
     let char_x = (char_index % font.grid_columns as usize) as u16;
     let char_y = (char_index / font.grid_columns as usize) as u16;
-    
+
     // Calculate source rectangle in the font bitmap
     let src_x = (char_x * font.grid_cell_width + font.char_offset_x) as i32;
     let src_y = (char_y * font.grid_cell_height + font.char_offset_y) as i32;
-    
+
     dest.copy_pixels_with_params(
         palettes,
         font_bitmap,
@@ -381,7 +409,13 @@ pub fn bitmap_font_copy_char(
     )
 }
 
-pub fn measure_text(text: &str, font: &BitmapFont, line_height: Option<u16>, line_spacing: u16, top_spacing: i16) -> (u16, u16) {
+pub fn measure_text(
+    text: &str,
+    font: &BitmapFont,
+    line_height: Option<u16>,
+    line_spacing: u16,
+    top_spacing: i16,
+) -> (u16, u16) {
     let mut width = 0;
     let mut line_width = 0;
     let line_height = line_height.unwrap_or(font.char_height);
@@ -421,7 +455,9 @@ pub fn _get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize
                 x = line_width;
             }
             line_width = 0;
-            y += params.line_height.unwrap_or(params.font.char_height) as i16 + params.line_spacing as i16 + 1;
+            y += params.line_height.unwrap_or(params.font.char_height) as i16
+                + params.line_spacing as i16
+                + 1;
         } else {
             if line_index == char_index {
                 return (x, y);
@@ -442,7 +478,9 @@ pub fn get_text_index_at_pos(text: &str, params: &DrawTextParams, x: i32, y: i32
     let mut line_y = params.top_spacing as i32;
     for c in text.chars() {
         if c == '\r' || c == '\n' {
-            if y >= line_y && y < line_y + params.line_height.unwrap_or(params.font.char_height) as i32 {
+            if y >= line_y
+                && y < line_y + params.line_height.unwrap_or(params.font.char_height) as i32
+            {
                 if x < line_width {
                     return index;
                 }
@@ -450,9 +488,13 @@ pub fn get_text_index_at_pos(text: &str, params: &DrawTextParams, x: i32, y: i32
             if line_width > x {
                 line_width = 0;
             }
-            line_y += params.line_height.unwrap_or(params.font.char_height) as i32 + params.line_spacing as i32 + 1;
+            line_y += params.line_height.unwrap_or(params.font.char_height) as i32
+                + params.line_spacing as i32
+                + 1;
         } else {
-            if y >= line_y && y < line_y + params.line_height.unwrap_or(params.font.char_height) as i32 {
+            if y >= line_y
+                && y < line_y + params.line_height.unwrap_or(params.font.char_height) as i32
+            {
                 if x < line_width {
                     return index;
                 }

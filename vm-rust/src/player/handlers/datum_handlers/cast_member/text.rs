@@ -1,40 +1,73 @@
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType},
+    director::lingo::datum::{
+        datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
+    },
     player::{
-        bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, font::{get_text_index_at_pos, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, DatumRef, DirPlayer, ScriptError
+        bitmap::{
+            bitmap::{Bitmap, BuiltInPalette, PaletteRef},
+            drawing::CopyPixelsParams,
+        },
+        cast_lib::CastMemberRef,
+        font::{get_text_index_at_pos, measure_text, DrawTextParams},
+        handlers::datum_handlers::{
+            cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
+        },
+        DatumRef, DirPlayer, ScriptError,
     },
 };
 
 pub struct TextMemberHandlers {}
 
 impl TextMemberHandlers {
-    pub fn call(player: &mut DirPlayer, datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn call(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        handler_name: &String,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let member_ref = player.get_datum(datum).to_member_ref()?;
-        let member = player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap();
+        let member = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(&member_ref)
+            .unwrap();
         let text = member.member_type.as_text().unwrap();
         match handler_name.as_str() {
             "count" => {
-              let count_of = player.get_datum(&args[0]).string_value()?;
-              if args.len() != 1 {
-                return Err(ScriptError::new("count requires 1 argument".to_string()));
-              }
-              let delimiter = player.movie.item_delimiter;
-              let count = StringChunkUtils::resolve_chunk_count(&text.text, StringChunkType::from(&count_of), delimiter)?;
-              Ok(player.alloc_datum(Datum::Int(count as i32)))
+                let count_of = player.get_datum(&args[0]).string_value()?;
+                if args.len() != 1 {
+                    return Err(ScriptError::new("count requires 1 argument".to_string()));
+                }
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &text.text,
+                    StringChunkType::from(&count_of),
+                    delimiter,
+                )?;
+                Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-              let prop_name = player.get_datum(&args[0]).string_value()?;
-              let start = player.get_datum(&args[1]).int_value()?;
-              let end = if args.len() > 2 { player.get_datum(&args[2]).int_value()? } else { start };
-              let chunk_expr = StringChunkType::from(&prop_name);
-              let chunk_expr = StringChunkExpr {
-                chunk_type: chunk_expr,
-                start,
-                end,
-                item_delimiter: player.movie.item_delimiter.clone(),
-              };
-              let resolved_str = StringChunkUtils::resolve_chunk_expr_string(&text.text, &chunk_expr)?;
-              Ok(player.alloc_datum(Datum::StringChunk(StringChunkSource::Member(member_ref), chunk_expr, resolved_str)))
+                let prop_name = player.get_datum(&args[0]).string_value()?;
+                let start = player.get_datum(&args[1]).int_value()?;
+                let end = if args.len() > 2 {
+                    player.get_datum(&args[2]).int_value()?
+                } else {
+                    start
+                };
+                let chunk_expr = StringChunkType::from(&prop_name);
+                let chunk_expr = StringChunkExpr {
+                    chunk_type: chunk_expr,
+                    start,
+                    end,
+                    item_delimiter: player.movie.item_delimiter.clone(),
+                };
+                let resolved_str =
+                    StringChunkUtils::resolve_chunk_expr_string(&text.text, &chunk_expr)?;
+                Ok(player.alloc_datum(Datum::StringChunk(
+                    StringChunkSource::Member(member_ref),
+                    chunk_expr,
+                    resolved_str,
+                )))
             }
             "locToCharPos" => {
                 let (x, y) = player.get_datum(&args[0]).to_int_point()?;
@@ -47,8 +80,10 @@ impl TextMemberHandlers {
                 let index = get_text_index_at_pos(&text.text, &params, x, y);
                 Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
             }
-            _ => Err(ScriptError::new(format!("No handler {handler_name} for text member type")))
-          }
+            _ => Err(ScriptError::new(format!(
+                "No handler {handler_name} for text member type"
+            ))),
+        }
     }
 
     pub fn get_prop(
@@ -131,7 +166,7 @@ impl TextMemberHandlers {
                     bg_color: bitmap.get_bg_color_ref(),
                     mask_image: None,
                 };
-                
+
                 bitmap.draw_text(
                     &text_data.text,
                     &font,

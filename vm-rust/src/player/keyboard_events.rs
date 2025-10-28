@@ -1,4 +1,7 @@
-use super::{cast_member::CastMemberType, events::player_dispatch_targeted_event, player_is_playing, reserve_player_mut, DatumRef, DirPlayer, ScriptError};
+use super::{
+    cast_member::CastMemberType, events::player_dispatch_targeted_event, player_is_playing,
+    reserve_player_mut, DatumRef, DirPlayer, ScriptError,
+};
 
 fn get_next_focus_sprite_id(player: &DirPlayer, after: i16) -> i16 {
     for sprite_id in after + 1..=player.movie.score.get_channel_count() as i16 {

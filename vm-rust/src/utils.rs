@@ -1,7 +1,7 @@
+use crate::js_api::safe_js_string;
 use chrono::{DateTime, Local, TimeDelta};
 use itertools::Itertools;
 use url::Url;
-use crate::{js_api::{safe_js_string}};
 
 pub fn set_panic_hook() {
     // When the `console_error_panic_hook` feature is enabled, we can call the
@@ -15,7 +15,7 @@ pub fn set_panic_hook() {
 }
 
 pub fn log_i(value: &str) {
-  web_sys::console::log_1(&safe_js_string(value))
+    web_sys::console::log_1(&safe_js_string(value))
 }
 
 #[macro_export]
@@ -63,11 +63,14 @@ impl ToHexString for Vec<u8> {
 
 /// Number of ticks (60 ticks/second) from epoch until endtime
 fn ticks_since_epoch(endtime: DateTime<Local>) -> i64 {
-  endtime.timestamp_nanos_opt().unwrap() / TimeDelta::milliseconds(1000 / 60).num_nanoseconds().unwrap()
+    endtime.timestamp_nanos_opt().unwrap()
+        / TimeDelta::milliseconds(1000 / 60)
+            .num_nanoseconds()
+            .unwrap()
 }
 
 pub fn get_elapsed_ticks(start_time: DateTime<chrono::Local>) -> i32 {
-  let current_ticks = ticks_since_epoch(chrono::Local::now());
-  let start_ticks = ticks_since_epoch(start_time);
-  (current_ticks - start_ticks) as i32
+    let current_ticks = ticks_since_epoch(chrono::Local::now());
+    let start_ticks = ticks_since_epoch(start_time);
+    (current_ticks - start_ticks) as i32
 }

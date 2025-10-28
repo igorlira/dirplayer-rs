@@ -1,13 +1,14 @@
 use crate::{
-    director::lingo::datum::{Datum, StringChunkType, datum_bool},
+    director::lingo::datum::{datum_bool, Datum, StringChunkType},
     player::{
-        cast_lib::CastMemberRef, font::{ measure_text, BitmapFont }, ColorRef,
-        bitmap::bitmap::{ Bitmap, PaletteRef, BuiltInPalette },
+        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef},
         bitmap::drawing::CopyPixelsParams,
+        cast_lib::CastMemberRef,
+        font::{measure_text, BitmapFont},
         handlers::datum_handlers::{
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
         },
-        DatumRef, DirPlayer, ScriptError,
+        ColorRef, DatumRef, DirPlayer, ScriptError,
     },
 };
 
@@ -58,7 +59,7 @@ impl FieldMemberHandlers {
             .find_member_by_ref(cast_member_ref)
             .unwrap();
         let field = member.member_type.as_field().unwrap();
-        
+
         match prop.as_str() {
             "text" => Ok(Datum::String(field.text.to_owned())),
             "font" => Ok(Datum::String(field.font.to_owned())),
@@ -94,27 +95,26 @@ impl FieldMemberHandlers {
                 } else {
                     None
                 };
-                
+
                 let font = if let Some(f) = font {
                     f
                 } else {
-                    player.font_manager.get_system_font()
+                    player
+                        .font_manager
+                        .get_system_font()
                         .ok_or_else(|| ScriptError::new("System font not available".to_string()))?
                 };
 
-                web_sys::console::log_1(&format!(
-                    "Field using font: '{}' (size: {})",
-                    font.font_name,
-                    font.font_size
-                ).into());
-
-                let (width, height) = measure_text(
-                    &text_clone,
-                    &font,
-                    None,
-                    fixed_line_space,
-                    top_spacing,
+                web_sys::console::log_1(
+                    &format!(
+                        "Field using font: '{}' (size: {})",
+                        font.font_name, font.font_size
+                    )
+                    .into(),
                 );
+
+                let (width, height) =
+                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing);
 
                 match prop.as_str() {
                     "rect" => Ok(Datum::IntRect((0, 0, width as i32, height as i32))),
@@ -132,7 +132,8 @@ impl FieldMemberHandlers {
                         // Fill with transparent background
                         for y in 0..height {
                             for x in 0..width {
-                                let index = ((y as usize * width as usize + x as usize) * 4) as usize;
+                                let index =
+                                    ((y as usize * width as usize + x as usize) * 4) as usize;
                                 if index + 3 < bitmap.data.len() {
                                     bitmap.data[index] = 0;
                                     bitmap.data[index + 1] = 0;
@@ -142,7 +143,9 @@ impl FieldMemberHandlers {
                             }
                         }
 
-                        let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref)
+                        let font_bitmap = player
+                            .bitmap_manager
+                            .get_bitmap(font.bitmap_ref)
                             .ok_or_else(|| ScriptError::new("Font bitmap not found".to_string()))?;
                         let palettes = player.movie.cast_manager.palettes();
 

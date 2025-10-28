@@ -4,8 +4,13 @@ use log::warn;
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::{ErrorEvent, Event, MessageEvent, WebSocket};
 
-use crate::{director::lingo::datum::{Datum, DatumType}, player::{events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, DatumRef, ScriptError}};
-
+use crate::{
+    director::lingo::datum::{Datum, DatumType},
+    player::{
+        events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, DatumRef,
+        ScriptError,
+    },
+};
 
 pub struct MultiuserMessage {
     pub error_code: i32,
@@ -52,12 +57,14 @@ pub struct MultiuserXtraManager {
 impl MultiuserXtraManager {
     pub fn create_instance(&mut self, _: &Vec<DatumRef>) -> u32 {
         self.instance_counter += 1;
-        self.instances
-            .insert(self.instance_counter, MultiuserXtraInstance {
+        self.instances.insert(
+            self.instance_counter,
+            MultiuserXtraInstance {
                 net_message_handler: None,
                 message_queue: vec![],
                 socket_tx: None,
-            });
+            },
+        );
         self.instance_counter
     }
 
@@ -118,7 +125,7 @@ impl MultiuserXtraManager {
                 let ws_url = format!("ws://{}:{}", host, port);
                 let socket = WebSocket::new(&ws_url).unwrap();
                 socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
-                
+
                 let socket_clone = socket.clone();
                 let onmessage_callback = Closure::<dyn FnMut(_)>::new(move |e: MessageEvent| {
                     // e.data().dyn_into::<js_sys::JsString>()
@@ -128,7 +135,8 @@ impl MultiuserXtraManager {
                     let string = String::from_utf8_lossy(&vec);
                     warn!("WebSocket message: {:?}", string);
 
-                    let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
+                    let mut multiusr_manager =
+                        unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                     let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                     instance.dispatch_message(MultiuserMessage {
                         error_code: 0,
@@ -145,7 +153,8 @@ impl MultiuserXtraManager {
                 });
                 let onopen_callback = Closure::<dyn FnMut(_)>::new(move |e: Event| {
                     warn!("WebSocket opened");
-                    let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
+                    let mut multiusr_manager =
+                        unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                     let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                     instance.dispatch_message(MultiuserMessage {
                         error_code: 0,
@@ -165,7 +174,9 @@ impl MultiuserXtraManager {
                 spawn_local(async move {
                     while let Ok(message) = rx.recv().await {
                         warn!("Sending message: {:?}", message);
-                        socket_clone.send_with_u8_array(&message.as_bytes()).unwrap();
+                        socket_clone
+                            .send_with_u8_array(&message.as_bytes())
+                            .unwrap();
                     }
                 });
 
@@ -175,38 +186,48 @@ impl MultiuserXtraManager {
                 onopen_callback.forget();
 
                 Ok(DatumRef::Void)
-            },
+            }
             "getNetMessage" => {
                 let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 if let Some(message) = instance.next_message() {
                     reserve_player_mut(|player| {
-                        let recipient_refs = message.recipients.iter().map(|recipient| {
-                            player.alloc_datum(Datum::String(recipient.clone()))
-                        }).collect();
+                        let recipient_refs = message
+                            .recipients
+                            .iter()
+                            .map(|recipient| player.alloc_datum(Datum::String(recipient.clone())))
+                            .collect();
 
                         let error_code = player.alloc_datum(Datum::Int(message.error_code));
-                        let recipients = player.alloc_datum(Datum::List(DatumType::List, recipient_refs, false));
+                        let recipients =
+                            player.alloc_datum(Datum::List(DatumType::List, recipient_refs, false));
                         let sender_id = player.alloc_datum(Datum::String(message.sender_id));
                         let subject = player.alloc_datum(Datum::String(message.subject));
                         let content = player.alloc_datum(message.content);
                         let time_stamp = player.alloc_datum(Datum::Int(message.time_stamp as i32)); // TODO: i64
 
-                        let error_code_key = player.alloc_datum(Datum::String("errorCode".to_string()));
-                        let recipients_key = player.alloc_datum(Datum::String("recipients".to_string()));
-                        let sender_id_key = player.alloc_datum(Datum::String("senderID".to_string()));
+                        let error_code_key =
+                            player.alloc_datum(Datum::String("errorCode".to_string()));
+                        let recipients_key =
+                            player.alloc_datum(Datum::String("recipients".to_string()));
+                        let sender_id_key =
+                            player.alloc_datum(Datum::String("senderID".to_string()));
                         let subject_key = player.alloc_datum(Datum::String("subject".to_string()));
                         let content_key = player.alloc_datum(Datum::String("content".to_string()));
-                        let time_stamp_key = player.alloc_datum(Datum::String("timeStamp".to_string()));
+                        let time_stamp_key =
+                            player.alloc_datum(Datum::String("timeStamp".to_string()));
 
-                        Ok(player.alloc_datum(Datum::PropList(vec![
-                            (error_code_key, error_code),
-                            (recipients_key, recipients),
-                            (sender_id_key, sender_id),
-                            (subject_key, subject),
-                            (content_key, content),
-                            (time_stamp_key, time_stamp),
-                        ], false)))
+                        Ok(player.alloc_datum(Datum::PropList(
+                            vec![
+                                (error_code_key, error_code),
+                                (recipients_key, recipients),
+                                (sender_id_key, sender_id),
+                                (subject_key, subject),
+                                (content_key, content),
+                                (time_stamp_key, time_stamp),
+                            ],
+                            false,
+                        )))
                     })
                 } else {
                     Ok(DatumRef::Void)
@@ -225,7 +246,7 @@ impl MultiuserXtraManager {
                         Err(ScriptError::new("Socket not connected".to_string()))
                     }
                 })
-            },
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {} found for Multiuser xtra instance #{}",
                 handler_name, instance_id

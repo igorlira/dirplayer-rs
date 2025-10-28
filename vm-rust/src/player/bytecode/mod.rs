@@ -1,7 +1,7 @@
-pub mod handler_manager;
 pub mod arithmetics;
-pub mod stack;
+pub mod compare;
 pub mod flow_control;
 pub mod get_set;
-pub mod compare;
+pub mod handler_manager;
+pub mod stack;
 pub mod string;

@@ -22,7 +22,7 @@ impl KeyboardManager {
         let code_mapped = keyboard_map::get_keyboard_key_map_js_to_sw().get(&code);
         debug!("Key down: {} {} (mapped to: {:?})", key, code, code_mapped);
         let mapped_code = *code_mapped.unwrap_or(&code);
-        
+
         // Check if this code is already in the down_keys list
         if !self.down_keys.iter().any(|x| x.code == mapped_code) {
             self.down_keys.push(KeyboardKey {
@@ -36,7 +36,7 @@ impl KeyboardManager {
         // Map the code the same way as key_down does
         let code_mapped = keyboard_map::get_keyboard_key_map_js_to_sw().get(&code);
         let code_to_remove = *code_mapped.unwrap_or(&code);
-        
+
         self.down_keys.retain(|x| x.code != code_to_remove);
     }
 

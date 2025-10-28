@@ -3,9 +3,20 @@ use std::collections::HashMap;
 use nohash_hasher::IntMap;
 use rgb565::Rgb565;
 
-use crate::{director::lingo::datum::Datum, player::{font::{bitmap_font_copy_char, BitmapFont}, geometry::IntRect, sprite::ColorRef}};
+use crate::{
+    director::lingo::datum::Datum,
+    player::{
+        font::{bitmap_font_copy_char, BitmapFont},
+        geometry::IntRect,
+        sprite::ColorRef,
+    },
+};
 
-use super::{bitmap::{resolve_color_ref, Bitmap}, mask::BitmapMask, palette_map::PaletteMap};
+use super::{
+    bitmap::{resolve_color_ref, Bitmap},
+    mask::BitmapMask,
+    palette_map::PaletteMap,
+};
 
 pub struct CopyPixelsParams<'a> {
     pub blend: i32,
@@ -48,14 +59,13 @@ pub fn should_matte_sprite(ink: u32) -> bool {
 }
 
 fn blend_pixel(
-    dst: (u8, u8, u8), 
-    src: (u8, u8, u8), 
+    dst: (u8, u8, u8),
+    src: (u8, u8, u8),
     ink: u32,
     bg_color: (u8, u8, u8),
     blend_alpha: f32, // This is params.blend / 100.0
     src_alpha: f32,   // Alpha from the source pixel (0.0 to 1.0)
 ) -> (u8, u8, u8) {
-    
     // Calculate the effective alpha: combination of native source alpha and blend parameter
     let effective_alpha = src_alpha * blend_alpha;
 
@@ -143,9 +153,19 @@ fn blend_pixel(
 }
 
 impl Bitmap {
-    pub fn get_pixel_color_with_alpha(&self, palettes: &PaletteMap, x: u16, y: u16) -> (u8, u8, u8, u8) {
+    pub fn get_pixel_color_with_alpha(
+        &self,
+        palettes: &PaletteMap,
+        x: u16,
+        y: u16,
+    ) -> (u8, u8, u8, u8) {
         let color_ref = self.get_pixel_color_ref(x, y);
-        let (r, g, b) = resolve_color_ref(palettes, &color_ref, &self.palette_ref, self.original_bit_depth);
+        let (r, g, b) = resolve_color_ref(
+            palettes,
+            &color_ref,
+            &self.palette_ref,
+            self.original_bit_depth,
+        );
 
         if self.bit_depth == 32 {
             let x_usize = x as usize;
@@ -158,7 +178,7 @@ impl Bitmap {
             }
         }
         // Default to fully opaque
-        (r, g, b, 0xFF) 
+        (r, g, b, 0xFF)
     }
 
     pub fn set_pixel(&mut self, x: i32, y: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
@@ -196,11 +216,11 @@ impl Bitmap {
                             palettes,
                             &ColorRef::PaletteIndex(palette_idx),
                             &own_palette,
-                            self.original_bit_depth
+                            self.original_bit_depth,
                         );
                         let distance = (r as i32 - palette_color.0 as i32).abs()
-                                    + (g as i32 - palette_color.1 as i32).abs()
-                                    + (b as i32 - palette_color.2 as i32).abs();
+                            + (g as i32 - palette_color.1 as i32).abs()
+                            + (b as i32 - palette_color.2 as i32).abs();
                         if distance < result_distance {
                             result_index = palette_idx;
                             result_distance = distance;
@@ -212,18 +232,17 @@ impl Bitmap {
                     let own_palette = &self.palette_ref;
                     let mut result_index = 0;
                     let mut result_distance = i32::MAX;
-                    
-                    
+
                     for idx in 0..=255 {
                         let palette_color = resolve_color_ref(
                             palettes,
                             &ColorRef::PaletteIndex(idx as u8),
                             &own_palette,
-                            self.original_bit_depth
+                            self.original_bit_depth,
                         );
                         let distance = (r as i32 - palette_color.0 as i32).abs()
-                                    + (g as i32 - palette_color.1 as i32).abs()
-                                    + (b as i32 - palette_color.2 as i32).abs();
+                            + (g as i32 - palette_color.1 as i32).abs()
+                            + (b as i32 - palette_color.2 as i32).abs();
                         if distance < result_distance {
                             result_index = idx;
                             result_distance = distance;
@@ -260,19 +279,19 @@ impl Bitmap {
         if x >= self.width as usize || y >= self.height as usize {
             return self.get_bg_color_ref();
         }
-        
+
         match self.bit_depth {
             4 => {
                 let bit_index = (y * self.width as usize + x) * 4;
                 let byte_index = bit_index / 8;
                 let value = self.data[byte_index];
-                
+
                 let nibble = if x % 2 == 0 {
-                    value >> 4  // High nibble (0-15)
+                    value >> 4 // High nibble (0-15)
                 } else {
-                    value & 0x0F  // Low nibble (0-15)
+                    value & 0x0F // Low nibble (0-15)
                 };
-                
+
                 // 4-bit uses 16-color palette, values are 0-15
                 ColorRef::PaletteIndex(nibble)
             }
@@ -303,7 +322,12 @@ impl Bitmap {
 
     pub fn get_pixel_color(&self, palettes: &PaletteMap, x: u16, y: u16) -> (u8, u8, u8) {
         let color_ref = self.get_pixel_color_ref(x, y);
-        resolve_color_ref(palettes, &color_ref, &self.palette_ref, self.original_bit_depth)
+        resolve_color_ref(
+            palettes,
+            &color_ref,
+            &self.palette_ref,
+            self.original_bit_depth,
+        )
     }
 
     pub const fn has_palette(&self) -> bool {
@@ -371,7 +395,16 @@ impl Bitmap {
         flipped
     }
 
-    pub fn stroke_sized_rect(&mut self, left: i32, top: i32, width: i32, height: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn stroke_sized_rect(
+        &mut self,
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
         let left = left.max(0) as i32;
         let top = top.max(0) as i32;
         let right = (left + width) as i32;
@@ -379,7 +412,16 @@ impl Bitmap {
         self.stroke_rect(left, top, right, bottom, color, palettes, alpha);
     }
 
-    pub fn stroke_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn stroke_rect(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
         let left = x1;
         let top = y1;
         let right = x2 - 1;
@@ -403,7 +445,15 @@ impl Bitmap {
         }
     }
 
-    pub fn clear_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
+    pub fn clear_rect(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+    ) {
         for y in y1..y2 {
             for x in x1..x2 {
                 self.set_pixel(x, y, color, palettes);
@@ -411,12 +461,21 @@ impl Bitmap {
         }
     }
 
-    pub fn fill_relative_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn fill_relative_rect(
+        &mut self,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
         let left = left.max(0);
         let top = top.max(0);
         let right = right.min(self.width as i32 - 1);
         let bottom = bottom.min(self.height as i32 - 1);
-        
+
         let x1 = left;
         let y1 = top;
         let x2 = self.width as i32 - right;
@@ -425,7 +484,16 @@ impl Bitmap {
         self.fill_rect(x1, y1, x2, y2, color, palettes, alpha);
     }
 
-    pub fn fill_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: (u8, u8, u8), palettes: &PaletteMap, alpha: f32) {
+    pub fn fill_rect(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
         if alpha == 0.0 {
             return;
         }
@@ -443,14 +511,15 @@ impl Bitmap {
     }
 
     pub fn copy_pixels(
-        &mut self, 
+        &mut self,
         palettes: &PaletteMap,
-        src: &Bitmap, 
+        src: &Bitmap,
         dst_rect: IntRect,
         src_rect: IntRect,
         param_list: &HashMap<String, Datum>,
     ) {
-        let blend = param_list.get("blend")
+        let blend = param_list
+            .get("blend")
             .map(|x| x.int_value().unwrap())
             .unwrap_or(100);
         let ink = param_list.get("ink");
@@ -474,7 +543,7 @@ impl Bitmap {
 
         let mask_image = param_list.get("maskImage");
         let mask_image = mask_image.map(|x| x.to_mask().unwrap());
-        
+
         let params = CopyPixelsParams {
             blend,
             ink,
@@ -487,9 +556,9 @@ impl Bitmap {
 
     /// Copy pixels from src to self, respecting scaling, flipping, masks, and blending
     pub fn copy_pixels_with_params(
-        &mut self, 
+        &mut self,
         palettes: &PaletteMap,
-        src: &Bitmap, 
+        src: &Bitmap,
         dst_rect: IntRect,
         src_rect: IntRect,
         params: &CopyPixelsParams,
@@ -497,15 +566,28 @@ impl Bitmap {
         let ink = params.ink;
         let alpha = params.blend as f32 / 100.0;
         let mask_image = params.mask_image;
-        let bg_color = resolve_color_ref(palettes, &params.bg_color, &src.palette_ref, src.original_bit_depth);
+        let bg_color = resolve_color_ref(
+            palettes,
+            &params.bg_color,
+            &src.palette_ref,
+            src.original_bit_depth,
+        );
 
         let is_flipped_h = dst_rect.width() < 0;
         let is_flipped_v = dst_rect.height() < 0;
         let step_x = (src_rect.width() as f32 / dst_rect.width() as f32).abs();
         let step_y = (src_rect.height() as f32 / dst_rect.height() as f32).abs();
 
-        let (min_dst_x, max_dst_x) = if is_flipped_h { (dst_rect.right, dst_rect.left) } else { (dst_rect.left, dst_rect.right) };
-        let (min_dst_y, max_dst_y) = if is_flipped_v { (dst_rect.bottom, dst_rect.top) } else { (dst_rect.top, dst_rect.bottom) };
+        let (min_dst_x, max_dst_x) = if is_flipped_h {
+            (dst_rect.right, dst_rect.left)
+        } else {
+            (dst_rect.left, dst_rect.right)
+        };
+        let (min_dst_y, max_dst_y) = if is_flipped_v {
+            (dst_rect.bottom, dst_rect.top)
+        } else {
+            (dst_rect.top, dst_rect.bottom)
+        };
 
         let mut src_y = if is_flipped_v {
             src_rect.bottom as f32 - step_y / 2.0
@@ -519,11 +601,15 @@ impl Bitmap {
             } else {
                 src_rect.left as f32 + step_x / 2.0
             };
-            
+
             for dst_x in min_dst_x..max_dst_x {
                 // Skip out-of-bounds
-                if dst_x < 0 || dst_y < 0 || dst_x >= self.width as i32 || dst_y >= self.height as i32 {
-                    src_x += if is_flipped_h { -step_x } else { step_x };;
+                if dst_x < 0
+                    || dst_y < 0
+                    || dst_x >= self.width as i32
+                    || dst_y >= self.height as i32
+                {
+                    src_x += if is_flipped_h { -step_x } else { step_x };
                     continue;
                 }
 
@@ -541,8 +627,9 @@ impl Bitmap {
                         continue;
                     }
                 }
-                
-                let (src_r, src_g, src_b, src_a) = src.get_pixel_color_with_alpha(palettes, src_x_int, src_y_int);
+
+                let (src_r, src_g, src_b, src_a) =
+                    src.get_pixel_color_with_alpha(palettes, src_x_int, src_y_int);
                 let src_color = (src_r, src_g, src_b);
                 let src_alpha = src_a as f32 / 255.0;
 
@@ -553,8 +640,9 @@ impl Bitmap {
                 }
 
                 let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
-                
-                let blended_color = blend_pixel(dst_color, src_color, ink, bg_color, alpha, src_alpha);
+
+                let blended_color =
+                    blend_pixel(dst_color, src_color, ink, bg_color, alpha, src_alpha);
 
                 self.set_pixel(dst_x, dst_y, blended_color, palettes);
                 src_x += if is_flipped_h { -step_x } else { step_x };
@@ -568,22 +656,26 @@ impl Bitmap {
     pub fn _draw_bitmap(
         &mut self,
         palettes: &PaletteMap,
-        bitmap: &Bitmap, 
-        loc_h: i32, 
-        loc_v: i32, 
+        bitmap: &Bitmap,
+        loc_h: i32,
+        loc_v: i32,
         width: i32,
         height: i32,
-        ink: u32, 
+        ink: u32,
         bg_color: (u8, u8, u8),
         alpha: f32,
     ) {
         let mut params = HashMap::new();
         params.insert("blend".to_owned(), Datum::Int((alpha * 100.0) as i32));
         params.insert("ink".to_owned(), Datum::Int(ink as i32));
-        params.insert("bgColor".to_owned(), Datum::ColorRef(ColorRef::Rgb(bg_color.0, bg_color.1, bg_color.2)));
+        params.insert(
+            "bgColor".to_owned(),
+            Datum::ColorRef(ColorRef::Rgb(bg_color.0, bg_color.1, bg_color.2)),
+        );
 
         let src_rect = IntRect::from_tuple((0, 0, bitmap.width as i32, bitmap.height as i32));
-        let dst_rect = IntRect::from_tuple((loc_h, loc_v, loc_h + width as i32, loc_v + height as i32));
+        let dst_rect =
+            IntRect::from_tuple((loc_h, loc_v, loc_h + width as i32, loc_v + height as i32));
         self.copy_pixels(palettes, bitmap, dst_rect, src_rect, &params);
     }
 
@@ -610,7 +702,16 @@ impl Bitmap {
                 continue;
             }
 
-            bitmap_font_copy_char(font, font_bitmap, char_num as u8, self, x, y, &palettes, &params);
+            bitmap_font_copy_char(
+                font,
+                font_bitmap,
+                char_num as u8,
+                self,
+                x,
+                y,
+                &palettes,
+                &params,
+            );
 
             // Use the font's actual char_width, not char_width + 1
             // PFR fonts already have proper spacing built in
@@ -688,10 +789,23 @@ impl Bitmap {
         let width = right - left;
         let height = bottom - top;
 
-        let mut trimmed = Bitmap::new(width as u16, height as u16, self.bit_depth, self.original_bit_depth, 0, self.palette_ref.clone());
+        let mut trimmed = Bitmap::new(
+            width as u16,
+            height as u16,
+            self.bit_depth,
+            self.original_bit_depth,
+            0,
+            self.palette_ref.clone(),
+        );
         let params = CopyPixelsParams::default(&self);
-        trimmed.copy_pixels_with_params(palettes, &self, IntRect::from(0, 0, width, height), IntRect::from(left, top, right, bottom), &params);
-        
+        trimmed.copy_pixels_with_params(
+            palettes,
+            &self,
+            IntRect::from(0, 0, width, height),
+            IntRect::from(left, top, right, bottom),
+            &params,
+        );
+
         self.width = width as u16;
         self.height = height as u16;
         self.data = trimmed.data;
@@ -720,12 +834,16 @@ impl Bitmap {
         palettes: &PaletteMap,
     ) {
         let (start_x, start_y) = start_point;
-    
+
         // --- Bounds check (Director silently ignores invalid coords)
-        if start_x < 0 || start_y < 0 || start_x >= self.width as i32 || start_y >= self.height as i32 {
+        if start_x < 0
+            || start_y < 0
+            || start_x >= self.width as i32
+            || start_y >= self.height as i32
+        {
             return;
         }
-        
+
         // --- Capture the original color at the starting pixel
         let original_color = self.get_pixel_color(palettes, start_x as u16, start_y as u16);
 
@@ -733,7 +851,7 @@ impl Bitmap {
         if Self::color_equal(original_color, target_color) {
             return;
         }
-        
+
         use std::collections::HashSet;
 
         let mut stack = Vec::with_capacity(256);
@@ -741,24 +859,24 @@ impl Bitmap {
 
         stack.push((start_x, start_y));
         visited.insert((start_x as u16, start_y as u16));
-        
+
         while let Some((x, y)) = stack.pop() {
             // --- Bounds check
             if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
                 continue;
             }
-            
+
             // --- Check current pixel color
             let current_color = self.get_pixel_color(palettes, x as u16, y as u16);
-        
+
             // --- Only fill if the color matches the original color
             if !Self::color_equal(current_color, original_color) {
                 continue;
             }
-            
+
             // --- Set pixel to target color
             self.set_pixel(x, y, target_color, palettes);
-            
+
             // --- Push 4-connected neighbors
             for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
                 if nx >= 0 && ny >= 0 && nx < self.width as i32 && ny < self.height as i32 {

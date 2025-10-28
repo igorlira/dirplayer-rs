@@ -1,9 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{
-        cast_lib::CastMemberRef,
-        DirPlayer, ScriptError,
-    },
+    player::{cast_lib::CastMemberRef, DirPlayer, ScriptError},
 };
 
 pub struct FilmLoopMemberHandlers {}
@@ -22,9 +19,12 @@ impl FilmLoopMemberHandlers {
         let film_loop = member.member_type.as_film_loop().unwrap();
         let film_loop_info = &film_loop.info;
         match prop.as_str() {
-            "rect" => {
-                Ok(Datum::IntRect((0, 0, film_loop_info.width as i32, film_loop_info.height as i32)))
-            },
+            "rect" => Ok(Datum::IntRect((
+                0,
+                0,
+                film_loop_info.width as i32,
+                film_loop_info.height as i32,
+            ))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for film loop",
                 prop

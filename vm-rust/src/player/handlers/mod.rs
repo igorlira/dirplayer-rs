@@ -1,7 +1,7 @@
-pub mod manager;
 pub mod cast;
-pub mod net;
-pub mod movie;
-pub mod types;
 pub mod datum_handlers;
+pub mod manager;
+pub mod movie;
+pub mod net;
 pub mod string;
+pub mod types;

@@ -7,11 +7,30 @@ use manual_future::ManualFuture;
 use url::Url;
 
 use crate::{
-    console_warn, director::lingo::datum::{Datum, TimeoutRef}, js_api::JsApi, player::PLAYER_OPT, utils::ToHexString
+    console_warn,
+    director::lingo::datum::{Datum, TimeoutRef},
+    js_api::JsApi,
+    player::PLAYER_OPT,
+    utils::ToHexString,
 };
 
 use super::{
-    allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::{DatumId, DatumRef}, events::{player_dispatch_callback_event, player_dispatch_event_to_sprite, player_dispatch_targeted_event, player_wait_available}, font::player_load_system_font, keyboard_events::{player_key_down, player_key_up}, player_alloc_datum, player_call_script_handler, player_dispatch_global_event, player_is_playing, reserve_player_mut, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, script::ScriptInstanceId, script_ref::ScriptInstanceRef, PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX
+    allocator::ScriptInstanceAllocatorTrait,
+    cast_lib::CastMemberRef,
+    cast_member::CastMemberType,
+    datum_ref::{DatumId, DatumRef},
+    events::{
+        player_dispatch_callback_event, player_dispatch_event_to_sprite,
+        player_dispatch_targeted_event, player_wait_available,
+    },
+    font::player_load_system_font,
+    keyboard_events::{player_key_down, player_key_up},
+    player_alloc_datum, player_call_script_handler, player_dispatch_global_event,
+    player_is_playing, reserve_player_mut, reserve_player_ref,
+    score::{concrete_sprite_hit_test, get_sprite_at},
+    script::ScriptInstanceId,
+    script_ref::ScriptInstanceRef,
+    PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX,
 };
 
 #[allow(dead_code)]
@@ -95,53 +114,54 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
 }
 
 pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
-  warn!("Starting command loop");
+    warn!("Starting command loop");
 
-  while !rx.is_closed() {
-    let item = rx.recv().await.unwrap();
-    let result = run_player_command(item.command).await;
-    match result {
-      Ok(result) => {
-        if let Some(completer) = item.completer {
-          completer.complete(Ok(result)).await;
+    while !rx.is_closed() {
+        let item = rx.recv().await.unwrap();
+        let result = run_player_command(item.command).await;
+        match result {
+            Ok(result) => {
+                if let Some(completer) = item.completer {
+                    completer.complete(Ok(result)).await;
+                }
+            }
+            Err(err) => {
+                // TODO ignore error if it's a CancelledException
+                // TODO print stack trace
+                reserve_player_mut(|player| player.on_script_error(&err));
+                if let Some(completer) = item.completer {
+                    completer.complete(Err(err)).await;
+                }
+            }
         }
-      }
-      Err(err) => {
-        // TODO ignore error if it's a CancelledException
-        // TODO print stack trace
-        reserve_player_mut(|player| {
-          player.on_script_error(&err)
-        });
-        if let Some(completer) = item.completer {
-          completer.complete(Err(err)).await;
-        }
-      }
     }
-  }
-  warn!("Command loop stopped!")  
+    warn!("Command loop stopped!")
 }
 
 pub fn player_dispatch(command: PlayerVMCommand) {
-  if let Some(tx) = unsafe { PLAYER_TX.clone() } {
-    if let Err(e) = tx.try_send(PlayerVMExecutionItem { command, completer: None }) {
-      // The channel is closed or full
-      eprintln!("Failed to send command to player: {:?}", e);
+    if let Some(tx) = unsafe { PLAYER_TX.clone() } {
+        if let Err(e) = tx.try_send(PlayerVMExecutionItem {
+            command,
+            completer: None,
+        }) {
+            // The channel is closed or full
+            eprintln!("Failed to send command to player: {:?}", e);
+        }
+    } else {
+        eprintln!("PLAYER_TX not initialized");
     }
-  } else {
-    eprintln!("PLAYER_TX not initialized");
-  }
 }
 
 #[allow(dead_code)]
 pub async fn player_dispatch_async(command: PlayerVMCommand) -> Result<DatumRef, ScriptError> {
-  let tx = unsafe { PLAYER_TX.clone() }.unwrap();
-  let (future, completer) = ManualFuture::new();
-  let item = PlayerVMExecutionItem {
-    command,
-    completer: Some(completer),
-  };
-  tx.send(item).await.unwrap();
-  future.await
+    let tx = unsafe { PLAYER_TX.clone() }.unwrap();
+    let (future, completer) = ManualFuture::new();
+    let item = PlayerVMExecutionItem {
+        command,
+        completer: Some(completer),
+    };
+    tx.send(item).await.unwrap();
+    future.await
 }
 
 pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, ScriptError> {
@@ -334,7 +354,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             });
             let is_inside = result.as_ref().map(|x| x.1).unwrap_or(true);
             let instance_ids = result.as_ref().map(|x| &x.0);
-            let event_name = if is_inside { "mouseUp" } else { "mouseUpOutSide" };
+            let event_name = if is_inside {
+                "mouseUp"
+            } else {
+                "mouseUpOutSide"
+            };
             player_dispatch_targeted_event(&event_name.to_string(), &vec![], instance_ids);
             reserve_player_mut(|player| {
                 player.is_double_click = false;
@@ -347,7 +371,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             }
             let (sprite_num, hovered_sprite) = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
-                
+
                 let hovered_sprite = player.hovered_sprite;
                 let sprite_num = get_sprite_at(player, x, y, false);
                 if let Some(sprite_num) = sprite_num {
@@ -359,11 +383,23 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let hovered_sprite = hovered_sprite.unwrap_or(-1);
                 if hovered_sprite != sprite_num as i16 {
                     if hovered_sprite != -1 {
-                        player_dispatch_event_to_sprite(&"mouseLeave".to_string(), &vec![], hovered_sprite as u16)
+                        player_dispatch_event_to_sprite(
+                            &"mouseLeave".to_string(),
+                            &vec![],
+                            hovered_sprite as u16,
+                        )
                     }
-                    player_dispatch_event_to_sprite(&"mouseEnter".to_string(), &vec![], sprite_num as u16);
+                    player_dispatch_event_to_sprite(
+                        &"mouseEnter".to_string(),
+                        &vec![],
+                        sprite_num as u16,
+                    );
                 } else {
-                    player_dispatch_event_to_sprite(&"mouseWithin".to_string(), &vec![], sprite_num as u16);
+                    player_dispatch_event_to_sprite(
+                        &"mouseWithin".to_string(),
+                        &vec![],
+                        sprite_num as u16,
+                    );
                 }
             }
         }
@@ -382,7 +418,19 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         }
         PlayerVMCommand::RequestScriptInstanceSnapshot(script_instance_id) => {
             reserve_player_ref(|player| {
-                JsApi::dispatch_script_instance_snapshot(if script_instance_id > 0 { Some(player.allocator.get_script_instance_ref(script_instance_id).unwrap()) } else { None }, player);
+                JsApi::dispatch_script_instance_snapshot(
+                    if script_instance_id > 0 {
+                        Some(
+                            player
+                                .allocator
+                                .get_script_instance_ref(script_instance_id)
+                                .unwrap(),
+                        )
+                    } else {
+                        None
+                    },
+                    player,
+                );
             });
         }
         PlayerVMCommand::SubscribeToMember(member_ref) => {
@@ -402,7 +450,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let call_params = reserve_player_mut(|player| {
                 let arg_list = vec![
                     player.alloc_datum(Datum::String("Script Error".to_string())),
-                    player.alloc_datum(Datum::String("An error occurred in the script".to_string())),
+                    player
+                        .alloc_datum(Datum::String("An error occurred in the script".to_string())),
                 ];
                 if let Some(alert_hook) = &player.movie.alert_hook {
                     match alert_hook {

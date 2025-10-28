@@ -1,14 +1,28 @@
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType},
+    director::lingo::datum::{
+        datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
+    },
     player::{
-        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, bitmap::drawing::CopyPixelsParams, bitmap::bitmap, bitmap::mask::BitmapMask, bitmap::palette_map::PaletteMap, cast_lib::CastMemberRef, font::{bitmap_font_copy_char, get_text_index_at_pos, BitmapFont, measure_text, DrawTextParams}, handlers::datum_handlers::{cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils}, DatumRef, DirPlayer, ScriptError        
+        bitmap::bitmap,
+        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef},
+        bitmap::drawing::CopyPixelsParams,
+        bitmap::mask::BitmapMask,
+        bitmap::palette_map::PaletteMap,
+        cast_lib::CastMemberRef,
+        font::{
+            bitmap_font_copy_char, get_text_index_at_pos, measure_text, BitmapFont, DrawTextParams,
+        },
+        handlers::datum_handlers::{
+            cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
+        },
+        DatumRef, DirPlayer, ScriptError,
     },
 };
 
-use crate::player::ColorRef;
-use std::convert::TryInto;
 use crate::player::cast_member::CastMemberType;
+use crate::player::ColorRef;
 use std::borrow::Borrow;
+use std::convert::TryInto;
 
 // Simple HTML parser without external dependencies
 #[derive(Clone, Debug)]
@@ -49,28 +63,30 @@ impl HtmlParser {
     pub fn parse_html(html: &str) -> Result<Vec<StyledSpan>, String> {
         let mut spans = Vec::new();
         let mut default_style = HtmlStyle::default();
-        
+
         // Extract body attributes for global styling
         Self::extract_body_style(html, &mut default_style);
-        
+
         // Simple regex-free HTML parsing
         Self::parse_html_recursive(html, &mut spans, default_style);
-        
+
         Ok(spans)
     }
-    
+
     fn extract_body_style(html: &str, style: &mut HtmlStyle) {
         let lower = html.to_lowercase();
-        
+
         // Extract text color from body tag
         if let Some(text_attr) = Self::extract_attr(&lower, "body", "text") {
             if let Some(color) = Self::parse_color(&text_attr) {
                 style.color = Some(color);
             }
         }
-        
+
         // Extract background color from body tag
-        if let Some(bg_attr) = Self::extract_attr(&lower, "body", "bg").or_else(|| Self::extract_attr(&lower, "body", "bgcolor")) {
+        if let Some(bg_attr) = Self::extract_attr(&lower, "body", "bg")
+            .or_else(|| Self::extract_attr(&lower, "body", "bgcolor"))
+        {
             if let Some(color) = Self::parse_color(&bg_attr) {
                 style.bg_color = Some(color);
             }
@@ -83,11 +99,11 @@ impl HtmlParser {
             if let Some(end_idx) = html[start_idx..].find('>') {
                 let tag_content = &html[start_idx..start_idx + end_idx];
                 let attr_pattern = format!("{}=", attr);
-                
+
                 if let Some(attr_idx) = tag_content.find(&attr_pattern) {
                     let after_eq = &tag_content[attr_idx + attr_pattern.len()..];
                     let quote_char = if after_eq.starts_with('"') { '"' } else { '\'' };
-                    
+
                     if let Some(start) = after_eq.find(quote_char) {
                         if let Some(end) = after_eq[start + 1..].find(quote_char) {
                             return Some(after_eq[start + 1..start + 1 + end].to_string());
@@ -98,19 +114,19 @@ impl HtmlParser {
         }
         None
     }
-    
+
     fn parse_html_recursive(html: &str, spans: &mut Vec<StyledSpan>, current_style: HtmlStyle) {
         let mut pos = 0;
         let mut style_stack = vec![current_style];
         let chars: Vec<char> = html.chars().collect();
-        
+
         while pos < chars.len() {
             if chars[pos] == '<' {
                 // Find tag end
                 if let Some(end) = chars[pos..].iter().position(|&c| c == '>').map(|p| p + pos) {
                     let tag = chars[pos + 1..end].iter().collect::<String>();
                     let tag_lower = tag.to_lowercase();
-                    
+
                     // Handle closing tags
                     if tag.starts_with('/') {
                         if style_stack.len() > 1 {
@@ -119,7 +135,7 @@ impl HtmlParser {
                     } else {
                         // Handle opening tags
                         let mut new_style = style_stack.last().unwrap().clone();
-                        
+
                         match tag_lower.split_whitespace().next().unwrap_or("") {
                             "font" => {
                                 if let Some(face) = Self::extract_tag_attr(&tag, "face") {
@@ -146,7 +162,8 @@ impl HtmlParser {
                                 });
                             }
                             "center" => {
-                                if !spans.is_empty() && !spans.last().unwrap().text.ends_with('\n') {
+                                if !spans.is_empty() && !spans.last().unwrap().text.ends_with('\n')
+                                {
                                     spans.push(StyledSpan {
                                         text: "\n".to_string(),
                                         style: new_style.clone(),
@@ -155,24 +172,24 @@ impl HtmlParser {
                             }
                             _ => {}
                         }
-                        
+
                         if !tag.ends_with('/') && tag_lower != "br" {
                             style_stack.push(new_style);
                         }
                     }
-                    
+
                     pos = end + 1;
                     continue;
                 }
             }
-            
+
             // Collect text content
             let mut text = String::new();
             while pos < chars.len() && chars[pos] != '<' {
                 text.push(chars[pos]);
                 pos += 1;
             }
-            
+
             if !text.trim().is_empty() {
                 spans.push(StyledSpan {
                     text,
@@ -181,15 +198,21 @@ impl HtmlParser {
             }
         }
     }
-    
+
     fn extract_tag_attr(tag: &str, attr: &str) -> Option<String> {
         let lower = tag.to_lowercase();
         let attr_pattern = format!("{}=", attr.to_lowercase());
-        
+
         if let Some(idx) = lower.find(&attr_pattern) {
             let after_eq = &tag[idx + attr_pattern.len()..];
-            let quote_char = if after_eq.starts_with('"') { '"' } else if after_eq.starts_with('\'') { '\'' } else { ' ' };
-            
+            let quote_char = if after_eq.starts_with('"') {
+                '"'
+            } else if after_eq.starts_with('\'') {
+                '\''
+            } else {
+                ' '
+            };
+
             if quote_char != ' ' {
                 if let Some(start) = after_eq.find(quote_char) {
                     if let Some(end) = after_eq[start + 1..].find(quote_char) {
@@ -204,10 +227,10 @@ impl HtmlParser {
         }
         None
     }
-    
+
     pub fn parse_color(color_str: &str) -> Option<u32> {
         let color_str = color_str.trim().to_lowercase();
-        
+
         if color_str.starts_with('#') {
             let hex = &color_str[1..];
             if hex.len() == 6 {
@@ -219,7 +242,7 @@ impl HtmlParser {
                 return u32::from_str_radix(hex, 16).ok();
             }
         }
-        
+
         let rgb = match color_str.as_str() {
             "black" => 0x000000,
             "white" => 0xFFFFFF,
@@ -240,7 +263,7 @@ impl HtmlParser {
             "purple" => 0x800080,
             _ => return None,
         };
-        
+
         Some(rgb)
     }
 }
@@ -248,33 +271,55 @@ impl HtmlParser {
 pub struct FontMemberHandlers {}
 
 impl FontMemberHandlers {
-    pub fn call(player: &mut DirPlayer, datum: &DatumRef, handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn call(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        handler_name: &String,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let member_ref = player.get_datum(datum).to_member_ref()?;
-        let member = player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap();
+        let member = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(&member_ref)
+            .unwrap();
         let text = member.member_type.as_text().unwrap();
         match handler_name.as_str() {
             "count" => {
-              let count_of = player.get_datum(&args[0]).string_value()?;
-              if args.len() != 1 {
-                return Err(ScriptError::new("count requires 1 argument".to_string()));
-              }
-              let delimiter = player.movie.item_delimiter;
-              let count = StringChunkUtils::resolve_chunk_count(&text.text, StringChunkType::from(&count_of), delimiter)?;
-              Ok(player.alloc_datum(Datum::Int(count as i32)))
+                let count_of = player.get_datum(&args[0]).string_value()?;
+                if args.len() != 1 {
+                    return Err(ScriptError::new("count requires 1 argument".to_string()));
+                }
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &text.text,
+                    StringChunkType::from(&count_of),
+                    delimiter,
+                )?;
+                Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-              let prop_name = player.get_datum(&args[0]).string_value()?;
-              let start = player.get_datum(&args[1]).int_value()?;
-              let end = if args.len() > 2 { player.get_datum(&args[2]).int_value()? } else { start };
-              let chunk_expr = StringChunkType::from(&prop_name);
-              let chunk_expr = StringChunkExpr {
-                chunk_type: chunk_expr,
-                start,
-                end,
-                item_delimiter: player.movie.item_delimiter.clone(),
-              };
-              let resolved_str = StringChunkUtils::resolve_chunk_expr_string(&text.text, &chunk_expr)?;
-              Ok(player.alloc_datum(Datum::StringChunk(StringChunkSource::Member(member_ref), chunk_expr, resolved_str)))
+                let prop_name = player.get_datum(&args[0]).string_value()?;
+                let start = player.get_datum(&args[1]).int_value()?;
+                let end = if args.len() > 2 {
+                    player.get_datum(&args[2]).int_value()?
+                } else {
+                    start
+                };
+                let chunk_expr = StringChunkType::from(&prop_name);
+                let chunk_expr = StringChunkExpr {
+                    chunk_type: chunk_expr,
+                    start,
+                    end,
+                    item_delimiter: player.movie.item_delimiter.clone(),
+                };
+                let resolved_str =
+                    StringChunkUtils::resolve_chunk_expr_string(&text.text, &chunk_expr)?;
+                Ok(player.alloc_datum(Datum::StringChunk(
+                    StringChunkSource::Member(member_ref),
+                    chunk_expr,
+                    resolved_str,
+                )))
             }
             "locToCharPos" => {
                 let (x, y) = player.get_datum(&args[0]).to_int_point()?;
@@ -287,8 +332,10 @@ impl FontMemberHandlers {
                 let index = get_text_index_at_pos(&text.text, &params, x, y);
                 Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
             }
-            _ => Err(ScriptError::new(format!("No handler {handler_name} for text member type")))
-          }
+            _ => Err(ScriptError::new(format!(
+                "No handler {handler_name} for text member type"
+            ))),
+        }
     }
 
     pub fn render_html_text_to_bitmap(
@@ -354,16 +401,7 @@ impl FontMemberHandlers {
                 }
 
                 // Draw single character using bitmap_font_copy_char
-                bitmap_font_copy_char(
-                    font,
-                    font_bitmap,
-                    ch as u8,
-                    bitmap,
-                    x,
-                    y,
-                    palettes,
-                    &params,
-                );
+                bitmap_font_copy_char(font, font_bitmap, ch as u8, bitmap, x, y, palettes, &params);
 
                 x += font.char_width as i32;
             }
@@ -382,16 +420,16 @@ impl FontMemberHandlers {
     // Helper function to determine ink mode from style
     fn determine_ink_from_style(style: &HtmlStyle) -> i32 {
         let mut ink = 36; // Default ink
-        
+
         // You can customize ink based on style properties
         if style.bold {
             ink = 36; // or a different ink for bold
         }
-        
+
         if style.italic {
             // Apply italic transformation if needed
         }
-        
+
         ink
     }
 
@@ -437,11 +475,11 @@ impl FontMemberHandlers {
     ) -> Result<(), ScriptError> {
         // Get the glyph from the font bitmap
         let glyph_index = ch as usize;
-        
+
         // This depends on your font implementation
         // For now, we'll assume you have a method to draw a character
         // You may need to adjust this based on your font system
-        
+
         let final_color = color_override.unwrap_or({
             // Use default text color from ink
             let palette_index = match ink {
@@ -450,14 +488,14 @@ impl FontMemberHandlers {
             };
             palette_index
         });
-        
+
         // Draw the character at (x, y) with the appropriate color
         // This is a placeholder - adjust based on your actual bitmap drawing code
         if let Some(palette) = palettes.palettes.first() {
             // Draw character using your existing text rendering system
             // but with the color override applied
         }
-        
+
         Ok(())
     }
 
@@ -486,30 +524,30 @@ impl FontMemberHandlers {
         let mut x = 0i32;
         let mut y = top_spacing as i32;
         let line_height = fixed_line_space as i32;
-        
+
         for span in spans {
             // Handle newlines
             let lines: Vec<&str> = span.text.split('\n').collect();
-            
+
             for (line_idx, line) in lines.iter().enumerate() {
                 if line_idx > 0 {
                     y += line_height;
                     x = 0;
                 }
-                
+
                 if !line.is_empty() {
                     let color_idx = if let Some(color) = span.style.color {
                         Self::rgb_to_palette_index(color, &palettes)
                     } else {
                         255 // Default (usually white)
                     };
-                    
+
                     let bg_color = if let Some(bg) = span.style.bg_color {
                         Self::rgb_to_palette_index(bg, &palettes)
                     } else {
                         Self::color_ref_to_u8(bitmap.get_bg_color_ref())
                     };
-                    
+
                     let params = CopyPixelsParams {
                         blend: 100,
                         ink: 36,
@@ -529,12 +567,12 @@ impl FontMemberHandlers {
                         line_height as u16,
                         top_spacing,
                     );
-                    
+
                     x += line.len() as i32 * 8; // Rough estimate
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -596,30 +634,26 @@ impl FontMemberHandlers {
                         } else {
                             None
                         };
-                        
+
                         // Fall back to system font if custom font not found
                         let font = if let Some(f) = font {
                             f
                         } else {
-                            player.font_manager.get_system_font()
-                                .ok_or_else(|| ScriptError::new("System font not available".to_string()))?
+                            player.font_manager.get_system_font().ok_or_else(|| {
+                                ScriptError::new("System font not available".to_string())
+                            })?
                         };
 
-                        web_sys::console::log_1(&format!(
-                            "Using font: '{}' (size: {}, char_width: {}, char_height: {})",
-                            font.font_name,
-                            font.font_size,
-                            font.char_width,
-                            font.char_height
-                        ).into());
-
-                        let (width, height) = measure_text(
-                            &text_clone,
-                            &font,
-                            None,
-                            fixed_line_space,
-                            top_spacing,
+                        web_sys::console::log_1(
+                            &format!(
+                                "Using font: '{}' (size: {}, char_width: {}, char_height: {})",
+                                font.font_name, font.font_size, font.char_width, font.char_height
+                            )
+                            .into(),
                         );
+
+                        let (width, height) =
+                            measure_text(&text_clone, &font, None, fixed_line_space, top_spacing);
 
                         match prop.as_str() {
                             "rect" => Ok(Datum::IntRect((0, 0, width as i32, height as i32))),
@@ -638,7 +672,8 @@ impl FontMemberHandlers {
                                 // Fill with transparent background
                                 for y in 0..height {
                                     for x in 0..width {
-                                        let index = ((y as usize * width as usize + x as usize) * 4) as usize;
+                                        let index = ((y as usize * width as usize + x as usize) * 4)
+                                            as usize;
                                         if index + 3 < bitmap.data.len() {
                                             bitmap.data[index] = 0;
                                             bitmap.data[index + 1] = 0;
@@ -648,7 +683,8 @@ impl FontMemberHandlers {
                                     }
                                 }
 
-                                let font_bitmap: &mut bitmap::Bitmap = player.bitmap_manager
+                                let font_bitmap: &mut bitmap::Bitmap = player
+                                    .bitmap_manager
                                     .get_bitmap_mut(font.bitmap_ref)
                                     .unwrap();
 
@@ -711,28 +747,24 @@ impl FontMemberHandlers {
                 }
             }
 
-            CastMemberType::Font(font_data) => {
-                match prop.as_str() {
-                    "previewText" => Ok(Datum::String(font_data.preview_text.clone())),
-                    "previewHtml" => {
-                        let html_string: String = font_data
-                            .preview_html_spans
-                            .iter()
-                            .map(|s| s.text.clone())
-                            .collect();
-                        Ok(Datum::String(html_string))
-                    }
-                    "fontStyle" => {
-                        Ok(Datum::List(DatumType::List, vec![], false))
-                    }
-                    "name" => Ok(Datum::String(font_data.font_info.name.clone())),
-                    "size" => Ok(Datum::Int(font_data.font_info.size as i32)),
-                    _ => Err(ScriptError::new(format!(
-                        "Cannot get castMember property {} for Font member",
-                        prop
-                    ))),
+            CastMemberType::Font(font_data) => match prop.as_str() {
+                "previewText" => Ok(Datum::String(font_data.preview_text.clone())),
+                "previewHtml" => {
+                    let html_string: String = font_data
+                        .preview_html_spans
+                        .iter()
+                        .map(|s| s.text.clone())
+                        .collect();
+                    Ok(Datum::String(html_string))
                 }
-            }
+                "fontStyle" => Ok(Datum::List(DatumType::List, vec![], false)),
+                "name" => Ok(Datum::String(font_data.font_info.name.clone())),
+                "size" => Ok(Datum::Int(font_data.font_info.size as i32)),
+                _ => Err(ScriptError::new(format!(
+                    "Cannot get castMember property {} for Font member",
+                    prop
+                ))),
+            },
 
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for this member type",
@@ -756,15 +788,19 @@ impl FontMemberHandlers {
                         "text" => font_member.preview_text = value.string_value()?,
                         "html" => {
                             let html_string = value.string_value()?;
-                            let spans = HtmlParser::parse_html(&html_string)
-                                .map_err(|e| ScriptError::new(format!("Failed to parse HTML: {}", e)))?;
-                            font_member.preview_text = spans.iter().map(|s| s.text.clone()).collect();
+                            let spans = HtmlParser::parse_html(&html_string).map_err(|e| {
+                                ScriptError::new(format!("Failed to parse HTML: {}", e))
+                            })?;
+                            font_member.preview_text =
+                                spans.iter().map(|s| s.text.clone()).collect();
                             font_member.preview_html_spans = spans;
                         }
-                        _ => return Err(ScriptError::new(format!(
-                            "Cannot set castMember prop '{}' for Font member",
-                            prop
-                        ))),
+                        _ => {
+                            return Err(ScriptError::new(format!(
+                                "Cannot set castMember prop '{}' for Font member",
+                                prop
+                            )))
+                        }
                     }
                 } else {
                     return Err(ScriptError::new(format!(

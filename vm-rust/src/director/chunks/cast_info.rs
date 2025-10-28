@@ -21,7 +21,8 @@ impl CastInfoChunk {
             &format!(
                 "Cinf raw_data ({} bytes): {:?}",
                 raw_data.len(),
-                raw_data.iter()
+                raw_data
+                    .iter()
                     .map(|b| format!("{:02X}", b))
                     .collect::<Vec<String>>()
                     .join(" ")

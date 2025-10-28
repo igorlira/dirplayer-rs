@@ -1,8 +1,8 @@
 use crate::director::lingo::datum::{Datum, DatumType};
 use crate::player::datum_ref::DatumRef;
 
-use crate::player::reserve_player_ref;
 use crate::player::allocator::{DatumAllocator, DatumAllocatorTrait};
+use crate::player::reserve_player_ref;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StaticDatum {
@@ -23,9 +23,7 @@ impl From<DatumRef> for StaticDatum {
         let datum_opt: Option<Datum> = match &dref {
             DatumRef::Void => None,
             DatumRef::Ref(_, _) => {
-                reserve_player_ref(|player| {
-                    Some(player.allocator.get_datum(&dref).clone())
-                })
+                reserve_player_ref(|player| Some(player.allocator.get_datum(&dref).clone()))
             }
         };
 
@@ -36,9 +34,14 @@ impl From<DatumRef> for StaticDatum {
                 Datum::Float(f) => StaticDatum::Float(f),
                 Datum::String(s) => StaticDatum::String(s),
                 Datum::Symbol(s) => StaticDatum::Symbol(s),
-                Datum::List(_, vec, _) => StaticDatum::List(vec.into_iter().map(StaticDatum::from).collect()),
+                Datum::List(_, vec, _) => {
+                    StaticDatum::List(vec.into_iter().map(StaticDatum::from).collect())
+                }
                 Datum::PropList(pairs, _) => StaticDatum::PropList(
-                    pairs.into_iter().map(|(k, v)| (StaticDatum::from(k), StaticDatum::from(v))).collect()
+                    pairs
+                        .into_iter()
+                        .map(|(k, v)| (StaticDatum::from(k), StaticDatum::from(v)))
+                        .collect(),
                 ),
                 Datum::IntPoint((x, y)) => StaticDatum::IntPoint(x, y),
                 Datum::IntRect((l, t, r, b)) => StaticDatum::IntRect(l, t, r, b),
@@ -55,9 +58,14 @@ impl From<Datum> for StaticDatum {
             Datum::Float(f) => StaticDatum::Float(f),
             Datum::String(s) => StaticDatum::String(s),
             Datum::Symbol(s) => StaticDatum::Symbol(s),
-            Datum::List(_, vec, _) => StaticDatum::List(vec.into_iter().map(StaticDatum::from).collect()),
+            Datum::List(_, vec, _) => {
+                StaticDatum::List(vec.into_iter().map(StaticDatum::from).collect())
+            }
             Datum::PropList(pairs, _) => StaticDatum::PropList(
-                pairs.into_iter().map(|(k, v)| (StaticDatum::from(k), StaticDatum::from(v))).collect()
+                pairs
+                    .into_iter()
+                    .map(|(k, v)| (StaticDatum::from(k), StaticDatum::from(v)))
+                    .collect(),
             ),
             Datum::IntPoint((x, y)) => StaticDatum::IntPoint(x, y),
             Datum::IntRect((l, t, r, b)) => StaticDatum::IntRect(l, t, r, b),
@@ -103,48 +111,41 @@ impl StaticDatum {
     }
 }
 
-fn static_datum_to_runtime(
-    param: &StaticDatum,
-    allocator: &mut DatumAllocator
-) -> DatumRef {
+fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocator) -> DatumRef {
     match param {
-        StaticDatum::String(s) => {
-            allocator.alloc_datum(Datum::String(s.clone())).unwrap()
-        },
-        StaticDatum::Int(i) => {
-            allocator.alloc_datum(Datum::Int(*i)).unwrap()
-        },
-        StaticDatum::Float(f) => {
-            allocator.alloc_datum(Datum::Float(*f)).unwrap()
-        },
-        StaticDatum::Symbol(s) => {
-            allocator.alloc_datum(Datum::Symbol(s.clone())).unwrap()
-        },
+        StaticDatum::String(s) => allocator.alloc_datum(Datum::String(s.clone())).unwrap(),
+        StaticDatum::Int(i) => allocator.alloc_datum(Datum::Int(*i)).unwrap(),
+        StaticDatum::Float(f) => allocator.alloc_datum(Datum::Float(*f)).unwrap(),
+        StaticDatum::Symbol(s) => allocator.alloc_datum(Datum::Symbol(s.clone())).unwrap(),
         StaticDatum::List(items) => {
-            let datum_refs: Vec<DatumRef> = items.iter().map(|item| {
-                static_datum_to_runtime(item, allocator)
-            }).collect();
-            allocator.alloc_datum(Datum::List(DatumType::List, datum_refs, false)).unwrap()
-        },
+            let datum_refs: Vec<DatumRef> = items
+                .iter()
+                .map(|item| static_datum_to_runtime(item, allocator))
+                .collect();
+            allocator
+                .alloc_datum(Datum::List(DatumType::List, datum_refs, false))
+                .unwrap()
+        }
         StaticDatum::PropList(items) => {
-            let datum_refs: Vec<(DatumRef, DatumRef)> = items.iter().map(|(key, val)| {
-            let key_ref = static_datum_to_runtime(key, allocator);
-            let val_ref = static_datum_to_runtime(val, allocator);
-            (key_ref, val_ref)
-            }).collect();
-            allocator.alloc_datum(Datum::PropList(datum_refs, false)).unwrap()
-        },
-        StaticDatum::IntPoint(x, y) => {
-            allocator.alloc_datum(Datum::IntPoint((*x, *y))).unwrap()
-        },
-        StaticDatum::IntRect(left, top, right, bottom) => {
-            allocator.alloc_datum(Datum::IntRect((*left, *top, *right, *bottom))).unwrap()
-        },
+            let datum_refs: Vec<(DatumRef, DatumRef)> = items
+                .iter()
+                .map(|(key, val)| {
+                    let key_ref = static_datum_to_runtime(key, allocator);
+                    let val_ref = static_datum_to_runtime(val, allocator);
+                    (key_ref, val_ref)
+                })
+                .collect();
+            allocator
+                .alloc_datum(Datum::PropList(datum_refs, false))
+                .unwrap()
+        }
+        StaticDatum::IntPoint(x, y) => allocator.alloc_datum(Datum::IntPoint((*x, *y))).unwrap(),
+        StaticDatum::IntRect(left, top, right, bottom) => allocator
+            .alloc_datum(Datum::IntRect((*left, *top, *right, *bottom)))
+            .unwrap(),
         StaticDatum::Void => DatumRef::Void,
         _ => {
-            web_sys::console::log_1(&format!(
-                "⚠️ Unhandled StaticDatum type, using Void"
-            ).into());
+            web_sys::console::log_1(&format!("⚠️ Unhandled StaticDatum type, using Void").into());
             DatumRef::Void
         }
     }
