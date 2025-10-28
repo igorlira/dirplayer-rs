@@ -664,8 +664,7 @@ where
     F: FnOnce(&mut Option<PlayerCanvasRenderer>) -> R,
 {
     RENDERER_LOCK.with_borrow_mut(|renderer_lock| {
-        let renderer = renderer_lock.borrow_mut();
-        f(renderer)
+        f(renderer_lock)
     })
 }
 
