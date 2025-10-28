@@ -17,6 +17,16 @@ pub struct CastMemberDef {
 }
 
 impl CastMemberChunk {
+  // Helper to read u16 safely
+  fn read_u16_safe(reader: &mut BinaryReader) -> Option<u16> {
+    reader.read_u16().ok()
+  }
+
+  // Helper to read u32 safely
+  fn read_u32_safe(reader: &mut BinaryReader) -> Option<u32> {
+    reader.read_u32().ok()
+  }
+
   #[allow(unused_variables, unused_assignments)]
   pub fn from_reader(reader: &mut BinaryReader, dir_version: u16) -> Result<CastMemberChunk, String> {
     reader.endian = Endian::Big;
