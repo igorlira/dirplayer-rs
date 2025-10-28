@@ -85,6 +85,7 @@ pub fn datum_equals(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> 
     }
     (Datum::String(_), Datum::Void) => Ok(false),
     (Datum::Void, Datum::Symbol(_)) => Ok(false),
+    (Datum::IntRect(left), Datum::IntRect(right)) => { Ok(left.0 == right.0 && left.1 == right.1 && left.2 == right.2 && left.3 == right.3) },
     (Datum::ColorRef(color_ref), Datum::String(string)) => {
       warn!("Datum equals not supported for ColorRef and String: {:?} and {}", color_ref, string);
       Ok(false)
