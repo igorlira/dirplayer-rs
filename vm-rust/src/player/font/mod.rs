@@ -2,11 +2,17 @@ use fxhash::FxHashMap;
 use log::warn;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
+use std::rc::Rc;
 
 use crate::player::{
+    CastManager, cast_member::CastMemberType, 
     bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
     reserve_player_mut,
 };
+
+use std::collections::HashMap;
+
+use crate::director::enums::FontInfo;
 
 use super::{
     bitmap::{drawing::CopyPixelsParams, manager::BitmapRef, palette_map::PaletteMap},
@@ -15,11 +21,14 @@ use super::{
 pub type FontRef = u32;
 
 pub struct FontManager {
-    pub fonts: FxHashMap<FontRef, BitmapFont>,
-    pub system_font: Option<FontRef>,
+    pub fonts: FxHashMap<FontRef, Rc<BitmapFont>>,
+    pub system_font: Option<Rc<BitmapFont>>,
     pub font_counter: FontRef,
+    pub font_cache: HashMap<String, Rc<BitmapFont>>,  // Cache for loaded fonts by name
+    pub font_by_id: HashMap<u16, FontRef>, // Map font_id to FontRef
 }
 
+#[derive(Clone)]
 pub struct BitmapFont {
     pub bitmap_ref: BitmapRef,
     pub char_width: u16,
@@ -31,6 +40,9 @@ pub struct BitmapFont {
     pub char_offset_x: u16,
     pub char_offset_y: u16,
     pub first_char_num: u8,
+    pub font_name: String,
+    pub font_size: u16,
+    pub font_style: u8,
 }
 
 pub struct DrawTextParams<'a> {
@@ -43,17 +55,135 @@ pub struct DrawTextParams<'a> {
 impl FontManager {
     pub fn new() -> FontManager {
         return FontManager {
-            system_font: None,
             fonts: FxHashMap::default(),
+            system_font: None,
             font_counter: 0,
+            font_cache: HashMap::new(),
+            font_by_id: HashMap::new(),
         };
     }
 
-    pub fn get_system_font(&self) -> Option<&BitmapFont> {
-        match self.system_font {
-            Some(font_ref) => self.fonts.get(&font_ref),
-            None => None,
+    pub fn get_system_font(&self) -> Option<Rc<BitmapFont>> {
+        self.system_font.clone()
+    }
+
+    pub fn get_font_by_info(&self, font_info: &FontInfo) -> Option<&BitmapFont> {
+        // First try to get by font_id
+        if let Some(font_ref) = self.font_by_id.get(&font_info.font_id) {
+            return self.fonts.get(font_ref).map(|v| &**v);
         }
+        
+        // Fall back to name lookup
+        self.get_font_immutable(&font_info.name)
+    }
+
+    /// Get a font by name, loading it if necessary
+    pub fn get_font(&mut self, font_name: &str) -> Option<&BitmapFont> {
+        // Check cache first
+        if self.font_cache.contains_key(font_name) {
+            return self.font_cache.get(font_name).map(|v| &**v);
+        }
+
+        // Font not in cache, cannot load here (would need cast_manager)
+        None
+    }
+
+    /// Load a font from cast members
+    fn load_font(&mut self, font_name: &str) -> Option<BitmapFont> {
+        // TODO: Implement actual font loading from cast members
+        // This is a placeholder that returns None
+        // You'll need to:
+        // 1. Search through cast members for a Font type with matching name
+        // 2. Extract font metrics from FontInfo
+        // 3. Create or reference a BitmapFont
+        
+        web_sys::console::log_1(&format!(
+            "FontManager: Attempted to load font '{}' - not implemented yet",
+            font_name
+        ).into());
+        
+        None
+    }
+
+    /// Get a font by name (immutable version)
+    pub fn get_font_immutable(&self, font_name: &str) -> Option<&BitmapFont> {
+        self.font_cache.get(font_name).map(|v| &**v)
+    }
+
+    /// Load a font from cast members by searching the cast manager
+    pub fn load_font_from_cast(
+        &mut self,
+        font_name: &str,
+        cast_manager: &CastManager,
+        size: Option<u16>,
+        style: Option<u8>,
+    ) -> Option<Rc<BitmapFont>> {
+        let cache_key = format!("{}_{}_{}", font_name, size.unwrap_or(0), style.unwrap_or(0));
+
+        for cast_lib in &cast_manager.casts {
+            for member in cast_lib.members.values() {
+                if let CastMemberType::Font(font_data) = &member.member_type {
+                    let name_matches = font_data.font_info.name == font_name;
+                    let size_matches = size.is_none() || size == Some(font_data.font_info.size);
+                    let style_matches = style.is_none() || style == Some(font_data.font_info.style);
+
+                    if name_matches && size_matches && style_matches {
+                        if let Some(system_font) = self.get_system_font() {
+                            let mut new_font = (*system_font).clone();
+                            new_font.font_name = font_data.font_info.name.clone();
+                            new_font.font_size = font_data.font_info.size;
+                            new_font.font_style = font_data.font_info.style;
+
+                            let scale_factor = font_data.font_info.size as f32 / 12.0;
+                            new_font.char_width = (new_font.char_width as f32 * scale_factor) as u16;
+                            new_font.char_height = (new_font.char_height as f32 * scale_factor) as u16;
+
+                            let rc_font = Rc::new(new_font);
+                            self.font_cache.insert(cache_key.clone(), Rc::clone(&rc_font));
+                            if !self.font_cache.contains_key(font_name) {
+                                self.font_cache.insert(font_name.to_string(), Rc::clone(&rc_font));
+                            }
+
+                            let font_ref = self.font_counter;
+                            self.font_counter += 1;
+                            self.fonts.insert(font_ref, Rc::clone(&rc_font));
+                            self.font_by_id.insert(font_data.font_info.font_id, font_ref);
+
+                            return Some(rc_font);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn get_font_with_cast(
+        &mut self,
+        font_name: &str,
+        cast_manager: Option<&CastManager>,
+        size: Option<u16>,
+        style: Option<u8>,
+    ) -> Option<Rc<BitmapFont>> {
+        let cache_key = format!("{}_{}_{}", font_name, size.unwrap_or(0), style.unwrap_or(0));
+
+        if let Some(font) = self.font_cache.get(&cache_key) {
+            return Some(Rc::clone(font));
+        }
+
+        if let Some(cast_mgr) = cast_manager {
+            if let Some(font) = self.load_font_from_cast(font_name, cast_mgr, size, style) {
+                return Some(font);
+            }
+        }
+
+        None
+    }
+
+    pub fn get_best_font(&mut self, font_name: &str) -> Option<&BitmapFont> {
+        // Just use get directly - no lifetime conflicts
+        self.font_cache.get(font_name).map(|v| &**v)
     }
 }
 
@@ -126,12 +256,23 @@ pub async fn player_load_system_font(path: &str) {
                     grid_cell_height,
                     first_char_num: 32,
                     char_offset_x: 1,
-                    char_offset_y: 1
+                    char_offset_y: 1,
+                    font_name: "System".to_string(),
+                    font_size: 12,
+                    font_style: 0,
                 };
+
+                let rc_font = Rc::new(font.clone());
+
                 let font_ref = player.font_manager.font_counter;
                 player.font_manager.font_counter += 1;
-                player.font_manager.fonts.insert(font_ref, font);
-                player.font_manager.system_font = Some(font_ref);
+                player.font_manager.fonts.insert(font_ref, Rc::clone(&rc_font));
+                player.font_manager.system_font = Some(rc_font);
+                
+                // Add to font_cache where rendering code looks for it
+                player.font_manager.font_cache.insert("System".to_string(), font.into());
+                
+                web_sys::console::log_1(&"✅ System font loaded successfully".into());
             });
 
             warn!("Loaded system font image data: {:?}", image_data);

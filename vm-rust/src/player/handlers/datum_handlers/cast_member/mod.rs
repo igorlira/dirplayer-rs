@@ -3,3 +3,4 @@ pub mod field;
 pub mod bitmap;
 pub mod film_loop;
 pub mod sound;
+pub mod font;

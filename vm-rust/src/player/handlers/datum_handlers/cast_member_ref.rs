@@ -184,6 +184,9 @@ impl CastMemberRefHandlers {
       CastMemberTypeId::Sound => {
         SoundMemberHandlers::get_prop(player, cast_member_ref, prop)
       }
+      CastMemberTypeId::Font => {
+        FontMemberHandlers::get_prop(player, cast_member_ref, prop)
+      }
       _ => {
         Err(ScriptError::new(format!("Cannot get castMember prop {} for member of type {:?}", prop, member_type)))
       }
@@ -209,6 +212,11 @@ impl CastMemberRefHandlers {
       }
       CastMemberTypeId::Text => {
         TextMemberHandlers::set_prop(member_ref, prop, value)
+      }
+      CastMemberTypeId::Font => {
+        reserve_player_mut(|player| {
+          FontMemberHandlers::set_prop(player, member_ref, prop, value)
+        })
       }
       CastMemberTypeId::Bitmap => {
         BitmapMemberHandlers::set_prop(member_ref, prop, value)

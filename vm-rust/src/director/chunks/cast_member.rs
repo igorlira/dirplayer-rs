@@ -1,12 +1,13 @@
 use binary_reader::{BinaryReader, Endian};
 
-use crate::director::{chunks::cast_member_info::CastMemberInfoChunk, enums::{BitmapInfo, FilmLoopInfo, SoundInfo, MemberType, ScriptType, ShapeInfo}};
+use crate::director::{chunks::cast_member_info::CastMemberInfoChunk, enums::{BitmapInfo, FilmLoopInfo, SoundInfo, MemberType, ScriptType, ShapeInfo, FontInfo}};
 
 use super::Chunk;
 
 pub struct CastMemberChunk {
   pub member_type: MemberType,
   pub specific_data: CastMemberSpecificData,
+  pub specific_data_raw: Vec<u8>,
   pub member_info: Option<CastMemberInfoChunk>,
 }
 
@@ -112,6 +113,7 @@ impl CastMemberChunk {
     return Ok(CastMemberChunk {
       member_type,
       specific_data: specific_data_parsed,
+      specific_data_raw: specific_data,
       member_info: info,
     })
   }
@@ -123,6 +125,7 @@ pub enum CastMemberSpecificData {
   Shape(ShapeInfo),
   FilmLoop(FilmLoopInfo),
   Sound(SoundInfo),
+  Font(FontInfo),
   None
 }
 
@@ -162,6 +165,14 @@ impl CastMemberSpecificData {
   pub fn sound_info(&self) -> Option<&SoundInfo> {
     if let CastMemberSpecificData::Sound(sound_info) = self {
       Some(sound_info)
+    } else {
+      None
+    }
+  }
+
+  pub fn font_info(&self) -> Option<&FontInfo> {
+    if let CastMemberSpecificData::Font(info) = self {
+      Some(info)
     } else {
       None
     }

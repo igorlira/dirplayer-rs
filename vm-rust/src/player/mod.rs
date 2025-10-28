@@ -54,10 +54,14 @@ use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
 use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks}};
 
+use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager, BitmapFont}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef}, sprite::{ColorRef, CursorRef}, timeout::TimeoutManager};
+
 use crate::player::handlers::datum_handlers::xml::{XmlDocument, XmlNode};
 use crate::player::handlers::datum_handlers::sound_channel::{SoundManager, AudioData, SoundChannelDatumHandlers};
 use crate::player::handlers::datum_handlers::date::DateObject;
 use crate::player::handlers::datum_handlers::math::MathObject;
+
+use crate::player::handlers::datum_handlers::player_call_datum_handler;
 
 pub enum HandlerExecutionResult {
   Advance,
@@ -228,6 +232,11 @@ impl DirPlayer {
     self.movie.load_from_file(dir, &mut self.net_manager, &mut self.bitmap_manager, &mut self.dir_cache).await;
     let (r, g, b) = self.movie.stage_color;
     self.bg_color = ColorRef::Rgb(r, g, b);
+    
+    // Load all fonts from cast members into the font manager
+    web_sys::console::log_1(&"Loading fonts from cast members...".into());
+    self.movie.cast_manager.load_fonts_into_manager(&mut self.font_manager);
+    
     JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
   }
 
@@ -609,6 +618,20 @@ impl DirPlayer {
     Err(ScriptError::new("Not implemented".to_string()))
   }
 
+  pub fn has_custom_font(&self, font_name: &str) -> bool {
+    if font_name.is_empty() || font_name == "System" {
+      return false;
+    }
+    self.font_manager.get_font_immutable(font_name).is_some()
+  }
+
+  pub fn list_available_fonts(&self) -> Vec<String> {
+    let mut fonts: Vec<String> = self.font_manager.font_cache.keys()
+      .map(|k| k.clone())
+      .collect();
+    fonts.sort();
+    fonts
+  }
 }
 
 pub fn player_alloc_datum(datum: Datum) -> DatumRef {

@@ -141,7 +141,15 @@ pub struct FilmLoopMember {
 pub struct SoundMember {
   pub info: SoundInfo,
   pub sound: SoundChunk,
-  // TODO add fields
+}
+
+#[derive(Clone, Debug)]
+pub struct FontMember {
+  pub font_info: FontInfo,
+  pub preview_text: String,
+  pub preview_html_spans: Vec<StyledSpan>,
+  pub fixed_line_space: u16,
+  pub top_spacing: i16,
 }
 
 #[allow(dead_code)]
@@ -155,6 +163,7 @@ pub enum CastMemberType {
   Shape(ShapeMember),
   FilmLoop(FilmLoopMember),
   Sound(SoundMember),
+  Font(FontMember),
   Unknown
 }
 
@@ -168,6 +177,7 @@ pub enum CastMemberTypeId {
   Shape,
   FilmLoop,
   Sound,
+  Font,
   Unknown
 }
 
@@ -182,6 +192,7 @@ impl fmt::Debug for CastMemberType {
       Self::Shape(_) => { write!(f, "Shape") }
       Self::FilmLoop(_) => { write!(f, "FilmLoop") }
       Self::Sound(_) => { write!(f, "Sound") }
+      Self::Font(_) => { write!(f, "Font") }
       Self::Unknown => { write!(f, "Unknown") }
     }
   }
@@ -198,6 +209,7 @@ impl CastMemberTypeId {
       Self::Shape => { Ok("shape") }
       Self::FilmLoop => { Ok("filmLoop") }
       Self::Sound => { Ok("sound") }
+      Self::Font => { Ok("Font") }
       _ => { Err(ScriptError::new("Unknown cast member type".to_string())) }
     }
   }
@@ -214,6 +226,7 @@ impl CastMemberType {
       Self::Shape(_) => { CastMemberTypeId::Shape }
       Self::FilmLoop(_) => { CastMemberTypeId::FilmLoop }
       Self::Sound(_) => { CastMemberTypeId::Sound }
+      Self::Font(_) => { CastMemberTypeId::Font }
       Self::Unknown => { CastMemberTypeId::Unknown }
     }
   }
@@ -228,6 +241,7 @@ impl CastMemberType {
       Self::Shape(_) => { "shape" }
       Self::FilmLoop(_) => { "filmLoop" }
       Self::Sound(_) => { "sound" }
+      Self::Font(_) => { "font" }
       _ => { "unknown" }
     }
   }
@@ -306,6 +320,13 @@ impl CastMemberType {
   pub fn as_sound(&self) -> Option<&SoundMember> {
     return match self {
       Self::Sound(data) => { Some(data) }
+      _ => { None }
+    }
+  }
+
+  pub fn as_font(&self) -> Option<&FontMember> {
+    return match self {
+      Self::Font(data) => { Some(data) }
       _ => { None }
     }
   }
@@ -481,6 +502,140 @@ impl CastMember {
             name: member_info.name.clone() 
           }
         )
+      }
+      MemberType::Font => {
+        use web_sys::console;
+        
+        let font_name = chunk
+          .member_info
+          .as_ref()
+          .map(|info| info.name.clone())
+          .unwrap_or_else(|| "<unnamed>".to_string());
+
+        // Try to get font_info from specific_data
+        let font_info_opt = chunk.specific_data.font_info();
+        
+        // Get raw specific data for analysis
+        let specific_data_bytes = chunk.specific_data_raw.clone();
+
+        // CRITICAL: Check if this looks like real font data
+        let has_font_binary_data = FontInfo::looks_like_real_font_data(&specific_data_bytes);
+        let is_text_data = FontInfo::looks_like_text_data(&specific_data_bytes);
+
+        if is_text_data {
+          if let Some(text_data) = TextMemberData::from_raw_bytes(&specific_data_bytes) {
+            text_data.log_summary();
+            
+            // // Convert to TextMember
+            // let mut text_member = TextMember::new();
+            // text_member.alignment = text_data.alignment_string().to_string();
+            // text_member.font_size = text_data.font_size;
+            // text_member.word_wrap = text_data.word_wrap;
+            // text_member.anti_alias = text_data.anti_alias;
+            // text_member.box_type = text_data.box_type_string().to_string();
+            // // ... set other fields
+          }
+        }
+    
+        if is_text_data || (!has_font_binary_data && font_info_opt.is_none()) {
+          console::log_1(&format!(
+              "   ❌ This is {} - converting to Text member",
+              if is_text_data { "text data" } else { "not font data" }
+          ).into());
+          
+          // Try to treat as Text member
+          if member_def.children.len() > 0 {
+            if let Some(first_child) = &member_def.children[0] {
+              if let Some(text_chunk) = first_child.as_text() {
+                console::log_1(&format!(
+                  "   → Converting to Text member (text: '{}')",
+                  &text_chunk.text.chars().take(50).collect::<String>()
+                ).into());
+                
+                let mut text_member = TextMember::new();
+                text_member.text = text_chunk.text.clone();
+                
+                return CastMember {
+                  number,
+                  name: font_name,
+                  member_type: CastMemberType::Text(text_member),
+                  color: ColorRef::PaletteIndex(255),
+                  bg_color: ColorRef::PaletteIndex(0),
+                };
+              }
+            }
+          }
+          
+          console::log_1(&"   → No text chunk, marking as Unknown".into());
+          return CastMember {
+            number,
+            name: font_name,
+            member_type: CastMemberType::Unknown,
+            color: ColorRef::PaletteIndex(255),
+            bg_color: ColorRef::PaletteIndex(0),
+          };
+        }
+
+        // Get or create FontInfo
+        let font_info = if let Some(info) = font_info_opt {
+          info.clone()
+        } else if has_font_binary_data {
+          // Try to parse from raw bytes with FourCC
+          if let Some(mut info) = FontInfo::from_raw_with_fourcc(&specific_data_bytes) {
+            // Set name from member_info
+            info.name = font_name.clone();
+            info
+          } else {
+            // Fallback
+            FontInfo {
+              font_id: 0,
+              size: 12,
+              style: 0,
+              name: font_name.clone(),
+            }
+          }
+        } else {
+          // Parse from raw bytes (old format)
+          let mut info = FontInfo::from(specific_data_bytes.as_slice());
+          info.name = font_name.clone();
+          info
+        };
+        
+        // Additional validation: check if font name makes sense
+        let name_looks_like_font = {
+          let name = font_info.name.trim();
+          let has_text_indicators = name.to_lowercase().contains("text") ||
+            name.to_lowercase().contains("label") ||
+            name.to_lowercase().contains("box") ||
+            name.to_lowercase().contains("button") ||
+            name.to_lowercase().contains("field");
+          
+          !has_text_indicators || name.chars().any(|c| c == '*' || c == '-')
+        };
+        
+        if !name_looks_like_font && !has_font_binary_data {
+          console::log_1(&format!(
+            "   ⚠️  Name '{}' doesn't look like a font name",
+            font_info.name
+          ).into());
+        }
+
+        console::log_1(&format!(
+          "   ✅ Valid Font: id={}, size={}, style={}, name='{}' (member #{})",
+          font_info.font_id,
+          font_info.size,
+          font_info.style,
+          font_info.name,
+          number
+        ).into());
+
+        CastMemberType::Font(FontMember {
+          font_info,
+          preview_text: "".to_string(),
+          preview_html_spans: Vec::new(),
+          fixed_line_space: 0,
+          top_spacing: 0,
+        })
       }
       MemberType::Bitmap => {
         let bitmap_info = chunk.specific_data.bitmap_info().unwrap();

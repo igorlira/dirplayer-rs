@@ -312,6 +312,139 @@ impl CastManager {
     let cell = self.movie_script_cache.borrow();
     cell
   }
+
+  /// Load all font cast members into the font manager
+  pub fn load_fonts_into_manager(&self, font_manager: &mut FontManager) {
+    use web_sys::console;
+    
+    console::log_1(&"🎨 Starting font loading from cast members...".into());
+
+    let mut loaded_count = 0;
+    let mut skipped_count = 0;
+    
+    for cast_lib in &self.casts {
+      console::log_1(&format!(
+        "   Scanning cast lib {} ({} members)",
+        cast_lib.number,
+        cast_lib.members.len()
+      ).into());
+        
+      for member in cast_lib.members.values() {
+        if let CastMemberType::Font(font_data) = &member.member_type {
+          let font_name = &font_data.font_info.name;
+          let font_size = font_data.font_info.size;
+          let font_style = font_data.font_info.style;
+          let font_id = font_data.font_info.font_id;
+
+          console::log_1(&format!(
+            "   📋 Found font member #{}: '{}' (id={}, size={}, style={})",
+            member.number, font_name, font_id, font_size, font_style
+          ).into());
+          
+          // Skip empty font names
+          if font_name.is_empty() {
+            web_sys::console::log_1(&format!(
+              "⊘ Skipping font member {} with empty name",
+              member.number
+            ).into());
+            skipped_count += 1;
+            continue;
+          }
+          
+          web_sys::console::log_1(&format!(
+            "📝 Loading font '{}' from cast (id: {}, size: {}, style: {}, member: {})",
+            font_name, font_id, font_size, font_style, member.number
+          ).into());
+          
+          // Create a BitmapFont from the FontInfo
+          if let Some(system_font) = font_manager.get_system_font() {
+            // Clone the actual BitmapFont, not the Rc
+            let mut font_data = (*system_font).clone(); // clone inner BitmapFont
+
+            // Now you can mutate freely
+            font_data.font_name = font_name.clone();
+            font_data.font_size = font_size;
+            font_data.font_style = font_style;
+
+            let scale_factor = if font_size > 0 {
+                font_size as f32 / 12.0
+            } else {
+                1.0
+            };
+
+            font_data.char_width = (system_font.char_width as f32 * scale_factor).max(1.0).ceil() as u16;
+            font_data.char_height = (system_font.char_height as f32 * scale_factor).max(1.0).ceil() as u16;
+
+            font_data.grid_cell_width = (system_font.grid_cell_width as f32 * scale_factor).max(1.0).ceil() as u16;
+            font_data.grid_cell_height = (system_font.grid_cell_height as f32 * scale_factor).max(1.0).ceil() as u16;
+
+            // Wrap in Rc for storage
+            let rc_font = Rc::new(font_data.clone());
+
+            // Create cache keys for different lookup scenarios
+            let full_key = format!("{}_{}_{}", font_name, font_size, font_style);
+            let size_key = format!("{}_{}_0", font_name, font_size);
+            let name_key = font_name.clone();
+
+            // Store in cache
+            font_manager.font_cache.insert(full_key.clone(), Rc::clone(&rc_font));
+            font_manager.font_cache.insert(name_key.clone(), Rc::clone(&rc_font));
+            font_manager.font_cache.insert(size_key.clone(), Rc::clone(&rc_font));
+
+            // Store by FontRef
+            let font_ref = font_manager.font_counter;
+            font_manager.font_counter += 1;
+            font_manager.fonts.insert(font_ref, rc_font);
+            
+            // Map the font_id to this FontRef (only if font_id > 0)
+            if font_id > 0 {
+              font_manager.font_by_id.insert(font_id, font_ref);
+            }
+            
+            console::log_1(&format!(
+              "      ✅ Loaded: ref={}, scale={:.2}x, char_size={}x{}",
+              font_ref, scale_factor, font_data.char_width, font_data.char_height
+            ).into());
+            
+            loaded_count += 1;
+          } else {
+            web_sys::console::log_1(&format!(
+              "⚠️  Cannot load font '{}': system font not available",
+              font_name
+            ).into());
+            skipped_count += 1;
+          }
+        }
+      }
+    }
+
+    console::log_1(&format!(
+      "🎨 Font loading complete: {} loaded, {} skipped",
+      loaded_count, skipped_count
+    ).into());
+    console::log_1(&format!(
+      "   Cache: {} entries, {} font_id mappings",
+      font_manager.font_cache.len(),
+      font_manager.font_by_id.len()
+    ).into());
+    
+    // Log all cached fonts for debugging
+    console::log_1(&"   Cached fonts:".into());
+    for (key, font) in &font_manager.font_cache {
+      console::log_1(&format!(
+        "      '{}' -> {} ({}pt, style={})",
+        key, font.font_name, font.font_size, font.font_style
+      ).into());
+    }
+    
+    web_sys::console::log_1(&format!(
+      "🎨 Font loading complete: {} loaded, {} skipped | {} in cache, {} font_id mappings",
+      loaded_count,
+      skipped_count,
+      font_manager.font_cache.len(),
+      font_manager.font_by_id.len()
+    ).into());
+  }
 }
 
 fn normalize_cast_lib_path(base_path: &Option<Url>, file_path: &String, ) -> Option<String> {

@@ -1,6 +1,9 @@
-use binary_reader::BinaryReader;
+use binary_reader::{BinaryReader, Endian};
 use log::warn;
 use num_derive::FromPrimitive;
+
+use web_sys::console;
+use std::convert::TryInto;
 
 use crate::{io::reader::DirectorExt, utils::log_i};
 
@@ -236,4 +239,368 @@ pub struct SoundInfo {
 	pub sample_count: u32,
 	pub duration: u32,
 	//pub compression_type: u16,
+}
+
+#[derive(Clone, Debug)]
+pub struct FontInfo {
+	pub font_id: u16,       // Internal font resource ID
+	pub name: String,       // Font name (if stored or resolved)
+	pub size: u16,          // point size
+	pub style: u8,          // style flags (bold/italic/etc)
+}
+
+impl From<&[u8]> for FontInfo {
+	fn from(bytes: &[u8]) -> FontInfo {
+		use binary_reader::{BinaryReader, Endian};
+		let mut reader = BinaryReader::from_u8(bytes);
+		reader.set_endian(Endian::Big);
+
+		let font_id = reader.read_u16().unwrap_or(0);
+		let size = reader.read_u16().unwrap_or(0);
+		let style = reader.read_u8().unwrap_or(0);
+
+		FontInfo {
+			font_id,
+			size,
+			style,
+			name: String::new(),
+		}
+	}
+}
+
+impl FontInfo {
+	/// Parse FontInfo from raw bytes with FourCC prefix
+	pub fn from_raw_with_fourcc(bytes: &[u8]) -> Option<FontInfo> {
+		if bytes.len() < 8 {
+			return None;
+		}
+		
+		use binary_reader::{BinaryReader, Endian};
+		let mut reader = BinaryReader::from_u8(bytes);
+		reader.set_endian(Endian::Big);
+		
+		// Skip length field
+		let _length = reader.read_u32().ok()?;
+		
+		// Read FourCC
+		let fourcc_bytes = reader.read_bytes(4).ok()?;
+		let fourcc = String::from_utf8_lossy(&fourcc_bytes);
+		
+		if fourcc != "font" {
+			return None;
+		}
+		
+		// Now parse the font data
+		// Based on "00 00 00 2c" after "font", seems like another length or data field
+		let data_length = reader.read_u32().ok()?;
+		
+		// Try to read font info fields
+		// The structure might be different, let's try to find font_id, size, style
+		let font_id = reader.read_u16().unwrap_or(0);
+		
+		// Skip some bytes and look for size
+		// This is empirical - you may need to adjust based on actual data
+		let size = reader.read_u16().unwrap_or(12);
+		let style = reader.read_u8().unwrap_or(0);
+		
+		Some(FontInfo {
+			font_id,
+			size,
+			style,
+			name: String::new(), // Name comes from member_info, not specific_data
+		})
+	}
+	
+	/// Check if raw bytes look like valid font data
+	pub fn looks_like_real_font_data(bytes: &[u8]) -> bool {
+		if bytes.len() < 8 {
+			return false;
+		}
+		
+		use binary_reader::{BinaryReader, Endian};
+		let mut reader = BinaryReader::from_u8(bytes);
+		reader.set_endian(Endian::Big);
+		
+		// Skip the first 4 bytes (seems to be a length field)
+		if let Ok(_length) = reader.read_u32() {
+			// Read the FourCC type identifier
+			if let Ok(fourcc_bytes) = reader.read_bytes(4) {
+				let fourcc = String::from_utf8_lossy(&fourcc_bytes);
+				
+				// Check if it's "font" type
+				if fourcc == "font" {
+					return true;
+				}
+			}
+		}
+		
+		false
+	}
+	
+	/// Check if raw bytes indicate text data (not font)
+	pub fn looks_like_text_data(bytes: &[u8]) -> bool {
+		if bytes.len() < 8 {
+			return false;
+		}
+		
+		use binary_reader::{BinaryReader, Endian};
+		let mut reader = BinaryReader::from_u8(bytes);
+		reader.set_endian(Endian::Big);
+		
+		// Skip the first 4 bytes
+		if let Ok(_length) = reader.read_u32() {
+			// Read the FourCC type identifier
+			if let Ok(fourcc_bytes) = reader.read_bytes(4) {
+				let fourcc = String::from_utf8_lossy(&fourcc_bytes);
+				
+				// Check if it's "text" type
+				if fourcc == "text" {
+					return true;
+				}
+			}
+		}
+		
+		false
+	}
+}
+
+#[derive(Debug, Clone)]
+pub struct TextMemberData {
+	pub width: u32,
+	pub height: u32,
+	pub tex_section: Option<TexSection>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TexSection {
+	// Header values
+	pub color_id: i32,           // -1 = FFFFFF (white)
+	pub bg_color_id: i32,        // Background color
+	pub unknown1: u32,
+	pub unknown2: u32,
+	
+	// Text properties
+	pub char_count: u32,
+	pub unknown3: u32,
+	pub line_count: u32,
+	pub unknown4: u32,
+	pub unknown5: u32,
+	pub unknown6: u32,
+	pub unknown7: u32,
+	pub text_offset: u32,
+	
+	// Color values (RGB)
+	pub color1: (u8, u8, u8),
+	pub color2: (u8, u8, u8),
+	pub color3: (u8, u8, u8),
+	
+	// Padding and floats
+	pub padding1: u32,
+	pub padding2: u32,
+	pub padding3: u32,
+	pub float1: f32,
+	pub padding4: u32,
+	pub padding5: u32,
+	pub padding6: u32,
+	pub float2: f32,
+	
+	// Text string
+	pub text: String,
+}
+
+impl TextMemberData {
+	pub fn from_raw_bytes(bytes: &[u8]) -> Option<Self> {
+		if bytes.len() < 8 {
+			console::log_1(&format!("❌ TextMemberData: too short ({} bytes)", bytes.len()).into());
+			return None;
+		}
+
+		let mut reader = BinaryReader::from_u8(bytes);
+		reader.set_endian(Endian::Big);
+
+		// Read outer structure
+		let length = reader.read_u32().ok()?;
+		let fourcc_bytes = reader.read_bytes(4).ok()?;
+		let fourcc = String::from_utf8_lossy(&fourcc_bytes);
+		
+		if fourcc != "text" {
+			return None;
+		}
+
+		let data_length = reader.read_u32().ok()?;
+		console::log_1(&format!("📦 Text member data length: {}", data_length).into());
+
+		// Skip zeros to find actual data (36 bytes of padding)
+		reader.pos += 36;
+
+		// Read dimensions and counts
+		let width = reader.read_u32().unwrap_or(0);
+		let height = reader.read_u32().unwrap_or(0);
+		console::log_1(&format!("📐 Dimensions: {}x{}", width, height).into());
+
+		let count1 = reader.read_u32().unwrap_or(0);
+		let size1 = reader.read_u32().unwrap_or(0);
+		console::log_1(&format!("🔢 Format count: {}, Size: {}", count1, size1).into());
+
+		let count2 = reader.read_u32().unwrap_or(0);
+		let size2 = reader.read_u32().unwrap_or(0);
+		console::log_1(&format!("🔢 Run count: {}, Size: {}", count2, size2).into());
+
+		let char_count = reader.read_u32().unwrap_or(0);
+		let size3 = reader.read_u32().unwrap_or(0);
+		console::log_1(&format!("🔢 Character count: {}, Size: {}", char_count, size3).into());
+
+		// Read the remaining values before 3TEX
+		let val1 = reader.read_u32().ok()?;
+		let val2 = reader.read_u32().ok()?;
+		let val3_bytes_slice = reader.read_bytes(4).ok()?;  // mutable borrow
+		let val3_bytes: [u8; 4] = val3_bytes_slice.try_into().ok()?; // copy into fixed array
+		let current_pos = reader.pos;                          // safe now
+		let val3_str = String::from_utf8_lossy(&val3_bytes);
+
+		console::log_1(&format!("📍 Current position: {}, next 4 bytes should be '3TEX'", current_pos).into());
+
+		if val3_str != "3TEX" {
+			console::log_1(&format!("❌ Expected '3TEX', got '{}'", val3_str).into());
+			return None;
+		}
+
+		console::log_1(&"✅ Found 3TEX section".into());
+
+		// Parse the 3TEX section
+		let tex_section = Self::parse_tex_section(&mut reader, char_count)?;
+
+		Some(TextMemberData {
+			width,
+			height,
+			tex_section: Some(tex_section),
+		})
+	}
+
+	fn parse_tex_section(reader: &mut BinaryReader, expected_char_count: u32) -> Option<TexSection> {
+		let tex_length = reader.read_u32().ok()?;
+		console::log_1(&format!("📦 3TEX section length: {}", tex_length).into());
+
+		// Parse header
+		let color_id = reader.read_i32().ok()?;
+		let bg_color_id = reader.read_i32().ok()?;
+		let unknown1 = reader.read_u32().ok()?;
+		let unknown2 = reader.read_u32().ok()?;
+		let char_count = reader.read_u32().ok()?;
+		let unknown3 = reader.read_u32().ok()?;
+		let line_count = reader.read_u32().ok()?;
+		let unknown4 = reader.read_u32().ok()?;
+		let unknown5 = reader.read_u32().ok()?;
+		let unknown6 = reader.read_u32().ok()?;
+		let unknown7 = reader.read_u32().ok()?;
+		let text_offset = reader.read_u32().ok()?;
+
+		// Read RGB colors
+		let color1 = (reader.read_u8().ok()?, reader.read_u8().ok()?, reader.read_u8().ok()?);
+		let color2 = (reader.read_u8().ok()?, reader.read_u8().ok()?, reader.read_u8().ok()?);
+		let color3 = (reader.read_u8().ok()?, reader.read_u8().ok()?, reader.read_u8().ok()?);
+
+		// Padding and floats
+		let padding1 = reader.read_u32().ok()?;
+		let padding2 = reader.read_u32().ok()?;
+		let padding3 = reader.read_u32().ok()?;
+		let float1 = f32::from_bits(reader.read_u32().ok()?);
+		let padding4 = reader.read_u32().ok()?;
+		let padding5 = reader.read_u32().ok()?;
+		let padding6 = reader.read_u32().ok()?;
+		let float2 = f32::from_bits(reader.read_u32().ok()?);
+
+		// Texture flag (usually 'NoTexture\0')
+		let no_texture_bytes = reader.read_bytes(9).ok()?;
+		let no_texture = String::from_utf8_lossy(&no_texture_bytes);
+		console::log_1(&format!("📝 Texture flag: '{}'", no_texture.trim_end_matches('\0')).into());
+
+		// -----------------------------
+		// Read actual text string
+		// -----------------------------
+		let mut text = String::new();
+
+		// Save current reader position (start of child chunks)
+		let text_start_pos = reader.pos;
+
+		while reader.pos + 8 <= reader.data.len() {
+			// Each chunk: [length:u32][type:4bytes][data]
+			let chunk_len = reader.read_u32().ok()? as usize;
+			let chunk_type_bytes = reader.read_bytes(4).ok()?;
+			let chunk_type = String::from_utf8_lossy(&chunk_type_bytes);
+
+			if chunk_type == "TEXT" {
+				let text_bytes = reader.read_bytes(chunk_len).ok()?;
+				text = String::from_utf8_lossy(text_bytes).to_string();
+				console::log_1(&format!("📝 Found TEXT chunk: '{}'", text).into());
+				break;
+			} else {
+				// Skip unknown chunk
+				reader.pos += chunk_len;
+			}
+		}
+
+		Some(TexSection {
+				color_id,
+				bg_color_id,
+				unknown1,
+				unknown2,
+				char_count,
+				unknown3,
+				line_count,
+				unknown4,
+				unknown5,
+				unknown6,
+				unknown7,
+				text_offset,
+				color1,
+				color2,
+				color3,
+				padding1,
+				padding2,
+				padding3,
+				float1,
+				padding4,
+				padding5,
+				padding6,
+				float2,
+				text,
+		})
+	}
+
+	pub fn log_summary(&self) {
+		console::log_1(&"═══════════════════════════════════".into());
+		console::log_1(&"📄 TEXT MEMBER DATA SUMMARY".into());
+		console::log_1(&"═══════════════════════════════════".into());
+		console::log_1(&format!("Dimensions:    {}x{}", self.width, self.height).into());
+		
+		if let Some(ref tex) = self.tex_section {
+			console::log_1(&"───────────────────────────────────".into());
+			console::log_1(&"3TEX Section:".into());
+			console::log_1(&format!("  Color ID:      {} {}", 
+				tex.color_id,
+				if tex.color_id == -1 { "(white FFFFFF)" } else { "" }
+			).into());
+			console::log_1(&format!("  BG Color ID:   {}", tex.bg_color_id).into());
+			console::log_1(&format!("  Char Count:    {}", tex.char_count).into());
+			console::log_1(&format!("  Line Count:    {}", tex.line_count).into());
+			console::log_1(&format!("  Text Offset:   {}", tex.text_offset).into());
+			console::log_1(&format!("  Color 1:       RGB({}, {}, {})", 
+					tex.color1.0, tex.color1.1, tex.color1.2).into());
+			console::log_1(&format!("  Color 2:       RGB({}, {}, {})", 
+					tex.color2.0, tex.color2.1, tex.color2.2).into());
+			console::log_1(&format!("  Color 3:       RGB({}, {}, {})", 
+					tex.color3.0, tex.color3.1, tex.color3.2).into());
+			console::log_1(&format!("  Float 1:       {}", tex.float1).into());
+			console::log_1(&format!("  Float 2:       {}", tex.float2).into());
+			
+			if !tex.text.is_empty() {
+				console::log_1(&format!("  Text:          '{}'", tex.text).into());
+			} else {
+				console::log_1(&"  Text:          (in child Text chunk)".into());
+			}
+		}
+		
+		console::log_1(&"═══════════════════════════════════".into());
+	}
 }

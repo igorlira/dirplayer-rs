@@ -9,7 +9,7 @@ pub struct CastMemberInfoChunkHeader {
   data_offset: usize,
   unk1: u32,
 	unk2: u32,
-  flags: u32,
+  pub flags: u32,
 	pub script_id: u32,
 }
 

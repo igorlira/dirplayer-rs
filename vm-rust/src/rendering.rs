@@ -4,11 +4,17 @@ use async_std::task::spawn_local;
 use chrono::Local;
 use itertools::Itertools;
 use wasm_bindgen::{prelude::*, Clamped};
+use web_sys::console;
 
 use crate::{console_warn, js_api::JsApi, player::{
     bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, manager::BitmapManager, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, movie::Movie, score::{get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef}, sprite::{CursorRef, Sprite}, DirPlayer, PLAYER_OPT
 }, utils::log_i};
 use crate::js_api::{safe_js_string};
+
+use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
+use crate::player::font::BitmapFont;
+use crate::player::font::FontManager;
+use crate::player::cast_manager::CastManager;
 
 pub struct PlayerCanvasRenderer {
     pub container_element: Option<web_sys::HtmlElement>,
@@ -22,6 +28,51 @@ pub struct PlayerCanvasRenderer {
     pub preview_member_ref: Option<CastMemberRef>,
     pub debug_selected_channel_num: Option<i16>,
     pub bitmap: Bitmap,
+}
+
+fn get_or_load_font(
+    font_manager: &mut FontManager,
+    cast_manager: &CastManager,
+    font_name: &str,
+    font_size: Option<u16>,
+    font_style: Option<u8>,
+) -> Option<Rc<BitmapFont>> {
+    if font_name.is_empty() || font_name == "System" {
+        return font_manager.get_system_font();
+    }
+
+    let cache_key = format!("{}_{}_{}", font_name, font_size.unwrap_or(0), font_style.unwrap_or(0));
+
+    console::log_1(
+        &format!("🔍 Looking for font: '{}' (key: '{}')", font_name, cache_key).into(),
+    );
+
+    if let Some(font) = font_manager.font_cache.get(&cache_key) {
+        console::log_1(&format!("✓ Found in cache: '{}'", cache_key).into());
+        return Some(Rc::clone(font));
+    }
+
+    if let Some(font) = font_manager.font_cache.get(font_name) {
+        console::log_1(&format!("✓ Found by name: '{}'", font_name).into());
+        return Some(Rc::clone(font));
+    }
+
+    console::log_1(&format!(
+        "⚠️  Font '{}' not in cache, attempting to load from cast...",
+        font_name
+    ).into());
+
+    if let Some(loaded_font) = font_manager.get_font_with_cast(font_name, Some(cast_manager), font_size, font_style) {
+        console::log_1(&format!("✅ Loaded font '{}' from cast", font_name).into());
+        return Some(loaded_font);
+    }
+
+    console::log_1(&format!(
+        "❌ Could not find font '{}', falling back to system font",
+        font_name
+    ).into());
+
+    font_manager.get_system_font()
 }
 
 pub fn render_stage_to_bitmap(player: &mut DirPlayer, bitmap: &mut Bitmap, debug_sprite_num: Option<i16>) {
@@ -143,26 +194,124 @@ pub fn render_score_to_bitmap(
                     dst_rect.top, 
                     dst_rect.right, 
                     dst_rect.bottom, 
-                    resolve_color_ref(&palettes, &sprite.color, &PaletteRef::BuiltIn(get_system_default_palette())), 
+                    resolve_color_ref(&palettes, &sprite.color, &PaletteRef::BuiltIn(get_system_default_palette()), bitmap.original_bit_depth), 
                     &palettes, 
                     sprite.blend as f32 / 100.0,
                 );
             }
             CastMemberType::Field(field_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
-                let sprite_rect = get_concrete_sprite_rect(player, sprite);
-                let font = player.font_manager.get_system_font().unwrap(); // TODO
-                let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
-
-                bitmap.draw_text(&field_member.text, font, font_bitmap, sprite.loc_h, sprite.loc_v, sprite.ink as u32, sprite.bg_color.clone(), &palettes, field_member.fixed_line_space, field_member.top_spacing);
-
-                if player.keyboard_focus_sprite == sprite.number as i16 {
-                    let cursor_x = sprite.loc_h + (sprite.width / 2);
-                    let cursor_y = sprite.loc_v;
-                    let cursor_width = 1;
-                    let cursor_height = field_member.font_size as i16;
+                
+                let font_opt = get_or_load_font(
+                    &mut player.font_manager,
+                    &player.movie.cast_manager,
+                    &field_member.font,
+                    Some(field_member.font_size),
+                    None
+                );
+                
+                if let Some(font) = font_opt {
+                    let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
                     
-                    bitmap.fill_rect(cursor_x, cursor_y, cursor_x + cursor_width, cursor_y + cursor_height as i32, (0, 0, 0), &palettes, 1.0)
+                    bitmap.draw_text(
+                        &field_member.text,
+                        &font,
+                        font_bitmap,
+                        sprite.loc_h,
+                        sprite.loc_v,
+                        sprite.ink as u32,
+                        sprite.bg_color.clone(),
+                        &palettes,
+                        field_member.fixed_line_space,
+                        field_member.top_spacing
+                    );
+                    
+                    if player.keyboard_focus_sprite == sprite.number as i16 {
+                        let cursor_x = sprite.loc_h + (sprite.width / 2);
+                        let cursor_y = sprite.loc_v;
+                        let cursor_width = 1;
+                        let cursor_height = font.char_height as i32;
+                        
+                        bitmap.fill_rect(
+                            cursor_x,
+                            cursor_y,
+                            cursor_x + cursor_width,
+                            cursor_y + cursor_height,
+                            (0, 0, 0),
+                            &palettes,
+                            1.0
+                        );
+                    }
+                }
+            }
+            CastMemberType::Font(font_member) => {
+                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                
+                // Get font by info with fallback
+                let font: Rc<BitmapFont> = if let Some(f) = player.font_manager.get_font_by_info(&font_member.font_info) {
+                    Rc::new(f.clone())  // wrap &BitmapFont in Rc
+                } else if let Some(f) = player.font_manager.get_system_font() {
+                    f  // already Rc<BitmapFont>
+                } else {
+                    continue;
+                };
+                
+                let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+                
+                if !font_member.preview_html_spans.is_empty() {
+                    if let Err(e) = FontMemberHandlers::render_html_text_to_bitmap(
+                        bitmap,
+                        &font_member.preview_html_spans,
+                        &font,
+                        font_bitmap,
+                        &palettes,
+                        font_member.fixed_line_space,
+                        sprite.loc_h as i32,
+                        sprite.loc_v as i32 + font_member.top_spacing as i32,
+                    ) {
+                        console_warn!("HTML render error: {:?}", e);
+                    }
+                } else if !font_member.preview_text.is_empty() {
+                    bitmap.draw_text(
+                        &font_member.preview_text,
+                        &font,
+                        font_bitmap,
+                        sprite.loc_h,
+                        sprite.loc_v,
+                        sprite.ink as u32,
+                        sprite.bg_color.clone(),
+                        &palettes,
+                        font.char_height,
+                        0,
+                    );
+                }
+            }
+            CastMemberType::Text(text_member) => {
+                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                
+                let font_opt = get_or_load_font(
+                    &mut player.font_manager,
+                    &player.movie.cast_manager,
+                    &text_member.font,
+                    Some(text_member.font_size),
+                    None
+                );
+                
+                if let Some(font) = font_opt {
+                    let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+                    
+                    bitmap.draw_text(
+                        &text_member.text,
+                        &font,
+                        font_bitmap,
+                        sprite.loc_h,
+                        sprite.loc_v,
+                        sprite.ink as u32,
+                        sprite.bg_color.clone(),
+                        &palettes,
+                        text_member.fixed_line_space,
+                        text_member.top_spacing,
+                    );
                 }
             }
             CastMemberType::FilmLoop(film_loop) => {
