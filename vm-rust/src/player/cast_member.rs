@@ -5,6 +5,11 @@ use log::warn;
 
 use crate::director::chunks::sound::SoundChunk;
 use crate::director::enums::SoundInfo;
+use crate::director::{chunks::{cast_member::CastMemberDef, score::ScoreChunk}, enums::{FilmLoopInfo, MemberType, ScriptType, ShapeInfo, BitmapInfo, FontInfo, TextMemberData}, lingo::script::ScriptContext};
+use super::{bitmap::{bitmap::{decompress_bitmap, decode_jpeg_bitmap, Bitmap, BuiltInPalette, PaletteRef}, manager::{BitmapManager, BitmapRef}}, score::Score, sprite::ColorRef, ScriptError};
+use crate::director::chunks::Chunk;
+use crate::player::handlers::datum_handlers::cast_member::font::StyledSpan;
+use web_sys::console;
 
 #[derive(Clone)]
 pub struct CastMember {
@@ -827,7 +832,47 @@ impl CastMember {
           })
         }
       }
-      _ => { 
+      _ => {
+        // Assuming `chunk.member_type` is an enum backed by a numeric ID
+        // If it's not Copy, clone or cast as needed.
+        let member_type_id = chunk.member_type as u16; // or u32 depending on your enum base type
+
+        console::log_1(&format!(
+          "[CastMember::from] Unknown member type for member #{} (cast_lib={}): {:?} (id={})",
+          number,
+          cast_lib,
+          chunk.member_type, // this prints name, e.g. Button
+          member_type_id      // this prints numeric id, e.g. 15
+        ).into());
+
+        if let Some(info) = &chunk.member_info {
+          console::log_1(&format!(
+              "  → name='{}', script_id={}, flags={:?}",
+              info.name,
+              info.header.script_id,
+              info.header.flags
+          ).into());
+        } else {
+          console::log_1(&"  → No member_info available".into());
+        }
+
+        // Log all child chunks
+        if member_def.children.is_empty() {
+          console::log_1(&"  → No children found.".into());
+        } else {
+          console::log_1(&format!(
+            "  → {} children:",
+            member_def.children.len()
+          ).into());
+
+          for (i, c_opt) in member_def.children.iter().enumerate() {
+            match c_opt {
+              Some(c) => console::log_1(&format!("    child[{}] = {}", i, Self::chunk_type_name(c)).into()),
+              None => console::log_1(&format!("    child[{}] = None", i).into()),
+            }
+          }
+        }
+
         CastMemberType::Unknown
       }
     };
