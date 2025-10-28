@@ -7,7 +7,7 @@ use wasm_bindgen::{prelude::*, Clamped};
 use web_sys::console;
 
 use crate::{console_warn, js_api::JsApi, player::{
-    bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, manager::BitmapManager, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, movie::Movie, score::{get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef}, sprite::{CursorRef, Sprite}, DirPlayer, PLAYER_OPT
+    bitmap::{bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef}, drawing::{should_matte_sprite, CopyPixelsParams}, manager::BitmapManager, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, cast_member::CastMemberType, geometry::IntRect, movie::Movie, reserve_player_ref, score::{get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef}, sprite::{CursorRef, Sprite}, DirPlayer, PLAYER_OPT
 }, utils::log_i};
 use crate::js_api::{safe_js_string};
 
@@ -741,8 +741,10 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 .dyn_into::<web_sys::HtmlCanvasElement>()
                 .unwrap();
 
-            // TODO: Set size from movie
-            let canvas_size = (720, 540);
+            let canvas_size = reserve_player_ref(|player| {
+                (player.movie.rect.width() as u32, player.movie.rect.height() as u32)
+            });
+
             canvas.set_width(canvas_size.0);
             canvas.set_height(canvas_size.1);
 

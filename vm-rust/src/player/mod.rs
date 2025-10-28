@@ -52,7 +52,7 @@ use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 
-use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks}};
+use crate::{console_warn, director::{chunks::handler::{Bytecode, HandlerDef}, enums::ScriptType, file::{read_director_file_bytes, DirectorFile}, lingo::{constants::{get_anim2_prop_name, get_anim_prop_name}, datum::{datum_bool, Datum, DatumType, VarRef}}}, js_api::JsApi, player::{bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext}, datum_formatting::format_datum, geometry::IntRect, profiling::get_profiler_report, scope::Scope}, rendering::with_canvas_renderer_mut, utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks}};
 
 use self::{bytecode::handler_manager::StaticBytecodeHandlerManager, cast_lib::CastMemberRef, cast_manager::CastManager, commands::{run_command_loop, PlayerVMCommand}, debug::{Breakpoint, BreakpointContext, BreakpointManager}, events::{player_dispatch_global_event, player_invoke_global_event, player_unwrap_result, player_wait_available, run_event_loop, PlayerVMEvent}, font::{player_load_system_font, FontManager, BitmapFont}, handlers::manager::BuiltInHandlerManager, keyboard::KeyboardManager, movie::Movie, net_manager::NetManagerSharedState, scope::ScopeRef, score::{get_sprite_at, Score}, script::{Script, ScriptHandlerRef}, sprite::{ColorRef, CursorRef}, timeout::TimeoutManager};
 
@@ -237,6 +237,12 @@ impl DirPlayer {
     web_sys::console::log_1(&"Loading fonts from cast members...".into());
     self.movie.cast_manager.load_fonts_into_manager(&mut self.font_manager);
     
+    with_canvas_renderer_mut(|renderer| {
+      if let Some(renderer) = renderer.as_mut() {
+        renderer.set_size(self.movie.rect.width() as u32, self.movie.rect.height() as u32);
+      }
+    });
+
     JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
   }
 
