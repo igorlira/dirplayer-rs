@@ -92,18 +92,29 @@ impl StringHandlers {
   pub fn char_to_num(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let str_value = player.get_datum(&args[0]).string_value()?;
-      let num = str_value.chars().next().map(|c| c as i32).unwrap_or(0);
-      Ok(player.alloc_datum(Datum::Int(num)))
+      let utf8_bytes = str_value.as_bytes();
+
+      let byte_val = if utf8_bytes.is_empty() {
+        0
+      } else {
+        utf8_bytes[0] as i32
+      };
+
+      Ok(player.alloc_datum(Datum::Int(byte_val)))
     })
   }
 
   pub fn num_to_char(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     reserve_player_mut(|player| {
       let num = player.get_datum(&args[0]).int_value()?;
-      let char_value = std::char::from_u32(num as u32)
-        .ok_or_else(|| ScriptError::new(format!("Invalid char code: {}", num)))?
-        .to_string();
-      Ok(player.alloc_datum(Datum::String(char_value)))
+      let byte_val = (num & 0xFF) as u8;
+
+      // Build a single-byte string directly from raw bytes (Latin-1 1:1)
+      let result_string = unsafe {
+        String::from_utf8_unchecked(vec![byte_val])
+      };
+
+      Ok(player.alloc_datum(Datum::String(result_string)))
     })
   }
 }
