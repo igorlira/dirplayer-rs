@@ -1,70 +1,15 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import init, { set_system_font_path, WebAudioBackend } from 'vm-rust';
 import { getCaseInsensitiveValue } from './utils';
 
 import EmbedPlayer from '../../src/components/EmbedPlayer';
-import { initVmCallbacks } from '../../src/vm/callbacks';
+import VMProvider from '../../src/components/VMProvider';
 import store from '../../src/store';
-import { ready } from '../../src/store/vmSlice';
 import { Provider as StoreProvider } from 'react-redux';
-
-declare global {
-  interface Window {
-    getAudioContext: () => AudioContext;
-  }
-}
-
-// === GLOBAL STATE ===
-let audioBackend: WebAudioBackend | null = null;
-let globalAudioContext: AudioContext | null = null;
-let wasmInitialized = false;
 
 // === PATHS ===
 const wasmUrl = chrome.runtime.getURL('vm-rust/pkg/vm_rust_bg.wasm');
 const systemFontUrl = chrome.runtime.getURL('charmap-system.png');
-
-// === AUDIO + WASM INITIALIZATION ===
-const initAll = async () => {
-  try {
-    // Step 1: Create AudioContext immediately
-    if (!globalAudioContext) {
-      globalAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      console.log('🎧 AudioContext created:', globalAudioContext.state);
-
-      window.getAudioContext = () => {
-        if (!globalAudioContext) throw new Error('AudioContext not initialized');
-        return globalAudioContext;
-      };
-    }
-
-    // Step 2: Initialize WASM
-    await init(wasmUrl);  // WASM can now call window.getAudioContext
-    initVmCallbacks();
-    set_system_font_path(systemFontUrl);
-    wasmInitialized = true;
-    console.log('✅ WASM initialized');
-
-    // Step 3: Create WebAudioBackend now that WASM is ready
-    audioBackend = new WebAudioBackend();
-    console.log('🎵 WebAudioBackend created');
-    audioBackend.resume_context();
-
-    if (globalAudioContext.state !== 'running') {
-      await globalAudioContext.resume();
-    }
-
-    store.dispatch(ready());
-    console.log('🚀 All systems ready!');
-  } catch (err) {
-    console.error('❌ initAll failed:', err);
-  }
-
-  document.removeEventListener('click', initAll);
-};
-
-// Wait for first user gesture (autoplay policy)
-document.addEventListener('click', initAll, { once: true });
 
 // === MUTATION OBSERVER ===
 const observer = new MutationObserver((mutations) => {
@@ -116,32 +61,20 @@ function renderWhenReady(
   externalParams: Record<string, string>
 ) {
   const root = ReactDOM.createRoot(mount);
-  const renderPlayer = () => {
-    root.render(
-      <React.StrictMode>
-        <StoreProvider store={store}>
+  root.render(
+    <React.StrictMode>
+      <StoreProvider store={store}>
+        <VMProvider systemFontPath={systemFontUrl} wasmUrl={wasmUrl}>
           <EmbedPlayer
             width={width}
             height={height}
             src={src}
             externalParams={externalParams}
           />
-        </StoreProvider>
-      </React.StrictMode>
-    );
-  };
-
-  if (wasmInitialized) {
-    renderPlayer();
-  } else {
-    console.log('⏳ Waiting for WASM init before rendering player:', src);
-    const interval = setInterval(() => {
-      if (wasmInitialized) {
-        clearInterval(interval);
-        renderPlayer();
-      }
-    }, 200);
-  }
+        </VMProvider>
+      </StoreProvider>
+    </React.StrictMode>
+  );
 }
 
 function replaceDirEmbed(element: HTMLEmbedElement) {

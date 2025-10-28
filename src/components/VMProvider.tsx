@@ -5,22 +5,18 @@ import {
   useReducer,
   useContext,
 } from "react";
-import init, { WebAudioBackend, add_breakpoint, set_system_font_path } from "vm-rust";
+import init, { add_breakpoint, set_system_font_path } from "vm-rust";
 import { initVmCallbacks } from "../vm/callbacks";
 import { JsBridgeBreakpoint } from "dirplayer-js-api";
 import { getFullPathFromOrigin } from "../utils/path";
-
-declare global {
-  interface Window {
-    getAudioContext: () => AudioContext;
-  }
-}
-
-// Exposed audio backend reference
-let audioBackend: WebAudioBackend | null = null;
+import { initAudioContext, initAudioBackend } from "../audio/audioInit";
+import { useDispatch } from "react-redux";
+import { ready } from "../store/vmSlice";
 
 interface VMProviderProps {
   children?: string | JSX.Element | JSX.Element[];
+  systemFontPath?: string; // Optional override for system font path (used in extension)
+  wasmUrl?: string; // Optional override for WASM URL (used in extension)
 }
 
 interface PlayerVMState {
@@ -37,7 +33,8 @@ const defaultPlayerState: PlayerVMState = {
 export const VMProviderContext =
   createContext<PlayerVMState>(defaultPlayerState);
 
-export default function VMProvider({ children }: VMProviderProps) {
+export default function VMProvider({ children, systemFontPath, wasmUrl }: VMProviderProps) {
+  const dispatch = useDispatch();
   const [vmState, send] = useReducer(
     (state: PlayerVMState, action: PlayerVMStateAction) => {
       switch (action.type) {
@@ -55,43 +52,25 @@ export default function VMProvider({ children }: VMProviderProps) {
     if (isInitCalled.current) return;
     isInitCalled.current = true;
 
-    let globalAudioContext: AudioContext | null = null;
-
-    const initAudio = async () => {
-      if (!globalAudioContext) {
-        globalAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-        console.log("AudioContext created:", globalAudioContext.state);
-
-        window.getAudioContext = () => {
-          if (!globalAudioContext) throw new Error("AudioContext not initialized");
-          return globalAudioContext;
-        };
-      }
-
+    const initVM = async () => {
       try {
+        // Step 1: Initialize AudioContext (required before WASM init)
+        initAudioContext();
+
+        // Step 2: Initialize WASM and VM
         initVmCallbacks();
-        await init({});
+        if (wasmUrl) {
+          await init(wasmUrl);
+        } else {
+          await init({});
+        }
         console.log("VM initialized");
 
-        // Initialize backend
-        try {
-          audioBackend = new WebAudioBackend(); // call the constructor
-          console.log("🎵 WebAudioBackend created");
+        // Step 3: Set system font
+        const fontPath = systemFontPath || getFullPathFromOrigin("charmap-system.png");
+        set_system_font_path(fontPath);
 
-          audioBackend.resume_context(); 
-          
-          // 💡 FIX: Explicitly resume the AudioContext (must be done in the user gesture handler)
-          if (globalAudioContext && globalAudioContext.state !== 'running') {
-            console.log(`🎶 Resuming AudioContext from state: ${globalAudioContext.state}`);
-            // Attempt to resume the context
-            globalAudioContext.resume().catch(e => console.error("Failed to resume AudioContext:", e));
-          }
-        } catch (err) {
-          console.error("Failed to create WebAudioBackend:", err);
-        }
-
-        set_system_font_path(getFullPathFromOrigin("charmap-system.png"))
-
+        // Step 4: Restore breakpoints
         const savedBreakpoints = window.localStorage.getItem("breakpoints");
         if (savedBreakpoints) {
           const breakpoints: JsBridgeBreakpoint[] = JSON.parse(savedBreakpoints);
@@ -100,17 +79,26 @@ export default function VMProvider({ children }: VMProviderProps) {
           }
         }
 
+        // Step 5: Mark VM as ready
         send({ type: "INIT_OK" });
+        dispatch(ready());
       } catch (err) {
-        console.error("Failed to initialize VM or audio backend:", err);
+        console.error("Failed to initialize VM:", err);
       }
-
-      document.removeEventListener("click", initAudio);
     };
 
-    // 7️⃣ Wait for first user click to comply with autoplay policy
-    document.addEventListener("click", initAudio, { once: true });
-  }, []);
+    const initAudioOnUserGesture = () => {
+      // Initialize audio backend on first user gesture
+      initAudioBackend();
+      document.removeEventListener("click", initAudioOnUserGesture);
+    };
+
+    // Initialize VM immediately
+    initVM();
+
+    // Setup audio initialization on first user gesture (autoplay policy)
+    document.addEventListener("click", initAudioOnUserGesture, { once: true });
+  }, [dispatch, systemFontPath, wasmUrl]);
   return (
     <div>
       {vmState.isLoading && "Loading..."}
