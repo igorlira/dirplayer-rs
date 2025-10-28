@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use binary_reader::BinaryReader;
 use itertools::Itertools;
 
-use crate::{director::{file::get_children_of_chunk, utils::fourcc_to_string}, console_warn};
+use crate::{director::{file::get_children_of_chunk, utils::fourcc_to_string}, utils::log_i};
 
 use super::{chunks::{cast_member::CastMemberDef, key_table::KeyTableChunk, ChunkContainer, script::ScriptChunk}, file::{get_cast_member_chunk, get_script_context_chunk, get_script_context_key_entry_for_cast, get_script_names_chunk, get_script_chunk, get_chunk}, rifx::RIFXReaderContext, utils::FOURCC, lingo::script::ScriptContext};
 
@@ -49,13 +49,15 @@ impl CastDef {
       let children_entries = get_children_of_chunk(&section_id, key_table);
       let children = children_entries.iter()
         .map(|x| {
+          let fourcc_str: String = fourcc_to_string(x.fourcc);
           let child = get_chunk(reader, chunk_container, rifx, x.fourcc, x.section_id);
-          if child.is_ok() { 
-            Some(child.unwrap()) 
-          } else {
-            // warn!("Could not read child chunk of type {}", fourcc_to_string(x.fourcc));
-            None
+          if let Err(err) = &child {
+            log_i(&format!(
+              "❌ Failed to read child chunk of type {} (section_id={}): {}",
+              fourcc_str, x.section_id, err
+            ));
           }
+          child.ok()
         })
         .collect_vec();
 
