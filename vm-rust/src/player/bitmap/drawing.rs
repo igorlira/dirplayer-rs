@@ -462,6 +462,7 @@ impl Bitmap {
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
 
+    /// Copy pixels from src to self, respecting scaling, flipping, masks, and blending
     pub fn copy_pixels_with_params(
         &mut self, 
         palettes: &PaletteMap,
@@ -473,35 +474,33 @@ impl Bitmap {
         let ink = params.ink;
         let alpha = params.blend as f32 / 100.0;
         let mask_image = params.mask_image;
-        let bg_color = &params.bg_color;
-        let bg_color = resolve_color_ref(palettes, &bg_color, &self.palette_ref, src.original_bit_depth);
+        let bg_color = resolve_color_ref(palettes, &params.bg_color, &src.palette_ref, src.original_bit_depth);
 
-        let mut src_y = if dst_rect.height() < 0 { src_rect.bottom } else { src_rect.top } as f32;
-        let step_x = src_rect.width() as f32 / dst_rect.width() as f32;
-        let step_y = src_rect.height() as f32 / dst_rect.height() as f32;
+        let is_flipped_h = dst_rect.width() < 0;
+        let is_flipped_v = dst_rect.height() < 0;
+        let step_x = (src_rect.width() as f32 / dst_rect.width() as f32).abs();
+        let step_y = (src_rect.height() as f32 / dst_rect.height() as f32).abs();
 
-        let (min_dst_x, max_dst_x) = {
-            if dst_rect.width() < 0 {
-                (dst_rect.right - 1, dst_rect.left)
-            } else {
-                (dst_rect.left, dst_rect.right)
-            }
-        };
-        let (min_dst_y, max_dst_y) = {
-            if dst_rect.height() < 0 {
-                (dst_rect.bottom - 1, dst_rect.top)
-            } else {
-                (dst_rect.top, dst_rect.bottom)
-            }
+        let (min_dst_x, max_dst_x) = if is_flipped_h { (dst_rect.right, dst_rect.left) } else { (dst_rect.left, dst_rect.right) };
+        let (min_dst_y, max_dst_y) = if is_flipped_v { (dst_rect.bottom, dst_rect.top) } else { (dst_rect.top, dst_rect.bottom) };
+
+        let mut src_y = if is_flipped_v {
+            src_rect.bottom as f32 - step_y / 2.0
+        } else {
+            src_rect.top as f32 + step_y / 2.0
         };
 
         for dst_y in min_dst_y..max_dst_y {
-            let mut src_x = if dst_rect.width() < 0 { src_rect.right } else { src_rect.left } as f32;
+            let mut src_x = if is_flipped_h {
+                src_rect.right as f32 - step_x / 2.0
+            } else {
+                src_rect.left as f32 + step_x / 2.0
+            };
             
             for dst_x in min_dst_x..max_dst_x {
-                // Bounds checking
+                // Skip out-of-bounds
                 if dst_x < 0 || dst_y < 0 || dst_x >= self.width as i32 || dst_y >= self.height as i32 {
-                    src_x += step_x;
+                    src_x += if is_flipped_h { -step_x } else { step_x };;
                     continue;
                 }
 
@@ -509,13 +508,13 @@ impl Bitmap {
                 let src_y_int = src_y.floor() as u16;
 
                 if src_x_int >= src.width || src_y_int >= src.height {
-                    src_x += step_x;
+                    src_x += if is_flipped_h { -step_x } else { step_x };
                     continue;
                 }
 
                 if let Some(mask_image) = mask_image {
                     if !mask_image.get_bit(src_x_int, src_y_int) {
-                        src_x += step_x;
+                        src_x += if is_flipped_h { -step_x } else { step_x };
                         continue;
                     }
                 }
@@ -524,14 +523,20 @@ impl Bitmap {
                 let src_color = (src_r, src_g, src_b);
                 let src_alpha = src_a as f32 / 255.0;
 
+                // Skip background
+                if ink == 36 && src_color == bg_color {
+                    src_x += if is_flipped_h { -step_x } else { step_x };
+                    continue;
+                }
+
                 let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
                 
                 let blended_color = blend_pixel(dst_color, src_color, ink, bg_color, alpha, src_alpha);
 
                 self.set_pixel(dst_x, dst_y, blended_color, palettes);
-                src_x += step_x;
+                src_x += if is_flipped_h { -step_x } else { step_x };
             }
-            src_y += step_y;
+            src_y += if is_flipped_v { -step_y } else { step_y };
         }
         // Uncomment below to debug copyPixel calls
         // self.stroke_rect(min_dst_x, min_dst_y, max_dst_x, max_dst_y, (0, 255, 0), palettes, 1.0);
