@@ -218,7 +218,38 @@ impl PropListDatumHandlers {
       "getPropAt" => Self::get_prop_at(datum, args),
       "addProp" => Self::add_prop(datum, args),
       "setaProp" => Self::set_opt_prop(datum, args),
-      "setProp" => Self::set_required_prop(datum, args),
+      "setProp" => {
+        if args.len() == 3 {
+          reserve_player_mut(|player| {
+            let prop_key_ref = &args[0];
+            let index_ref = &args[1];
+            let value_ref = &args[2];
+            
+            let prop_list = player.get_datum(datum).to_map()?;
+            let list_ref = PropListUtils::get_by_key(prop_list, prop_key_ref, &player.allocator)?;
+            
+            let index = player.get_datum(index_ref).int_value()? as usize;
+            let adjusted_index = if index == 0 { 0 } else { index - 1 };
+            
+            let list_datum = player.get_datum(&list_ref);
+            if let Datum::List(_, list, _) = list_datum {
+              if adjusted_index < list.len() {
+                let (_, list_vec, _) = player.get_datum_mut(&list_ref).to_list_mut()?;
+                list_vec[adjusted_index] = value_ref.clone();
+                Ok(DatumRef::Void)
+              } else {
+                Err(ScriptError::new(format!("Index out of bounds: {}", index)))
+              }
+            } else {
+              Err(ScriptError::new(format!("Property is not a list, it's: {}", list_datum.type_str())))
+            }
+          })
+        } else if args.len() == 2 {
+          Self::set_required_prop(datum, args)
+        } else {
+          Err(ScriptError::new(format!("Invalid number of arguments for setProp: {}", args.len())))
+        }
+      }
       "getProp" => Self::get_prop(datum, args),
       "getaProp" => Self::get_a_prop(datum, args),
       "deleteProp" => Self::delete_prop(datum, args),
