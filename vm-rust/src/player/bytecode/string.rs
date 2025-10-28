@@ -2,7 +2,7 @@ use crate::{director::{chunks::handler::Bytecode, lingo::datum::{datum_bool, Dat
 
 use super::handler_manager::BytecodeHandlerContext;
 
-enum PutType {
+pub enum PutType {
   Into,
   After,
   Before,
@@ -140,7 +140,8 @@ impl StringBytecodeHandler {
           &id_ref, 
           cast_id_ref.as_ref(), 
           var_type, 
-          &value_ref, 
+          &value_ref,
+          put_type,
           &ctx, 
         )?,
         PutType::Before => {
@@ -153,7 +154,7 @@ impl StringBytecodeHandler {
           new_string.push_str(value.string_value()?.as_str());
           new_string.push_str(curr_string.as_str());
           let new_string = player.alloc_datum(Datum::String(new_string));
-          player_set_context_var(player, &id_ref, cast_id_ref.as_ref(), var_type, &new_string, &ctx)?;
+          player_set_context_var(player, &id_ref, cast_id_ref.as_ref(), var_type, &new_string, put_type, &ctx)?;
         }
         PutType::After => {
           let curr_string_id = player_get_context_var(player, &id_ref, cast_id_ref.as_ref(), var_type, &ctx)?;
@@ -165,7 +166,7 @@ impl StringBytecodeHandler {
           new_string.push_str(curr_string.as_str());
           new_string.push_str(value.string_value()?.as_str());
           let new_string = player.alloc_datum(Datum::String(new_string));
-          player_set_context_var(player, &id_ref, cast_id_ref.as_ref(), var_type, &new_string, &ctx)?;
+          player_set_context_var(player, &id_ref, cast_id_ref.as_ref(), var_type, &new_string, put_type, &ctx)?;
         }
       }
 
