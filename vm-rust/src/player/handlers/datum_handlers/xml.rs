@@ -95,8 +95,6 @@ impl XmlParser {
                     }
 
                     element_stack.push(element_id);
-
-                    web_sys::console::log_1(&format!("🔧 Created XML element: {} (ID: {})", name.local_name, element_id).into());
                 },
 
                 Ok(XmlEvent::EndElement { .. }) => {
@@ -429,8 +427,6 @@ impl XmlDatumHandlers {
             }
         };
 
-        web_sys::console::log_1(&format!("🔧 XML {}.{} property access", xml_id, prop).into());
-
         Self::get_xml_property(player, xml_id, prop)
     }
 
@@ -446,8 +442,6 @@ impl XmlDatumHandlers {
                 return Err(ScriptError::new("Invalid XML reference".to_string()));
             }
         };
-
-        web_sys::console::log_1(&format!("🔧 XML {}.{} property set", xml_id, prop).into());
 
         Self::set_xml_property(player, xml_id, prop, value)
     }
@@ -891,8 +885,6 @@ impl XmlDatumHandlers {
                 
                 if let Some(node) = player.xml_nodes.get(&node_id) {
                     let value = node.attributes.get(&attr_name.to_lowercase()).cloned().unwrap_or_default();
-                    web_sys::console::log_1(&format!("🔧 ✓ Attribute '{}' = '{}' (empty: {})", 
-                        attr_name, value, value.is_empty()).into());
                     Ok(player.alloc_datum(Datum::String(value)))
                 } else {
                     web_sys::console::log_1(&format!("🔧 ⚠️ Node {} not found", node_id).into());
