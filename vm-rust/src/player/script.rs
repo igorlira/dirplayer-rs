@@ -349,7 +349,7 @@ pub async fn player_set_obj_prop(
             TimeoutDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
         Datum::PropList(..) => reserve_player_mut(|player| {
-            let key_ref = player.alloc_datum(Datum::String(prop_name.clone()));
+            let key_ref = player.alloc_datum(Datum::Symbol(prop_name.clone()));
             PropListUtils::set_prop(obj_ref, &key_ref, value_ref, player, true, prop_name.clone())
         }),
         Datum::IntRect(..) => reserve_player_mut(|player| {
