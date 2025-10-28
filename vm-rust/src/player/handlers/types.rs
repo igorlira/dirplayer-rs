@@ -577,24 +577,47 @@ impl TypeHandlers {
       };
       
       let bit_depth = player.get_datum(&args[2]).int_value()? as u8;
-      let alpha_depth = if args.len() >= 4 {
-        player.get_datum(&args[3]).int_value()? as u8
-      } else {
-        0
-      };
-      
-      let palette_ref = if args.len() >= 5 {
-        match player.get_datum(&args[4]) {
-          Datum::Symbol(s) => PaletteRef::BuiltIn(BuiltInPalette::from_symbol_string(s).unwrap()),
-          Datum::PaletteRef(p) => p.clone(),
-          Datum::CastMember(m) => PaletteRef::Member(m.clone()),
-          other => return Err(ScriptError::new(format!(
-            "Invalid palette argument of type {} for image", other.type_str()
-          ))),
+      let mut palette_ref = PaletteRef::BuiltIn(get_system_default_palette());
+      let mut alpha_depth = 0;
+      if args.len() >= 4 {
+        let arg3 = player.get_datum(&args[3]);
+        match arg3.type_enum() {
+          DatumType::Int => {
+            alpha_depth = arg3.int_value()? as u8;
+          },
+          DatumType::Symbol => {
+            palette_ref = match arg3 {
+              Datum::Symbol(s) => PaletteRef::BuiltIn(BuiltInPalette::from_symbol_string(s).unwrap()),
+              _ => return Err(ScriptError::new(
+                format!("Invalid 4th argument type for image(): {}, expected symbol", arg3.type_str())
+              )),
+            };
+          }
+          DatumType::PaletteRef => {
+            // If the 4th argument is a palette, then there's no alpha depth specified
+            palette_ref = match arg3 {
+              Datum::PaletteRef(p) => p.clone(),
+              _ => return Err(ScriptError::new(
+                format!("Invalid 4th argument type for image(): {}, expected palette", arg3.type_str())
+              )),
+            };
+          },
+          DatumType::CastMemberRef => {
+            // If the 4th argument is a cast member, then there's no alpha depth specified
+            palette_ref = match arg3 {
+              Datum::CastMember(m) => PaletteRef::Member(m.clone()),
+              _ => return Err(ScriptError::new(
+                format!("Invalid 4th argument type for image(): {}, expected int or palette", arg3.type_str())
+              )),
+            };
+          }
+          _ => {
+            return Err(ScriptError::new(
+              format!("Invalid 4th argument type for image(): {}, expected int or palette", arg3.type_str())
+            ));
+          }
         }
-      } else {
-        PaletteRef::BuiltIn(get_system_default_palette())
-      };
+      }
 
       let bitmap = Bitmap::new(width, height, bit_depth, bit_depth, alpha_depth, palette_ref);
       let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
