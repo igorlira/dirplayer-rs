@@ -692,7 +692,7 @@ impl Bitmap {
         let width = right - left;
         let height = bottom - top;
 
-        let mut trimmed = Bitmap::new(width as u16, height as u16, self.bit_depth, 0, self.original_bit_depth, self.palette_ref.clone());
+        let mut trimmed = Bitmap::new(width as u16, height as u16, self.bit_depth, self.original_bit_depth, 0, self.palette_ref.clone());
         let params = CopyPixelsParams::default(&self);
         trimmed.copy_pixels_with_params(palettes, &self, IntRect::from(0, 0, width, height), IntRect::from(left, top, right, bottom), &params);
         

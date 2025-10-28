@@ -596,7 +596,7 @@ impl TypeHandlers {
         PaletteRef::BuiltIn(get_system_default_palette())
       };
 
-      let bitmap = Bitmap::new(width, height, bit_depth, alpha_depth, bit_depth, palette_ref);
+      let bitmap = Bitmap::new(width, height, bit_depth, bit_depth, alpha_depth, palette_ref);
       let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
       Ok(player.alloc_datum(Datum::BitmapRef(bitmap_ref)))
     })

@@ -18,7 +18,7 @@ use num::FromPrimitive;
 
 use super::{mask::BitmapMask, palette::{SYSTEM_MAC_PALETTE, MAC_16_PALETTE, SYSTEM_WIN_PALETTE, WIN_16_PALETTE, GRAYSCALE_PALETTE, GRAYSCALE_4_PALETTE, GRAYSCALE_16_PALETTE, RAINBOW_PALETTE, RAINBOW16_PALETTE, PASTELS_PALETTE, PASTELS16_PALETTE, VIVID_PALETTE, VIVID16_PALETTE, NTSC_PALETTE, NTSC16_PALETTE, METALLIC_PALETTE, METALLIC16_PALETTE, WEB_216_PALETTE}, palette_map::PaletteMap};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum PaletteRef {
     BuiltIn(BuiltInPalette),
     Member(CastMemberRef),
@@ -335,7 +335,7 @@ fn decode_generic_bitmap(
             data.len()
         );
         let actual_bit_depth = bit_depth * num_channels;
-        return Ok(Bitmap::new(width, height, actual_bit_depth, 0, bit_depth, palette_ref));
+        return Ok(Bitmap::new(width, height, actual_bit_depth, bit_depth, 0, palette_ref));
     } else {
         let mut result =
             vec![

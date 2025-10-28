@@ -622,7 +622,7 @@ impl FontMemberHandlers {
                                     height,
                                     32,
                                     8,
-                                    32,
+                                    0,
                                     PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
                                 );
 

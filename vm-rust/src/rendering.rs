@@ -490,8 +490,8 @@ impl PlayerCanvasRenderer {
                     width as u16,
                     height as u16,
                     32,
-                    0,
                     32,
+                    0,
                     PaletteRef::BuiltIn(get_system_default_palette()),
                 );
                 let palettes = &player.movie.cast_manager.palettes();
@@ -546,8 +546,8 @@ impl PlayerCanvasRenderer {
                     width as u16,
                     height as u16,
                     32,
-                    0,
                     32,
+                    0,
                     PaletteRef::BuiltIn(get_system_default_palette()),
                 );
                 render_score_to_bitmap(player, &ScoreRef::FilmLoop(member_ref.clone()), &mut bitmap, None, IntRect::from_size(0, 0, width, height));
@@ -604,8 +604,8 @@ impl PlayerCanvasRenderer {
                 movie_width as u16,
                 movie_height as u16,
                 32,
-                0,
                 32,
+                0,
                 PaletteRef::BuiltIn(get_system_default_palette()),
             );
         }
@@ -785,7 +785,7 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 preview_size: (1, 1),
                 preview_member_ref: None,
                 debug_selected_channel_num: None,
-                bitmap: Bitmap::new(1, 1, 32, 0, 32, PaletteRef::BuiltIn(get_system_default_palette())),
+                bitmap: Bitmap::new(1, 1, 32, 32, 0, PaletteRef::BuiltIn(get_system_default_palette())),
             };
 
             *renderer_lock = Some(renderer);

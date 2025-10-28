@@ -117,8 +117,8 @@ impl TextMemberHandlers {
                     width,
                     height,
                     8,
-                    0,
                     8,
+                    0,
                     PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
                 );
                 let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();

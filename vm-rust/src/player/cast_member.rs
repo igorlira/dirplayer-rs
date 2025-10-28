@@ -496,12 +496,12 @@ impl CastMember {
         },
         Err(e) => {
           warn!("Failed to decompress bitmap {}: {:?}. Using empty image.", number, e);
-          bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 0, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+          bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
         }
       }
     } else {
       warn!("No bitmap chunk found for member {}", number);
-      bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 0, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+      bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
     }
   }
 
@@ -742,8 +742,8 @@ impl CastMember {
               bitmap_width,
               bitmap_height,
               32,
-              0,
               32,
+              0,
               PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
             );
 
@@ -935,7 +935,7 @@ impl CastMember {
               },
               Err(e) => {
                 warn!("Failed to decode JPEG bitmap {}: {:?}. Using empty image.", number, e);
-                bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 0, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+                bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
               }
             }
           } else {
