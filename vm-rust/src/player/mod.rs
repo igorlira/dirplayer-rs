@@ -713,8 +713,8 @@ async fn player_call_global_handler(handler_name: &String, args: &Vec<DatumRef>)
         receiver_handler = get_active_static_script_refs(&player.movie, &player.get_hydrated_globals())
           .iter()
           .find_map(|script_ref| {
-            let script = player.movie.cast_manager.get_script_by_ref(script_ref).unwrap();
-            script.get_own_handler_ref(&handler_name)
+            let script = player.movie.cast_manager.get_script_by_ref(script_ref);
+            script.and_then(|x| x.get_own_handler_ref(&handler_name))
               .map(|handler_pair| (None, handler_pair))
         });
       }
