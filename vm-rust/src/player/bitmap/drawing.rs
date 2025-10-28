@@ -497,9 +497,22 @@ impl Bitmap {
 
         for dst_y in min_dst_y..max_dst_y {
             let mut src_x = if dst_rect.width() < 0 { src_rect.right } else { src_rect.left } as f32;
+            
             for dst_x in min_dst_x..max_dst_x {
+                // Bounds checking
+                if dst_x < 0 || dst_y < 0 || dst_x >= self.width as i32 || dst_y >= self.height as i32 {
+                    src_x += step_x;
+                    continue;
+                }
+
                 let src_x_int = src_x.floor() as u16;
                 let src_y_int = src_y.floor() as u16;
+
+                if src_x_int >= src.width || src_y_int >= src.height {
+                    src_x += step_x;
+                    continue;
+                }
+
                 if let Some(mask_image) = mask_image {
                     if !mask_image.get_bit(src_x_int, src_y_int) {
                         src_x += step_x;
