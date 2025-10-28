@@ -532,8 +532,15 @@ impl DirPlayer {
         Ok(())
       },
       "actorList" => {
-        // TODO
-        Ok(())
+        // Setting actorList - update the global variable
+        match value {
+          Datum::List(list_type, list_items, sorted) => {
+            let new_actor_list = self.alloc_datum(Datum::List(list_type, list_items, sorted));
+            self.globals.insert("actorList".to_string(), new_actor_list);
+            Ok(())
+          },
+          _ => Err(ScriptError::new("actorList must be a list".to_string())),
+        }
       },
       _ => {
         self.movie.set_prop(prop, value, &self.allocator)
@@ -882,7 +889,6 @@ pub async fn player_call_script_handler_raw_args(
 }
 
 pub async fn run_frame_loop() {
-  // let player_arc = &PLAYER_LOCK;
   let mut fps: u32;
   unsafe {
     let player = PLAYER_OPT.as_ref().unwrap();
@@ -904,7 +910,50 @@ pub async fn run_frame_loop() {
       player_wait_available().await;
       player_unwrap_result(player_invoke_global_event(&"prepareFrame".to_string(), &vec![]).await);
       player_unwrap_result(player_invoke_global_event(&"enterFrame".to_string(), &vec![]).await);
+
+      // Send stepFrame to all items in actorList
+      let actor_list_snapshot = reserve_player_ref(|player| {
+        let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
+        let actor_list_datum = player.get_datum(&actor_list_ref);
+        match actor_list_datum {
+          Datum::List(_, items, _) => {
+            items.clone()
+          },
+          _ => vec![]
+        }
+      });
+
+      // Call stepFrame on each actor in the snapshot
+      for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
+        // Verify the actor is still in actorList
+        let still_active = reserve_player_ref(|player| {
+          let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
+          let actor_list_datum = player.get_datum(&actor_list_ref);
+          match actor_list_datum {
+            Datum::List(_, items, _) => items.contains(&actor_ref),
+            _ => false
+          }
+        });
+
+        if !still_active {
+          continue;
+        }
+
+        // Don't catch errors, let them propagate
+        let result = player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+        
+        // Propagate the error
+        if let Err(err) = result {
+          web_sys::console::log_1(&format!("❌ stepFrame[{}] error: {}", idx, err.message).into());
+          // Stop the frame loop and show the error
+          reserve_player_mut(|player| {
+            player.on_script_error(&err);
+          });
+          return; // Exit the frame loop
+        }
+      }
     }
+    
     timeout(Duration::from_millis(1000 / fps as u64), future::pending::<()>()).await.unwrap_err();
     player_wait_available().await;
 
