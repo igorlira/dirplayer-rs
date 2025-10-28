@@ -396,9 +396,95 @@ impl CastMember {
         })
       }
       MemberType::Sound => {
-        CastMemberType::Sound(SoundMember {
-          // TODO populate fields
-        })
+        // Log children
+        if !member_def.children.is_empty() {
+          console::log_1(&format!(
+            "CastMember {} has {} children:",
+            number,
+            member_def.children.len()
+          ).into());
+
+          for (i, c_opt) in member_def.children.iter().enumerate() {
+            match c_opt {
+              Some(c) => console::log_1(&format!("child[{}] = {}", i, Self::chunk_type_name(c)).into()),
+              None => console::log_1(&format!("child[{}] = None", i).into()),
+            }
+          }
+        }
+
+        // Try to find a sound chunk
+        let sound_chunk_opt = member_def.children.iter()
+          .filter_map(|c_opt| c_opt.as_ref())
+          .find_map(|chunk| match chunk {
+            Chunk::Sound(s) => {
+              console::log_1(&format!("Found Sound chunk with {} bytes", s.data().len()).into());
+              Some(s.clone())
+            },
+            Chunk::Media(m) => {
+              console::log_1(&format!(
+                "Found Media chunk: sample_rate={}, data_size_field={}, audio_data.len()={}, is_compressed={}",
+                m.sample_rate, m.data_size_field, m.audio_data.len(), m.is_compressed
+              ).into());
+              
+              // Check if the Media chunk has any sound data
+              // Don't just check is_empty - also check data_size_field
+              if !m.audio_data.is_empty() || m.data_size_field > 0 {
+                let sound = SoundChunk::from_media(&m);
+                console::log_1(&format!(
+                  "Created SoundChunk from Media: {} bytes, rate={}",
+                  sound.data().len(), sound.sample_rate()
+                ).into());
+                Some(sound)
+              } else {
+                console::log_1(&"Media chunk has no audio data".into());
+                None
+              }
+            },
+            _ => None,
+          });
+
+        let found_sound = sound_chunk_opt.is_some();
+        console::log_1(&format!(
+          "CastMember {}: {} children, found sound chunk = {}",
+          number,
+          member_def.children.len(),
+          found_sound
+        ).into());
+
+        // Construct SoundMember
+        if let Some(sound_chunk) = sound_chunk_opt {
+          let info = SoundInfo {
+            sample_rate: sound_chunk.sample_rate(),
+            sample_size: sound_chunk.bits_per_sample(),
+            channels: sound_chunk.channels(),
+            sample_count: sound_chunk.sample_count(),
+            duration: if sound_chunk.sample_rate() > 0 {
+              (sound_chunk.sample_count() as f32 / sound_chunk.sample_rate() as f32 * 1000.0).round() as u32
+            } else {
+              0
+            },
+          };
+
+          console::log_1(&format!(
+            "SoundMember created → sample_rate: {}, sample_size: {}, channels: {}, sample_count: {}, duration: {:.3}s",
+            info.sample_rate,
+            info.sample_size,
+            info.channels,
+            info.sample_count,
+            info.duration
+          ).into());
+
+          CastMemberType::Sound(SoundMember {
+            info,
+            sound: sound_chunk,
+          })
+        } else {
+          warn!("No sound chunk found for member {}", number);
+          CastMemberType::Sound(SoundMember {
+            info: SoundInfo::default(),
+            sound: SoundChunk::default(),
+          })
+        }
       }
       _ => { 
         CastMemberType::Unknown

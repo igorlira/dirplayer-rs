@@ -1,6 +1,6 @@
 use binary_reader::{BinaryReader, Endian};
 
-use crate::director::{chunks::cast_member_info::CastMemberInfoChunk, enums::{BitmapInfo, FilmLoopInfo, MemberType, ScriptType, ShapeInfo}};
+use crate::director::{chunks::cast_member_info::CastMemberInfoChunk, enums::{BitmapInfo, FilmLoopInfo, SoundInfo, MemberType, ScriptType, ShapeInfo}};
 
 use super::Chunk;
 

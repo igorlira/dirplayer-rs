@@ -227,3 +227,13 @@ impl From<&[u8]> for FilmLoopInfo {
 		}
 	}
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct SoundInfo {
+	pub sample_rate: u32,
+	pub sample_size: u16,
+	pub channels: u16,
+	pub sample_count: u32,
+	pub duration: u32,
+	//pub compression_type: u16,
+}
