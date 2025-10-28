@@ -1,4 +1,5 @@
 use crate::{director::lingo::datum::{datum_bool, Datum, PropListPair}, player::{allocator::{DatumAllocator, DatumAllocatorTrait}, compare::{datum_equals, datum_less_than}, datum_formatting::{format_concrete_datum, format_datum}, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
+use crate::PLAYER_OPT;
 
 pub struct PropListDatumHandlers {}
 
@@ -228,6 +229,7 @@ impl PropListDatumHandlers {
       "duplicate" => Self::duplicate(datum, args),
       "getLast" => Self::get_last(datum, args),
       "count" => Self::count(datum, args),
+      "getPropRef" => Self::get_prop_ref(datum, args),
       _ => Err(ScriptError::new(format!("No handler {handler_name} for prop list datum")))
     }
   }
@@ -536,5 +538,59 @@ impl PropListDatumHandlers {
         Err(ScriptError::new(format!("Prop name must be a string, int or symbol (is {})", prop_name.type_str())))
       }
     })
+  }
+  
+  pub fn get_prop_ref(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    if args.is_empty() {
+      return Err(ScriptError::new("getPropRef requires at least one argument".to_string()));
+    }
+
+    let key = args[0].clone();
+    let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    let base = player.get_datum(datum);
+
+    let result = match base {
+      Datum::PropList(prop_list, _is_sorted) => {
+        // Get the property from the prop list
+        let prop_value = PropListUtils::get_by_key(&prop_list, &key, &player.allocator)?;
+        
+        // If there's a second argument and the property is a list, index into it
+        if args.len() >= 2 {
+          let index_ref = &args[1];
+          let index = player.get_datum(index_ref).int_value()?;
+          let prop_datum = player.get_datum(&prop_value);
+          
+          match prop_datum {
+            Datum::List(_, items, _) => {
+              // Support both 0-based and 1-based indexing
+              let actual_index = if index == 0 {
+                0
+              } else if index >= 1 {
+                (index - 1) as usize
+              } else {
+                return Err(ScriptError::new(format!("Index out of bounds: {}", index)));
+              };
+              
+              if actual_index >= items.len() {
+                return Err(ScriptError::new(format!("Index out of bounds: {}", index)));
+              }
+              
+              items[actual_index].clone()
+            }
+            _ => return Err(ScriptError::new("Second argument to getPropRef requires first property to be a list".to_string())),
+          }
+        } else {
+          prop_value
+        }
+      }
+      _ => return Err(ScriptError::new("getPropRef: datum is not a propList".to_string())),
+    };
+
+    // If there are more keys, recursively resolve
+    if args.len() > 2 {
+      TypeUtils::get_sub_prop(&result, &args[2], player)
+    } else {
+      Ok(result)
+    }
   }
 }
