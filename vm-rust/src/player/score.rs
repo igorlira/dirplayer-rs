@@ -741,6 +741,32 @@ pub fn sprite_set_prop(
         Ok(())
       }
     ),
+    "quad" => borrow_sprite_mut(
+      sprite_id, 
+      |player| {
+        // quad should be a list of 4 points: [topLeft, topRight, bottomRight, bottomLeft]
+        if let Ok(list) = value.to_list() {
+          if list.len() == 4 {
+            let mut points = Vec::new();
+            for point_ref in list {
+              let point = player.get_datum(point_ref).to_int_point()?;
+              points.push(point);
+            }
+            Ok(points)
+          } else {
+            Err(ScriptError::new("quad must be a list of 4 points".to_string()))
+          }
+        } else {
+          Err(ScriptError::new("quad must be a list".to_string()))
+        }
+      },
+      |sprite, points| {
+        // TODO: update sprite position and size
+        let points = points?;
+        sprite.quad = Some([points[0], points[1], points[2], points[3]]);
+        Ok(())
+      }
+    ),
     prop_name => borrow_sprite_mut(
       sprite_id,
       |_| {},

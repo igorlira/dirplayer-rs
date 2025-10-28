@@ -60,6 +60,7 @@ pub struct Sprite {
   pub editable: bool,
   pub entered: bool,
   pub exited: bool,
+  pub quad: Option<[(i32, i32); 4]>,  // [topLeft, topRight, bottomRight, bottomLeft] -- TODO: Tie this to position and size
 }
 
 impl Sprite {
@@ -90,6 +91,7 @@ impl Sprite {
       editable: false,
       entered: false,
       exited: false,
+      quad: None,
     }
   }
 
@@ -118,5 +120,6 @@ impl Sprite {
     self.editable = false;
     self.entered = false;
     self.exited = false;
+    self.quad = None;
   }
 }
