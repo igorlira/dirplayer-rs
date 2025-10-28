@@ -882,7 +882,19 @@ pub fn concrete_sprite_hit_test(
   x: i32,
   y: i32,
 ) -> bool {
+  // Don't test collision for invisible sprites
+  if !sprite.visible {
+    return false;
+  }
+  
   let rect = get_concrete_sprite_rect(player, sprite);
+  
+  // Don't test collision for sprites positioned far off-screen
+  // If the entire rect is in negative space, it's intentionally hidden
+  if rect.right < 0 || rect.bottom < 0 {
+    return false;
+  }
+  
   let left = rect.left;
   let top = rect.top;
   let right = rect.right;
