@@ -5,10 +5,10 @@ use num_derive::FromPrimitive;
 use crate::{io::reader::DirectorExt, utils::log_i};
 
 
-#[derive(Copy, Clone, FromPrimitive)]
+#[derive(Copy, Clone, FromPrimitive, Debug)]
 pub enum MemberType {
 	Null = 0,
-  	Bitmap = (1),
+	Bitmap = (1),
 	FilmLoop = (2),
 	Text = (3),
 	Palette = (4),
@@ -20,28 +20,30 @@ pub enum MemberType {
 	DigitalVideo = (10),
 	Script = (11),
 	RTE = (12),
-  Font = (15)
+	Font = (15),
+	Unknown = (255)
 }
 
 impl MemberType {
-  pub fn from(val: u32) -> MemberType {
-    return num::FromPrimitive::from_u32(val).unwrap();
-  }
+	pub fn from(val: u32) -> MemberType {
+		num::FromPrimitive::from_u32(val).unwrap_or(MemberType::Unknown)
+	}
 }
 
-#[derive(Copy, Clone, FromPrimitive, PartialEq)]
+#[derive(Debug, Copy, Clone, FromPrimitive, PartialEq)]
 pub enum ScriptType {
 	Invalid = (0),
 	Score = (1),
 	Movie = (3),
-	Parent = (7)
+	Parent = (7),
+	Unknown = (255)
 }
 
 impl ScriptType {
 	pub fn from(val: u16) -> ScriptType {
-	  return num::FromPrimitive::from_u16(val).unwrap();
+		num::FromPrimitive::from_u16(val).unwrap_or(ScriptType::Unknown)
 	}
-  }
+}
 
 #[derive(Clone)]
 pub struct BitmapInfo {
