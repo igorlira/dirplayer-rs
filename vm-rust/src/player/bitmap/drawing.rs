@@ -144,22 +144,44 @@ fn blend_pixel(
 
 impl Bitmap {
     pub fn get_pixel_color_with_alpha(&self, palettes: &PaletteMap, x: u16, y: u16) -> (u8, u8, u8, u8) {
-        let color_ref = self.get_pixel_color_ref(x, y);
-        let (r, g, b) = resolve_color_ref(palettes, &color_ref, &self.palette_ref, self.original_bit_depth);
+        let x_usize = x as usize;
+        let y_usize = y as usize;
 
-        if self.bit_depth == 32 {
-            let x_usize = x as usize;
-            let y_usize = y as usize;
-            if x_usize < self.width as usize && y_usize < self.height as usize {
+        if x_usize >= self.width as usize || y_usize >= self.height as usize {
+            return (0, 0, 0, 0);
+        }
+
+        match self.bit_depth {
+            8 => {
+                let index = y_usize * self.width as usize + x_usize;
+                let palette_index = self.data[index];
+                
+                let (r, g, b) = resolve_color_ref(
+                    palettes,
+                    &ColorRef::PaletteIndex(palette_index),
+                    &self.palette_ref,
+                    self.original_bit_depth,
+                );
+                (r, g, b, 0xFF)
+            }
+            32 => {
+                // 32-bit direct RGBA
                 let index = (y_usize * self.width as usize + x_usize) * 4;
-                // The alpha component is the 4th byte for 32-bit data (R, G, B, A)
+                let r = self.data[index];
+                let g = self.data[index + 1];
+                let b = self.data[index + 2];
                 let a = self.data[index + 3];
-                return (r, g, b, a);
+                (r, g, b, a)
+            }
+            _ => {
+                // fallback: use color_ref for other bit depths
+                let color_ref = self.get_pixel_color_ref(x, y);
+                let (r, g, b) = resolve_color_ref(palettes, &color_ref, &self.palette_ref, self.original_bit_depth);
+                (r, g, b, 0xFF)
             }
         }
-        // Default to fully opaque
-        (r, g, b, 0xFF) 
     }
+
     pub fn set_pixel(&mut self, x: i32, y: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
@@ -186,49 +208,45 @@ impl Bitmap {
                     self.data[byte_index] = value;
                 }
                 4 => {
-                    let bit_index = (y * self.width as usize + x) * 4;
-                    let byte_index = bit_index / 8;
-                    let value = self.data[byte_index];
-                    
                     let own_palette = &self.palette_ref;
                     let mut result_index: u8 = 0;
                     let mut result_distance = i32::MAX;
-                    
-                    // For 4-bit, only search palette indices 0-15
+
                     for palette_idx in 0..16u8 {
-                        let palette_color = resolve_color_ref(palettes, &ColorRef::PaletteIndex(palette_idx), &own_palette, self.original_bit_depth);
-                        let distance = (r as i32 - palette_color.0 as i32).abs() 
-                                    + (g as i32 - palette_color.1 as i32).abs() 
+                        let palette_color = resolve_color_ref(
+                            palettes,
+                            &ColorRef::PaletteIndex(palette_idx),
+                            &own_palette,
+                            self.original_bit_depth
+                        );
+                        let distance = (r as i32 - palette_color.0 as i32).abs()
+                                    + (g as i32 - palette_color.1 as i32).abs()
                                     + (b as i32 - palette_color.2 as i32).abs();
                         if distance < result_distance {
                             result_index = palette_idx;
                             result_distance = distance;
                         }
                     }
-                    
-                    // Pack the 4-bit value into the byte
-                    let new_value = if x % 2 == 0 {
-                        // High nibble
-                        (result_index << 4) | (value & 0x0F)
-                    } else {
-                        // Low nibble
-                        (value & 0xF0) | result_index
-                    };
-                    
-                    self.data[byte_index] = new_value;
+                    self.data[index] = result_index;
                 }
                 8 => {
                     let own_palette = &self.palette_ref;
                     let mut result_index = 0;
                     let mut result_distance = i32::MAX;
                     
-                    for index in 0..=255 {
-                        let palette_color = resolve_color_ref(palettes, &ColorRef::PaletteIndex(index as u8), &own_palette, self.original_bit_depth);
-                        let distance = (r as i32 - palette_color.0 as i32).abs() 
-                                    + (g as i32 - palette_color.1 as i32).abs() 
+                    
+                    for idx in 0..=255 {
+                        let palette_color = resolve_color_ref(
+                            palettes,
+                            &ColorRef::PaletteIndex(idx as u8),
+                            &own_palette,
+                            self.original_bit_depth
+                        );
+                        let distance = (r as i32 - palette_color.0 as i32).abs()
+                                    + (g as i32 - palette_color.1 as i32).abs()
                                     + (b as i32 - palette_color.2 as i32).abs();
                         if distance < result_distance {
-                            result_index = index;
+                            result_index = idx;
                             result_distance = distance;
                         }
                     }
@@ -251,7 +269,7 @@ impl Bitmap {
                 }
                 _ => {
                     // TODO: Should this be logged?
-                    // panic!("Unsupported bit depth fot set_pixel: {}", self.bit_depth)
+                    println!("Unsupported bit depth for set_pixel: {}", self.bit_depth);
                 }
             }
         }
