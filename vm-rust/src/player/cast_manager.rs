@@ -86,7 +86,8 @@ impl CastManager {
       if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
         match cast.preload_mode {
           0 => {
-            // When needed
+            // TODO: Load when needed
+            cast.preload(net_manager, bitmap_manager, dir_cache).await;
           },
           1 => {
             if reason == CastPreloadReason::AfterFrameOne {
