@@ -4,12 +4,18 @@ use itertools::Itertools;
 use crate::director::{chunks::literal::LiteralStore, lingo::datum::Datum};
 
 use super::handler::{HandlerDef, HandlerRecord};
+use crate::director::static_datum::StaticDatum;
+use std::collections::{
+  HashMap, 
+  hash_map::Entry
+};
 
 #[derive(Clone)]
 pub struct ScriptChunk {
   pub literals: Vec<Datum>,
   pub handlers: Vec<HandlerDef>,
   pub property_name_ids: Vec<u16>,
+  pub property_defaults: HashMap<u16, StaticDatum>,
 }
 
 impl ScriptChunk {
@@ -78,11 +84,24 @@ impl ScriptChunk {
       .map(|record| LiteralStore::read_data(reader, record, literals_data_offset).unwrap())
       .collect_vec();
 
-    return Ok(ScriptChunk { 
+    // === Map property IDs to real parameter names ===
+    let mut property_defaults = HashMap::new();
+    for (i, prop_id) in property_name_ids.iter().enumerate() {
+      if let Some(literal) = literals.get(i) {
+        // Property has a default value from the literal
+        if let Entry::Vacant(entry) = property_defaults.entry(*prop_id) {
+          entry.insert(StaticDatum::from(literal.clone()));
+        }
+      }
+      // Properties without literals will be initialized to Void in ScriptInstance::new()
+    }
+    
+    Ok(ScriptChunk {
       literals,
       handlers,
       property_name_ids,
-    });
+      property_defaults,
+    })
   }
 }
 
