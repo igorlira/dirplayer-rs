@@ -695,7 +695,15 @@ pub fn resolve_color_ref(
                 }
             };
 
-            color.unwrap_or((255, 0, 255)) // magenta for missing colors
+            if let Some(color) = color {
+                return color.clone();
+            } else if *color_index == 0 {
+                return (255, 255, 255);
+            } else if *color_index == 255 {
+                return (0, 0, 0);
+            } else {
+                return (255, 0, 255); // magenta for missing colors
+            }
         }
     }
 }

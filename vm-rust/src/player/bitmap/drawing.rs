@@ -144,42 +144,21 @@ fn blend_pixel(
 
 impl Bitmap {
     pub fn get_pixel_color_with_alpha(&self, palettes: &PaletteMap, x: u16, y: u16) -> (u8, u8, u8, u8) {
-        let x_usize = x as usize;
-        let y_usize = y as usize;
+        let color_ref = self.get_pixel_color_ref(x, y);
+        let (r, g, b) = resolve_color_ref(palettes, &color_ref, &self.palette_ref, self.original_bit_depth);
 
-        if x_usize >= self.width as usize || y_usize >= self.height as usize {
-            return (0, 0, 0, 0);
-        }
-
-        match self.bit_depth {
-            8 => {
-                let index = y_usize * self.width as usize + x_usize;
-                let palette_index = self.data[index];
-                
-                let (r, g, b) = resolve_color_ref(
-                    palettes,
-                    &ColorRef::PaletteIndex(palette_index),
-                    &self.palette_ref,
-                    self.original_bit_depth,
-                );
-                (r, g, b, 0xFF)
-            }
-            32 => {
-                // 32-bit direct RGBA
+        if self.bit_depth == 32 {
+            let x_usize = x as usize;
+            let y_usize = y as usize;
+            if x_usize < self.width as usize && y_usize < self.height as usize {
                 let index = (y_usize * self.width as usize + x_usize) * 4;
-                let r = self.data[index];
-                let g = self.data[index + 1];
-                let b = self.data[index + 2];
+                // The alpha component is the 4th byte for 32-bit data (R, G, B, A)
                 let a = self.data[index + 3];
-                (r, g, b, a)
-            }
-            _ => {
-                // fallback: use color_ref for other bit depths
-                let color_ref = self.get_pixel_color_ref(x, y);
-                let (r, g, b) = resolve_color_ref(palettes, &color_ref, &self.palette_ref, self.original_bit_depth);
-                (r, g, b, 0xFF)
+                return (r, g, b, a);
             }
         }
+        // Default to fully opaque
+        (r, g, b, 0xFF) 
     }
 
     pub fn set_pixel(&mut self, x: i32, y: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
