@@ -61,7 +61,13 @@ pub async fn player_call_datum_handler(
         script_instance::ScriptInstanceDatumHandlers::call(obj_ref, handler_name, args)
       }
     }
-    DatumType::TimeoutRef => TimeoutDatumHandlers::call(obj_ref, handler_name, args),
+    DatumType::TimeoutRef => {
+      if TimeoutDatumHandlers::has_async_handler(handler_name) {
+        TimeoutDatumHandlers::call_async(obj_ref, handler_name, args).await
+      } else {
+        TimeoutDatumHandlers::call(obj_ref, handler_name, args)
+      }
+    }
     DatumType::CastMemberRef => cast_member_ref::CastMemberRefHandlers::call(obj_ref, handler_name, args),
     DatumType::IntRect => RectDatumHandlers::call(obj_ref, handler_name, args),
     DatumType::IntPoint => PointDatumHandlers::call(obj_ref, handler_name, args),
