@@ -6,3 +6,4 @@ pub mod cast;
 pub mod rifx;
 pub mod enums;
 pub mod lingo;
+pub mod static_datum;

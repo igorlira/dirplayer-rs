@@ -35,6 +35,7 @@ impl SpriteChannel {
 pub struct ScoreBehaviorReference {
   pub cast_lib: u16,
   pub cast_member: u16,
+  pub parameter: Vec<DatumRef>,
 }
 
 #[derive(Clone)]
@@ -117,6 +118,7 @@ impl Score {
       });
     }
 
+    // Find spans that should be entered
     let spans_to_enter: Vec<_> = self.sprite_spans.iter()
       .filter(|span| Self::is_span_in_frame(span, frame_num))
       .filter(|span| {
@@ -128,6 +130,7 @@ impl Score {
       .cloned()
       .collect();
 
+    // Get initialization data for sprites
     let span_init_data: Vec<_> = spans_to_enter.iter()
       .filter_map(|span| {
         self.channel_initialization_data
@@ -140,6 +143,7 @@ impl Score {
       })
       .collect();
 
+    // Initialize sprite properties (member, position, etc.)
     for (span, data) in span_init_data.iter() {
       let sprite_num = span.channel_number as i16;
       let sprite: &mut Sprite = self.get_sprite_mut(sprite_num);
@@ -160,14 +164,100 @@ impl Score {
         sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
       }
     }
-  
-    for span in spans_to_enter.iter() {
-      if let Some(behavior_ref) = span.scripts.first() {
-        let (_, datum_ref) = Self::create_behavior(behavior_ref.cast_lib as i32, behavior_ref.cast_member as i32);
-        let scripts = Datum::List(DatumType::List, vec![datum_ref], false);
-        let _ = sprite_set_prop(span.channel_number as i16, "scriptInstanceList", scripts);
-        player_dispatch_event_to_sprite(&"beginSprite".to_owned(), &vec![], span.channel_number as u16);
+
+    // Attach behaviors and set their parameters - GROUP BY CHANNEL
+    // Group spans by channel_number to process all behaviors for a sprite at once
+    let spans_by_channel: std::collections::HashMap<u32, Vec<&ScoreSpriteSpan>> = 
+      spans_to_enter.iter()
+        .fold(std::collections::HashMap::new(), |mut acc, span| {
+          acc.entry(span.channel_number).or_insert_with(Vec::new).push(span);
+          acc
+        });
+
+    for (channel_num, channel_spans) in spans_by_channel.iter() {
+      web_sys::console::log_1(&format!(
+          "🔧 Attaching behaviors to channel {}: {} spans",
+          channel_num,
+          channel_spans.len()
+      ).into());
+
+      for span in channel_spans {
+        if span.scripts.is_empty() {
+          continue;
+        }
+
+        for behavior_ref in &span.scripts {
+          // Create the behavior instance
+          let (script_instance_ref, datum_ref) =
+            Self::create_behavior(behavior_ref.cast_lib as i32, behavior_ref.cast_member as i32);
+
+          // Extract the ScriptInstanceRef from datum_ref
+          let actual_instance_ref = reserve_player_mut(|player| {
+              let datum = player.get_datum(&datum_ref);
+              match datum {
+                Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
+                _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string()))
+              }
+          }).expect("Failed to extract ScriptInstanceRef");
+
+          // Parameter setup
+          if !behavior_ref.parameter.is_empty() {
+            reserve_player_mut(|player| {
+              for param_ref in &behavior_ref.parameter {
+                let param_datum = player.get_datum(param_ref);
+                if let Datum::PropList(props, _) = param_datum {
+                  let props_to_set: Vec<(String, DatumRef)> = props.iter()
+                    .filter_map(|(key_ref, value_ref)| {
+                      let key = player.get_datum(key_ref);
+                      if let Datum::Symbol(key_name) = key {
+                        Some((key_name.clone(), value_ref.clone()))
+                      } else {
+                        None
+                      }
+                    })
+                    .collect();
+
+                  for (prop_name, value_ref) in props_to_set {
+                    let _ = script_set_prop(
+                      player,
+                      &actual_instance_ref,
+                      &prop_name,
+                      &value_ref,
+                      false,
+                    );
+                  }
+                }
+              }
+              Ok::<(), ScriptError>(())
+            }).expect("Failed to set behavior parameters");
+          }
+
+          // Attach behavior to sprite
+          reserve_player_mut(|player| {
+            let sprite_num = *channel_num as i16;
+
+            let current_list_datum = sprite_get_prop(player, sprite_num, "scriptInstanceList");
+
+            let mut list: Vec<DatumRef> = match current_list_datum {
+              Ok(Datum::List(_, items, _)) => items.clone(),
+              _ => vec![],
+            };
+
+            list.push(datum_ref.clone());
+
+            let scripts = Datum::List(DatumType::List, list.clone(), false);
+            let _ = sprite_set_prop(sprite_num, "scriptInstanceList", scripts);
+            Ok::<(), ScriptError>(())
+          }).expect("Failed to attach behavior to sprite");
+        }
       }
+
+      // Dispatch beginSprite once per channel after all behaviors are attached
+      player_dispatch_event_to_sprite(
+        &"beginSprite".to_owned(),
+        &vec![],
+        *channel_num as u16,
+      );
     }
   }
 
@@ -229,10 +319,7 @@ impl Score {
 
     self.channel_initialization_data = score_chunk.frame_data.frame_channel_data.clone();
     
-    for i in 0..score_chunk.frame_interval_primaries.len() {
-      let primary = &score_chunk.frame_interval_primaries[i];
-      let secondary = &score_chunk.frame_interval_secondaries[i];
-
+    for (primary, secondary) in &score_chunk.frame_intervals {
       let is_frame_script_or_sprite_script = primary.channel_index == 0 || primary.channel_index > 5;
       if is_frame_script_or_sprite_script {
         // TODO support the other 5 reserved channels
@@ -241,13 +328,12 @@ impl Score {
           start_frame: primary.start_frame,
           end_frame: primary.end_frame,
           scripts: match secondary {
+            Some(sec) => vec![ScoreBehaviorReference {
+              cast_lib: sec.cast_lib,
+              cast_member: sec.cast_member,
+              parameter: sec.parameter.clone(),
+            }],
             None => Vec::new(),
-            Some(sec) => vec![
-              ScoreBehaviorReference {
-                cast_lib: sec.cast_lib,
-                cast_member: sec.cast_member,
-              }
-            ],
           },
         };
         self.sprite_spans.push(sprite_span);
