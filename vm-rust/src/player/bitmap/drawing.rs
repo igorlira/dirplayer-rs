@@ -641,4 +641,65 @@ impl Bitmap {
         }
         mask
     }
+
+    /// Flood fills starting from a point, replacing the original color with target color
+    /// This is used by Director's image.floodFill(point, color) method
+    pub fn flood_fill(&mut self, start_point: (i32, i32), target_color: (u8, u8, u8), palettes: &PaletteMap) {
+        let (start_x, start_y) = start_point;
+    
+        // Bounds check
+        if start_x < 0 || start_y < 0 || start_x >= self.width as i32 || start_y >= self.height as i32 {
+            return;
+        }
+        
+        let original_color = self.get_pixel_color(palettes, start_x as u16, start_y as u16);
+    
+        // If already the target color, nothing to do
+        if original_color == target_color {
+            return;
+        }
+        
+        // Use a stack-based flood fill to avoid recursion stack overflow
+        use std::collections::HashSet;
+        let mut stack = Vec::with_capacity(256); // Pre-allocate for better performance
+        let mut visited = HashSet::new();
+        
+        stack.push((start_x, start_y));
+        visited.insert((start_x as u16, start_y as u16));
+        
+        while let Some((x, y)) = stack.pop() {
+            // Bounds check
+            if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                continue;
+            }
+            
+            let current_color = self.get_pixel_color(palettes, x as u16, y as u16);
+        
+            // Only fill if the color matches the original
+            if current_color != original_color {
+                continue;
+            }
+            
+            // Set the pixel to the target color
+            self.set_pixel(x, y, target_color, palettes);
+            
+            // Add neighbors to stack (4-way connectivity) if not visited
+            let neighbors = [
+                (x + 1, y),
+                (x - 1, y),
+                (x, y + 1),
+                (x, y - 1),
+            ];
+            
+            for (nx, ny) in neighbors {
+                if nx >= 0 && ny >= 0 && nx < self.width as i32 && ny < self.height as i32 {
+                    let pos = (nx as u16, ny as u16);
+                    if visited.insert(pos) {
+                        // insert returns true if the value was not present
+                        stack.push((nx, ny));
+                    }
+                }
+            }
+        }
+    }
 }
