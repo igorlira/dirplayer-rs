@@ -82,9 +82,18 @@ impl ScriptDatumHandlers {
   pub fn create_script_instance(script_ref: &CastMemberRef) -> (ScriptInstanceRef, DatumRef) {
     reserve_player_mut(|player| {
       let instance_id = player.allocator.get_free_script_instance_id();
-      let script = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
-      let lctx: &crate::director::lingo::script::ScriptContext = get_lctx_for_script(player, script).unwrap();
-      let instance = ScriptInstance::new(instance_id, script_ref.to_owned(), script, lctx);
+      let script = player.movie.cast_manager.get_script_by_ref(script_ref).unwrap();
+
+      let lctx_ptr: *const crate::director::lingo::script::ScriptContext =
+        get_lctx_for_script(player, script).unwrap() as *const _;
+
+      let instance = ScriptInstance::new(
+        instance_id,
+        script_ref.to_owned(),
+        script,
+        unsafe { &*lctx_ptr }, // safe because lctx_ptr is still valid
+      );
+
       let instance_ref = player.allocator.alloc_script_instance(instance);
       let datum_ref = player.alloc_datum(Datum::ScriptInstanceRef(instance_ref.clone()));
       (instance_ref, datum_ref)
