@@ -31,6 +31,7 @@ pub struct FieldMember {
   pub auto_tab: bool, // Tabbing order depends on sprite number order, not position on the Stage.
   pub editable: bool,
   pub border: u16,
+  pub back_color: u16,
 }
 
 #[derive(Clone)]
@@ -46,6 +47,7 @@ pub struct TextMember {
   pub fixed_line_space: u16,
   pub top_spacing: i16,
   pub width: u16,
+  pub html_styled_spans: Vec<StyledSpan>,
 }
 
 impl CastMember {
@@ -77,6 +79,7 @@ impl FieldMember {
       auto_tab: false,
       editable: false,
       border: 0,
+      back_color: 0,
     }
   }
 }
@@ -95,6 +98,20 @@ impl TextMember {
       box_type: "adjust".to_string(),
       anti_alias: false,
       width: 100,
+      html_styled_spans: Vec::new(),
+    }
+  }
+
+  pub fn has_html_styling(&self) -> bool {
+    !self.html_styled_spans.is_empty()
+  }
+  
+  pub fn get_text_content(&self) -> &str {
+    if self.has_html_styling() {
+      // Extract plain text from HTML spans
+      &self.text
+    } else {
+      &self.text
     }
   }
 }

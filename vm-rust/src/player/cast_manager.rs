@@ -2,9 +2,14 @@ use std::{cell::{Ref, RefCell}, collections::HashMap, rc::Rc};
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
+use log::warn;
 use url::Url;
 
+use crate::js_api::ascii_safe;
+
 use crate::{director::{enums::ScriptType, file::DirectorFile, lingo::datum::Datum}, js_api::JsApi, player::cast_lib::CastLib};
+
+use crate::player::FontManager;
 
 use super::{allocator::DatumAllocator, bitmap::{manager::BitmapManager, palette_map::PaletteMap}, cast_lib::{CastLibState, CastMemberRef, INVALID_CAST_MEMBER_REF}, cast_member::{CastMember, CastMemberType}, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers, net_manager::NetManager, script::Script, ScriptError};
 
