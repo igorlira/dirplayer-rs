@@ -79,27 +79,30 @@ impl From<&[u8]> for BitmapInfo {
 		let mut reader = BinaryReader::from_u8(bytes);
 		reader.set_endian(binary_reader::Endian::Big);
 
-		reader.read_u8().unwrap();
-		reader.read_u8().unwrap(); // Logo -> 16
-		reader.read_u32().unwrap();
-		let height = reader.read_u16().unwrap();
-		let width = reader.read_u16().unwrap();
-		reader.read_u16().unwrap();
-		reader.read_u16().unwrap();
-		reader.read_u16().unwrap();
-		reader.read_u16().unwrap();
-		let reg_y = reader.read_i16().unwrap();
-		let reg_x = reader.read_i16().unwrap();
-		reader.read_u8().unwrap();
-		let bit_depth;
-		let palette_id;
-		if reader.eof() {
-			bit_depth = 1;
-			palette_id = 0;
-		} else {
-			bit_depth = reader.read_u8().unwrap();
-			reader.read_i16().unwrap(); // palette?
-			palette_id = reader.read_i16().unwrap() - 1; // TODO why -1?
+		let mut width = 0;
+		let mut height = 0;
+		let mut reg_x = 0;
+		let mut reg_y = 0;
+		let mut bit_depth = 1;
+		let mut palette_id = 0;
+		
+		let _ = reader.read_u8();
+		let _ = reader.read_u8(); // Logo -> 16
+		let _ = reader.read_u32();
+		if let Ok(val) = reader.read_u16() { height = val; }
+		if let Ok(val) = reader.read_u16() { width = val; }
+		let _ = reader.read_u16();
+		let _ = reader.read_u16();
+		let _ = reader.read_u16();
+		let _ = reader.read_u16();
+		if let Ok(val) = reader.read_i16() { reg_y = val; }
+		if let Ok(val) = reader.read_i16() { reg_x = val; }
+		let _ = reader.read_u8();
+		
+		if !reader.eof() {
+			if let Ok(val) = reader.read_u8() { bit_depth = val; }
+			let _ = reader.read_i16(); // palette?
+			if let Ok(val) = reader.read_i16() { palette_id = val - 1; } // TODO why -1?
 		};
 
 		return BitmapInfo {
@@ -124,21 +127,28 @@ impl From<&[u8]> for ShapeInfo {
 		let mut reader = BinaryReader::from_u8(bytes);
 		reader.set_endian(binary_reader::Endian::Big);
 
-		let shape_type = reader.read_u16().unwrap(); // 00 01
-		let reg_y = reader.read_u16().unwrap(); // 00 00
-		let reg_x = reader.read_u16().unwrap(); // 00 00
-		let height = reader.read_u16().unwrap(); // 00 36
-		let width = reader.read_u16().unwrap(); // 02 d0
-		let _ = reader.read_u16().unwrap();
-		let color = reader.read_u8().unwrap();
-		let _ = reader.read_u16().unwrap();
-		let _ = reader.read_u16().unwrap();
+		let mut shape_type_raw = 0;
+		let mut reg_y = 0;
+		let mut reg_x = 0;
+		let mut height = 0;
+		let mut width = 0;
+		let mut color = 0;
+
+		if let Ok(val) = reader.read_u16() { shape_type_raw = val; } // 00 01
+		if let Ok(val) = reader.read_u16() { reg_y = val; } // 00 00
+		if let Ok(val) = reader.read_u16() { reg_x = val; } // 00 00
+		if let Ok(val) = reader.read_u16() { height = val; } // 00 36
+		if let Ok(val) = reader.read_u16() { width = val; } // 02 d0
+		let _ = reader.read_u16();
+		if let Ok(val) = reader.read_u8() { color = val; }
+		let _ = reader.read_u16();
+		let _ = reader.read_u16();
 		
 		return ShapeInfo {
-			shape_type: match shape_type {
+			shape_type: match shape_type_raw  {
 				0x0001 => ShapeType::Rect,
 				_ => {
-					warn!("Unknown shape type: {:x}", shape_type);
+					warn!("Unknown shape type: {:x}", shape_type_raw );
 					ShapeType::Unknown
 				}
 			},
@@ -165,25 +175,47 @@ impl From<&[u8]> for FilmLoopInfo {
 	fn from(bytes: &[u8]) -> FilmLoopInfo {
 		let mut reader = BinaryReader::from_u8(bytes);
 		reader.set_endian(binary_reader::Endian::Big);
-		
+
 		// based on director 7
-		let reg_y = reader.read_u16().unwrap();
-		let reg_x = reader.read_u16().unwrap();
-		let height = reader.read_u16().unwrap();
-		let width = reader.read_u16().unwrap();
+		// Define default values to use in case of a read error
+		let mut reg_y = 0;
+		let mut reg_x = 0;
+		let mut height = 0;
+		let mut width = 0;
+		let mut flags = 0;
+		let mut _unk1 = 0;
 
-		let _unk0 = reader.read_u24().unwrap(); // typically all zeroes
-
-		let flags = reader.read_u8().unwrap();
+		// Use `if let Ok(...)` to safely handle the reads
+		if let Ok(y) = reader.read_u16() {
+			reg_y = y;
+		}
+		if let Ok(x) = reader.read_u16() {
+			reg_x = x;
+		}
+		if let Ok(h) = reader.read_u16() {
+			height = h;
+		}
+		if let Ok(w) = reader.read_u16() {
+			width = w;
+		}
+		if let Ok(f) = reader.read_u24() {
+			// This is the line that was causing the panic.
+			// We now safely read it and ignore the value.
+		}
+		if let Ok(f) = reader.read_u8() {
+			flags = f;
+		}
+		// believe these bitfields are only for other cast member types
+		if let Ok(u) = reader.read_u16() {
+			_unk1 = u;
+		}
+		
 		let center = flags & 0b1;
 		let crop = 1 - ((flags & 0b10) >> 1);
 		let sound = (flags & 0b1000) >> 3;
 		let loops = 1 - ((flags & 0b100000) >> 5);
 		// log_i(format_args!("FilmLoopInfo {reg_y} {reg_x} {height} {width} center={center} crop={crop} sound={sound} loop={loops}").to_string().as_str());
 
-		// believe these bitfields are only for other cast member types
-		let _unk1 = reader.read_u16().unwrap();
-		
 		return FilmLoopInfo {
 			reg_point: (reg_x as i16, reg_y as i16),
 			width,
