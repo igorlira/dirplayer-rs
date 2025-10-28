@@ -1,3 +1,4 @@
+use crate::{director::lingo::datum::{datum_bool, Datum}, player::{allocator::{DatumAllocator, DatumAllocatorTrait}, compare::{datum_equals, datum_less_than}, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError}};
 use crate::player::datum_formatting::format_concrete_datum;
 
 pub struct ListDatumHandlers {}
@@ -195,9 +196,24 @@ impl ListDatumHandlers {
 
   pub fn delete_one(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let index = reserve_player_ref(|player| {
-      let item = player.get_datum(&args[0]);
+      let search_ref = &args[0];
+      let item = player.get_datum(search_ref);
       let list_vec = player.get_datum(datum).to_list()?;
-      let index = list_vec.iter().position(|x| datum_equals(player.get_datum(&x), item, &player.allocator).unwrap());
+      let index = list_vec.iter().enumerate().find_map(|(i, list_item_ref)| {
+        // For script instances and other reference types, check reference equality first
+        // Direct reference comparison (important for deleteOne(me) in scripts)
+        if list_item_ref == search_ref {
+          return Some(i);
+        }
+        
+        // Fallback to value equality for other types
+        let list_item = player.get_datum(list_item_ref);
+        if datum_equals(list_item, item, &player.allocator).unwrap_or(false) {
+          Some(i)
+        } else {
+          None
+        }
+      });
       Ok(index)
     })?;
 
