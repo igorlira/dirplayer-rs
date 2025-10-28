@@ -474,7 +474,7 @@ impl Bitmap {
         let alpha = params.blend as f32 / 100.0;
         let mask_image = params.mask_image;
         let bg_color = &params.bg_color;
-        let bg_color = resolve_color_ref(palettes, &bg_color, &self.palette_ref);
+        let bg_color = resolve_color_ref(palettes, &bg_color, &self.palette_ref, src.original_bit_depth);
 
         let mut src_y = if dst_rect.height() < 0 { src_rect.bottom } else { src_rect.top } as f32;
         let step_x = src_rect.width() as f32 / dst_rect.width() as f32;
