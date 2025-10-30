@@ -2,7 +2,7 @@ use log::error;
 use pest::{iterators::{Pair, Pairs}, pratt_parser::{Assoc, Op, PrattParser}, Parser};
 
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType}, js_api::ascii_safe, player::{bytecode::get_set::GetSetUtils, handlers::datum_handlers::player_call_datum_handler, player_call_global_handler, reserve_player_mut, script::{get_obj_prop, player_set_obj_prop}, DirPlayer}
+    director::lingo::datum::{Datum, DatumType, datum_bool}, js_api::ascii_safe, player::{DirPlayer, bytecode::get_set::GetSetUtils, datum_operations::add_datums, handlers::datum_handlers::player_call_datum_handler, player_call_global_handler, reserve_player_mut, script::{get_obj_prop, player_set_obj_prop}}
 };
 
 use super::{sprite::ColorRef, DatumRef, ScriptError};
@@ -33,6 +33,7 @@ pub enum LingoExpr {
     PointLiteral((i32, i32)),
     Identifier(String),
     Assignment(Box<LingoExpr>, Box<LingoExpr>),
+    Add(Box<LingoExpr>, Box<LingoExpr>),
 }
 
 /// Evaluate a static Lingo expression. This does not support function calls.
@@ -168,7 +169,9 @@ fn parse_lingo_expr_runtime(pairs: Pairs<'_, Rule>, pratt: &PrattParser<Rule>) -
         .map_infix(|lhs, op, rhs| {
             match op.as_rule() {
                 Rule::add => {
-                    Err(ScriptError::new("Addition operator not implemented".to_string()))
+                    let left = lhs?;
+                    let right = rhs?;
+                    Ok(LingoExpr::Add(Box::new(left), Box::new(right)))
                 },
                 Rule::obj_prop => {
                     let obj_ref = lhs?;
@@ -420,6 +423,16 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 },
                 _ => Err(ScriptError::new("Invalid assignment left-hand side".to_string())),
             }
+        }
+        LingoExpr::Add(lhs, rhs) => {
+            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
+            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
+            reserve_player_mut(|player| {
+                let left = player.get_datum(&left).clone();
+                let right = player.get_datum(&right).clone();
+                let result = add_datums(left, right, player)?;
+                Ok(player.alloc_datum(result))
+            })
         }
     }
 }
