@@ -358,6 +358,7 @@ impl CastMemberRefHandlers {
             "castLibNum" => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
             "color" => Ok(Datum::ColorRef(color)),
             "bgColor" => Ok(Datum::ColorRef(bg_color)),
+            "mediaReady" => Ok(Datum::Int(1)),
             _ => Self::get_member_type_prop(player, cast_member_ref, &member_type, prop),
         }
     }
