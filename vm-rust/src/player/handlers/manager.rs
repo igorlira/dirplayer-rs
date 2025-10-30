@@ -389,7 +389,7 @@ impl BuiltInHandlerManager {
 
     fn show_globals() -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            JsApi::dispatch_debug_message("-- Global Variables ---");
+            JsApi::dispatch_debug_message("--- Global Variables ---");
             for (name, value) in &player.globals {
                 let value = format_datum(value, player);
                 JsApi::dispatch_debug_message(&format!("{} = {}", name, value));
