@@ -54,9 +54,9 @@ command_inline_args_comma = _{ expr ~ ("," ~ expr)+ }
 command_inline_args_space = _{ expr ~ expr+ }
 command_inline_args = { command_inline_args_comma | command_inline_args_space | expr }
 handler_call = { ident ~ "(" ~ handler_call_args? ~ ")" }
-command_inline = { ident ~ command_inline_args? }
+command_inline = { ident ~ !(WHITESPACE* ~ ("(" | ".")) ~ command_inline_args? }
 assignment = { (expr | ident) ~ "=" ~ expr }
-command = _{ assignment | handler_call | command_inline }
+command = _{ assignment | command_inline | expr }
 obj_prop = { "." }
 add = { "+" }
 bin_op = _{ obj_prop | add }

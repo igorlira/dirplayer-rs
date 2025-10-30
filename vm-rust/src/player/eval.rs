@@ -444,7 +444,15 @@ pub fn parse_lingo_expr_ast_runtime(rule: Rule, expr: String) -> Result<LingoExp
     match LingoParser::parse(rule, expr.as_str()) {
         Ok(parse_result) => {
             let expr_pair = &parse_result.enumerate().next().unwrap();
-            let ast = parse_lingo_rule_runtime(expr_pair.1.clone(), &pratt)?;
+            let mut ast = parse_lingo_rule_runtime(expr_pair.1.clone(), &pratt)?;
+
+            // In command context, convert bare identifiers to handler calls
+            if rule == Rule::command_eval_expr {
+                if let LingoExpr::Identifier(name) = ast {
+                    ast = LingoExpr::HandlerCall(name, vec![]);
+                }
+            }
+
             Ok(ast)
         }
         Err(e) => {

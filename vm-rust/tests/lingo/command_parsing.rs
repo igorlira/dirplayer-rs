@@ -146,3 +146,19 @@ fn test_deep_assignment() {
         )
     );
 }
+
+#[test]
+fn test_obj_handler_call_no_args() {
+    let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, "obj.handler()".to_string());
+    assert!(result.is_ok());
+
+    let ast = result.unwrap();
+    assert_eq!(
+        ast,
+        LingoExpr::ObjHandlerCall(
+            Box::new(LingoExpr::Identifier("obj".to_string())),
+            "handler".to_string(),
+            vec![]
+        )
+    );
+}
