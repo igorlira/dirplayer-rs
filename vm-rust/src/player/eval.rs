@@ -15,7 +15,7 @@ fn tokenize_lingo(_expr: &String) -> Vec<String> {
     [].to_vec()
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum LingoExpr {
     SymbolLiteral(String),
     StringLiteral(String),
@@ -220,47 +220,33 @@ pub fn parse_lingo_rule_runtime(pair: Pair<'_, Rule>, pratt: &PrattParser<Rule>)
 
                 result_vec.push((key, value));
             }
-            reserve_player_mut(|player| {
-                Ok(LingoExpr::PropListLiteral(result_vec))
-            })
+            Ok(LingoExpr::PropListLiteral(result_vec))
         }
-        Rule::empty_prop_list => reserve_player_mut(|player| {
-            Ok(LingoExpr::PropListLiteral(vec![]))
-        }),
-        Rule::number_int => reserve_player_mut(|player| {
-            Ok(LingoExpr::IntLiteral(pair.as_str().parse::<i32>().unwrap()))
-        }),
-        Rule::number_float => reserve_player_mut(|player| {
-            Ok(LingoExpr::FloatLiteral(pair.as_str().parse::<f32>().unwrap()))
-        }),
+        Rule::empty_prop_list => Ok(LingoExpr::PropListLiteral(vec![])),
+        Rule::number_int => Ok(LingoExpr::IntLiteral(pair.as_str().parse::<i32>().unwrap())),
+        Rule::number_float => Ok(LingoExpr::FloatLiteral(pair.as_str().parse::<f32>().unwrap())),
         Rule::rect => {
             let mut inner = pair.into_inner();
-            reserve_player_mut(|player| {
-                Ok(LingoExpr::RectLiteral((
-                    inner.next().unwrap().as_str().parse::<i32>().unwrap(),
-                    inner.next().unwrap().as_str().parse::<i32>().unwrap(),
-                    inner.next().unwrap().as_str().parse::<i32>().unwrap(),
-                    inner.next().unwrap().as_str().parse::<i32>().unwrap(),
-                )))
-            })
+            Ok(LingoExpr::RectLiteral((
+                inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+                inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+                inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+                inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+            )))
         }
         Rule::rgb_num_color => {
             let mut inner = pair.into_inner();
-            reserve_player_mut(|player| {
-                Ok(LingoExpr::ColorLiteral(ColorRef::Rgb(
-                    inner.next().unwrap().as_str().parse::<u8>().unwrap(),
-                    inner.next().unwrap().as_str().parse::<u8>().unwrap(),
-                    inner.next().unwrap().as_str().parse::<u8>().unwrap(),
-                )))
-            })
+            Ok(LingoExpr::ColorLiteral(ColorRef::Rgb(
+                inner.next().unwrap().as_str().parse::<u8>().unwrap(),
+                inner.next().unwrap().as_str().parse::<u8>().unwrap(),
+                inner.next().unwrap().as_str().parse::<u8>().unwrap(),
+            )))
         }
         Rule::rgb_str_color => {
             let mut inner = pair.into_inner();
             let str_inner = inner.next().unwrap().into_inner().next().unwrap();
             let str_val = str_inner.as_str();
-            reserve_player_mut(|player| {
-                Ok(LingoExpr::ColorLiteral(ColorRef::from_hex(str_val)))
-            })
+            Ok(LingoExpr::ColorLiteral(ColorRef::from_hex(str_val)))
         }
         Rule::rgb_color => {
             let inner = pair.into_inner().next().unwrap();
@@ -268,35 +254,21 @@ pub fn parse_lingo_rule_runtime(pair: Pair<'_, Rule>, pratt: &PrattParser<Rule>)
         }
         Rule::symbol => {
             let str_val = pair.into_inner().next().unwrap().as_str();
-            reserve_player_mut(|player| {
-                Ok(LingoExpr::SymbolLiteral(str_val.to_owned()))
-            })
+            Ok(LingoExpr::SymbolLiteral(str_val.to_owned()))
         }
-        Rule::bool_true => reserve_player_mut(|player| {
-            Ok(LingoExpr::BoolLiteral(true))
-        }),
-        Rule::bool_false => reserve_player_mut(|player| {
-            Ok(LingoExpr::BoolLiteral(false))
-        }),
+        Rule::bool_true => Ok(LingoExpr::BoolLiteral(true)),
+        Rule::bool_false => Ok(LingoExpr::BoolLiteral(false)),
         Rule::void => Ok(LingoExpr::VoidLiteral),
-        Rule::string_empty => reserve_player_mut(|player| {
-            Ok(LingoExpr::StringLiteral("".to_owned()))
-        }),
-        Rule::nohash_symbol => reserve_player_mut(|player| {
-            Ok(LingoExpr::SymbolLiteral(pair.as_str().to_owned()))
-        }),
+        Rule::string_empty => Ok(LingoExpr::StringLiteral("".to_owned())),
+        Rule::nohash_symbol => Ok(LingoExpr::SymbolLiteral(pair.as_str().to_owned())),
         Rule::point => {
             let mut inner = pair.into_inner();
-            reserve_player_mut(|player| {
-                Ok(LingoExpr::PointLiteral((
-                    inner.next().unwrap().as_str().parse::<i32>().unwrap(),
-                    inner.next().unwrap().as_str().parse::<i32>().unwrap(),
-                )))
-            })
+            Ok(LingoExpr::PointLiteral((
+                inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+                inner.next().unwrap().as_str().parse::<i32>().unwrap(),
+            )))
         }
-        Rule::empty_list => reserve_player_mut(|player| {
-            Ok(LingoExpr::ListLiteral(vec![]))
-        }),
+        Rule::empty_list => Ok(LingoExpr::ListLiteral(vec![])),
         // Rule::handler_call | Rule::command_inline => eval_lingo_call(pair.into_inner(), &pratt).await,
         Rule::handler_call | Rule::command_inline => {
             let mut inner = pair.into_inner();
@@ -466,19 +438,24 @@ pub fn eval_lingo_expr_static(expr: String) -> Result<DatumRef, ScriptError> {
     }
 }
 
-pub async fn eval_lingo_expr_runtime(expr: String) -> Result<DatumRef, ScriptError> {
+pub fn parse_lingo_expr_ast_runtime(rule: Rule, expr: String) -> Result<LingoExpr, ScriptError> {
     let pratt = create_lingo_pratt_parser();
     let _tokens = tokenize_lingo(&expr);
-    match LingoParser::parse(Rule::eval_expr, expr.as_str()) {
+    match LingoParser::parse(rule, expr.as_str()) {
         Ok(parse_result) => {
             let expr_pair = &parse_result.enumerate().next().unwrap();
             let ast = parse_lingo_rule_runtime(expr_pair.1.clone(), &pratt)?;
-            eval_lingo_expr_ast_runtime(&ast).await
+            Ok(ast)
         }
         Err(e) => {
             Err(ScriptError::new(ascii_safe(&e.to_string())))
         }
     }
+}
+
+pub async fn eval_lingo_expr_runtime(expr: String) -> Result<DatumRef, ScriptError> {
+    let ast = parse_lingo_expr_ast_runtime(Rule::eval_expr, expr)?;
+    eval_lingo_expr_ast_runtime(&ast).await
 }
 
 fn create_lingo_pratt_parser() -> PrattParser<Rule> {
@@ -488,16 +465,6 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
 }
 
 pub async fn eval_lingo_command(expr: String) -> Result<DatumRef, ScriptError> {
-    let pratt = create_lingo_pratt_parser();
-    let _tokens = tokenize_lingo(&expr);
-    match LingoParser::parse(Rule::command_eval_expr, expr.as_str()) {
-        Ok(parse_result) => {
-            let expr_pair = &parse_result.enumerate().next().unwrap();
-            let ast = parse_lingo_rule_runtime(expr_pair.1.clone(), &pratt)?;
-            eval_lingo_expr_ast_runtime(&ast).await
-        }
-        Err(e) => {
-            Err(ScriptError::new(format!("eval_lingo_command parse error: {}", ascii_safe(&e.to_string()))))
-        }
-    }
+    let ast = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, expr)?;
+    eval_lingo_expr_ast_runtime(&ast).await
 }

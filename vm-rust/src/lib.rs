@@ -1,8 +1,8 @@
-mod io;
-mod js_api;
-mod player;
-mod rendering;
-mod utils;
+pub mod io;
+pub mod js_api;
+pub mod player;
+pub mod rendering;
+pub mod utils;
 
 use async_std::task::spawn_local;
 use js_api::JsApi;
