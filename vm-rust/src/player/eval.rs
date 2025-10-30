@@ -2,7 +2,7 @@ use log::error;
 use pest::{iterators::{Pair, Pairs}, pratt_parser::{Assoc, Op, PrattParser}, Parser};
 
 use crate::{
-    director::lingo::datum::{Datum, DatumType, datum_bool}, js_api::ascii_safe, player::{DirPlayer, bytecode::get_set::GetSetUtils, datum_operations::add_datums, handlers::datum_handlers::player_call_datum_handler, player_call_global_handler, reserve_player_mut, script::{get_obj_prop, player_set_obj_prop}}
+    director::lingo::datum::{Datum, DatumType, datum_bool}, js_api::ascii_safe, player::{DirPlayer, bytecode::get_set::GetSetUtils, datum_operations::{add_datums, subtract_datums}, handlers::datum_handlers::player_call_datum_handler, player_call_global_handler, reserve_player_mut, script::{get_obj_prop, player_set_obj_prop}}
 };
 
 use super::{sprite::ColorRef, DatumRef, ScriptError};
@@ -34,6 +34,7 @@ pub enum LingoExpr {
     Identifier(String),
     Assignment(Box<LingoExpr>, Box<LingoExpr>),
     Add(Box<LingoExpr>, Box<LingoExpr>),
+    Subtract(Box<LingoExpr>, Box<LingoExpr>),
 }
 
 /// Evaluate a static Lingo expression. This does not support function calls.
@@ -173,6 +174,11 @@ fn parse_lingo_expr_runtime(pairs: Pairs<'_, Rule>, pratt: &PrattParser<Rule>) -
                     let right = rhs?;
                     Ok(LingoExpr::Add(Box::new(left), Box::new(right)))
                 },
+                Rule::subtract => {
+                    let left = lhs?;
+                    let right = rhs?;
+                    Ok(LingoExpr::Subtract(Box::new(left), Box::new(right)))
+                }
                 Rule::obj_prop => {
                     let obj_ref = lhs?;
                     let rhs = rhs?;
@@ -434,6 +440,16 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 Ok(player.alloc_datum(result))
             })
         }
+        LingoExpr::Subtract(lhs, rhs) => {
+            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
+            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
+            reserve_player_mut(|player| {
+                let left = player.get_datum(&left).clone();
+                let right = player.get_datum(&right).clone();
+                let result = subtract_datums(left, right, player)?;
+                Ok(player.alloc_datum(result))
+            })
+        }
     }
 }
 
@@ -481,7 +497,7 @@ pub async fn eval_lingo_expr_runtime(expr: String) -> Result<DatumRef, ScriptErr
 
 fn create_lingo_pratt_parser() -> PrattParser<Rule> {
     PrattParser::new()
-        .op(Op::infix(Rule::add, Assoc::Left))
+        .op(Op::infix(Rule::add, Assoc::Left) | Op::infix(Rule::subtract, Assoc::Left))
         .op(Op::infix(Rule::obj_prop, Assoc::Left))
 }
 

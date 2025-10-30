@@ -59,7 +59,8 @@ assignment = { (expr | ident) ~ "=" ~ expr }
 command = _{ assignment | command_inline | expr }
 obj_prop = { "." }
 add = { "+" }
-bin_op = _{ obj_prop | add }
+subtract = { "-" }
+bin_op = _{ obj_prop | add | subtract }
 expr = { primitive ~ (bin_op ~ primitive)* }
 
 command_eval_expr  = _{ SOI ~ command ~ EOI }
