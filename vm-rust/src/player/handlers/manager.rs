@@ -369,6 +369,8 @@ impl BuiltInHandlerManager {
             "keyPressed" => Self::key_pressed(args),
             "showGlobals" => Self::show_globals(),
             "tellStreamStatus" => Self::tell_stream_status(args),
+            "label" => Self::label(args),
+            "alert" => Self::alert(args),
             _ => {
                 let formatted_args = reserve_player_ref(|player| {
                     let mut formatted_args = String::new();
@@ -386,6 +388,22 @@ impl BuiltInHandlerManager {
                 return Err(ScriptError::new(msg));
             }
         }
+    }
+
+    fn alert(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let message = player.get_datum(&args[0]).string_value()?;
+            JsApi::dispatch_debug_message(&format!("Alert: {}", message));
+            Ok(DatumRef::Void)
+        })
+    }
+
+    fn label(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let label_name = player.get_datum(&args[0]).string_value()?;
+            let label = player.movie.score.frame_labels.iter().find(|label| label.label == label_name);
+            Ok(player.alloc_datum(Datum::Int(label.map_or(0, |label| label.frame_num as i32))))
+        })
     }
 
     fn show_globals() -> Result<DatumRef, ScriptError> {

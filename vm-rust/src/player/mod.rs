@@ -615,6 +615,11 @@ impl DirPlayer {
 
     fn set_player_prop(&mut self, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
         match prop.as_str() {
+            "itemDelimiter" => {
+                let value = self.get_datum(value);
+                self.movie.item_delimiter = (value.string_value()?).as_bytes()[0] as char;
+                Ok(())
+            }
             "traceScript" => {
                 // TODO
                 Ok(())

@@ -105,6 +105,7 @@ impl Movie {
             "traceScript" => Ok(Datum::Int(0)),                  // TODO
             "movieName" => Ok(Datum::String(self.file_name.to_owned())),
             "updateLock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
+            "path" => Ok(Datum::String(self.base_path.to_owned())),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
         }
     }

@@ -380,7 +380,7 @@ impl JsApi {
     }
 
     pub fn dispatch_debug_message(message: &str) {
-        onDebugMessage(message);
+        onDebugMessage(&&safe_string(message));
     }
 
     pub fn get_mini_member_snapshot(member: &CastMember) -> js_sys::Map {
