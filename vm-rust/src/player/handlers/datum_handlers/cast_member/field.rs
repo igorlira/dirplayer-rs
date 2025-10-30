@@ -21,15 +21,15 @@ impl FieldMemberHandlers {
         handler_name: &String,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        let member_ref = player.get_datum(datum).to_member_ref()?;
-        let member = player
-            .movie
-            .cast_manager
-            .find_member_by_ref(&member_ref)
-            .unwrap();
-        let field = member.member_type.as_field().unwrap();
         match handler_name.as_str() {
             "count" => {
+                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .unwrap();
+                let field = member.member_type.as_field().unwrap();
                 let count_of = player.get_datum(&args[0]).string_value()?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
@@ -41,6 +41,23 @@ impl FieldMemberHandlers {
                     delimiter,
                 )?;
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
+            }
+            "setContents" => {
+                if args.len() != 1 {
+                    return Err(ScriptError::new("setContents requires 1 argument".to_string()));
+                }
+                let new_contents = player.get_datum(&args[0]).string_value()?;
+                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(&member_ref)
+                    .unwrap()
+                    .member_type
+                    .as_field_mut()
+                    .unwrap();
+                member.text = new_contents;
+                Ok(DatumRef::Void)
             }
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for field member type"
