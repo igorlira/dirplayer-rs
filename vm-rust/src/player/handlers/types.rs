@@ -14,7 +14,7 @@ use crate::{
         sprite::{ColorRef, CursorRef},
         xtra::manager::{create_xtra_instance, is_xtra_registered},
         DatumRef, DirPlayer, MathObject, ScriptError, XmlDocument,
-    }
+    },
 };
 
 use super::datum_handlers::{
@@ -314,7 +314,7 @@ impl TypeHandlers {
             let datum = player.get_datum(&args[0]);
             match datum {
                 Datum::String(s) => Some(s.clone()),
-                _ => None
+                _ => None,
             }
         });
         match eval_expr {

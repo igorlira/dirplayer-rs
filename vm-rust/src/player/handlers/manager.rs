@@ -15,10 +15,15 @@ use super::{
     types::TypeHandlers,
 };
 use crate::{
-    director::lingo::datum::{Datum, DatumType, datum_bool},
+    director::lingo::datum::{datum_bool, Datum, DatumType},
     js_api::JsApi,
     player::{
-        DatumRef, DirPlayer, ScriptError, datum_formatting::{format_concrete_datum, format_datum}, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef
+        datum_formatting::{format_concrete_datum, format_datum},
+        handlers::datum_handlers::xml::XmlHelper,
+        keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut,
+        reserve_player_ref,
+        script_ref::ScriptInstanceRef,
+        DatumRef, DirPlayer, ScriptError,
     },
 };
 
@@ -401,7 +406,12 @@ impl BuiltInHandlerManager {
     fn label(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let label_name = player.get_datum(&args[0]).string_value()?;
-            let label = player.movie.score.frame_labels.iter().find(|label| label.label == label_name);
+            let label = player
+                .movie
+                .score
+                .frame_labels
+                .iter()
+                .find(|label| label.label == label_name);
             Ok(player.alloc_datum(Datum::Int(label.map_or(0, |label| label.frame_num as i32))))
         })
     }
@@ -529,10 +539,8 @@ impl BuiltInHandlerManager {
         }
 
         reserve_player_mut(|player| {
-            player.enable_stream_status_handler = player
-                .get_datum(&args[0])
-                .bool_value()
-                .unwrap_or(false);
+            player.enable_stream_status_handler =
+                player.get_datum(&args[0]).bool_value().unwrap_or(false);
             Ok(player.alloc_datum(Datum::Int(player.enable_stream_status_handler as i32)))
         })
     }

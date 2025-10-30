@@ -242,10 +242,7 @@ impl XMediaChunk {
                 }
 
                 if Self::looks_like_bitmap_data(candidate, bytes_per_glyph) {
-                    debug!(
-                        "  ✓ Found bitmap data at offset 0x{:04X}!",
-                        offset
-                    );
+                    debug!("  ✓ Found bitmap data at offset 0x{:04X}!", offset);
                     glyph_data = Some(candidate.to_vec());
                     found_offset = offset;
                     break;

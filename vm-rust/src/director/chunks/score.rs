@@ -90,7 +90,7 @@ impl ScoreFrameChannelData {
             .read_u8()
             .map_err(|e| format!("Failed to read unk3: {:?}", e))?;
         let color_flag = (unk3 & 0xF0) >> 4;
-        let unk3_2  = unk3 & 0x0F;
+        let unk3_2 = unk3 & 0x0F;
 
         let unk4 = reader
             .read_u8()
@@ -601,7 +601,10 @@ impl ScoreChunk {
                                 let mut sec_reader = BinaryReader::from_u8(&entries[j]);
                                 sec_reader.set_endian(Endian::Big);
 
-                                debug!("  📦 Entry {} has {} bytes = {} potential behaviors", j, next_size, behavior_count);
+                                debug!(
+                                    "  📦 Entry {} has {} bytes = {} potential behaviors",
+                                    j, next_size, behavior_count
+                                );
 
                                 let mut found_valid_behavior = false;
 
@@ -633,9 +636,11 @@ impl ScoreChunk {
                                                                 .trim_end_matches('\0');
                                                             if clean.starts_with('[') {
                                                                 // TODO: Replace `eval_lingo` with a parser
-                                                                if let Ok(proplist) = eval_lingo_expr_static(
-                                                                    clean.to_owned(),
-                                                                ) {
+                                                                if let Ok(proplist) =
+                                                                    eval_lingo_expr_static(
+                                                                        clean.to_owned(),
+                                                                    )
+                                                                {
                                                                     secondary
                                                                         .parameter
                                                                         .push(proplist);
@@ -644,7 +649,8 @@ impl ScoreChunk {
                                                         }
                                                     }
 
-                                                    debug!("    ✅ Behavior {}: cast={}/{}, unk0={}",
+                                                    debug!(
+                                                        "    ✅ Behavior {}: cast={}/{}, unk0={}",
                                                         behavior_idx + 1,
                                                         cast_lib,
                                                         cast_member,
@@ -672,7 +678,8 @@ impl ScoreChunk {
                             }
                         }
 
-                        debug!("📊 Primary for channel {} has {} behaviors total",
+                        debug!(
+                            "📊 Primary for channel {} has {} behaviors total",
                             primary.channel_index,
                             secondaries.len()
                         );
@@ -699,10 +706,7 @@ impl ScoreChunk {
             i += 1;
         }
 
-        debug!(
-            "🏁 Finished analyzing. Created {} results",
-            results.len()
-        );
+        debug!("🏁 Finished analyzing. Created {} results", results.len());
         Ok(results)
     }
 }

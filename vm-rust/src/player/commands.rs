@@ -10,7 +10,7 @@ use crate::{
     console_warn,
     director::lingo::datum::{Datum, TimeoutRef},
     js_api::JsApi,
-    player::{eval::{eval_lingo_command}, PLAYER_OPT},
+    player::{eval::eval_lingo_command, PLAYER_OPT},
     utils::{log_i, ToHexString},
 };
 
@@ -501,7 +501,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         PlayerVMCommand::EvalLingoCommand(command) => {
             JsApi::dispatch_debug_message(&command);
             let result = eval_lingo_command(command).await?;
-            return Ok(result)
+            return Ok(result);
         }
     }
     Ok(DatumRef::Void)

@@ -1,8 +1,21 @@
 use log::error;
-use pest::{iterators::{Pair, Pairs}, pratt_parser::{Assoc, Op, PrattParser}, Parser};
+use pest::{
+    iterators::{Pair, Pairs},
+    pratt_parser::{Assoc, Op, PrattParser},
+    Parser,
+};
 
 use crate::{
-    director::lingo::datum::{Datum, DatumType, datum_bool}, js_api::ascii_safe, player::{DirPlayer, bytecode::{get_set::GetSetUtils, string::StringBytecodeHandler}, datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums}, handlers::datum_handlers::player_call_datum_handler, player_call_global_handler, reserve_player_mut, script::{get_obj_prop, player_set_obj_prop}}
+    director::lingo::datum::{datum_bool, Datum, DatumType},
+    js_api::ascii_safe,
+    player::{
+        bytecode::{get_set::GetSetUtils, string::StringBytecodeHandler},
+        datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums},
+        handlers::datum_handlers::player_call_datum_handler,
+        player_call_global_handler, reserve_player_mut,
+        script::{get_obj_prop, player_set_obj_prop},
+        DirPlayer,
+    },
 };
 
 use super::{sprite::ColorRef, DatumRef, ScriptError};
@@ -59,9 +72,7 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         }
         Rule::string => {
             let str_val = pair.into_inner().next().unwrap().as_str();
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::String(str_val.to_owned())))
-            })
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(str_val.to_owned()))))
         }
         Rule::prop_list => eval_lingo_pair_static(pair.into_inner().next().unwrap()),
         Rule::multi_prop_list => {
@@ -73,13 +84,11 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
 
                 result_vec.push((key, value));
             }
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::PropList(result_vec, false)))
-            })
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(result_vec, false))))
         }
-        Rule::empty_prop_list => reserve_player_mut(|player| {
-            Ok(player.alloc_datum(Datum::PropList(vec![], false)))
-        }),
+        Rule::empty_prop_list => {
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(vec![], false))))
+        }
         Rule::number_int => reserve_player_mut(|player| {
             Ok(player.alloc_datum(Datum::Int(pair.as_str().parse::<i32>().unwrap())))
         }),
@@ -121,20 +130,14 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         }
         Rule::symbol => {
             let str_val = pair.into_inner().next().unwrap().as_str();
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Symbol(str_val.to_owned())))
-            })
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Symbol(str_val.to_owned()))))
         }
-        Rule::bool_true => reserve_player_mut(|player| {
-            Ok(player.alloc_datum(datum_bool(true)))
-        }),
-        Rule::bool_false => reserve_player_mut(|player| {
-            Ok(player.alloc_datum(datum_bool(false)))
-        }),
+        Rule::bool_true => reserve_player_mut(|player| Ok(player.alloc_datum(datum_bool(true)))),
+        Rule::bool_false => reserve_player_mut(|player| Ok(player.alloc_datum(datum_bool(false)))),
         Rule::void => Ok(DatumRef::Void),
-        Rule::string_empty => reserve_player_mut(|player| {
-            Ok(player.alloc_datum(Datum::String("".to_owned())))
-        }),
+        Rule::string_empty => {
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String("".to_owned()))))
+        }
         Rule::nohash_symbol => reserve_player_mut(|player| {
             Ok(player.alloc_datum(Datum::Symbol(pair.as_str().to_owned())))
         }),
@@ -157,7 +160,10 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
     }
 }
 
-fn get_eval_top_level_prop(player: &mut DirPlayer, prop_name: &str) -> Result<DatumRef, ScriptError> {
+fn get_eval_top_level_prop(
+    player: &mut DirPlayer,
+    prop_name: &str,
+) -> Result<DatumRef, ScriptError> {
     if let Some(global_ref) = player.globals.get(prop_name) {
         Ok(global_ref.clone())
     } else {
@@ -166,65 +172,73 @@ fn get_eval_top_level_prop(player: &mut DirPlayer, prop_name: &str) -> Result<Da
     }
 }
 
-fn parse_lingo_expr_runtime(pairs: Pairs<'_, Rule>, pratt: &PrattParser<Rule>) -> Result<LingoExpr, ScriptError> {
+fn parse_lingo_expr_runtime(
+    pairs: Pairs<'_, Rule>,
+    pratt: &PrattParser<Rule>,
+) -> Result<LingoExpr, ScriptError> {
     pratt
-        .map_primary(|pair| {
-            parse_lingo_rule_runtime(pair, pratt)
-        })
-        .map_infix(|lhs, op, rhs| {
-            match op.as_rule() {
-                Rule::add => {
-                    let left = lhs?;
-                    let right = rhs?;
-                    Ok(LingoExpr::Add(Box::new(left), Box::new(right)))
-                },
-                Rule::subtract => {
-                    let left = lhs?;
-                    let right = rhs?;
-                    Ok(LingoExpr::Subtract(Box::new(left), Box::new(right)))
-                }
-                Rule::multiply => {
-                    let left = lhs?;
-                    let right = rhs?;
-                    Ok(LingoExpr::Multiply(Box::new(left), Box::new(right)))
-                }
-                Rule::divide => {
-                    let left = lhs?;
-                    let right = rhs?;
-                    Ok(LingoExpr::Divide(Box::new(left), Box::new(right)))
-                }
-                Rule::join => {
-                    let left = lhs?;
-                    let right = rhs?;
-                    Ok(LingoExpr::Join(Box::new(left), Box::new(right)))
-                }
-                Rule::join_pad => {
-                    let left = lhs?;
-                    let right = rhs?;
-                    Ok(LingoExpr::JoinPad(Box::new(left), Box::new(right)))
-                }
-                Rule::obj_prop => {
-                    let obj_ref = lhs?;
-                    let rhs = rhs?;
-                    match rhs {
-                        LingoExpr::Identifier(name) => {
-                            let prop_name = name;
-                            Ok(LingoExpr::ObjProp(Box::new(obj_ref), prop_name))
-                        }
-                        LingoExpr::HandlerCall(name, args) => {
-                            Ok(LingoExpr::ObjHandlerCall(Box::new(obj_ref), name, args))
-                        }
-                        _ => Err(ScriptError::new(format!("Invalid object prop operator rhs {:?}", rhs))),
-                    }
-                },
-                _ => Err(ScriptError::new(format!("Invalid infix operator {:?}", op.as_rule()))),
+        .map_primary(|pair| parse_lingo_rule_runtime(pair, pratt))
+        .map_infix(|lhs, op, rhs| match op.as_rule() {
+            Rule::add => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Add(Box::new(left), Box::new(right)))
             }
+            Rule::subtract => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Subtract(Box::new(left), Box::new(right)))
+            }
+            Rule::multiply => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Multiply(Box::new(left), Box::new(right)))
+            }
+            Rule::divide => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Divide(Box::new(left), Box::new(right)))
+            }
+            Rule::join => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Join(Box::new(left), Box::new(right)))
+            }
+            Rule::join_pad => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::JoinPad(Box::new(left), Box::new(right)))
+            }
+            Rule::obj_prop => {
+                let obj_ref = lhs?;
+                let rhs = rhs?;
+                match rhs {
+                    LingoExpr::Identifier(name) => {
+                        let prop_name = name;
+                        Ok(LingoExpr::ObjProp(Box::new(obj_ref), prop_name))
+                    }
+                    LingoExpr::HandlerCall(name, args) => {
+                        Ok(LingoExpr::ObjHandlerCall(Box::new(obj_ref), name, args))
+                    }
+                    _ => Err(ScriptError::new(format!(
+                        "Invalid object prop operator rhs {:?}",
+                        rhs
+                    ))),
+                }
+            }
+            _ => Err(ScriptError::new(format!(
+                "Invalid infix operator {:?}",
+                op.as_rule()
+            ))),
         })
         .parse(pairs)
 }
 
 /// Evaluate a dynamic Lingo expression at runtime.
-pub fn parse_lingo_rule_runtime(pair: Pair<'_, Rule>, pratt: &PrattParser<Rule>) -> Result<LingoExpr, ScriptError> {
+pub fn parse_lingo_rule_runtime(
+    pair: Pair<'_, Rule>,
+    pratt: &PrattParser<Rule>,
+) -> Result<LingoExpr, ScriptError> {
     let inner_rule = pair.as_rule();
     match pair.as_rule() {
         Rule::expr => {
@@ -249,7 +263,8 @@ pub fn parse_lingo_rule_runtime(pair: Pair<'_, Rule>, pratt: &PrattParser<Rule>)
             for inner_pair in pair.into_inner() {
                 let mut pair_inner = inner_pair.into_inner();
                 let key = parse_lingo_rule_runtime(pair_inner.next().unwrap(), pratt)?;
-                let value = parse_lingo_expr_runtime(pair_inner.next().unwrap().into_inner(), pratt)?;
+                let value =
+                    parse_lingo_expr_runtime(pair_inner.next().unwrap().into_inner(), pratt)?;
 
                 result_vec.push((key, value));
             }
@@ -257,7 +272,9 @@ pub fn parse_lingo_rule_runtime(pair: Pair<'_, Rule>, pratt: &PrattParser<Rule>)
         }
         Rule::empty_prop_list => Ok(LingoExpr::PropListLiteral(vec![])),
         Rule::number_int => Ok(LingoExpr::IntLiteral(pair.as_str().parse::<i32>().unwrap())),
-        Rule::number_float => Ok(LingoExpr::FloatLiteral(pair.as_str().parse::<f32>().unwrap())),
+        Rule::number_float => Ok(LingoExpr::FloatLiteral(
+            pair.as_str().parse::<f32>().unwrap(),
+        )),
         Rule::rect => {
             let mut inner = pair.into_inner();
             Ok(LingoExpr::RectLiteral((
@@ -329,13 +346,16 @@ pub fn parse_lingo_rule_runtime(pair: Pair<'_, Rule>, pratt: &PrattParser<Rule>)
                 Rule::ident => {
                     let ident_name = left_pair.as_str();
                     LingoExpr::Identifier(ident_name.to_owned())
-                },
+                }
                 _ => parse_lingo_rule_runtime(left_pair, pratt)?,
             };
 
             let right_expr = parse_lingo_expr_runtime(right_pair.into_inner(), pratt)?;
 
-            Ok(LingoExpr::Assignment(Box::new(left_expr), Box::new(right_expr)))
+            Ok(LingoExpr::Assignment(
+                Box::new(left_expr),
+                Box::new(right_expr),
+            ))
         }
         _ => Err(ScriptError::new(format!(
             "Invalid runtime Lingo expression {:?}",
@@ -347,15 +367,11 @@ pub fn parse_lingo_rule_runtime(pair: Pair<'_, Rule>, pratt: &PrattParser<Rule>)
 pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, ScriptError> {
     match expr {
         LingoExpr::SymbolLiteral(s) => {
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Symbol(s.to_string())))
-            })
-        },
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Symbol(s.to_string()))))
+        }
         LingoExpr::StringLiteral(s) => {
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::String(s.to_string())))
-            })
-        },
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(s.to_string()))))
+        }
         LingoExpr::ListLiteral(items) => {
             let mut datum_items = vec![];
             for item in items {
@@ -365,23 +381,17 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             reserve_player_mut(|player| {
                 Ok(player.alloc_datum(Datum::List(DatumType::List, datum_items, false)))
             })
-        },
+        }
         LingoExpr::VoidLiteral => Ok(DatumRef::Void),
         LingoExpr::BoolLiteral(b) => {
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Int(if *b { 1 } else { 0 })))
-            })
-        },
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(if *b { 1 } else { 0 }))))
+        }
         LingoExpr::IntLiteral(i) => {
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Int(*i)))
-            })
-        },
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(*i))))
+        }
         LingoExpr::FloatLiteral(f) => {
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Float(*f)))
-            })
-        },
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Float(*f))))
+        }
         LingoExpr::PropListLiteral(pairs) => {
             let mut datum_pairs = vec![];
             for (key_expr, value_expr) in pairs {
@@ -389,10 +399,8 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 let value_datum = Box::pin(eval_lingo_expr_ast_runtime(value_expr)).await?;
                 datum_pairs.push((key_datum, value_datum));
             }
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::PropList(datum_pairs, false)))
-            })
-        },
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(datum_pairs, false))))
+        }
         LingoExpr::HandlerCall(handler_name, args) => {
             let mut datum_args = vec![];
             for arg in args {
@@ -400,32 +408,22 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 datum_args.push(datum);
             }
             player_call_global_handler(&handler_name, &datum_args).await
-        },
+        }
         LingoExpr::ObjProp(obj_expr, prop_name) => {
             let obj_datum = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
-            reserve_player_mut(|player| {
-                get_obj_prop(player, &obj_datum, prop_name)
-            })
-        },
+            reserve_player_mut(|player| get_obj_prop(player, &obj_datum, prop_name))
+        }
         LingoExpr::ColorLiteral(color_ref) => {
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::ColorRef(color_ref.clone())))
-            })
-        },
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::ColorRef(color_ref.clone()))))
+        }
         LingoExpr::RectLiteral((x, y, w, h)) => {
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::IntRect((*x, *y, *w, *h))))
-            })
-        },
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::IntRect((*x, *y, *w, *h)))))
+        }
         LingoExpr::PointLiteral((x, y)) => {
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::IntPoint((*x, *y))))
-            })
-        },
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::IntPoint((*x, *y)))))
+        }
         LingoExpr::Identifier(ident_name) => {
-            reserve_player_mut(|player| {
-                get_eval_top_level_prop(player, ident_name)
-            })
+            reserve_player_mut(|player| get_eval_top_level_prop(player, ident_name))
         }
         LingoExpr::ObjHandlerCall(obj_expr, handler_name, args) => {
             let obj_datum = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
@@ -440,18 +438,21 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             let right_datum = Box::pin(eval_lingo_expr_ast_runtime(right_expr.as_ref())).await?;
 
             match left_expr.as_ref() {
-                LingoExpr::Identifier(ident_name) => {
-                    reserve_player_mut(|player| {
-                        player.globals.insert(ident_name.to_owned(), right_datum.clone());
-                        Ok(right_datum)
-                    })
-                },
+                LingoExpr::Identifier(ident_name) => reserve_player_mut(|player| {
+                    player
+                        .globals
+                        .insert(ident_name.to_owned(), right_datum.clone());
+                    Ok(right_datum)
+                }),
                 LingoExpr::ObjProp(obj_expr, prop_name) => {
-                    let obj_datum = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
-                    player_set_obj_prop( &obj_datum, prop_name, &right_datum).await?;
+                    let obj_datum =
+                        Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
+                    player_set_obj_prop(&obj_datum, prop_name, &right_datum).await?;
                     Ok(DatumRef::Void)
-                },
-                _ => Err(ScriptError::new("Invalid assignment left-hand side".to_string())),
+                }
+                _ => Err(ScriptError::new(
+                    "Invalid assignment left-hand side".to_string(),
+                )),
             }
         }
         LingoExpr::Add(lhs, rhs) => {
@@ -517,7 +518,10 @@ pub fn eval_lingo_expr_static(expr: String) -> Result<DatumRef, ScriptError> {
             eval_lingo_pair_static(expr_pair.1.clone())
         }
         Err(e) => {
-            error!("eval_lingo_expr_static parse error: {}", ascii_safe(&e.to_string()));
+            error!(
+                "eval_lingo_expr_static parse error: {}",
+                ascii_safe(&e.to_string())
+            );
             Ok(DatumRef::Void)
         }
     }
@@ -540,9 +544,7 @@ pub fn parse_lingo_expr_ast_runtime(rule: Rule, expr: String) -> Result<LingoExp
 
             Ok(ast)
         }
-        Err(e) => {
-            Err(ScriptError::new(ascii_safe(&e.to_string())))
-        }
+        Err(e) => Err(ScriptError::new(ascii_safe(&e.to_string()))),
     }
 }
 

@@ -449,10 +449,7 @@ impl CastManager {
 
                     // Skip empty font names
                     if font_name.is_empty() {
-                        warn!(
-                            "⊘ Skipping font member {} with empty name",
-                            member.number
-                        );
+                        warn!("⊘ Skipping font member {} with empty name", member.number);
                         skipped_count += 1;
                         continue;
                     }
@@ -595,7 +592,10 @@ impl CastManager {
 
                             debug!(
                                 "      ✅ Loaded (scaled): ref={}, scale={:.2}x, char_size={}x{}",
-                                font_ref, scale_factor, font_data_clone.char_width, font_data_clone.char_height
+                                font_ref,
+                                scale_factor,
+                                font_data_clone.char_width,
+                                font_data_clone.char_height
                             );
 
                             loaded_count += 1;

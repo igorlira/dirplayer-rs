@@ -163,11 +163,12 @@ impl GetSetBytecodeHandler {
             .clone();
 
             if let Datum::XmlRef(xml_id) = player.get_datum(&obj_datum_ref) {
-                let result_ref = crate::player::handlers::datum_handlers::xml::XmlDatumHandlers::get_prop(
-                    player,
-                    &obj_datum_ref,
-                    &prop_name,
-                )?;
+                let result_ref =
+                    crate::player::handlers::datum_handlers::xml::XmlDatumHandlers::get_prop(
+                        player,
+                        &obj_datum_ref,
+                        &prop_name,
+                    )?;
 
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.push(result_ref);
@@ -505,9 +506,7 @@ impl GetSetBytecodeHandler {
                 }
                 crate::director::lingo::datum::DatumType::XmlRef => {
                     crate::player::handlers::datum_handlers::xml::XmlDatumHandlers::get_prop(
-                        player,
-                        &obj_ref,
-                        &prop_name
+                        player, &obj_ref, &prop_name,
                     )?
                 }
                 crate::director::lingo::datum::DatumType::String => match prop_name.as_str() {

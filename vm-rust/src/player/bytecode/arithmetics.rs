@@ -1,7 +1,9 @@
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        HandlerExecutionResult, ScriptError, datum_formatting::format_datum, datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums}, reserve_player_mut
+        datum_formatting::format_datum,
+        datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums},
+        reserve_player_mut, HandlerExecutionResult, ScriptError,
     },
 };
 

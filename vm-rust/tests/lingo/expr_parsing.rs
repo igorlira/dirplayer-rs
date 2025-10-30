@@ -1,4 +1,4 @@
-use vm_rust::player::{eval::{parse_lingo_expr_ast_runtime, LingoExpr, Rule}};
+use vm_rust::player::eval::{parse_lingo_expr_ast_runtime, LingoExpr, Rule};
 
 #[test]
 fn test_symbol() {
@@ -6,10 +6,7 @@ fn test_symbol() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::SymbolLiteral("symbol".to_string())
-    );
+    assert_eq!(ast, LingoExpr::SymbolLiteral("symbol".to_string()));
 }
 
 #[test]
@@ -18,10 +15,7 @@ fn test_string() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::StringLiteral("string".to_string())
-    );
+    assert_eq!(ast, LingoExpr::StringLiteral("string".to_string()));
 }
 
 #[test]
@@ -30,10 +24,7 @@ fn test_int() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::IntLiteral(42)
-    );
+    assert_eq!(ast, LingoExpr::IntLiteral(42));
 }
 
 #[test]
@@ -42,10 +33,7 @@ fn test_neg_int() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::IntLiteral(-42)
-    );
+    assert_eq!(ast, LingoExpr::IntLiteral(-42));
 }
 
 #[test]
@@ -54,10 +42,7 @@ fn test_float() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::FloatLiteral(42.5)
-    );
+    assert_eq!(ast, LingoExpr::FloatLiteral(42.5));
 }
 
 #[test]
@@ -66,10 +51,7 @@ fn test_float_ending_with_dot() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::FloatLiteral(42.0)
-    );
+    assert_eq!(ast, LingoExpr::FloatLiteral(42.0));
 }
 
 #[test]
@@ -78,10 +60,7 @@ fn test_neg_float() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::FloatLiteral(-42.5)
-    );
+    assert_eq!(ast, LingoExpr::FloatLiteral(-42.5));
 }
 
 #[test]
@@ -90,10 +69,7 @@ fn test_list_empty() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::ListLiteral(vec![])
-    );
+    assert_eq!(ast, LingoExpr::ListLiteral(vec![]));
 }
 
 #[test]
@@ -102,10 +78,7 @@ fn test_list_single() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::ListLiteral(vec![LingoExpr::IntLiteral(1)])
-    );
+    assert_eq!(ast, LingoExpr::ListLiteral(vec![LingoExpr::IntLiteral(1)]));
 }
 
 #[test]
@@ -130,10 +103,7 @@ fn test_proplist_empty() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::PropListLiteral(vec![])
-    );
+    assert_eq!(ast, LingoExpr::PropListLiteral(vec![]));
 }
 
 #[test]
@@ -144,24 +114,37 @@ fn test_proplist_single() {
     let ast = result.unwrap();
     assert_eq!(
         ast,
-        LingoExpr::PropListLiteral(vec![
-            (LingoExpr::SymbolLiteral("key1".to_string()), LingoExpr::IntLiteral(1))
-        ])
+        LingoExpr::PropListLiteral(vec![(
+            LingoExpr::SymbolLiteral("key1".to_string()),
+            LingoExpr::IntLiteral(1)
+        )])
     );
 }
 
 #[test]
 fn test_proplist_multi() {
-    let result = parse_lingo_expr_ast_runtime(Rule::eval_expr, "[#key1: 1, #key2: 2, #key3: 3]".to_string());
+    let result = parse_lingo_expr_ast_runtime(
+        Rule::eval_expr,
+        "[#key1: 1, #key2: 2, #key3: 3]".to_string(),
+    );
     assert!(result.is_ok());
 
     let ast = result.unwrap();
     assert_eq!(
         ast,
         LingoExpr::PropListLiteral(vec![
-            (LingoExpr::SymbolLiteral("key1".to_string()), LingoExpr::IntLiteral(1)),
-            (LingoExpr::SymbolLiteral("key2".to_string()), LingoExpr::IntLiteral(2)),
-            (LingoExpr::SymbolLiteral("key3".to_string()), LingoExpr::IntLiteral(3))
+            (
+                LingoExpr::SymbolLiteral("key1".to_string()),
+                LingoExpr::IntLiteral(1)
+            ),
+            (
+                LingoExpr::SymbolLiteral("key2".to_string()),
+                LingoExpr::IntLiteral(2)
+            ),
+            (
+                LingoExpr::SymbolLiteral("key3".to_string()),
+                LingoExpr::IntLiteral(3)
+            )
         ])
     );
 }
@@ -172,10 +155,7 @@ fn test_void() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::VoidLiteral
-    );
+    assert_eq!(ast, LingoExpr::VoidLiteral);
 }
 
 #[test]
@@ -184,19 +164,13 @@ fn test_bool() {
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::BoolLiteral(true)
-    );
+    assert_eq!(ast, LingoExpr::BoolLiteral(true));
 
     let result = parse_lingo_expr_ast_runtime(Rule::eval_expr, "false".to_string());
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(
-        ast,
-        LingoExpr::BoolLiteral(false)
-    );
+    assert_eq!(ast, LingoExpr::BoolLiteral(false));
 }
 
 #[test]
@@ -219,9 +193,7 @@ fn test_handler_call_single_arg() {
     let ast = result.unwrap();
     assert_eq!(
         ast,
-        LingoExpr::HandlerCall("handler_call".to_string(), vec![
-            LingoExpr::IntLiteral(1),
-        ])
+        LingoExpr::HandlerCall("handler_call".to_string(), vec![LingoExpr::IntLiteral(1),])
     );
 }
 
@@ -233,11 +205,14 @@ fn test_handler_call_multi_args() {
     let ast = result.unwrap();
     assert_eq!(
         ast,
-        LingoExpr::HandlerCall("handler_call".to_string(), vec![
-            LingoExpr::IntLiteral(1),
-            LingoExpr::IntLiteral(2),
-            LingoExpr::IntLiteral(3)
-        ])
+        LingoExpr::HandlerCall(
+            "handler_call".to_string(),
+            vec![
+                LingoExpr::IntLiteral(1),
+                LingoExpr::IntLiteral(2),
+                LingoExpr::IntLiteral(3)
+            ]
+        )
     );
 }
 

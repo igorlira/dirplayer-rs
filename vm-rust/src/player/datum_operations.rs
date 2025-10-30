@@ -1,6 +1,9 @@
 use std::cmp::min;
 
-use crate::{director::lingo::datum::{Datum, DatumType}, player::{datum_formatting::format_datum, datum_ref::DatumRef}};
+use crate::{
+    director::lingo::datum::{Datum, DatumType},
+    player::{datum_formatting::format_datum, datum_ref::DatumRef},
+};
 
 use super::{sprite::ColorRef, DirPlayer, ScriptError};
 
@@ -381,9 +384,7 @@ pub fn multiply_datums(
             (left * *x2 as f32).round() as i32,
             (left * *y2 as f32).round() as i32,
         )),
-        (Datum::IntPoint((x, y)), Datum::Int(right)) => {
-            Datum::IntPoint((x * *right, y * *right))
-        }
+        (Datum::IntPoint((x, y)), Datum::Int(right)) => Datum::IntPoint((x * *right, y * *right)),
         (Datum::IntPoint((x, y)), Datum::Float(right)) => Datum::IntPoint((
             (*x as f32 * right).round() as i32,
             (*y as f32 * right).round() as i32,
@@ -392,9 +393,7 @@ pub fn multiply_datums(
             (left * *x as f32).round() as i32,
             (left * *y as f32).round() as i32,
         )),
-        (Datum::Int(left), Datum::IntPoint((x, y))) => {
-            Datum::IntPoint((left * *x, left * *y))
-        }
+        (Datum::Int(left), Datum::IntPoint((x, y))) => Datum::IntPoint((left * *x, left * *y)),
         (Datum::List(_, list, _), Datum::Float(right)) => {
             let mut new_list = vec![];
             for item in list {
@@ -404,9 +403,9 @@ pub fn multiply_datums(
                     Datum::Float(n) => Datum::Float(n * right),
                     _ => {
                         return Err(ScriptError::new(format!(
-                        "Mul operator in list only works with ints and floats. Given: {}",
-                        format_datum(item, player)
-                    )))
+                            "Mul operator in list only works with ints and floats. Given: {}",
+                            format_datum(item, player)
+                        )))
                     }
                 };
                 new_list.push(result_datum);
@@ -451,15 +450,13 @@ pub fn divide_datums(
 ) -> Result<Datum, ScriptError> {
     let left = player.get_datum(&left);
     let right = player.get_datum(&right);
-    
+
     let result = match (left, right) {
         (Datum::Int(left), Datum::Int(right)) => Datum::Int(left / right),
         (Datum::Int(left), Datum::Float(right)) => Datum::Float((*left as f32) / right),
         (Datum::Float(left), Datum::Int(right)) => Datum::Float(*left / (*right as f32)),
         (Datum::Float(left), Datum::Float(right)) => Datum::Float(left / right),
-        (Datum::IntPoint((x, y)), Datum::Int(right)) => {
-            Datum::IntPoint((x / *right, y / *right))
-        }
+        (Datum::IntPoint((x, y)), Datum::Int(right)) => Datum::IntPoint((x / *right, y / *right)),
         (Datum::IntPoint((x, y)), Datum::Float(right)) => Datum::IntPoint((
             (*x as f32 / right).round() as i32,
             (*y as f32 / right).round() as i32,
@@ -478,9 +475,9 @@ pub fn divide_datums(
             (*y2 as f32 / right).round() as i32,
         )),
         (Datum::Int(left), Datum::String(right)) => {
-            let right = right.parse::<f32>().map_err(|_| {
-                ScriptError::new(format!("Cannot divide int by string: {}", right))
-            })?;
+            let right = right
+                .parse::<f32>()
+                .map_err(|_| ScriptError::new(format!("Cannot divide int by string: {}", right)))?;
             Datum::Float((*left as f32) / right)
         }
         (Datum::Float(left), Datum::String(right)) => {

@@ -214,37 +214,25 @@ impl Score {
                     0 => {
                         sprite.color = ColorRef::PaletteIndex(data.fore_color);
                         sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
-                    },
+                    }
                     // only foreColor has hex
                     1 => {
-                        sprite.color = ColorRef::Rgb(
-                            data.fore_color,
-                            data.fore_color_g,
-                            data.fore_color_b
-                        );
+                        sprite.color =
+                            ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b);
                         sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
                     }
                     // only backColor has hex
                     2 => {
                         sprite.color = ColorRef::PaletteIndex(data.fore_color);
-                        sprite.bg_color = ColorRef::Rgb(
-                            data.back_color,
-                            data.back_color_g,
-                            data.back_color_b
-                        );
+                        sprite.bg_color =
+                            ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b);
                     }
                     // fore+back color has hex
                     3 => {
-                        sprite.color = ColorRef::Rgb(
-                            data.fore_color,
-                            data.fore_color_g,
-                            data.fore_color_b
-                        );
-                        sprite.bg_color = ColorRef::Rgb(
-                            data.back_color,
-                            data.back_color_g,
-                            data.back_color_b
-                        );
+                        sprite.color =
+                            ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b);
+                        sprite.bg_color =
+                            ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b);
                     }
                     _ => {
                         web_sys::console::error_1(&JsValue::from_str(&format!(

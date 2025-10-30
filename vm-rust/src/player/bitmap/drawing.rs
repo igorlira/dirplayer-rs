@@ -636,13 +636,21 @@ impl Bitmap {
                 // Apply sprite color to non-background pixels
                 // For fonts/text: REPLACE foreground color instead of multiplying
                 // This works whether the font is black or white
-                let bg_color_resolved = 
-                resolve_color_ref(palettes, &params.bg_color, &src.palette_ref, src.original_bit_depth);
+                let bg_color_resolved = resolve_color_ref(
+                    palettes,
+                    &params.bg_color,
+                    &src.palette_ref,
+                    src.original_bit_depth,
+                );
 
                 if (src_r, src_g, src_b) != bg_color_resolved {
                     // This is a foreground pixel (not background)
-                    let apply_color = 
-                    resolve_color_ref(palettes, &params.color, &src.palette_ref, src.original_bit_depth);
+                    let apply_color = resolve_color_ref(
+                        palettes,
+                        &params.color,
+                        &src.palette_ref,
+                        src.original_bit_depth,
+                    );
                     if apply_color != (0, 0, 0) {
                         // Replace the foreground color with the sprite color
                         src_color = apply_color;

@@ -895,7 +895,11 @@ async fn player_call_global_handler(
         player_handle_scope_return(&scope);
         return Ok(scope.return_value);
     } else if BuiltInHandlerManager::has_async_handler(handler_name) {
-        return Box::pin(BuiltInHandlerManager::call_async_handler(handler_name, args)).await;
+        return Box::pin(BuiltInHandlerManager::call_async_handler(
+            handler_name,
+            args,
+        ))
+        .await;
     } else {
         return BuiltInHandlerManager::call_handler(handler_name, args);
     }

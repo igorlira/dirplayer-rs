@@ -689,7 +689,7 @@ impl CastMember {
                                         // Pattern is: 00 XX XX 2C where XX XX are ASCII hex digits
                                         let mut length_str = String::new();
                                         let mut length_pos = i + 1;
-                                        
+
                                         while length_pos < i + 3 && xmedia.raw_data[length_pos] != 0x2C {
                                             let byte = xmedia.raw_data[length_pos];
                                             if byte >= 0x30 && byte <= 0x39 { // 0-9
@@ -772,10 +772,7 @@ impl CastMember {
                                     }
                                     if !name.is_empty() {
                                         let name_str = String::from_utf8_lossy(&name).to_string();
-                                        debug!(
-                                            "📝 Found font reference: '{}'",
-                                            name_str
-                                        );
+                                        debug!("📝 Found font reference: '{}'", name_str);
                                         return Some(name_str);
                                     }
                                 }
@@ -789,10 +786,7 @@ impl CastMember {
                 let pfr_font_data = member_def.children.iter().find_map(|child_opt| {
                     if let Some(Chunk::XMedia(xmedia)) = child_opt {
                         if xmedia.is_pfr_font() {
-                            debug!(
-                                "🎨 Found PFR font data ({} bytes)",
-                                xmedia.raw_data.len()
-                            );
+                            debug!("🎨 Found PFR font data ({} bytes)", xmedia.raw_data.len());
                             return xmedia.parse_pfr_font();
                         }
                     }
@@ -1212,11 +1206,7 @@ impl CastMember {
 
                     for (i, c_opt) in member_def.children.iter().enumerate() {
                         match c_opt {
-                            Some(c) => debug!(
-                                "    child[{}] = {}",
-                                i,
-                                Self::chunk_type_name(c)
-                            ),
+                            Some(c) => debug!("    child[{}] = {}", i, Self::chunk_type_name(c)),
                             None => debug!("    child[{}] = None", i),
                         }
                     }

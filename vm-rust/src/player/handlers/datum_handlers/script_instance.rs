@@ -369,9 +369,7 @@ impl ScriptInstanceDatumHandlers {
                     ))
                 }
             };
-            let script_instance = player
-                .allocator
-                .get_script_instance(&script_instance_ref);
+            let script_instance = player.allocator.get_script_instance(&script_instance_ref);
             let script = player
                 .movie
                 .cast_manager

@@ -1,9 +1,13 @@
 use crate::{
-    director::{
-        lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool},
+    director::lingo::datum::{
+        datum_bool, Datum, StringChunkExpr, StringChunkSource, StringChunkType,
     },
     player::{
-        DirPlayer, HandlerExecutionResult, ScriptError, context_vars::{player_get_context_var, player_set_context_var, read_context_var_args}, datum_formatting::format_concrete_datum, datum_ref::DatumRef, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut
+        context_vars::{player_get_context_var, player_set_context_var, read_context_var_args},
+        datum_formatting::format_concrete_datum,
+        datum_ref::DatumRef,
+        handlers::datum_handlers::string_chunk::StringChunkUtils,
+        reserve_player_mut, DirPlayer, HandlerExecutionResult, ScriptError,
     },
 };
 
