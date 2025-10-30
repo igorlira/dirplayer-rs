@@ -15,12 +15,10 @@ use super::{
     types::TypeHandlers,
 };
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType},
+    director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        datum_formatting::format_concrete_datum, handlers::datum_handlers::xml::XmlHelper,
-        keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut,
-        reserve_player_ref, script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError,
+        DatumRef, DirPlayer, ScriptError, datum_formatting::{format_concrete_datum, format_datum}, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef
     },
 };
 
@@ -369,6 +367,7 @@ impl BuiltInHandlerManager {
             "vector" => TypeHandlers::vector(args),
             "color" => TypeHandlers::color(args),
             "keyPressed" => Self::key_pressed(args),
+            "showGlobals" => Self::show_globals(),
             _ => {
                 let formatted_args = reserve_player_ref(|player| {
                     let mut formatted_args = String::new();
@@ -386,6 +385,17 @@ impl BuiltInHandlerManager {
                 return Err(ScriptError::new(msg));
             }
         }
+    }
+
+    fn show_globals() -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            JsApi::dispatch_debug_message("-- Global Variables ---");
+            for (name, value) in &player.globals {
+                let value = format_datum(value, player);
+                JsApi::dispatch_debug_message(&format!("{} = {}", name, value));
+            }
+        });
+        Ok(DatumRef::Void)
     }
 
     pub fn key_pressed(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
