@@ -2,7 +2,7 @@ use log::error;
 use pest::{iterators::{Pair, Pairs}, pratt_parser::{Assoc, Op, PrattParser}, Parser};
 
 use crate::{
-    director::lingo::datum::{Datum, DatumType, datum_bool}, js_api::ascii_safe, player::{DirPlayer, bytecode::get_set::GetSetUtils, datum_operations::{add_datums, subtract_datums}, handlers::datum_handlers::player_call_datum_handler, player_call_global_handler, reserve_player_mut, script::{get_obj_prop, player_set_obj_prop}}
+    director::lingo::datum::{Datum, DatumType, datum_bool}, js_api::ascii_safe, player::{DirPlayer, bytecode::get_set::GetSetUtils, datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums}, handlers::datum_handlers::player_call_datum_handler, player_call_global_handler, reserve_player_mut, script::{get_obj_prop, player_set_obj_prop}}
 };
 
 use super::{sprite::ColorRef, DatumRef, ScriptError};
@@ -35,6 +35,9 @@ pub enum LingoExpr {
     Assignment(Box<LingoExpr>, Box<LingoExpr>),
     Add(Box<LingoExpr>, Box<LingoExpr>),
     Subtract(Box<LingoExpr>, Box<LingoExpr>),
+    Multiply(Box<LingoExpr>, Box<LingoExpr>),
+    Divide(Box<LingoExpr>, Box<LingoExpr>),
+    Concat(Box<LingoExpr>, Box<LingoExpr>),
 }
 
 /// Evaluate a static Lingo expression. This does not support function calls.
@@ -178,6 +181,21 @@ fn parse_lingo_expr_runtime(pairs: Pairs<'_, Rule>, pratt: &PrattParser<Rule>) -
                     let left = lhs?;
                     let right = rhs?;
                     Ok(LingoExpr::Subtract(Box::new(left), Box::new(right)))
+                }
+                Rule::multiply => {
+                    let left = lhs?;
+                    let right = rhs?;
+                    Ok(LingoExpr::Multiply(Box::new(left), Box::new(right)))
+                }
+                Rule::divide => {
+                    let left = lhs?;
+                    let right = rhs?;
+                    Ok(LingoExpr::Divide(Box::new(left), Box::new(right)))
+                }
+                Rule::concat => {
+                    let left = lhs?;
+                    let right = rhs?;
+                    Ok(LingoExpr::Concat(Box::new(left), Box::new(right)))
                 }
                 Rule::obj_prop => {
                     let obj_ref = lhs?;
@@ -450,6 +468,25 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 Ok(player.alloc_datum(result))
             })
         }
+        LingoExpr::Multiply(lhs, rhs) => {
+            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
+            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
+            reserve_player_mut(|player| {
+                let result = multiply_datums(left, right, player)?;
+                Ok(player.alloc_datum(result))
+            })
+        }
+        LingoExpr::Divide(lhs, rhs) => {
+            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
+            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
+            reserve_player_mut(|player| {
+                let result = divide_datums(left, right, player)?;
+                Ok(player.alloc_datum(result))
+            })
+        }
+        LingoExpr::Concat(_, _) => {
+            Err(ScriptError::new("Concat operation not implemented".to_string()))
+        }
     }
 }
 
@@ -498,6 +535,8 @@ pub async fn eval_lingo_expr_runtime(expr: String) -> Result<DatumRef, ScriptErr
 fn create_lingo_pratt_parser() -> PrattParser<Rule> {
     PrattParser::new()
         .op(Op::infix(Rule::add, Assoc::Left) | Op::infix(Rule::subtract, Assoc::Left))
+        .op(Op::infix(Rule::multiply, Assoc::Left) | Op::infix(Rule::divide, Assoc::Left))
+        .op(Op::infix(Rule::concat, Assoc::Left))
         .op(Op::infix(Rule::obj_prop, Assoc::Left))
 }
 
