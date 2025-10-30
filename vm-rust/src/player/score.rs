@@ -1025,7 +1025,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
 
 pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: i32) -> bool {
     // Don't test collision for invisible sprites
-    if !sprite.visible {
+    if !sprite.visible || !sprite.member.is_some() {
         return false;
     }
 

@@ -161,6 +161,7 @@ pub struct DirPlayer {
     pub last_mouse_down_time: i64,
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
+    pub click_on_sprite: i16,
     pub subscribed_member_refs: Vec<CastMemberRef>, // TODO move to debug module
     pub is_subscribed_to_channel_names: bool,       // TODO move to debug module
     pub font_manager: FontManager,
@@ -251,6 +252,7 @@ impl DirPlayer {
             sound_manager: sound_manager,
             date_objects: HashMap::new(),
             math_objects: HashMap::new(),
+            click_on_sprite: 0,
         };
 
         // Initialize the actorList as a global variable
@@ -593,6 +595,7 @@ impl DirPlayer {
                     .unwrap_or(&DatumRef::Void)
                     .clone())
             }
+            "clickOn" => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
             _ => {
                 let datum = self.movie.get_prop(prop)?;
                 Ok(self.alloc_datum(datum))

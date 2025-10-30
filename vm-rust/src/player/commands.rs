@@ -320,9 +320,13 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                             }
                             _ => {}
                         }
+                        player.mouse_down_sprite = sprite_number as i16;
+                        player.click_on_sprite = sprite_number as i16;
+                    } else {
+                        player.mouse_down_sprite = -1;
+                        player.click_on_sprite = 0;
                     }
 
-                    player.mouse_down_sprite = sprite_number as i16;
                     sprite.map(|x| x.script_instance_list.clone())
                 } else {
                     None
