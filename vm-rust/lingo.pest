@@ -1,6 +1,6 @@
 alpha           =  { 'a'..'z' | 'A'..'Z' }
 digit           =  { '0'..'9' }
-ident           =  { !digit ~ (alpha | digit)+ }
+ident           = @{ !digit ~ (alpha | digit | "_")+ }
 string_interior =  {
     (!("\"") // unless the next character is a quotation mark
   // followed by the correct amount of number signs,
@@ -9,10 +9,10 @@ string_interior =  {
 }
 WHITESPACE = _{ " " | "\t" | ("\\" ~ ("\r\n" | "\n" | "\r")) | "\r\n" | "\n" | "\r" }
 
-symbol     =  { "#" ~ (ident) }
+symbol     =  ${ "#" ~ ident }
 nohash_symbol = { (ident) }
 quote      = _{ "\"" }
-string     =  { quote ~ (string_interior) ~ quote }
+string     =  ${ quote ~ (string_interior) ~ quote }
 string_empty = { "EMPTY" }
 empty_list =  { "[]" }
 multi_list =  { "[" ~ (expr) ~ ("," ~ (expr))* ~ "]" }
@@ -21,12 +21,12 @@ bool_true       =  { "true" | "True" | "TRUE" }
 bool_false      =  { "false" | "False" | "FALSE" }
 
 number_sign    = { "+" | "-" }
-float_exponent = { "e" ~ number_sign? ~ digit+ }
+float_exponent = ${ "e" ~ number_sign? ~ digit+ }
 
-number_int     = { (number_sign?) ~ (digit+) }
-number_float_a = { (number_sign?) ~ (digit*) ~ "." ~ (digit+) ~ (float_exponent?) }
-number_float_b = { (number_sign?) ~ (digit+) ~ "." ~ (digit*) ~ (float_exponent?) }
-number_float   = { number_float_a | number_float_b }
+number_int     = ${ (number_sign?) ~ (digit+) }
+number_float_a = ${ (number_sign?) ~ (digit*) ~ "." ~ (digit+) ~ (float_exponent?) }
+number_float_b = ${ (number_sign?) ~ (digit+) ~ "." ~ (digit*) ~ (float_exponent?) }
+number_float   = ${ number_float_a | number_float_b }
 
 prop_list_key   = _{ (symbol | nohash_symbol | string | number_float | number_int | void | bool_true | bool_false | string_empty) }
 prop_list_pair  = { prop_list_key ~ ":" ~ expr }
@@ -44,6 +44,17 @@ rgb_color     = { rgb_num_color | rgb_str_color }
 rect          = { "rect" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ ")" }
 point         = { "point" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ ")" }
 
-expr       =  { (symbol | list | string | prop_list | number_float | number_int | rgb_color | void | rect | bool_true | bool_false | string_empty | point) }
+parens_expr = _{ "(" ~ expr ~ ")" }
+expr       =  { (symbol | list | string | prop_list | number_float | number_int | rgb_color | void | rect | bool_true | bool_false | string_empty | point | parens_expr | handler_call) }
 eval_expr  = _{ SOI ~ expr ~ EOI }
 ident_list = _{ !digit ~ ident ~ (" " ~ ident)+ }
+
+handler_call_args = { expr ~ ("," ~ expr)* }
+command_inline_args_comma = _{ expr ~ ("," ~ expr)+ }
+command_inline_args_space = _{ expr ~ expr+ }
+command_inline_args = { command_inline_args_comma | command_inline_args_space | expr }
+handler_call = { ident ~ "(" ~ handler_call_args? ~ ")" }
+command_inline = { ident ~ command_inline_args? }
+command = _{ handler_call | command_inline }
+
+command_eval_expr  = _{ SOI ~ command ~ EOI }

@@ -87,7 +87,12 @@ export const studioLayoutModel = Model.fromJson({
                 type: "tab",
                 name: "Member",
                 component: "member",
-              }
+              },
+              {
+                type: "tab",
+                name: "Message",
+                component: "message",
+              },
             ],
           },
         ],

@@ -17,6 +17,7 @@ import DebugInspector from '../DebugInspector';
 import MemberInspector from '../MemberInspector';
 import PropertyInspector from '../PropertyInspector';
 import { studioLayoutModel } from './layout';
+import MessageInspector from '../MessageInspector';
 
 const StudioLayout = () => {
   const castSnapshots = useAppSelector((state) => state.vm.castSnapshots);
@@ -74,6 +75,8 @@ const StudioLayout = () => {
       return selectedMemberId ? <MemberInspector memberId={selectedMemberId} /> : null;
     } else if (component === "properties") {
       return <PropertyInspector selectedObject={selectedObject} />;
+    } else if (component === "message") {
+      return <MessageInspector />;
     }
   }
 

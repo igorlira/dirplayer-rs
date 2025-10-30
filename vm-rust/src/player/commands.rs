@@ -10,8 +10,8 @@ use crate::{
     console_warn,
     director::lingo::datum::{Datum, TimeoutRef},
     js_api::JsApi,
-    player::PLAYER_OPT,
-    utils::ToHexString,
+    player::{eval::{eval_lingo_command}, PLAYER_OPT},
+    utils::{log_i, ToHexString},
 };
 
 use super::{
@@ -60,6 +60,7 @@ pub enum PlayerVMCommand {
     SubscribeToMember(CastMemberRef),
     UnsubscribeFromMember(CastMemberRef),
     TriggerAlertHook,
+    EvalLingoCommand(String),
 }
 
 pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
@@ -110,6 +111,7 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
             format!("UnsubscribeFromMember({:?})", member_ref)
         }
         PlayerVMCommand::TriggerAlertHook => "TriggerAlertHook".to_string(),
+        PlayerVMCommand::EvalLingoCommand(cmd) => format!("EvalLingoCommand({})", cmd),
     }
 }
 
@@ -491,6 +493,10 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if let Some((receiver, handler, args)) = call_params {
                 player_call_script_handler(receiver, handler, &args).await?;
             }
+        }
+        PlayerVMCommand::EvalLingoCommand(command) => {
+            let result = eval_lingo_command(command).await?;
+            return Ok(result)
         }
     }
     Ok(DatumRef::Void)

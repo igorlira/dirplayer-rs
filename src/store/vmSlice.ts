@@ -24,6 +24,7 @@ interface VMSliceState {
   subscribedMemberTokens: TMemberSubscription[],
   isMovieLoaded: boolean,
   movieChunkList: Partial<Record<number, JsBridgeChunk>>,
+  debugMessages: string[],
 }
 
 const initialState: VMSliceState = {
@@ -41,6 +42,7 @@ const initialState: VMSliceState = {
   subscribedMemberTokens: [],
   isMovieLoaded: false,
   movieChunkList: {},
+  debugMessages: [],
 }
 
 interface CastMemberListChangedPayload {
@@ -232,7 +234,13 @@ const vmSlice = createSlice({
         isMovieLoaded: true,
       }
     },
-  },
+    debugMessageAdded: (state, action: PayloadAction<string>) => {
+      return {
+        ...state,
+        debugMessages: [...state.debugMessages, action.payload],
+      }
+    },
+  }
 })
 
 export const selectCastSnapshot = (state: VMSliceState, number: number) => state.castSnapshots[number]
@@ -245,7 +253,8 @@ export const selectCurrentScope = (state: VMSliceState) => state.scopes.at(state
 export const selectScriptError = (state: VMSliceState) => state.scriptError
 export const selectBreakpoints = (state: VMSliceState, scriptName?: string) => state.breakpoints.filter(b => !scriptName || b.script_name === scriptName)
 export const selectGlobals = (state: VMSliceState) => state.globals
+export const selectDebugMessages = (state: VMSliceState) => state.debugMessages
 
 // Action creators are generated for each case reducer function
-export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, movieChunkListChanged } = vmSlice.actions
+export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, movieChunkListChanged, debugMessageAdded } = vmSlice.actions
 export default vmSlice.reducer

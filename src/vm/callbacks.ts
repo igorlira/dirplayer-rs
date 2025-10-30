@@ -1,6 +1,6 @@
 import { ICastMemberRef, JsBridgeBreakpoint, JsBridgeChunk, OnScriptErrorData, registerVmCallbacks } from "dirplayer-js-api";
 import store from "../store";
-import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, frameChanged, globalsChanged, movieChunkListChanged, movieLoaded, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
+import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, debugMessageAdded, frameChanged, globalsChanged, movieChunkListChanged, movieLoaded, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import { OnMovieLoadedCallbackData, trigger_timeout } from 'vm-rust'
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
@@ -59,7 +59,8 @@ export function initVmCallbacks() {
       store.dispatch(globalsChanged(globals))
     },
     onDebugMessage: (message: string) => {
-      console.log("-- ", message);
+      console.log(message);
+      store.dispatch(debugMessageAdded(message));
     },
     onScheduleTimeout: (timeoutName: string, periodMs: number) => {
       const handle = setInterval(() => {

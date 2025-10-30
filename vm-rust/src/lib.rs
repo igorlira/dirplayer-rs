@@ -224,6 +224,11 @@ pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
     });
 }
 
+#[wasm_bindgen]
+pub fn eval_command(command: String) {
+    player_dispatch(PlayerVMCommand::EvalLingoCommand(command));
+}
+
 #[wasm_bindgen(start)]
 pub fn main() {
     set_panic_hook();

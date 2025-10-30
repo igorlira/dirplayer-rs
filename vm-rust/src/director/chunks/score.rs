@@ -4,12 +4,10 @@ use log::error;
 use crate::{io::reader::DirectorExt, utils::log_i};
 
 use crate::player::datum_ref::DatumRef;
-use crate::player::eval::eval_lingo;
+use crate::player::eval::eval_lingo_expr_static;
 
 use web_sys;
 use web_sys::console;
-
-use crate::PLAYER_OPT;
 
 #[allow(dead_code)]
 pub struct ScoreFrameDelta {
@@ -641,13 +639,9 @@ impl ScoreChunk {
                                                             let clean = proplist_string
                                                                 .trim_end_matches('\0');
                                                             if clean.starts_with('[') {
-                                                                let player = unsafe {
-                                                                    PLAYER_OPT.as_mut().unwrap()
-                                                                };
                                                                 // TODO: Replace `eval_lingo` with a parser
-                                                                if let Ok(proplist) = eval_lingo(
+                                                                if let Ok(proplist) = eval_lingo_expr_static(
                                                                     clean.to_owned(),
-                                                                    player,
                                                                 ) {
                                                                     secondary
                                                                         .parameter

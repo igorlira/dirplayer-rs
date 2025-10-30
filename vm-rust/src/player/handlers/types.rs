@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use log::error;
 
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType},
@@ -7,13 +8,13 @@ use crate::{
         bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef},
         compare::sort_datums,
         datum_formatting::format_datum,
-        eval::eval_lingo,
+        eval::eval_lingo_expr_runtime,
         geometry::IntRect,
         reserve_player_mut, reserve_player_ref,
         sprite::{ColorRef, CursorRef},
         xtra::manager::{create_xtra_instance, is_xtra_registered},
         DatumRef, DirPlayer, MathObject, ScriptError, XmlDocument,
-    },
+    }
 };
 
 use super::datum_handlers::{
@@ -308,14 +309,21 @@ impl TypeHandlers {
         })
     }
 
-    pub fn value(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let expr = player.get_datum(&args[0]);
-            match expr {
-                Datum::String(s) => eval_lingo(s.to_owned(), player),
-                _ => Ok(args[0].clone()),
+    pub async fn value(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let eval_expr = reserve_player_mut(|player| {
+            let datum = player.get_datum(&args[0]);
+            match datum {
+                Datum::String(s) => Some(s.clone()),
+                _ => None
             }
-        })
+        });
+        match eval_expr {
+            Some(s) => eval_lingo_expr_runtime(s.to_owned()).await.or_else(|err| {
+                error!("value() eval error, returning Void: {}", &err.message);
+                Ok(DatumRef::Void)
+            }),
+            _ => Ok(args[0].clone()),
+        }
     }
 
     pub fn void(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

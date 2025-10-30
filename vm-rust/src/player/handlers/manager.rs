@@ -74,7 +74,7 @@ impl BuiltInHandlerManager {
                 line.push_str(&format_concrete_datum(&arg, player));
                 i += 1;
             }
-            JsApi::dispatch_debug_message(line.as_str());
+            JsApi::dispatch_debug_message(format!("-- {}", line.as_str()).as_str());
             Ok(())
         })?;
         Ok(DatumRef::Void)
@@ -192,6 +192,7 @@ impl BuiltInHandlerManager {
             "callAncestor" => true,
             "sendSprite" => true,
             "sendAllSprites" => true,
+            "value" => true,
             _ => false,
         }
     }
@@ -207,6 +208,7 @@ impl BuiltInHandlerManager {
             "callAncestor" => TypeHandlers::call_ancestor(args).await,
             "sendSprite" => MovieHandlers::send_sprite(args).await,
             "sendAllSprites" => MovieHandlers::send_all_sprites(args).await,
+            "value" => TypeHandlers::value(args).await,
             _ => {
                 let msg = format!("No built-in async handler: {}", name);
                 return Err(ScriptError::new(msg));
@@ -230,7 +232,6 @@ impl BuiltInHandlerManager {
             "floatp" => TypeHandlers::floatp(args),
             "offset" => StringHandlers::offset(args),
             "length" => StringHandlers::length(args),
-            "value" => TypeHandlers::value(args),
             "script" => MovieHandlers::script(args),
             "void" => TypeHandlers::void(args),
             "param" => Self::param(args),
