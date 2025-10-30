@@ -78,20 +78,17 @@ impl GetSetBytecodeHandler {
     }
 
     pub fn set_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        let player_immutable = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        let current_obj = player_immutable.get_ctx_current_bytecode(ctx).obj as u16;
+        let prop_name = get_name(&player_immutable, &ctx, current_obj)
+            .ok_or_else(|| ScriptError::new("Failed to get property name".to_string()))?
+            .to_owned();
+
         reserve_player_mut(|player| {
-            let (value_ref, receiver, script_ref, prop_name) = {
-                let current_obj = player.get_ctx_current_bytecode(ctx).obj as u16;
-                let prop_name = get_name(&player, &ctx, current_obj)
-                    .ok_or_else(|| ScriptError::new("Failed to get property name".to_string()))?
-                    .to_owned();
+            let (value_ref, receiver, script_ref) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 let value_ref = scope.stack.pop().unwrap();
-                (
-                    value_ref,
-                    scope.receiver.clone(),
-                    scope.script_ref.clone(),
-                    prop_name,
-                )
+                (value_ref, scope.receiver.clone(), scope.script_ref.clone())
             };
 
             match receiver {
@@ -150,6 +147,19 @@ impl GetSetBytecodeHandler {
             )
             .unwrap()
             .clone();
+
+            if let Datum::XmlRef(xml_id) = player.get_datum(&obj_datum_ref) {
+                let result_ref = crate::player::handlers::datum_handlers::xml::XmlDatumHandlers::get_prop(
+                    player,
+                    &obj_datum_ref,
+                    &prop_name,
+                )?;
+
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.push(result_ref);
+
+                return Ok(HandlerExecutionResult::Advance);
+            }
 
             let result_ref = get_obj_prop(player, &obj_datum_ref, &prop_name)?;
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -479,7 +489,22 @@ impl GetSetBytecodeHandler {
                         )));
                     }
                 }
+                crate::director::lingo::datum::DatumType::XmlRef => {
+                    crate::player::handlers::datum_handlers::xml::XmlDatumHandlers::get_prop(
+                        player,
+                        &obj_ref,
+                        &prop_name
+                    )?
+                }
                 crate::director::lingo::datum::DatumType::String => match prop_name.as_str() {
+                    "length" => {
+                        let len = if let Datum::String(s) = player.get_datum(&obj_ref) {
+                            s.len() as i32
+                        } else {
+                            unreachable!()
+                        };
+                        player.alloc_datum(Datum::Int(len))
+                    }
                     "char" => {
                         use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
                         let (s_len, s_clone) = if let Datum::String(s) = player.get_datum(&obj_ref)
@@ -572,9 +597,9 @@ impl GetSetBytecodeHandler {
                             }
                         } else {
                             return Err(ScriptError::new(format!(
-                "Cannot use numeric index '{}' on script instance - no indexable property found (tried: aSquares, list, items, data)",
-                prop_name
-              )));
+                                "Cannot use numeric index '{}' on script instance - no indexable property found (tried: aSquares, list, items, data)",
+                                prop_name
+                            )));
                         }
                     } else {
                         // Regular property access

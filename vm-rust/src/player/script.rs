@@ -408,7 +408,7 @@ pub async fn player_set_obj_prop(
                 &key_ref,
                 value_ref,
                 player,
-                true,
+                false,
                 prop_name.clone(),
             )
         }),
