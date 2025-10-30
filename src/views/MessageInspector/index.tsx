@@ -6,6 +6,8 @@ import { selectDebugMessages } from '../../store/vmSlice';
 
 export default function MessageInspector() {
   const [command, setCommand] = useState('');
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
   const debugMessages = useAppSelector(({ vm }) => selectDebugMessages(vm)).join('\n');
   const messageLogRef = useRef<HTMLDivElement>(null);
 
@@ -15,7 +17,11 @@ export default function MessageInspector() {
 
   const handleEvaluate = () => {
     try {
-      eval_command(command);
+      if (command.trim()) {
+        eval_command(command);
+        setHistory(prev => [...prev, command]);
+        setHistoryIndex(-1);
+      }
       setCommand('');
     } catch (err) {
       console.error(err);
@@ -25,6 +31,25 @@ export default function MessageInspector() {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       handleEvaluate();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (history.length > 0) {
+        const newIndex = historyIndex === -1 ? history.length - 1 : Math.max(0, historyIndex - 1);
+        setHistoryIndex(newIndex);
+        setCommand(history[newIndex]);
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (historyIndex !== -1) {
+        const newIndex = Math.min(history.length - 1, historyIndex + 1);
+        if (newIndex === history.length - 1 && historyIndex === history.length - 1) {
+          setHistoryIndex(-1);
+          setCommand('');
+        } else {
+          setHistoryIndex(newIndex);
+          setCommand(history[newIndex]);
+        }
+      }
     }
   };
 
