@@ -521,6 +521,7 @@ pub fn get_obj_prop(
         Datum::SoundChannel(_) => Ok(player.alloc_datum(SoundChannelDatumHandlers::get_prop(
             player, obj_ref, &prop_name,
         )?)),
+        Datum::MovieRef => player.get_movie_prop(prop_name),
         _ => {
             if prop_name == "ilk" {
                 let ilk = TypeUtils::get_datum_ilk(&obj_clone)?;

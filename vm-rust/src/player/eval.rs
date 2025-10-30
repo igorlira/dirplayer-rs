@@ -2,7 +2,7 @@ use log::error;
 use pest::{iterators::{Pair, Pairs}, pratt_parser::{Assoc, Op, PrattParser}, Parser};
 
 use crate::{
-    director::{lingo::datum::{datum_bool, Datum, DatumType}}, js_api::ascii_safe, player::{bytecode::get_set::GetSetUtils, handlers::datum_handlers::player_call_datum_handler, player_call_global_handler, reserve_player_mut, reserve_player_ref, script::get_obj_prop, DirPlayer}
+    director::lingo::datum::{datum_bool, Datum, DatumType}, js_api::ascii_safe, player::{bytecode::get_set::GetSetUtils, handlers::datum_handlers::player_call_datum_handler, player_call_global_handler, reserve_player_mut, script::{get_obj_prop, player_set_obj_prop}, DirPlayer}
 };
 
 use super::{sprite::ColorRef, DatumRef, ScriptError};
@@ -32,6 +32,7 @@ pub enum LingoExpr {
     RectLiteral((i32, i32, i32, i32)),
     PointLiteral((i32, i32)),
     Identifier(String),
+    Assignment(Box<LingoExpr>, Box<LingoExpr>),
 }
 
 /// Evaluate a static Lingo expression. This does not support function calls.
@@ -314,6 +315,23 @@ pub fn parse_lingo_rule_runtime(pair: Pair<'_, Rule>, pratt: &PrattParser<Rule>)
             let str_val = pair.as_str();
             Ok(LingoExpr::Identifier(str_val.to_owned()))
         }
+        Rule::assignment => {
+            let mut inner = pair.into_inner();
+            let left_pair = inner.next().unwrap();
+            let right_pair = inner.next().unwrap();
+
+            let left_expr = match left_pair.as_rule() {
+                Rule::ident => {
+                    let ident_name = left_pair.as_str();
+                    LingoExpr::Identifier(ident_name.to_owned())
+                },
+                _ => parse_lingo_rule_runtime(left_pair, pratt)?,
+            };
+
+            let right_expr = parse_lingo_expr_runtime(right_pair.into_inner(), pratt)?;
+
+            Ok(LingoExpr::Assignment(Box::new(left_expr), Box::new(right_expr)))
+        }
         _ => Err(ScriptError::new(format!(
             "Invalid runtime Lingo expression {:?}",
             inner_rule
@@ -412,6 +430,24 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 datum_args.push(datum);
             }
             player_call_datum_handler(&obj_datum, handler_name, &datum_args).await
+        }
+        LingoExpr::Assignment(left_expr, right_expr) => {
+            let right_datum = Box::pin(eval_lingo_expr_ast_runtime(right_expr.as_ref())).await?;
+
+            match left_expr.as_ref() {
+                LingoExpr::Identifier(ident_name) => {
+                    reserve_player_mut(|player| {
+                        player.globals.insert(ident_name.to_owned(), right_datum.clone());
+                        Ok(right_datum)
+                    })
+                },
+                LingoExpr::ObjProp(obj_expr, prop_name) => {
+                    let obj_datum = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
+                    player_set_obj_prop( &obj_datum, prop_name, &right_datum).await?;
+                    Ok(DatumRef::Void)
+                },
+                _ => Err(ScriptError::new("Invalid assignment left-hand side".to_string())),
+            }
         }
     }
 }
