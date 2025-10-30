@@ -1,5 +1,5 @@
 alpha           =  { 'a'..'z' | 'A'..'Z' }
-digit           =  { '0'..'9' }
+digit           =  _{ '0'..'9' }
 ident           = @{ !digit ~ (alpha | digit | "_")+ }
 string_interior =  {
     (!("\"") // unless the next character is a quotation mark
@@ -32,9 +32,9 @@ prop_list_key   = _{ (symbol | nohash_symbol | string | number_float | number_in
 prop_list_pair  = { prop_list_key ~ ":" ~ expr }
 empty_prop_list = { "[" ~ ":" ~ "]" }
 multi_prop_list = { "[" ~ (prop_list_pair) ~ ("," ~ (prop_list_pair))* ~ "]" }
-prop_list       = { empty_prop_list | multi_prop_list }
+prop_list       = _{ empty_prop_list | multi_prop_list }
 
-list = { empty_list | multi_list }
+list = _{ empty_list | multi_list }
 
 rgb_num_arg   = { digit{,3} }
 rgb_num_color = { "rgb" ~ "(" ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ ")" }
@@ -45,7 +45,7 @@ rect          = { "rect" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (numb
 point         = { "point" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ ")" }
 
 parens_expr = _{ "(" ~ expr ~ ")" }
-expr       =  { (symbol | list | string | prop_list | number_float | number_int | rgb_color | void | rect | bool_true | bool_false | string_empty | point | parens_expr | ident | handler_call) }
+primitive       =  _{ (symbol | list | string | prop_list | number_float | number_int | rgb_color | void | rect | bool_true | bool_false | string_empty | point | parens_expr | handler_call | ident) }
 eval_expr  = _{ SOI ~ expr ~ EOI }
 ident_list = _{ !digit ~ ident ~ (" " ~ ident)+ }
 
@@ -56,5 +56,9 @@ command_inline_args = { command_inline_args_comma | command_inline_args_space | 
 handler_call = { ident ~ "(" ~ handler_call_args? ~ ")" }
 command_inline = { ident ~ command_inline_args? }
 command = _{ handler_call | command_inline }
+obj_prop = { "." }
+add = { "+" }
+bin_op = _{ obj_prop | add }
+expr = { primitive ~ (bin_op ~ primitive)* }
 
 command_eval_expr  = _{ SOI ~ command ~ EOI }
