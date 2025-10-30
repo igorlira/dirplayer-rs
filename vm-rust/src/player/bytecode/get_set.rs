@@ -50,6 +50,20 @@ impl GetSetUtils {
             _ => player.set_movie_prop(prop_name, value),
         }
     }
+
+    pub fn get_top_level_prop(
+        player: &mut DirPlayer,
+        prop_name: &str,
+    ) -> Result<Datum, ScriptError> {
+        match prop_name {
+            "_player" => Ok(Datum::PlayerRef),
+            "_movie" => Ok(Datum::MovieRef),
+            _ => Err(ScriptError::new(format!(
+                "Invalid top level prop: {}",
+                prop_name
+            ))),
+        }
+    }
 }
 
 impl GetSetBytecodeHandler {
@@ -738,14 +752,7 @@ impl GetSetBytecodeHandler {
             )
             .unwrap()
             .clone();
-            let result = match prop_name.as_str() {
-                "_player" => Ok(Datum::PlayerRef),
-                "_movie" => Ok(Datum::MovieRef),
-                _ => Err(ScriptError::new(format!(
-                    "Invalid top level prop: {}",
-                    prop_name
-                ))),
-            }?;
+            let result = GetSetUtils::get_top_level_prop(player, prop_name.as_str())?;
             let result_id = player.alloc_datum(result);
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_id);

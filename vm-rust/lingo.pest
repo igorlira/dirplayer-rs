@@ -45,7 +45,7 @@ rect          = { "rect" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (numb
 point         = { "point" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ ")" }
 
 parens_expr = _{ "(" ~ expr ~ ")" }
-expr       =  { (symbol | list | string | prop_list | number_float | number_int | rgb_color | void | rect | bool_true | bool_false | string_empty | point | parens_expr | handler_call) }
+expr       =  { (symbol | list | string | prop_list | number_float | number_int | rgb_color | void | rect | bool_true | bool_false | string_empty | point | parens_expr | ident | handler_call) }
 eval_expr  = _{ SOI ~ expr ~ EOI }
 ident_list = _{ !digit ~ ident ~ (" " ~ ident)+ }
 

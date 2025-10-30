@@ -2,7 +2,7 @@ use log::error;
 use pest::{iterators::{Pair, Pairs}, Parser};
 
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType}, js_api::ascii_safe, player::{player_call_global_handler, reserve_player_mut}
+    director::lingo::datum::{datum_bool, Datum, DatumType}, js_api::ascii_safe, player::{bytecode::get_set::GetSetUtils, player_call_global_handler, reserve_player_mut}
 };
 
 use super::{sprite::ColorRef, DatumRef, ScriptError};
@@ -243,6 +243,17 @@ pub async fn eval_lingo_pair_runtime(pair: Pair<'_, Rule>) -> Result<DatumRef, S
             Ok(player.alloc_datum(Datum::List(DatumType::List, vec![], false)))
         }),
         Rule::handler_call | Rule::command_inline => eval_lingo_call(pair.into_inner()).await,
+        Rule::ident => {
+            let str_val = pair.as_str();
+            reserve_player_mut(|player| {
+                if let Some(global_ref) = player.globals.get(str_val) {
+                    Ok(global_ref.clone())
+                } else {
+                    let result = GetSetUtils::get_top_level_prop(player, str_val)?;
+                    Ok(player.alloc_datum(result))
+                }
+            })
+        }
         _ => Err(ScriptError::new(format!(
             "Invalid runtime Lingo expression {:?}",
             inner_rule
