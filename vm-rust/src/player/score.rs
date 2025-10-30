@@ -986,6 +986,14 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
+        "puppet" => borrow_sprite_mut(
+            sprite_id,
+            |_| {},
+            |sprite, _| {
+                sprite.puppet = value.to_bool()?;
+                Ok(())
+            },
+        ),
         prop_name => borrow_sprite_mut(
             sprite_id,
             |_| {},
