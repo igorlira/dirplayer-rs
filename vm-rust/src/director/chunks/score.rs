@@ -42,6 +42,11 @@ pub struct ScoreFrameChannelData {
     pub pos_x: u16,
     pub height: u16,
     pub width: u16,
+    pub color_flag: u8,
+    pub fore_color_g: u8,
+    pub back_color_g: u8,
+    pub fore_color_b: u8,
+    pub back_color_b: u8,
 }
 
 impl ScoreFrameChannelData {
@@ -83,6 +88,34 @@ impl ScoreFrameChannelData {
             .read_u16()
             .map_err(|e| format!("Failed to read width: {:?}", e))?;
 
+        let unk3 = reader
+            .read_u8()
+            .map_err(|e| format!("Failed to read unk3: {:?}", e))?;
+        let color_flag = (unk3 & 0xF0) >> 4;
+        let unk3_2  = unk3 & 0x0F;
+
+        let unk4 = reader
+            .read_u8()
+            .map_err(|e| format!("Failed to read unk4: {:?}", e))?;
+        let unk5 = reader
+            .read_u8()
+            .map_err(|e| format!("Failed to read unk5: {:?}", e))?;
+        let unk6 = reader
+            .read_u8()
+            .map_err(|e| format!("Failed to read unk6: {:?}", e))?;
+        let fore_color_g = reader
+            .read_u8()
+            .map_err(|e| format!("Failed to read fore_color_g: {:?}", e))?;
+        let back_color_g = reader
+            .read_u8()
+            .map_err(|e| format!("Failed to read back_color_g: {:?}", e))?;
+        let fore_color_b = reader
+            .read_u8()
+            .map_err(|e| format!("Failed to read fore_color_b: {:?}", e))?;
+        let back_color_b = reader
+            .read_u8()
+            .map_err(|e| format!("Failed to read back_color_b: {:?}", e))?;
+
         Ok(ScoreFrameChannelData {
             sprite_type,
             ink,
@@ -96,6 +129,11 @@ impl ScoreFrameChannelData {
             pos_x,
             height,
             width,
+            color_flag,
+            fore_color_g,
+            back_color_g,
+            fore_color_b,
+            back_color_b,
         })
     }
 }

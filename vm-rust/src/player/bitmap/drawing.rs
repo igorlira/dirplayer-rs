@@ -630,11 +630,27 @@ impl Bitmap {
 
                 let (src_r, src_g, src_b, src_a) =
                     src.get_pixel_color_with_alpha(palettes, src_x_int, src_y_int);
-                let src_color = (src_r, src_g, src_b);
+                let mut src_color = (src_r, src_g, src_b);
                 let src_alpha = src_a as f32 / 255.0;
 
+                // Apply sprite color to non-background pixels
+                // For fonts/text: REPLACE foreground color instead of multiplying
+                // This works whether the font is black or white
+                let bg_color_resolved = 
+                resolve_color_ref(palettes, &params.bg_color, &src.palette_ref, src.original_bit_depth);
+
+                if (src_r, src_g, src_b) != bg_color_resolved {
+                    // This is a foreground pixel (not background)
+                    let apply_color = 
+                    resolve_color_ref(palettes, &params.color, &src.palette_ref, src.original_bit_depth);
+                    if apply_color != (0, 0, 0) {
+                        // Replace the foreground color with the sprite color
+                        src_color = apply_color;
+                    }
+                }
+
                 // Skip background
-                if ink == 36 && src_color == bg_color {
+                if ink == 36 && (src_r, src_g, src_b) == bg_color {
                     src_x += if is_flipped_h { -step_x } else { step_x };
                     continue;
                 }
