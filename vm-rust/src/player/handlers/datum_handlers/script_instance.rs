@@ -1,5 +1,5 @@
 use crate::{
-    director::lingo::datum::{datum_bool, Datum},
+    director::lingo::datum::{datum_bool, Datum, DatumType},
     player::{
         allocator::ScriptInstanceAllocatorTrait,
         cast_lib::CastMemberRef,
@@ -359,6 +359,33 @@ impl ScriptInstanceDatumHandlers {
         })
     }
 
+    pub fn handlers(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let script_instance_ref = match player.get_datum(datum) {
+                Datum::ScriptInstanceRef(instance_ref) => instance_ref.clone(),
+                _ => {
+                    return Err(ScriptError::new(
+                        "Cannot get handlers of non-script instance".to_string(),
+                    ))
+                }
+            };
+            let script_instance = player
+                .allocator
+                .get_script_instance(&script_instance_ref);
+            let script = player
+                .movie
+                .cast_manager
+                .get_script_by_ref(&script_instance.script)
+                .unwrap();
+            let handler_names = script.handler_names.clone();
+            let handler_name_datums = handler_names
+                .iter()
+                .map(|name| player.alloc_datum(Datum::Symbol(name.clone())))
+                .collect();
+            Ok(player.alloc_datum(Datum::List(DatumType::List, handler_name_datums, false)))
+        })
+    }
+
     pub fn call(
         datum: &DatumRef,
         handler_name: &String,
@@ -374,6 +401,7 @@ impl ScriptInstanceDatumHandlers {
             "getaProp" => Self::get_a_prop(datum, args),
             "getAt" => Self::get_at(datum, args),
             "count" => Self::count(datum, args),
+            "handlers" => Self::handlers(datum, args),
             _ => Err(ScriptError::new_code(
                 ScriptErrorCode::HandlerNotFound,
                 format!("No handler {handler_name} for script instance datum"),

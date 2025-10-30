@@ -1,5 +1,5 @@
 use crate::{
-    director::lingo::datum::{datum_bool, Datum},
+    director::lingo::datum::{datum_bool, Datum, DatumType},
     player::{
         allocator::ScriptInstanceAllocatorTrait,
         cast_lib::CastMemberRef,
@@ -85,10 +85,35 @@ impl ScriptDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
             "handler" => Self::handler(datum, args),
+            "handlers" => Self::handlers(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for script datum"
             ))),
         }
+    }
+
+    pub fn handlers(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let script_ref = match player.get_datum(datum) {
+                Datum::ScriptRef(script_ref) => script_ref,
+                _ => {
+                    return Err(ScriptError::new(
+                        "Cannot get handlers of non-script".to_string(),
+                    ))
+                }
+            };
+            let script = player
+                .movie
+                .cast_manager
+                .get_script_by_ref(script_ref)
+                .unwrap();
+            let handler_names = script.handler_names.clone();
+            let handler_name_datums = handler_names
+                .iter()
+                .map(|name| player.alloc_datum(Datum::Symbol(name.clone())))
+                .collect();
+            Ok(player.alloc_datum(Datum::List(DatumType::List, handler_name_datums, false)))
+        })
     }
 
     pub fn handler(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

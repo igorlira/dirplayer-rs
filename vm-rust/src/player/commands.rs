@@ -495,6 +495,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             }
         }
         PlayerVMCommand::EvalLingoCommand(command) => {
+            JsApi::dispatch_debug_message(&command);
             let result = eval_lingo_command(command).await?;
             return Ok(result)
         }
