@@ -1,5 +1,6 @@
 use binary_reader::{BinaryReader, Endian};
 
+use log::debug;
 use wasm_bindgen::JsValue;
 use web_sys::console;
 
@@ -133,18 +134,15 @@ impl SoundChunk {
             .map(|b| format!("{:02X} ", b))
             .collect::<Vec<String>>()
             .join(" ");
-        console::log_1(
-            &format!(
-                "WAV Hex Dump (Full File, {} bytes):\n{}",
-                data_test.len(),
-                hex_dump
-            )
-            .into(),
+        debug!(
+            "WAV Hex Dump (Full File, {} bytes):\n{}",
+            data_test.len(),
+            hex_dump
         );
 
         reader.pos = r_begin;
 
-        console::log_1(&"Parsing Director MX 2004 snd chunk (Finalized Multi-offset check)".into());
+        debug!("Parsing Director MX 2004 snd chunk (Finalized Multi-offset check)");
 
         let original_endian = reader.endian;
         reader.endian = Endian::Big;
@@ -240,12 +238,9 @@ impl SoundChunk {
         }
 
         // Log the selection
-        console::log_1(
-            &format!(
-                "Selected Format: {} Hz, {}-bit, {} channels (RateA={}, RateB={}, RateC={})",
-                sample_rate, bits_per_sample, channels, rate_a, rate_b, rate_c
-            )
-            .into(),
+        debug!(
+            "Selected Format: {} Hz, {}-bit, {} channels (RateA={}, RateB={}, RateC={})",
+            sample_rate, bits_per_sample, channels, rate_a, rate_b, rate_c
         );
 
         // --- 3. Skip Remaining Header and Read Data ---
@@ -278,16 +273,13 @@ impl SoundChunk {
         // Calculate duration and round to 3 decimal places for comparison
         let duration = (sample_count as f64 / sample_rate as f64 * 1000.0).round() / 1000.0;
 
-        console::log_1(
-            &format!(
-                "🎵 Final snd: {} Hz, {}-bit, {} bytes → {} samples, {:.3}s",
-                sample_rate,
-                bits_per_sample,
-                data.len(),
-                sample_count,
-                duration
-            )
-            .into(),
+        debug!(
+            "🎵 Final snd: {} Hz, {}-bit, {} bytes → {} samples, {:.3}s",
+            sample_rate,
+            bits_per_sample,
+            data.len(),
+            sample_count,
+            duration
         );
 
         Ok(SoundChunk {

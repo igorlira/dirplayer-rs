@@ -1,7 +1,7 @@
 use core::fmt;
 use std::fmt::Formatter;
 
-use log::warn;
+use log::{debug, warn};
 
 use super::{
     bitmap::{
@@ -23,7 +23,6 @@ use crate::director::{
     lingo::script::ScriptContext,
 };
 use crate::player::handlers::datum_handlers::cast_member::font::StyledSpan;
-use web_sys::console;
 
 #[derive(Clone)]
 pub struct CastMember {
@@ -640,12 +639,9 @@ impl CastMember {
                     }
                 };
 
-                console::log_1(
-                    &format!(
-                        "🎨 Creating Font cast member: '{}' (member #{})",
-                        font_name, number
-                    )
-                    .into(),
+                debug!(
+                    "🎨 Creating Font cast member: '{}' (member #{})",
+                    font_name, number
                 );
 
                 let specific_data_bytes = chunk.specific_data_raw.clone();
@@ -657,12 +653,9 @@ impl CastMember {
                     .find_map(|child_opt| {
                         if let Some(Chunk::XMedia(xmedia)) = child_opt {
                             if !xmedia.is_pfr_font() && xmedia.raw_data.len() > 100 {
-                                console::log_1(
-                                    &format!(
-                                        "📄 Analyzing text XMedia chunk ({} bytes)",
-                                        xmedia.raw_data.len()
-                                    )
-                                    .into(),
+                                debug!(
+                                    "📄 Analyzing text XMedia chunk ({} bytes)",
+                                    xmedia.raw_data.len()
                                 );
 
                                 // Debug: show first 200 bytes
@@ -673,7 +666,7 @@ impl CastMember {
                                     .map(|b| format!("{:02X}", b))
                                     .collect::<Vec<_>>()
                                     .join(" ");
-                                console::log_1(&format!("   First 200 bytes: {}", preview).into());
+                                debug!("   First 200 bytes: {}", preview);
 
                                 // Look for the pattern "00 XX XX 2C" followed by readable text
                                 for i in 0..xmedia.raw_data.len().saturating_sub(100) {
@@ -683,16 +676,13 @@ impl CastMember {
                                     {
                                         // comma
 
-                                        console::log_1(
-                                            &format!(
-                                                "   Found potential text start at offset {}: {:02X} {:02X} {:02X} {:02X}",
-                                                i,
-                                                xmedia.raw_data[i],
-                                                xmedia.raw_data[i+1],
-                                                xmedia.raw_data[i+2],
-                                                xmedia.raw_data[i+3]
-                                            )
-                                            .into(),
+                                        debug!(
+                                            "   Found potential text start at offset {}: {:02X} {:02X} {:02X} {:02X}",
+                                            i,
+                                            xmedia.raw_data[i],
+                                            xmedia.raw_data[i + 1],
+                                            xmedia.raw_data[i + 2],
+                                            xmedia.raw_data[i + 3]
                                         );
 
                                         // Parse the length from the hex ASCII digits before the comma
@@ -711,19 +701,18 @@ impl CastMember {
                                             }
                                             length_pos += 1;
                                         }
-                                        
-                                        console::log_1(
-                                            &format!("   Length string: '{}'", length_str).into(),
-                                        );
+
+                                        debug!("   Length string: '{}'", length_str);
 
                                         // Parse the length (it's in hex format as ASCII)
                                         let text_length = if let Ok(len) = usize::from_str_radix(&length_str, 16) {
-                                            console::log_1(
-                                                &format!("   Parsed length: {} bytes (0x{} hex)", len, length_str).into(),
+                                            debug!(
+                                                "   Parsed length: {} bytes (0x{} hex)",
+                                                len, length_str
                                             );
                                             len
                                         } else {
-                                            console::log_1(&"   Failed to parse length, using fallback".into());
+                                            debug!("   Failed to parse length, using fallback");
                                             100 // fallback
                                         };
 
@@ -744,13 +733,10 @@ impl CastMember {
                                         // Clean up the text
                                         let text = text.trim().to_string();
 
-                                        console::log_1(
-                                            &format!(
-                                                "   Extracted: '{}' ({} chars)",
-                                                text.chars().take(80).collect::<String>(),
-                                                text.len()
-                                            )
-                                            .into(),
+                                        debug!(
+                                            "   Extracted: '{}' ({} chars)",
+                                            text.chars().take(80).collect::<String>(),
+                                            text.len()
                                         );
 
                                         if text.len() > 3 {
@@ -759,16 +745,14 @@ impl CastMember {
                                     }
                                 }
 
-                                console::log_1(&"   ⚠️ No text found in XMedia chunk".into());
+                                debug!("   ⚠️ No text found in XMedia chunk");
                             }
                         }
                         None
                     })
                     .unwrap_or_default();
 
-                console::log_1(
-                    &format!("   Final preview_text length: {}", preview_text.len()).into(),
-                );
+                debug!("   Final preview_text length: {}", preview_text.len());
 
                 let preview_font_name = member_def.children.iter().find_map(|child_opt| {
                     if let Some(Chunk::XMedia(xmedia)) = child_opt {
@@ -788,9 +772,9 @@ impl CastMember {
                                     }
                                     if !name.is_empty() {
                                         let name_str = String::from_utf8_lossy(&name).to_string();
-                                        console::log_1(
-                                            &format!("📝 Found font reference: '{}'", name_str)
-                                                .into(),
+                                        debug!(
+                                            "📝 Found font reference: '{}'",
+                                            name_str
                                         );
                                         return Some(name_str);
                                     }
@@ -805,12 +789,9 @@ impl CastMember {
                 let pfr_font_data = member_def.children.iter().find_map(|child_opt| {
                     if let Some(Chunk::XMedia(xmedia)) = child_opt {
                         if xmedia.is_pfr_font() {
-                            console::log_1(
-                                &format!(
-                                    "🎨 Found PFR font data ({} bytes)",
-                                    xmedia.raw_data.len()
-                                )
-                                .into(),
+                            debug!(
+                                "🎨 Found PFR font data ({} bytes)",
+                                xmedia.raw_data.len()
                             );
                             return xmedia.parse_pfr_font();
                         }
@@ -825,16 +806,13 @@ impl CastMember {
                 // Step 5: Create the appropriate FontMember
                 let (font_info, bitmap_ref, char_width, char_height, grid_columns, grid_rows) =
                     if let Some(pfr) = pfr_font_data {
-                        console::log_1(
-                            &format!(
-                                "📝 Creating bitmap from PFR: '{}' ({}x{}, grid {}x{})",
-                                pfr.font_name,
-                                pfr.char_width,
-                                pfr.char_height,
-                                pfr.grid_columns,
-                                pfr.grid_rows
-                            )
-                            .into(),
+                        debug!(
+                            "📝 Creating bitmap from PFR: '{}' ({}x{}, grid {}x{})",
+                            pfr.font_name,
+                            pfr.char_width,
+                            pfr.char_height,
+                            pfr.grid_columns,
+                            pfr.grid_rows
                         );
 
                         let bitmap_width = pfr.char_width * pfr.grid_columns as u16;
@@ -858,7 +836,7 @@ impl CastMember {
                         }
 
                         // ✅ RENDER VECTOR GLYPHS
-                        console::log_1(&"🎨 Rendering PFR vector glyphs...".into());
+                        debug!("🎨 Rendering PFR vector glyphs...");
 
                         use super::super::director::chunks::pfr_renderer::render_pfr_font;
 
@@ -869,12 +847,9 @@ impl CastMember {
                             128, // Total glyphs
                         );
 
-                        console::log_1(
-                            &format!(
-                                "✅ Vector rendering complete: {} bytes",
-                                rendered_bitmap_data.len()
-                            )
-                            .into(),
+                        debug!(
+                            "✅ Vector rendering complete: {} bytes",
+                            rendered_bitmap_data.len()
                         );
 
                         // Copy the rendered 1-bit data into the 32-bit RGBA bitmap
@@ -930,7 +905,7 @@ impl CastMember {
                             }
                         }
 
-                        console::log_1(&"✅ PFR font bitmap created!".into());
+                        debug!("✅ PFR font bitmap created!");
 
                         let bitmap_ref = bitmap_manager.add_bitmap(font_bitmap);
 
@@ -947,7 +922,7 @@ impl CastMember {
                             name: final_font_name,
                         };
 
-                        console::log_1(&"✅ PFR font bitmap created!".into());
+                        debug!("✅ PFR font bitmap created!");
 
                         (
                             font_info,
@@ -987,14 +962,11 @@ impl CastMember {
                     };
 
                 // Step 6: Create the single FontMember
-                console::log_1(
-                    &format!(
-                        "✅ Creating FontMember: name='{}', has_bitmap={}, preview_text_len={}",
-                        font_info.name,
-                        bitmap_ref.is_some(),
-                        preview_text.len()
-                    )
-                    .into(),
+                debug!(
+                    "✅ Creating FontMember: name='{}', has_bitmap={}, preview_text_len={}",
+                    font_info.name,
+                    bitmap_ref.is_some(),
+                    preview_text.len()
                 );
 
                 CastMemberType::Font(FontMember {
@@ -1038,23 +1010,17 @@ impl CastMember {
                     };
 
                     if is_jpeg && !media.audio_data.is_empty() {
-                        web_sys::console::log_1(
-                            &format!(
-                                "Found JPEG data in Media chunk for bitmap {}, size: {} bytes",
-                                number,
-                                media.audio_data.len()
-                            )
-                            .into(),
+                        debug!(
+                            "Found JPEG data in Media chunk for bitmap {}, size: {} bytes",
+                            number,
+                            media.audio_data.len()
                         );
 
                         match decode_jpeg_bitmap(&media.audio_data, &bitmap_info) {
                             Ok(new_bitmap) => {
-                                web_sys::console::log_1(
-                                    &format!(
-                                        "Successfully decoded JPEG: {}x{}, bit_depth: {}",
-                                        new_bitmap.width, new_bitmap.height, new_bitmap.bit_depth
-                                    )
-                                    .into(),
+                                debug!(
+                                    "Successfully decoded JPEG: {}x{}, bit_depth: {}",
+                                    new_bitmap.width, new_bitmap.height, new_bitmap.bit_depth
                                 );
                                 bitmap_manager.add_bitmap(new_bitmap)
                             }
@@ -1126,21 +1092,16 @@ impl CastMember {
             MemberType::Sound => {
                 // Log children
                 if !member_def.children.is_empty() {
-                    console::log_1(
-                        &format!(
-                            "CastMember {} has {} children:",
-                            number,
-                            member_def.children.len()
-                        )
-                        .into(),
+                    debug!(
+                        "CastMember {} has {} children:",
+                        number,
+                        member_def.children.len()
                     );
 
                     for (i, c_opt) in member_def.children.iter().enumerate() {
                         match c_opt {
-                            Some(c) => console::log_1(
-                                &format!("child[{}] = {}", i, Self::chunk_type_name(c)).into(),
-                            ),
-                            None => console::log_1(&format!("child[{}] = None", i).into()),
+                            Some(c) => debug!("child[{}] = {}", i, Self::chunk_type_name(c)),
+                            None => debug!("child[{}] = None", i),
                         }
                     }
                 }
@@ -1150,26 +1111,26 @@ impl CastMember {
           .filter_map(|c_opt| c_opt.as_ref())
           .find_map(|chunk| match chunk {
             Chunk::Sound(s) => {
-              console::log_1(&format!("Found Sound chunk with {} bytes", s.data().len()).into());
+              debug!("Found Sound chunk with {} bytes", s.data().len());
               Some(s.clone())
             },
             Chunk::Media(m) => {
-              console::log_1(&format!(
-                "Found Media chunk: sample_rate={}, data_size_field={}, audio_data.len()={}, is_compressed={}",
+              debug!("Found Media chunk: sample_rate={}, data_size_field={}, audio_data.len()={}, is_compressed={}",
                 m.sample_rate, m.data_size_field, m.audio_data.len(), m.is_compressed
-              ).into());
+              );
 
               // Check if the Media chunk has any sound data
               // Don't just check is_empty - also check data_size_field
               if !m.audio_data.is_empty() || m.data_size_field > 0 {
                 let sound = SoundChunk::from_media(&m);
-                console::log_1(&format!(
+                debug!(
                   "Created SoundChunk from Media: {} bytes, rate={}",
-                  sound.data().len(), sound.sample_rate()
-                ).into());
+                  sound.data().len(),
+                  sound.sample_rate()
+                );
                 Some(sound)
               } else {
-                console::log_1(&"Media chunk has no audio data".into());
+                debug!("Media chunk has no audio data");
                 None
               }
             },
@@ -1177,14 +1138,11 @@ impl CastMember {
           });
 
                 let found_sound = sound_chunk_opt.is_some();
-                console::log_1(
-                    &format!(
-                        "CastMember {}: {} children, found sound chunk = {}",
-                        number,
-                        member_def.children.len(),
-                        found_sound
-                    )
-                    .into(),
+                debug!(
+                    "CastMember {}: {} children, found sound chunk = {}",
+                    number,
+                    member_def.children.len(),
+                    found_sound
                 );
 
                 // Construct SoundMember
@@ -1203,14 +1161,14 @@ impl CastMember {
                         },
                     };
 
-                    console::log_1(&format!(
-            "SoundMember created → sample_rate: {}, sample_size: {}, channels: {}, sample_count: {}, duration: {:.3}s",
-            info.sample_rate,
-            info.sample_size,
-            info.channels,
-            info.sample_count,
-            info.duration
-          ).into());
+                    debug!(
+                        "SoundMember created → sample_rate: {}, sample_size: {}, channels: {}, sample_count: {}, duration: {:.3}s",
+                        info.sample_rate,
+                        info.sample_size,
+                        info.channels,
+                        info.sample_count,
+                        info.duration
+                    );
 
                     CastMemberType::Sound(SoundMember {
                         info,
@@ -1229,41 +1187,37 @@ impl CastMember {
                 // If it's not Copy, clone or cast as needed.
                 let member_type_id = chunk.member_type as u16; // or u32 depending on your enum base type
 
-                console::log_1(
-                    &format!(
-          "[CastMember::from] Unknown member type for member #{} (cast_lib={}): {:?} (id={})",
-          number,
-          cast_lib,
-          chunk.member_type, // this prints name, e.g. Button
-          member_type_id      // this prints numeric id, e.g. 15
-        )
-                    .into(),
+                warn!(
+                    "[CastMember::from] Unknown member type for member #{} (cast_lib={}): {:?} (id={})",
+                    number,
+                    cast_lib,
+                    chunk.member_type, // this prints name, e.g. Button
+                    member_type_id      // this prints numeric id, e.g. 15
                 );
 
                 if let Some(info) = &chunk.member_info {
-                    console::log_1(
-                        &format!(
-                            "  → name='{}', script_id={}, flags={:?}",
-                            info.name, info.header.script_id, info.header.flags
-                        )
-                        .into(),
+                    debug!(
+                        "  → name='{}', script_id={}, flags={:?}",
+                        info.name, info.header.script_id, info.header.flags
                     );
                 } else {
-                    console::log_1(&"  → No member_info available".into());
+                    debug!("  → No member_info available");
                 }
 
                 // Log all child chunks
                 if member_def.children.is_empty() {
-                    console::log_1(&"  → No children found.".into());
+                    debug!("  → No children found.");
                 } else {
-                    console::log_1(&format!("  → {} children:", member_def.children.len()).into());
+                    debug!("  → {} children:", member_def.children.len());
 
                     for (i, c_opt) in member_def.children.iter().enumerate() {
                         match c_opt {
-                            Some(c) => console::log_1(
-                                &format!("    child[{}] = {}", i, Self::chunk_type_name(c)).into(),
+                            Some(c) => debug!(
+                                "    child[{}] = {}",
+                                i,
+                                Self::chunk_type_name(c)
                             ),
-                            None => console::log_1(&format!("    child[{}] = None", i).into()),
+                            None => debug!("    child[{}] = None", i),
                         }
                     }
                 }

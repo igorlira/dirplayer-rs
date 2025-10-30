@@ -1,4 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
+use log::debug;
 use web_sys::console;
 
 pub struct CastInfoChunk {
@@ -17,17 +18,14 @@ impl CastInfoChunk {
 
         reader.endian = original_endian;
 
-        console::log_1(
-            &format!(
-                "Cinf raw_data ({} bytes): {:?}",
-                raw_data.len(),
-                raw_data
-                    .iter()
-                    .map(|b| format!("{:02X}", b))
-                    .collect::<Vec<String>>()
-                    .join(" ")
-            )
-            .into(),
+        debug!(
+            "Cinf raw_data ({} bytes): {:?}",
+            raw_data.len(),
+            raw_data
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<String>>()
+                .join(" ")
         );
 
         Ok(CastInfoChunk { raw_data })

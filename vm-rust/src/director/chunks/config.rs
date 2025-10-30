@@ -3,6 +3,7 @@ use crate::{
     utils::log_i,
 };
 use binary_reader::{BinaryReader, Endian};
+use log::debug;
 
 pub struct ConfigChunk {
     /*  0 */ pub len: u16,
@@ -156,10 +157,7 @@ impl ConfigChunk {
 
         let computed_checksum = config.compute_checksum(dir_endian);
         if checksum != computed_checksum {
-            log_i(
-                format!("Checksums don't match! Stored: {checksum} Computed: {computed_checksum}")
-                    .as_str(),
-            );
+            debug!("Checksums don't match! Stored: {checksum} Computed: {computed_checksum}");
         }
 
         return Ok(config);

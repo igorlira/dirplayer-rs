@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use binary_reader::BinaryReader;
 use itertools::Itertools;
+use log::debug;
 
 use crate::{
     director::{file::get_children_of_chunk, utils::fourcc_to_string},
@@ -79,10 +80,10 @@ impl CastDef {
                     let fourcc_str: String = fourcc_to_string(x.fourcc);
                     let child = get_chunk(reader, chunk_container, rifx, x.fourcc, x.section_id);
                     if let Err(err) = &child {
-                        log_i(&format!(
+                        debug!(
                             "❌ Failed to read child chunk of type {} (section_id={}): {}",
                             fourcc_str, x.section_id, err
-                        ));
+                        );
                     }
                     child.ok()
                 })

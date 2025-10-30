@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use js_sys::Uint8Array;
+use log::debug;
 use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -62,13 +63,9 @@ impl NetTaskState {
 
 pub async fn fetch_net_task(task: &NetTask) -> NetResult {
     let resolved_url_str = task.resolved_url.to_string();
-    log_i(
-        format_args!(
-            "execute_task #{} url: {} resolved: {}",
-            task.id, task.url, resolved_url_str
-        )
-        .to_string()
-        .as_str(),
+    debug!(
+        "execute_task #{} url: {} resolved: {}",
+        task.id, task.url, resolved_url_str
     );
 
     // Normal HTTP(S) fetch

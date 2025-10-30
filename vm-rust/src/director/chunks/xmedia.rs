@@ -1,5 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
-use web_sys::console;
+use log::{debug, warn};
 
 // Import the PFR vector renderer
 use super::pfr_renderer::render_pfr_font;
@@ -29,7 +29,7 @@ impl XMediaChunk {
 
         reader.endian = original_endian;
 
-        console::log_1(&format!("XMED raw_data ({} bytes)", raw_data.len()).into());
+        debug!("XMED raw_data ({} bytes)", raw_data.len());
 
         Ok(XMediaChunk { raw_data })
     }
@@ -41,13 +41,13 @@ impl XMediaChunk {
 
         // Check for "PFR1" magic (0x50 0x46 0x52 0x31)
         if self.raw_data.len() >= 4 && &self.raw_data[0..4] == b"PFR1" {
-            console::log_1(&"✓ Found PFR1 magic header".into());
+            debug!("✓ Found PFR1 magic header");
             return true;
         }
 
         // Reject styled text XMedia chunks (start with "FFFF")
         if self.raw_data.len() >= 4 && &self.raw_data[0..4] == b"FFFF" {
-            console::log_1(&"✗ This is styled text data (FFFF header), not a font".into());
+            debug!("✗ This is styled text data (FFFF header), not a font");
             return false;
         }
 
@@ -94,7 +94,7 @@ impl XMediaChunk {
         // Vector commands use lots of high bytes (0x80+) as opcodes
 
         if data.len() < bytes_per_glyph * 80 {
-            console::log_1(&"      Fail: Not enough data for 80 glyphs".into());
+            debug!("      Fail: Not enough data for 80 glyphs");
             return false;
         }
 
@@ -111,23 +111,17 @@ impl XMediaChunk {
         // Real bitmap data should have >40% very low bytes (0x00-0x3F)
         // and >60% low bytes (0x00-0x7F)
         if very_low_ratio < 0.4 {
-            console::log_1(
-                &format!(
-                    "      Fail: Only {:.1}% very low bytes (need >40%)",
-                    very_low_ratio * 100.0
-                )
-                .into(),
+            debug!(
+                "      Fail: Only {:.1}% very low bytes (need >40%)",
+                very_low_ratio * 100.0
             );
             return false;
         }
 
         if low_ratio < 0.6 {
-            console::log_1(
-                &format!(
-                    "      Fail: Only {:.1}% low bytes (need >60%)",
-                    low_ratio * 100.0
-                )
-                .into(),
+            debug!(
+                "      Fail: Only {:.1}% low bytes (need >60%)",
+                low_ratio * 100.0
             );
             return false;
         }
@@ -136,18 +130,15 @@ impl XMediaChunk {
         let first_byte = data[0];
         let all_same = data[0..sample_size].iter().all(|&b| b == first_byte);
         if all_same {
-            console::log_1(&format!("      Fail: All bytes are 0x{:02X}", first_byte).into());
+            debug!("      Fail: All bytes are 0x{:02X}", first_byte);
             return false;
         }
 
-        console::log_1(
-            &format!(
-                "      Pass: {:.1}% very_low, {:.1}% low, {:.1}% high bytes",
-                very_low_ratio * 100.0,
-                low_ratio * 100.0,
-                high as f32 / sample_size as f32 * 100.0
-            )
-            .into(),
+        debug!(
+            "      Pass: {:.1}% very_low, {:.1}% low, {:.1}% high bytes",
+            very_low_ratio * 100.0,
+            low_ratio * 100.0,
+            high as f32 / sample_size as f32 * 100.0
         );
         true
     }
@@ -157,14 +148,14 @@ impl XMediaChunk {
             return None;
         }
 
-        console::log_1(&"🔍 Parsing PFR1 font format...".into());
+        debug!("🔍 Parsing PFR1 font format...");
 
         // Extract font name
         let font_name = self
             .extract_font_name()
             .unwrap_or_else(|| format!("Unknown_PFR_Font"));
 
-        console::log_1(&format!("  Font name: '{}'", font_name).into());
+        debug!("  Font name: '{}'", font_name);
 
         // Character dimensions are stored as single bytes:
         // Width at offset 0x56, Height at offset 0x58
@@ -190,7 +181,7 @@ impl XMediaChunk {
             8
         };
 
-        console::log_1(&format!("  Char dimensions: {}×{} pixels", char_width, char_height).into());
+        debug!("  Char dimensions: {}×{} pixels", char_width, char_height);
 
         // Grid is 16×8 for 128 characters
         let grid_columns = 16u8;
@@ -202,12 +193,9 @@ impl XMediaChunk {
         let total_glyphs = grid_columns as usize * grid_rows as usize;
         let expected_bitmap_bytes = bytes_per_glyph * total_glyphs;
 
-        console::log_1(
-            &format!(
-                "  Expected: {} bytes/glyph, {} total bytes needed",
-                bytes_per_glyph, expected_bitmap_bytes
-            )
-            .into(),
+        debug!(
+            "  Expected: {} bytes/glyph, {} total bytes needed",
+            bytes_per_glyph, expected_bitmap_bytes
         );
 
         // Try multiple offsets to find the bitmap data
@@ -219,12 +207,9 @@ impl XMediaChunk {
             self.raw_data.len().saturating_sub(expected_bitmap_bytes), // End of file
         ];
 
-        console::log_1(
-            &format!(
-                "  Searching for bitmap data at {} candidate offsets...",
-                candidate_offsets.len()
-            )
-            .into(),
+        debug!(
+            "  Searching for bitmap data at {} candidate offsets...",
+            candidate_offsets.len()
         );
 
         let mut glyph_data = None;
@@ -236,48 +221,43 @@ impl XMediaChunk {
                 let candidate = &self.raw_data[offset..offset + expected_bitmap_bytes];
 
                 // Log what we're checking
-                console::log_1(
-                    &format!(
-                        "  Checking offset 0x{:04X}: first 16 bytes: {:02X?}",
-                        offset,
-                        &candidate[0..16.min(candidate.len())]
-                    )
-                    .into(),
+                debug!(
+                    "  Checking offset 0x{:04X}: first 16 bytes: {:02X?}",
+                    offset,
+                    &candidate[0..16.min(candidate.len())]
                 );
 
                 // Check 'H' character (ASCII 72) specifically
                 let h_offset = 72 * bytes_per_glyph;
                 if h_offset + bytes_per_glyph <= candidate.len() {
                     let h_glyph = &candidate[h_offset..h_offset + bytes_per_glyph];
-                    console::log_1(&format!("    'H' (glyph #72): {:02X?}", h_glyph).into());
+                    debug!("    'H' (glyph #72): {:02X?}", h_glyph);
                 }
 
                 // Also check space for reference
                 let space_offset = 32 * bytes_per_glyph;
                 if space_offset + bytes_per_glyph <= candidate.len() {
                     let space_glyph = &candidate[space_offset..space_offset + bytes_per_glyph];
-                    console::log_1(&format!("    Space (glyph #32): {:02X?}", space_glyph).into());
+                    debug!("    Space (glyph #32): {:02X?}", space_glyph);
                 }
 
                 if Self::looks_like_bitmap_data(candidate, bytes_per_glyph) {
-                    console::log_1(
-                        &format!("  ✓ Found bitmap data at offset 0x{:04X}!", offset).into(),
+                    debug!(
+                        "  ✓ Found bitmap data at offset 0x{:04X}!",
+                        offset
                     );
                     glyph_data = Some(candidate.to_vec());
                     found_offset = offset;
                     break;
                 } else {
-                    console::log_1(&"    ✗ Validation failed".into());
+                    debug!("    ✗ Validation failed");
                 }
             } else {
-                console::log_1(
-                    &format!(
-                        "  Skipping offset 0x{:04X}: not enough data (need {}, have {})",
-                        offset,
-                        expected_bitmap_bytes,
-                        self.raw_data.len().saturating_sub(offset)
-                    )
-                    .into(),
+                debug!(
+                    "  Skipping offset 0x{:04X}: not enough data (need {}, have {})",
+                    offset,
+                    expected_bitmap_bytes,
+                    self.raw_data.len().saturating_sub(offset)
                 );
             }
         }
@@ -285,7 +265,7 @@ impl XMediaChunk {
         // If none of the standard offsets worked, try a brute force scan
         // looking for sections where bytes are mostly in the 0x00-0x7F range
         if glyph_data.is_none() {
-            console::log_1(&"  No bitmap at standard offsets, trying brute-force scan...".into());
+            debug!("  No bitmap at standard offsets, trying brute-force scan...");
 
             let mut best_offset = 0;
             let mut best_score = 0.0;
@@ -312,13 +292,10 @@ impl XMediaChunk {
             }
 
             if best_score > 0.5 {
-                console::log_1(
-                    &format!(
-                        "  ✓ Brute-force found candidate at offset 0x{:04X} (score: {:.1}%)",
-                        best_offset,
-                        best_score * 100.0
-                    )
-                    .into(),
+                debug!(
+                    "  ✓ Brute-force found candidate at offset 0x{:04X} (score: {:.1}%)",
+                    best_offset,
+                    best_score * 100.0
                 );
 
                 let candidate = &self.raw_data[best_offset..best_offset + expected_bitmap_bytes];
@@ -328,23 +305,20 @@ impl XMediaChunk {
         }
 
         if glyph_data.is_none() {
-            console::log_1(&"  ✗ No pre-rendered bitmap data found.".into());
-            console::log_1(&"  🎨 Attempting to render from PFR vector data...".into());
+            debug!("  ✗ No pre-rendered bitmap data found.");
+            debug!("  🎨 Attempting to render from PFR vector data...");
 
             // Try to render using the vector renderer
             let glyph_data_offset = 0x200; // Vector data starts here
             if glyph_data_offset < self.raw_data.len() {
                 let vector_data = &self.raw_data[glyph_data_offset..];
 
-                console::log_1(
-                    &format!(
-                        "  📐 Rendering {} glyphs at {}×{} from {} bytes of vector data",
-                        total_glyphs,
-                        char_width,
-                        char_height,
-                        vector_data.len()
-                    )
-                    .into(),
+                debug!(
+                    "  📐 Rendering {} glyphs at {}×{} from {} bytes of vector data",
+                    total_glyphs,
+                    char_width,
+                    char_height,
+                    vector_data.len()
                 );
 
                 let rendered_bitmap = render_pfr_font(
@@ -355,53 +329,44 @@ impl XMediaChunk {
                 );
 
                 if rendered_bitmap.len() >= expected_bitmap_bytes {
-                    console::log_1(&"  ✅ Successfully rendered PFR vector font!".into());
+                    debug!("  ✅ Successfully rendered PFR vector font!");
                     glyph_data = Some(rendered_bitmap[..expected_bitmap_bytes].to_vec());
                     found_offset = glyph_data_offset;
                 } else {
-                    console::log_1(
-                        &format!(
-                            "  ⚠️  Rendered {} bytes, expected {}",
-                            rendered_bitmap.len(),
-                            expected_bitmap_bytes
-                        )
-                        .into(),
+                    debug!(
+                        "  ⚠️  Rendered {} bytes, expected {}",
+                        rendered_bitmap.len(),
+                        expected_bitmap_bytes
                     );
                 }
             }
         }
 
         if glyph_data.is_none() {
-            console::log_1(&"  ✗ Could not render PFR font.".into());
-            console::log_1(&"  ".into());
-            console::log_1(&"  ═══════════════════════════════════════════════════════".into());
-            console::log_1(&"  ⚠️  PFR RENDERING FAILED".into());
-            console::log_1(&"  ═══════════════════════════════════════════════════════".into());
-            console::log_1(&"  System font will be used as fallback.".into());
-            console::log_1(&"  ═══════════════════════════════════════════════════════".into());
+            warn!("  ✗ Could not render PFR font.");
+            warn!("  ");
+            warn!("  ═══════════════════════════════════════════════════════");
+            warn!("  ⚠️  PFR RENDERING FAILED");
+            warn!("  ═══════════════════════════════════════════════════════");
+            warn!("  System font will be used as fallback.");
+            warn!("  ═══════════════════════════════════════════════════════");
             return None;
         }
 
         let glyph_data = glyph_data.unwrap();
 
-        console::log_1(
-            &format!(
-                "  ✅ Extracted {} bytes of bitmap data from offset 0x{:04X}",
-                glyph_data.len(),
-                found_offset
-            )
-            .into(),
+        debug!(
+            "  ✅ Extracted {} bytes of bitmap data from offset 0x{:04X}",
+            glyph_data.len(),
+            found_offset
         );
 
         // Log first glyph of space character for verification
         let space_offset = 32 * bytes_per_glyph;
         if space_offset + bytes_per_glyph <= glyph_data.len() {
-            console::log_1(
-                &format!(
-                    "  📋 Space char (glyph #32): {:02X?}",
-                    &glyph_data[space_offset..space_offset + bytes_per_glyph.min(8)]
-                )
-                .into(),
+            debug!(
+                "  📋 Space char (glyph #32): {:02X?}",
+                &glyph_data[space_offset..space_offset + bytes_per_glyph.min(8)]
             );
         }
 
@@ -420,14 +385,11 @@ impl XMediaChunk {
         expected_width: u16,
         expected_height: u16,
     ) -> Vec<u8> {
-        console::log_1(
-            &format!(
-                "🔧 Decoding PFR RLE bitmap: {} bytes → {}×{} pixels",
-                glyph_data.len(),
-                expected_width,
-                expected_height
-            )
-            .into(),
+        debug!(
+            "🔧 Decoding PFR RLE bitmap: {} bytes → {}×{} pixels",
+            glyph_data.len(),
+            expected_width,
+            expected_height
         );
 
         let total_pixels = expected_width as usize * expected_height as usize;
@@ -466,14 +428,11 @@ impl XMediaChunk {
             pos += 2;
         }
 
-        console::log_1(
-            &format!(
-                "   Decoded {} pixels ({} bits, {} bytes)",
-                bit_pos,
-                bit_pos,
-                bitmap.len()
-            )
-            .into(),
+        debug!(
+            "   Decoded {} pixels ({} bits, {} bytes)",
+            bit_pos,
+            bit_pos,
+            bitmap.len()
         );
 
         bitmap
@@ -484,7 +443,7 @@ impl XMediaChunk {
             return None;
         }
 
-        console::log_1(&"🔍 Parsing PFR1 font format with RLE...".into());
+        debug!("🔍 Parsing PFR1 font format with RLE...");
 
         // ... (same font name extraction as before) ...
 
@@ -507,23 +466,20 @@ impl XMediaChunk {
         // Decode RLE to raw bitmap
         let decoded_bitmap = Self::decode_pfr_rle_bitmap(rle_data, bitmap_width, bitmap_height);
 
-        console::log_1(
-            &format!(
-                "  ✅ PFR font: {}×{} chars, grid {}×{}, {} bytes decoded bitmap",
-                char_width,
-                char_height,
-                grid_columns,
-                grid_rows,
-                decoded_bitmap.len()
-            )
-            .into(),
+        debug!(
+            "  ✅ PFR font: {}×{} chars, grid {}×{}, {} bytes decoded bitmap",
+            char_width,
+            char_height,
+            grid_columns,
+            grid_rows,
+            decoded_bitmap.len()
         );
 
         let font_name = self
             .extract_font_name()
             .unwrap_or_else(|| format!("Unknown_PFR_Font"));
 
-        console::log_1(&format!("  Font name: '{}'", font_name).into());
+        debug!("  Font name: '{}'", font_name);
 
         Some(PfrFont {
             font_name,

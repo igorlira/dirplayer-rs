@@ -6,7 +6,7 @@ use std::{
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
-use log::warn;
+use log::{debug, log, warn};
 use url::Url;
 
 use crate::js_api::ascii_safe;
@@ -414,30 +414,24 @@ impl CastManager {
     pub fn load_fonts_into_manager(&self, font_manager: &mut FontManager) {
         use web_sys::console;
 
-        console::log_1(&"🎨 Starting font loading from cast members...".into());
+        debug!("🎨 Starting font loading from cast members...");
 
         let mut loaded_count = 0;
         let mut skipped_count = 0;
 
         for cast_lib in &self.casts {
-            console::log_1(
-                &format!(
-                    "   Scanning cast lib {} ({} members)",
-                    cast_lib.number,
-                    cast_lib.members.len()
-                )
-                .into(),
+            debug!(
+                "   Scanning cast lib {} ({} members)",
+                cast_lib.number,
+                cast_lib.members.len()
             );
 
             for member in cast_lib.members.values() {
                 if let CastMemberType::Font(font_data) = &member.member_type {
                     if !font_data.preview_text.is_empty() {
-                        console::log_1(
-                            &format!(
-                  "   ⏭️  Skipping font member #{}: '{}' (has preview text, not a real font)",
-                  member.number, member.name
-              )
-                            .into(),
+                        warn!(
+                            "   ⏭️  Skipping font member #{}: '{}' (has preview text, not a real font)",
+                            member.number, member.name
                         );
                         skipped_count += 1;
                         continue;
@@ -448,30 +442,24 @@ impl CastManager {
                     let font_style = font_data.font_info.style;
                     let font_id = font_data.font_info.font_id;
 
-                    console::log_1(
-                        &format!(
-                            "   📋 Found font member #{}: '{}' (id={}, size={}, style={})",
-                            member.number, font_name, font_id, font_size, font_style
-                        )
-                        .into(),
+                    debug!(
+                        "   📋 Found font member #{}: '{}' (id={}, size={}, style={})",
+                        member.number, font_name, font_id, font_size, font_style
                     );
 
                     // Skip empty font names
                     if font_name.is_empty() {
-                        console::log_1(
-                            &format!("⊘ Skipping font member {} with empty name", member.number)
-                                .into(),
+                        warn!(
+                            "⊘ Skipping font member {} with empty name",
+                            member.number
                         );
                         skipped_count += 1;
                         continue;
                     }
 
-                    console::log_1(
-                        &format!(
-            "📝 Loading font '{}' from cast (id: {}, size: {}, style: {}, member: {})",
-            font_name, font_id, font_size, font_style, member.number
-          )
-                        .into(),
+                    debug!(
+                        "📝 Loading font '{}' from cast (id: {}, size: {}, style: {}, member: {})",
+                        font_name, font_id, font_size, font_style, member.number
                     );
 
                     // Check if this is a PFR font with bitmap_ref
@@ -482,12 +470,9 @@ impl CastManager {
                         let grid_columns = font_data.grid_columns.unwrap_or(16);
                         let grid_rows = font_data.grid_rows.unwrap_or(8);
 
-                        console::log_1(
-                            &format!(
-                                "      ✅ PFR font: bitmap_ref={}, dims={}x{}, grid={}x{}",
-                                bitmap_ref, char_width, char_height, grid_columns, grid_rows
-                            )
-                            .into(),
+                        debug!(
+                            "      ✅ PFR font: bitmap_ref={}, dims={}x{}, grid={}x{}",
+                            bitmap_ref, char_width, char_height, grid_columns, grid_rows
                         );
 
                         let font = crate::player::font::BitmapFont {
@@ -543,12 +528,9 @@ impl CastManager {
                             font_manager.font_by_id.insert(font_id, font_ref);
                         }
 
-                        console::log_1(
-                            &format!(
-                                "      ✅ Loaded PFR: ref={}, char_size={}x{}",
-                                font_ref, char_width, char_height
-                            )
-                            .into(),
+                        debug!(
+                            "      ✅ Loaded PFR: ref={}, char_size={}x{}",
+                            font_ref, char_width, char_height
                         );
 
                         loaded_count += 1;
@@ -611,22 +593,16 @@ impl CastManager {
                                 font_manager.font_by_id.insert(font_id, font_ref);
                             }
 
-                            console::log_1(
-                                &format!(
-                "      ✅ Loaded (scaled): ref={}, scale={:.2}x, char_size={}x{}",
-                font_ref, scale_factor, font_data_clone.char_width, font_data_clone.char_height
-              )
-                                .into(),
+                            debug!(
+                                "      ✅ Loaded (scaled): ref={}, scale={:.2}x, char_size={}x{}",
+                                font_ref, scale_factor, font_data_clone.char_width, font_data_clone.char_height
                             );
 
                             loaded_count += 1;
                         } else {
-                            console::log_1(
-                                &format!(
-                                    "⚠️  Cannot load font '{}': system font not available",
-                                    font_name
-                                )
-                                .into(),
+                            warn!(
+                                "⚠️  Cannot load font '{}': system font not available",
+                                font_name
                             );
                             skipped_count += 1;
                         }
@@ -635,37 +611,29 @@ impl CastManager {
             }
         }
 
-        console::log_1(
-            &format!(
-                "🎨 Font loading complete: {} loaded, {} skipped",
-                loaded_count, skipped_count
-            )
-            .into(),
+        debug!(
+            "Font loading complete: {} loaded, {} skipped",
+            loaded_count, skipped_count
         );
-        console::log_1(
-            &format!(
-                "   Cache: {} entries, {} font_id mappings",
-                font_manager.font_cache.len(),
-                font_manager.font_by_id.len()
-            )
-            .into(),
+        debug!(
+            "   Cache: {} entries, {} font_id mappings",
+            font_manager.font_cache.len(),
+            font_manager.font_by_id.len()
         );
+        debug!("   Cached fonts: {:?}", font_manager.font_cache.keys());
 
         // Log all cached fonts for debugging
-        console::log_1(&"   Cached fonts:".into());
+        debug!("   Cached fonts:");
         for (key, font) in &font_manager.font_cache {
-            console::log_1(
-                &format!(
-                    "      '{}' -> {} ({}pt, style={}, {}x{})",
-                    key,
-                    font.font_name,
-                    font.font_size,
-                    font.font_style,
-                    font.char_width,
-                    font.char_height
-                )
-                .into(),
-            );
+            debug!(
+                "      '{}' -> {} ({}pt, style={}, {}x{})",
+                key,
+                font.font_name,
+                font.font_size,
+                font.font_style,
+                font.char_width,
+                font.char_height
+            )
         }
     }
 }

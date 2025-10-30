@@ -9,7 +9,6 @@ import { isUIShown } from "../utils/debug";
 export function initVmCallbacks() {
   registerVmCallbacks({
     onMovieLoaded: (result: OnMovieLoadedCallbackData) => {
-      console.log('onMovieLoaded called!', result.version, result.test_val)
       store.dispatch(movieLoaded());
     },
     onMovieChunkListChanged: (chunkList) => {

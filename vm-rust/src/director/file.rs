@@ -11,6 +11,7 @@ use crate::io::reader::DirectorExt;
 use crate::utils::log_i;
 use binary_reader::BinaryReader;
 use itertools::Itertools;
+use log::debug;
 use log::warn;
 use url::Url;
 
@@ -249,7 +250,7 @@ fn read_casts(
         return Ok((Vec::new(), casts));
     }
 
-    log_i("No cast!");
+    debug!("No cast!");
     return Ok((Vec::new(), casts));
 }
 

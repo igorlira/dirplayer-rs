@@ -1,4 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
+use log::debug;
 use web_sys::console;
 
 pub struct EffectChunk {
@@ -17,17 +18,14 @@ impl EffectChunk {
 
         reader.endian = original_endian;
 
-        console::log_1(
-            &format!(
-                "FXmp raw_data ({} bytes): {:?}",
-                raw_data.len(),
-                raw_data
-                    .iter()
-                    .map(|b| format!("{:02X}", b))
-                    .collect::<Vec<String>>()
-                    .join(" ")
-            )
-            .into(),
+        debug!(
+            "FXmp raw_data ({} bytes): {:?}",
+            raw_data.len(),
+            raw_data
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<String>>()
+                .join(" ")
         );
 
         Ok(EffectChunk { raw_data })

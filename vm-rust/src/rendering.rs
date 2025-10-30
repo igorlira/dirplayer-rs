@@ -8,6 +8,7 @@ use std::{
 use async_std::task::spawn_local;
 use chrono::Local;
 use itertools::Itertools;
+use log::debug;
 use wasm_bindgen::{prelude::*, Clamped};
 use web_sys::console;
 
@@ -74,45 +75,36 @@ fn get_or_load_font(
         font_style.unwrap_or(0)
     );
 
-    console::log_1(
-        &format!(
-            "🔍 Looking for font: '{}' (key: '{}')",
-            font_name, cache_key
-        )
-        .into(),
+    debug!(
+        "🔍 Looking for font: '{}' (key: '{}')",
+        font_name, cache_key
     );
 
     if let Some(font) = font_manager.font_cache.get(&cache_key) {
-        console::log_1(&format!("✓ Found in cache: '{}'", cache_key).into());
+        debug!("✓ Found in cache: '{}'", cache_key);
         return Some(Rc::clone(font));
     }
 
     if let Some(font) = font_manager.font_cache.get(font_name) {
-        console::log_1(&format!("✓ Found by name: '{}'", font_name).into());
+        debug!("✓ Found by name: '{}'", font_name);
         return Some(Rc::clone(font));
     }
 
-    console::log_1(
-        &format!(
-            "⚠️  Font '{}' not in cache, attempting to load from cast...",
-            font_name
-        )
-        .into(),
+    debug!(
+        "⚠️  Font '{}' not in cache, attempting to load from cast...",
+        font_name
     );
 
     if let Some(loaded_font) =
         font_manager.get_font_with_cast(font_name, Some(cast_manager), font_size, font_style)
     {
-        console::log_1(&format!("✅ Loaded font '{}' from cast", font_name).into());
+        debug!("✅ Loaded font '{}' from cast", font_name);
         return Some(loaded_font);
     }
 
-    console::log_1(
-        &format!(
-            "❌ Could not find font '{}', falling back to system font",
-            font_name
-        )
-        .into(),
+    debug!(
+        "❌ Could not find font '{}', falling back to system font",
+        font_name
     );
 
     font_manager.get_system_font()

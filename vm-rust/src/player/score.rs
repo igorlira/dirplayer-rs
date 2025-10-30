@@ -1,6 +1,7 @@
 use std::cmp::max;
 
 use itertools::Itertools;
+use log::debug;
 use wasm_bindgen::JsValue;
 
 use crate::{
@@ -268,13 +269,10 @@ impl Score {
                 });
 
         for (channel_num, channel_spans) in spans_by_channel.iter() {
-            web_sys::console::log_1(
-                &format!(
-                    "🔧 Attaching behaviors to channel {}: {} spans",
-                    channel_num,
-                    channel_spans.len()
-                )
-                .into(),
+            debug!(
+                "🔧 Attaching behaviors to channel {}: {} spans",
+                channel_num,
+                channel_spans.len()
             );
 
             for span in channel_spans {

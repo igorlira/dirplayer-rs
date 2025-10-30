@@ -1,4 +1,4 @@
-use web_sys::console;
+use log::debug;
 
 /// PFR Vector Renderer - Complete Implementation
 /// Renders PFR (Portable Font Resource) vector glyphs to bitmaps
@@ -362,7 +362,7 @@ pub fn render_pfr_font(
     char_height: usize,
     glyph_count: usize,
 ) -> Vec<u8> {
-    console::log_1(&"🎨 PFR VM Renderer: Interpreting bytecode...".into());
+    debug!("🎨 PFR VM Renderer: Interpreting bytecode...");
 
     // Try to find glyph boundaries by looking for fill commands
     let mut boundaries = vec![0];
@@ -386,7 +386,7 @@ pub fn render_pfr_font(
         }
     }
 
-    console::log_1(&format!("  Found {} glyph boundaries", boundaries.len()).into());
+    debug!("  Found {} glyph boundaries", boundaries.len());
 
     let bytes_per_glyph = ((char_width + 7) / 8) * char_height;
     let mut output = vec![0u8; bytes_per_glyph * glyph_count];
@@ -416,7 +416,7 @@ pub fn render_pfr_font(
     }
 
     // Log samples
-    console::log_1(&"  Sample glyphs:".into());
+    debug!("  Sample glyphs:");
     for &idx in &[32, 65, 72] {
         if idx < glyph_count {
             let offset = idx * bytes_per_glyph;
@@ -424,19 +424,16 @@ pub fn render_pfr_font(
                 let glyph = &output[offset..offset + bytes_per_glyph];
                 let pixels: u32 = glyph.iter().map(|b| b.count_ones()).sum();
 
-                console::log_1(
-                    &format!(
-                        "    Glyph #{} ('{}'):  {} pixels",
-                        idx,
-                        match idx {
-                            32 => "space",
-                            65 => "A",
-                            72 => "H",
-                            _ => "?",
-                        },
-                        pixels
-                    )
-                    .into(),
+                debug!(
+                    "    Glyph #{} ('{}'):  {} pixels",
+                    idx,
+                    match idx {
+                        32 => "space",
+                        65 => "A",
+                        72 => "H",
+                        _ => "?",
+                    },
+                    pixels
                 );
 
                 if pixels > 0 {
@@ -451,7 +448,7 @@ pub fn render_pfr_font(
                                     '·'
                                 });
                             }
-                            console::log_1(&line.into());
+                            debug!("{}", line);
                         }
                     }
                 }
@@ -459,6 +456,6 @@ pub fn render_pfr_font(
         }
     }
 
-    console::log_1(&format!("✅ Rendered {} glyphs", glyph_count).into());
+    debug!("✅ Rendered {} glyphs", glyph_count);
     output
 }

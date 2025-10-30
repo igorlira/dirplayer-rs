@@ -1,5 +1,6 @@
 use binary_reader::{BinaryReader, Endian};
 
+use log::debug;
 use web_sys::console;
 
 pub struct SordChunk {
@@ -19,7 +20,7 @@ impl SordChunk {
 
         reader.endian = original_endian;
 
-        console::log_1(&format!("Read {} bytes for Sord chunk", raw_data.len()).into());
+        debug!("Read {} bytes for Sord chunk", raw_data.len());
 
         if raw_data.len() < 20 {
             return Err("Sord chunk too small to contain header".into());
@@ -37,16 +38,13 @@ impl SordChunk {
         let codec = u16::from_be_bytes([header[16], header[17]]);
         let flags = u16::from_be_bytes([header[18], header[19]]);
 
-        web_sys::console::log_1(&format!(
-            "Parsed Sord header:\n marker={} channels={} bits={} sample_rate={} offset={} length={} codec={} flags={}",
+        debug!("Parsed Sord header:\n marker={} channels={} bits={} sample_rate={} offset={} length={} codec={} flags={}",
             marker, channels, bits_per_sample, sample_rate, data_offset, data_length, codec, flags
-        ).into());
+        );
 
         // Optional: save remaining bytes for later
         let extra_data = &raw_data[20..];
-        web_sys::console::log_1(
-            &format!("Extra {} bytes remaining in Sord chunk", extra_data.len()).into(),
-        );
+        debug!("Extra {} bytes remaining in Sord chunk", extra_data.len());
 
         Ok(SordChunk { raw_data })
     }

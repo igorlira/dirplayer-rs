@@ -1,5 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
-use log::error;
+use log::{debug, error, warn};
 
 use crate::{io::reader::DirectorExt, utils::log_i};
 
@@ -164,13 +164,9 @@ impl ScoreFrameData {
     #[allow(unused_variables)]
     pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameData, String> {
         let header = Self::read_header(reader)?;
-        log_i(
-            format_args!(
-                "ScoreFrameData {} {} {}",
-                header.frame_count, header.num_channels, header.sprite_record_size
-            )
-            .to_string()
-            .as_str(),
+        debug!(
+            "ScoreFrameData {} {} {}",
+            header.frame_count, header.num_channels, header.sprite_record_size
         );
 
         let mut channel_data = vec![
@@ -253,7 +249,7 @@ impl ScoreFrameData {
                     let data = ScoreFrameChannelData::read(&mut channel_reader)?;
                     channel_reader.jmp(pos + header.sprite_record_size as usize);
                     if data != ScoreFrameChannelData::default() {
-                        log_i(format_args!("frame_index={frame_index} channel_index={channel_index} sprite_type={} ink={} fore_color={} back_color={} pos_y={} pos_x={} height={} width={}", data.sprite_type, data.ink, data.fore_color, data.back_color, data.pos_y, data.pos_x, data.height, data.width).to_string().as_str());
+                        debug!("frame_index={frame_index} channel_index={channel_index} sprite_type={} ink={} fore_color={} back_color={} pos_y={} pos_x={} height={} width={}", data.sprite_type, data.ink, data.fore_color, data.back_color, data.pos_y, data.pos_x, data.height, data.width);
                         frame_channel_data.push((frame_index, channel_index, data));
                     }
                 }
@@ -566,7 +562,7 @@ impl ScoreChunk {
         let mut results = vec![];
         let mut i = 2; // Start at 2, skip entries 0 and 1
 
-        log_i(&format!("🔍 Starting to analyze {} entries", entries.len()));
+        debug!("🔍 Starting to analyze {} entries", entries.len());
 
         while i < entries.len() {
             let entry_bytes = &entries[i];
@@ -583,10 +579,10 @@ impl ScoreChunk {
                     reader.set_endian(Endian::Big);
 
                     if let Ok(primary) = FrameIntervalPrimary::read(&mut reader) {
-                        log_i(&format!(
+                        debug!(
                             "🎯 Found primary at entry {}: channel={}, frames={}-{}",
                             i, primary.channel_index, primary.start_frame, primary.end_frame
-                        ));
+                        );
 
                         // Look ahead to collect ALL secondary entries for this primary
                         let mut secondaries = Vec::new();
@@ -596,7 +592,7 @@ impl ScoreChunk {
                         while j < entries.len() {
                             let next_size = entries[j].len();
 
-                            log_i(&format!("  🔎 Checking entry {} (size={})", j, next_size));
+                            debug!("  🔎 Checking entry {} (size={})", j, next_size);
 
                             // Check if this could be a behavior entry
                             // Pattern: 8 bytes per behavior (cast_lib u16, cast_member u16, unk0 u32)
@@ -605,10 +601,7 @@ impl ScoreChunk {
                                 let mut sec_reader = BinaryReader::from_u8(&entries[j]);
                                 sec_reader.set_endian(Endian::Big);
 
-                                log_i(&format!(
-                                    "  📦 Entry {} has {} bytes = {} potential behaviors",
-                                    j, next_size, behavior_count
-                                ));
+                                debug!("  📦 Entry {} has {} bytes = {} potential behaviors", j, next_size, behavior_count);
 
                                 let mut found_valid_behavior = false;
 
@@ -651,18 +644,17 @@ impl ScoreChunk {
                                                         }
                                                     }
 
-                                                    log_i(&format!(
-                                                        "    ✅ Behavior {}: cast={}/{}, unk0={}",
+                                                    debug!("    ✅ Behavior {}: cast={}/{}, unk0={}",
                                                         behavior_idx + 1,
                                                         cast_lib,
                                                         cast_member,
                                                         unk0
-                                                    ));
+                                                    );
                                                     secondaries.push(secondary);
                                                     found_valid_behavior = true;
                                                 } else {
-                                                    log_i(&format!("    ⏭️ Skipping invalid behavior {}: cast={}/{}", 
-                            behavior_idx + 1, cast_lib, cast_member));
+                                                    warn!("    ⏭️ Skipping invalid behavior {}: cast={}/{}", 
+                                                        behavior_idx + 1, cast_lib, cast_member);
                                                 }
                                             }
                                         }
@@ -675,16 +667,15 @@ impl ScoreChunk {
                                     break;
                                 }
                             } else {
-                                log_i(&format!("  ⏹️ Not a behavior entry size, stopping"));
+                                debug!("  ⏹️ Not a behavior entry size, stopping");
                                 break; // Not a behavior entry size
                             }
                         }
 
-                        log_i(&format!(
-                            "📊 Primary for channel {} has {} behaviors total",
+                        debug!("📊 Primary for channel {} has {} behaviors total",
                             primary.channel_index,
                             secondaries.len()
-                        ));
+                        );
 
                         // Create a separate result entry for EACH secondary
                         if secondaries.is_empty() {
@@ -708,10 +699,10 @@ impl ScoreChunk {
             i += 1;
         }
 
-        log_i(&format!(
+        debug!(
             "🏁 Finished analyzing. Created {} results",
             results.len()
-        ));
+        );
         Ok(results)
     }
 }

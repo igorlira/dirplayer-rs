@@ -300,7 +300,7 @@ impl DirPlayer {
         self.bg_color = ColorRef::Rgb(r, g, b);
 
         // Load all fonts from cast members into the font manager
-        web_sys::console::log_1(&"Loading fonts from cast members...".into());
+        log::debug!("Loading fonts from cast members...");
         self.movie
             .cast_manager
             .load_fonts_into_manager(&mut self.font_manager);

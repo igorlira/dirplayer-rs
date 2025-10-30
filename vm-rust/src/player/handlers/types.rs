@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use log::error;
+use log::warn;
 
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType},
@@ -319,7 +319,7 @@ impl TypeHandlers {
         });
         match eval_expr {
             Some(s) => eval_lingo_expr_runtime(s.to_owned()).await.or_else(|err| {
-                error!("value() eval error, returning Void: {}", &err.message);
+                warn!("value() eval error, returning Void: {}", &err.message);
                 Ok(DatumRef::Void)
             }),
             _ => Ok(args[0].clone()),
