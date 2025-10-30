@@ -182,6 +182,7 @@ pub struct DirPlayer {
     pub sound_manager: SoundManager,
     pub date_objects: HashMap<u32, DateObject>,
     pub math_objects: HashMap<u32, MathObject>,
+    pub enable_stream_status_handler: bool,
 }
 
 impl DirPlayer {
@@ -253,6 +254,7 @@ impl DirPlayer {
             date_objects: HashMap::new(),
             math_objects: HashMap::new(),
             click_on_sprite: 0,
+            enable_stream_status_handler: false,
         };
 
         // Initialize the actorList as a global variable

@@ -368,6 +368,7 @@ impl BuiltInHandlerManager {
             "color" => TypeHandlers::color(args),
             "keyPressed" => Self::key_pressed(args),
             "showGlobals" => Self::show_globals(),
+            "tellStreamStatus" => Self::tell_stream_status(args),
             _ => {
                 let formatted_args = reserve_player_ref(|player| {
                     let mut formatted_args = String::new();
@@ -499,6 +500,22 @@ impl BuiltInHandlerManager {
                 matching_nodes,
                 false,
             )))
+        })
+    }
+
+    fn tell_stream_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.len() < 1 {
+            return Err(ScriptError::new(
+                "tellStreamStatus requires 1 argument".to_string(),
+            ));
+        }
+
+        reserve_player_mut(|player| {
+            player.enable_stream_status_handler = player
+                .get_datum(&args[0])
+                .bool_value()
+                .unwrap_or(false);
+            Ok(player.alloc_datum(Datum::Int(player.enable_stream_status_handler as i32)))
         })
     }
 }
