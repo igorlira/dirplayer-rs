@@ -1,14 +1,9 @@
 use crate::{
     director::{
-        chunks::handler::Bytecode,
-        lingo::datum::{datum_bool, Datum, StringChunkExpr, StringChunkSource, StringChunkType},
+        lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool},
     },
     player::{
-        context_vars::{player_get_context_var, player_set_context_var, read_context_var_args},
-        datum_formatting::format_concrete_datum,
-        handlers::datum_handlers::string_chunk::StringChunkUtils,
-        reserve_player_mut, DirPlayer, HandlerExecutionResult, HandlerExecutionResultContext,
-        ScriptError,
+        DirPlayer, HandlerExecutionResult, ScriptError, context_vars::{player_get_context_var, player_set_context_var, read_context_var_args}, datum_formatting::format_concrete_datum, datum_ref::DatumRef, handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut
     },
 };
 
@@ -44,6 +39,26 @@ impl StringBytecodeHandler {
             Datum::Void => Ok("".to_string()),
             _ => Ok(format_concrete_datum(datum, &player)),
         }
+    }
+
+    pub fn concat_datums(
+        left: DatumRef,
+        right: DatumRef,
+        player: &mut DirPlayer,
+        pad: bool,
+    ) -> Result<DatumRef, ScriptError> {
+        let right = player.get_datum(&right);
+        let left = player.get_datum(&left);
+
+        let right = Self::get_datum_concat_value(right, &player)?;
+        let left = Self::get_datum_concat_value(left, &player)?;
+
+        let result = if pad {
+            format!("{} {}", left, right)
+        } else {
+            format!("{}{}", left, right)
+        };
+        Ok(player.alloc_datum(Datum::String(result)))
     }
 
     pub fn contains_str(
@@ -103,15 +118,8 @@ impl StringBytecodeHandler {
                 let left = scope.stack.pop().unwrap();
                 (left, right)
             };
-            let right = player.get_datum(&right_id);
-            let left = player.get_datum(&left_id);
 
-            let right = Self::get_datum_concat_value(right, &player)?;
-            let left = Self::get_datum_concat_value(left, &player)?;
-
-            let join_str = format!("{} {}", left, right);
-
-            let result_id = player.alloc_datum(Datum::String(join_str));
+            let result_id = Self::concat_datums(left_id, right_id, player, true)?;
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
@@ -126,15 +134,8 @@ impl StringBytecodeHandler {
                 let left = scope.stack.pop().unwrap();
                 (left, right)
             };
-            let right = player.get_datum(&right_id);
-            let left = player.get_datum(&left_id);
 
-            let right = Self::get_datum_concat_value(right, &player)?;
-            let left = Self::get_datum_concat_value(left, &player)?;
-
-            let join_str = format!("{}{}", left, right);
-
-            let result_id = player.alloc_datum(Datum::String(join_str));
+            let result_id = Self::concat_datums(left_id, right_id, player, false)?;
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
