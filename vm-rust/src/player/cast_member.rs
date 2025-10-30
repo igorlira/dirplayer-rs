@@ -659,7 +659,7 @@ impl CastMember {
                             if !xmedia.is_pfr_font() && xmedia.raw_data.len() > 100 {
                                 console::log_1(
                                     &format!(
-                                        "📝 Analyzing text XMedia chunk ({} bytes)",
+                                        "📄 Analyzing text XMedia chunk ({} bytes)",
                                         xmedia.raw_data.len()
                                     )
                                     .into(),
@@ -685,41 +685,59 @@ impl CastMember {
 
                                         console::log_1(
                                             &format!(
-                    "   Found potential text start at offset {}: {:02X} {:02X} {:02X} {:02X}",
-                    i,
-                    xmedia.raw_data[i],
-                    xmedia.raw_data[i+1],
-                    xmedia.raw_data[i+2],
-                    xmedia.raw_data[i+3]
-                  )
+                                                "   Found potential text start at offset {}: {:02X} {:02X} {:02X} {:02X}",
+                                                i,
+                                                xmedia.raw_data[i],
+                                                xmedia.raw_data[i+1],
+                                                xmedia.raw_data[i+2],
+                                                xmedia.raw_data[i+3]
+                                            )
                                             .into(),
                                         );
+
+                                        // Parse the length from the hex ASCII digits before the comma
+                                        // Pattern is: 00 XX XX 2C where XX XX are ASCII hex digits
+                                        let mut length_str = String::new();
+                                        let mut length_pos = i + 1;
+                                        
+                                        while length_pos < i + 3 && xmedia.raw_data[length_pos] != 0x2C {
+                                            let byte = xmedia.raw_data[length_pos];
+                                            if byte >= 0x30 && byte <= 0x39 { // 0-9
+                                                length_str.push(byte as char);
+                                            } else if byte >= 0x41 && byte <= 0x46 { // A-F
+                                                length_str.push(byte as char);
+                                            } else if byte >= 0x61 && byte <= 0x66 { // a-f
+                                                length_str.push(byte as char);
+                                            }
+                                            length_pos += 1;
+                                        }
+                                        
+                                        console::log_1(
+                                            &format!("   Length string: '{}'", length_str).into(),
+                                        );
+
+                                        // Parse the length (it's in hex format as ASCII)
+                                        let text_length = if let Ok(len) = usize::from_str_radix(&length_str, 16) {
+                                            console::log_1(
+                                                &format!("   Parsed length: {} bytes (0x{} hex)", len, length_str).into(),
+                                            );
+                                            len
+                                        } else {
+                                            console::log_1(&"   Failed to parse length, using fallback".into());
+                                            100 // fallback
+                                        };
 
                                         // Start reading after the comma
                                         let text_start = i + 4;
                                         let mut text = String::new();
-                                        let mut consecutive_printable = 0;
 
-                                        for j in
-                                            text_start..xmedia.raw_data.len().min(text_start + 500)
-                                        {
+                                        for j in text_start..xmedia.raw_data.len().min(text_start + text_length) {
                                             let byte = xmedia.raw_data[j];
 
                                             if byte >= 0x20 && byte <= 0x7E {
                                                 text.push(byte as char);
-                                                consecutive_printable += 1;
                                             } else if byte == 0x0D || byte == 0x0A {
-                                                // Line break - keep going if we have good text
-                                                if consecutive_printable > 10 {
-                                                    text.push(' ');
-                                                }
-                                                consecutive_printable = 0;
-                                            } else if byte < 0x20 {
-                                                // Control character
-                                                if text.len() > 50 {
-                                                    break; // We have enough text
-                                                }
-                                                consecutive_printable = 0;
+                                                text.push(' ');
                                             }
                                         }
 
@@ -735,7 +753,7 @@ impl CastMember {
                                             .into(),
                                         );
 
-                                        if text.len() > 10 {
+                                        if text.len() > 3 {
                                             return Some(text);
                                         }
                                     }
