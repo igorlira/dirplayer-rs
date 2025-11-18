@@ -454,6 +454,10 @@ impl Score {
 
     pub fn reset(&mut self) {
         for channel in &mut self.channels {
+            // Clear script instances for ALL sprites, not just puppeted ones
+            // This prevents stale ScriptInstanceRef objects from pointing to deleted instances
+            channel.sprite.script_instance_list.clear();
+
             if channel.sprite.puppet {
                 channel.sprite.reset();
             }

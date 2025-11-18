@@ -4,6 +4,8 @@ use std::{
     rc::Rc,
 };
 
+use log::warn;
+
 use super::{allocator::DatumAllocatorTrait, PLAYER_OPT};
 
 pub type DatumId = usize;
@@ -66,11 +68,20 @@ impl Drop for DatumRef {
     fn drop(&mut self) {
         if let DatumRef::Ref(id, ref_count) = self {
             unsafe {
-                let ref_count = &mut **ref_count;
-                *ref_count -= 1;
-                if *ref_count <= 0 {
-                    let player = PLAYER_OPT.as_mut().unwrap();
-                    player.allocator.on_datum_ref_dropped(*id);
+                // Check if we can safely dereference the ref_count pointer
+                // During allocator reset, the Rc may have been freed
+                // We need to check if the player still exists and if the datum is still in the allocator
+                if let Some(player) = PLAYER_OPT.as_mut() {
+                    // Only proceed if the datum still exists in the allocator
+                    if player.allocator.datums.contains_key(id) {
+                        let ref_count = &mut **ref_count;
+                        *ref_count -= 1;
+                        if *ref_count <= 0 {
+                            player.allocator.on_datum_ref_dropped(*id);
+                        }
+                    } else {
+                        warn!("Attempted to drop DatumRef for non-existing DatumId: {}", id);
+                    }
                 }
             }
         }

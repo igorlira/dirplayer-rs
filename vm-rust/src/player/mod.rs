@@ -52,7 +52,7 @@ use cast_member::{CastMemberType, CastMemberTypeId};
 use datum_ref::DatumRef;
 use fxhash::FxHashMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
-use log::warn;
+use log::{debug, warn};
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use net_manager::NetManager;
 use profiling::{end_profiling, start_profiling};
@@ -257,18 +257,7 @@ impl DirPlayer {
             enable_stream_status_handler: false,
         };
 
-        // Initialize the actorList as a global variable
-        let actor_list_datum = result.alloc_datum(Datum::List(DatumType::List, vec![], false));
-        result
-            .globals
-            .insert("actorList".to_string(), actor_list_datum);
-
-        // Initialize VOID constant
-        result.globals.insert("VOID".to_string(), DatumRef::Void);
-
-        for i in 0..MAX_STACK_SIZE {
-            result.scopes.push(Scope::default(i));
-        }
+        result.reset();
         result
     }
 
@@ -501,16 +490,38 @@ impl DirPlayer {
 
     pub fn reset(&mut self) {
         self.stop();
+
+        // Clear all references before resetting the allocator
+        // This ensures all DatumRef and ScriptInstanceRef objects are dropped properly
+        debug!("Clearing scopes");
         self.scopes.clear();
+        debug!("Clearing globals");
         self.globals.clear();
-        self.allocator.reset();
+        debug!("Clearing timeout manager");
         self.timeout_manager.clear();
         // netManager.clear();
+        debug!("Resetting score");
         self.movie.score.reset();
         self.movie.current_frame = 1;
         // TODO cancel breakpoints
         self.current_breakpoint = None;
-        // notifyListeners();
+        self.scope_count = 0;
+
+        debug!("Resetting allocator");
+        // Now it's safe to reset the allocator
+        self.allocator.reset();
+
+        // Initialize the actorList as a global variable
+        let actor_list_datum = self.alloc_datum(Datum::List(DatumType::List, vec![], false));
+        self.globals.insert("actorList".to_string(), actor_list_datum);
+
+        // Initialize VOID constant
+        self.globals.insert("VOID".to_string(), DatumRef::Void);
+
+        // Initialize scopes (call stack)
+        for i in 0..MAX_STACK_SIZE {
+            self.scopes.push(Scope::default(i));
+        }
 
         JsApi::dispatch_frame_changed(self.movie.current_frame);
         JsApi::dispatch_scope_list(self);

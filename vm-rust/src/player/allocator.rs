@@ -2,7 +2,7 @@ use std::{cell::UnsafeCell, rc::Rc};
 
 use async_std::channel::{Receiver, Sender};
 use fxhash::FxHashMap;
-use log::warn;
+use log::{debug, warn};
 
 use crate::{console_warn, director::lingo::datum::Datum};
 
@@ -256,9 +256,23 @@ impl ScriptInstanceAllocatorTrait for DatumAllocator {
 
 impl ResetableAllocator for DatumAllocator {
     fn reset(&mut self) {
-        self.datums.clear();
-        self.datum_id_counter = 1;
-        self.script_instances.clear();
+        // Explicitly drop all entries to ensure proper cleanup
+        // This prevents issues with Drop implementations trying to access
+        // the allocator during HashMap clearing
+        debug!("Removing all datums");
+        let mut datum_ids: Vec<DatumId> = self.datums.keys().copied().collect();
+        datum_ids.reverse();
+        for id in datum_ids {
+            self.datums.remove(&id);
+        }
+
+        debug!("Removing all script instances");
+        let instance_ids: Vec<ScriptInstanceId> = self.script_instances.keys().copied().collect();
+        for id in instance_ids {
+            self.script_instances.remove(&id);
+        }
+
         self.script_instance_counter = 1;
+        self.datum_id_counter = 1;
     }
 }
