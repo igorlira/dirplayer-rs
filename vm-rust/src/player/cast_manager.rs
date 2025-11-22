@@ -82,7 +82,7 @@ impl CastManager {
                 lctx: cast_def.and_then(|x| x.lctx.clone()),
                 members: FxHashMap::default(),
                 scripts: FxHashMap::default(),
-                preload_mode: 0,
+                preload_mode: cast_entry.preload_settings,
                 capital_x: false,
                 dir_version: 0,
             };
@@ -114,16 +114,16 @@ impl CastManager {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
                 match cast.preload_mode {
                     0 => {
-                        // TODO: Load when needed
-                        cast.preload(net_manager, bitmap_manager, dir_cache).await;
+                        // Preload: When Needed
                     }
                     1 => {
+                        // Preload: After frame one
                         if reason == CastPreloadReason::AfterFrameOne {
                             cast.preload(net_manager, bitmap_manager, dir_cache).await;
                         }
                     }
                     2 => {
-                        // Before frame one
+                        // Preload: Before frame one
                         if reason == CastPreloadReason::MovieLoaded {
                             cast.preload(net_manager, bitmap_manager, dir_cache).await;
                         }

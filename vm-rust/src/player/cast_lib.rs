@@ -50,7 +50,7 @@ pub struct CastLib {
     pub lctx: Option<ScriptContext>,
     pub members: FxHashMap<u32, CastMember>,
     pub scripts: FxHashMap<u32, Rc<Script>>,
-    pub preload_mode: u8,
+    pub preload_mode: u16,
     pub capital_x: bool,
     pub dir_version: u16,
 }
@@ -184,7 +184,7 @@ impl CastLib {
         // TODO
         match prop.as_str() {
             "preloadMode" => {
-                self.preload_mode = value.int_value()? as u8;
+                self.preload_mode = value.int_value()? as u16;
             }
             "name" => {
                 self.set_name(value.string_value()?);
