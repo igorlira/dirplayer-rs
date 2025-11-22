@@ -61,7 +61,7 @@ pub struct BitmapInfo {
     pub palette_id: i16,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum ShapeType {
     Rect,
