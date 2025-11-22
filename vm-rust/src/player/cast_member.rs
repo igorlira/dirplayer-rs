@@ -1006,17 +1006,65 @@ impl CastMember {
                 })
             }
             MemberType::Flash => {
+                use crate::director::enums::ShapeType;
+                debug!("Flash member {}: checking for shape_info", number);
+                debug!("  specific_data has shape_info: {}", chunk.specific_data.shape_info().is_some());
+                
+                if let Some(shape_info) = chunk.specific_data.shape_info() {
+                    debug!("Flash member {} is a Shape (via shape_info)", number);
+                    return CastMember {
+                        number,
+                        name: chunk
+                            .member_info
+                            .as_ref()
+                            .map(|x| x.name.to_owned())
+                            .unwrap_or_default(),
+                        member_type: CastMemberType::Shape(ShapeMember {
+                            shape_info: shape_info.clone(),
+                        }),
+                        color: ColorRef::PaletteIndex(255),
+                        bg_color: ColorRef::PaletteIndex(0),
+                    }
+                }
+                
+                // Director MX 2004 can store shapes as Flash members
+                // Try to parse the specific_data_raw as ShapeInfo
+                if !chunk.specific_data_raw.is_empty() {
+                    debug!("  specific_data_raw length: {}", chunk.specific_data_raw.len());
+                    
+                    // Try parsing as ShapeInfo
+                    let shape_info = ShapeInfo::from(chunk.specific_data_raw.as_slice());
+                    debug!("  Parsed shape_type: {:?}", shape_info.shape_type);
+                    
+                    // If it looks like valid shape data, treat it as a shape
+                    if matches!(shape_info.shape_type, ShapeType::Rect | ShapeType::Oval | ShapeType::OvalRect | ShapeType::Line) {
+                        debug!("Flash member {} is actually a Shape!", number);
+                        return CastMember {
+                            number,
+                            name: chunk
+                                .member_info
+                                .as_ref()
+                                .map(|x| x.name.to_owned())
+                                .unwrap_or_default(),
+                            member_type: CastMemberType::Shape(ShapeMember { shape_info }),
+                            color: ColorRef::PaletteIndex(255),
+                            bg_color: ColorRef::PaletteIndex(0),
+                        }
+                    }
+                }
+                
+                // Otherwise, process as actual Flash
                 debug!("Creating Flash cast member #{} in cast lib {}", number, cast_lib);
                 if let Some(Some(chunk)) = member_def.children.get(0) {
-                if let Some(flash_chunk_data) = chunk.as_bytes() {
-                    CastMemberType::Flash(FlashMember { data: flash_chunk_data.to_vec() })
+                    if let Some(flash_chunk_data) = chunk.as_bytes() {
+                        CastMemberType::Flash(FlashMember { data: flash_chunk_data.to_vec() })
+                    } else {
+                        warn!("Flash cast member data chunk was not of expected type.");
+                        CastMemberType::Flash(FlashMember { data: vec![] })
+                    }
                 } else {
-                    warn!("Flash cast member data chunk was not of expected type.");
+                    warn!("Flash cast member has no data chunk or it is invalid.");
                     CastMemberType::Flash(FlashMember { data: vec![] })
-                }
-                } else {
-                warn!("Flash cast member has no data chunk or it is invalid.");
-                CastMemberType::Flash(FlashMember { data: vec![] })
                 }
             }
             MemberType::Ole => {
