@@ -110,9 +110,49 @@ impl StringChunkUtils {
                 new_string.replace_range(start..end, "");
                 Ok(new_string)
             }
-            _ => Err(ScriptError::new(
-                "Only char chunk type is supported for string by deleting chunk".to_string(),
-            )),
+            StringChunkType::Item => {
+                let chunk_list = 
+                    Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), chunk_expr.item_delimiter)?;
+                let (start, end) = 
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
+
+                if chunk_list.len() == 0 {
+                    return Ok(string.clone());
+                }
+
+                let mut new_chunks = chunk_list;
+                new_chunks.drain(start..end);
+                let delimiter = chunk_expr.item_delimiter.to_string();
+                Ok(new_chunks.join(&delimiter))
+            },
+            StringChunkType::Word => {
+                let chunk_list = 
+                    Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), chunk_expr.item_delimiter)?;
+                let (start, end) = 
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
+
+                if chunk_list.len() == 0 {
+                    return Ok(string.clone());
+                }
+
+                let mut new_chunks = chunk_list;
+                new_chunks.drain(start..end);
+                Ok(new_chunks.join(" "))
+            },
+            StringChunkType::Line => {
+                let chunk_list = 
+                    Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), chunk_expr.item_delimiter)?;
+                let (start, end) = 
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
+
+                if chunk_list.len() == 0 {
+                    return Ok(string.clone());
+                }
+
+                let mut new_chunks = chunk_list;
+                new_chunks.drain(start..end);
+                Ok(new_chunks.join("\r\n"))
+            },
         }
     }
 
