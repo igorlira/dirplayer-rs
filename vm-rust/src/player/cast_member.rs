@@ -12,13 +12,10 @@ use super::{
     sprite::ColorRef,
     ScriptError,
 };
-use crate::director::chunks::sound::SoundChunk;
-use crate::director::chunks::Chunk;
-use crate::director::enums::SoundInfo;
 use crate::director::{
-    chunks::{cast_member::CastMemberDef, score::ScoreChunk},
+    chunks::{cast_member::CastMemberDef, score::ScoreChunk, xmedia::PfrFont, xmedia::XMediaChunk, sound::SoundChunk, Chunk, cast_member::CastMemberChunk},
     enums::{
-        BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, TextMemberData,
+        BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, TextMemberData, SoundInfo,
     },
     lingo::script::ScriptContext,
 };
@@ -66,6 +63,14 @@ pub struct TextMember {
     pub top_spacing: i16,
     pub width: u16,
     pub html_styled_spans: Vec<StyledSpan>,
+}
+
+pub struct PfrBitmap {
+    pub bitmap_ref: BitmapRef,
+    pub char_width: u16,
+    pub char_height: u16,
+    pub grid_columns: u8,
+    pub grid_rows: u8,
 }
 
 impl CastMember {
@@ -178,6 +183,11 @@ pub struct SoundMember {
     pub sound: SoundChunk,
 }
 
+#[derive(Clone)]
+pub struct FlashMember {
+    pub data: Vec<u8>,
+}
+
 #[derive(Clone, Debug)]
 pub struct FontMember {
     pub font_info: FontInfo,
@@ -205,6 +215,7 @@ pub enum CastMemberType {
     FilmLoop(FilmLoopMember),
     Sound(SoundMember),
     Font(FontMember),
+    Flash(FlashMember),
     Unknown,
 }
 
@@ -219,6 +230,7 @@ pub enum CastMemberTypeId {
     FilmLoop,
     Sound,
     Font,
+    Flash,
     Unknown,
 }
 
@@ -252,6 +264,9 @@ impl fmt::Debug for CastMemberType {
             Self::Font(_) => {
                 write!(f, "Font")
             }
+            Self::Flash(_) => {
+                write!(f, "Flash")
+            }
             Self::Unknown => {
                 write!(f, "Unknown")
             }
@@ -270,7 +285,8 @@ impl CastMemberTypeId {
             Self::Shape => Ok("shape"),
             Self::FilmLoop => Ok("filmLoop"),
             Self::Sound => Ok("sound"),
-            Self::Font => Ok("Font"),
+            Self::Font => Ok("font"),
+            Self::Flash => Ok("flash"),
             _ => Err(ScriptError::new("Unknown cast member type".to_string())),
         };
     }
@@ -288,6 +304,7 @@ impl CastMemberType {
             Self::FilmLoop(_) => CastMemberTypeId::FilmLoop,
             Self::Sound(_) => CastMemberTypeId::Sound,
             Self::Font(_) => CastMemberTypeId::Font,
+            Self::Flash(_) => CastMemberTypeId::Flash,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -303,6 +320,7 @@ impl CastMemberType {
             Self::FilmLoop(_) => "filmLoop",
             Self::Sound(_) => "sound",
             Self::Font(_) => "font",
+            Self::Flash(_) => "flash",
             _ => "unknown",
         };
     }
@@ -391,6 +409,20 @@ impl CastMemberType {
             _ => None,
         };
     }
+
+    pub fn as_flash(&self) -> Option<&FlashMember> {
+        return match self {
+            Self::Flash(data) => { Some(data) }
+            _ => { None }
+        }
+    }
+
+    pub fn as_flash_mut(&mut self) -> Option<&mut FlashMember> {
+        return match self {
+            Self::Flash(data) => { Some(data) }
+            _ => { None }
+        }
+    }
 }
 
 impl CastMember {
@@ -419,6 +451,7 @@ impl CastMember {
             Chunk::CstInfo(_) => "Cinf",
             Chunk::Effect(_) => "FXmp",
             Chunk::Thum(_) => "Thum",
+            Chunk::Raw(_) => "Raw",
         }
     }
 
@@ -545,6 +578,401 @@ impl CastMember {
         }
     }
 
+    fn extract_text_from_xmedia(data: &[u8]) -> Option<String> {
+        let len_limit = data.len().saturating_sub(100);
+
+        for i in 0..len_limit {
+            // Look for: 00 XX XX 2C   (comma at [i+3])
+            if data[i] != 0x00 || i + 3 >= data.len() || data[i + 3] != 0x2C {
+                continue;
+            }
+
+            // Parse ASCII hex length: two bytes at [i+1] and [i+2]
+            let length_str = data[i + 1..=i + 2]
+                .iter()
+                .filter_map(|b| {
+                    let c = *b as char;
+                    c.is_ascii_hexdigit().then_some(c)
+                })
+                .collect::<String>();
+
+            let text_length = usize::from_str_radix(&length_str, 16).unwrap_or(100);
+
+            // Extract text
+            let start = i + 4;
+            let end = (start + text_length).min(data.len());
+            let mut text = String::new();
+
+            for &b in &data[start..end] {
+                match b {
+                    0x20..=0x7E => text.push(b as char),
+                    0x0D | 0x0A => text.push(' '),
+                    _ => {}
+                }
+            }
+
+            let text = text.trim().to_string();
+            if text.len() > 3 {
+                return Some(text);
+            }
+        }
+
+        None
+    }
+
+    fn scan_font_name_from_xmedia(xmedia: &XMediaChunk) -> Option<String> {
+        let data = &xmedia.raw_data;
+
+        for i in 0..data.len().saturating_sub(20) {
+            // Look for the exact prefix
+            if data[i..].starts_with(b"FFF Reaction") {
+                // Extract until the null terminator
+                let mut name = Vec::new();
+
+                for &b in &data[i..] {
+                    if b == 0 { break; }
+                    if b.is_ascii_graphic() || b == b' ' {
+                        name.push(b);
+                    }
+                }
+
+                if !name.is_empty() {
+                    return Some(String::from_utf8_lossy(&name).to_string());
+                }
+            }
+        }
+
+        None
+    }
+
+    fn extract_pfr(member_def: &CastMemberDef) -> Option<PfrFont> {
+        member_def.children.iter()
+            .find_map(|c| match c {
+                Some(Chunk::XMedia(x)) if x.is_pfr_font() => x.parse_pfr_font(),
+                _ => None
+            })
+    }
+
+    fn find_pfr_name(member_def: &CastMemberDef) -> Option<String> {
+        member_def.children.iter().find_map(|child_opt| {
+            if let Some(Chunk::XMedia(xmedia)) = child_opt {
+                if xmedia.is_pfr_font() {
+                    let name = xmedia.extract_font_name();
+                    if !name.clone()?.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+            None
+        })?
+    }
+
+    fn resolve_font_name(chunk: &CastMemberChunk, member_def: &CastMemberDef, number: u32) -> String {
+        if let Some(name) = chunk.member_info.as_ref().map(|i| i.name.clone()).filter(|n| !n.is_empty()) {
+            return name;
+        }
+
+        if let Some(pfr_name) = Self::find_pfr_name(member_def) {
+            return pfr_name;
+        }
+
+        if let Some(info) = chunk.specific_data.font_info() {
+            if !info.name.is_empty() {
+                return info.name.clone();
+            }
+        }
+
+        format!("Font_{}", number)
+    }
+
+    fn render_pfr_to_bitmap(
+        pfr: &PfrFont,
+        bitmap_manager: &mut BitmapManager,
+    ) -> PfrBitmap {
+        let bitmap_width  = (pfr.char_width  as u16) * (pfr.grid_columns as u16);
+        let bitmap_height = (pfr.char_height as u16) * (pfr.grid_rows    as u16);
+
+        debug!(
+            "🎨 Creating bitmap for PFR font '{}' ({}x{}, grid {}x{})",
+            pfr.font_name,
+            bitmap_width,
+            bitmap_height,
+            pfr.grid_columns,
+            pfr.grid_rows,
+        );
+
+        // Create a blank 32-bit bitmap
+        let mut bitmap = Bitmap::new(
+            bitmap_width,
+            bitmap_height,
+            32,
+            32,
+            0,
+            PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+        );
+
+        // fully transparent
+        for px in bitmap.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0, 0, 0, 0]);
+        }
+
+        // Render PFR vector glyphs into a temporary 1-bit buffer
+        use super::super::director::chunks::pfr_renderer::render_pfr_font;
+
+        let rendered = render_pfr_font(
+            &pfr.glyph_data,
+            pfr.char_width as usize,
+            pfr.char_height as usize,
+            128, // fixed number of glyphs
+        );
+
+        debug!("🖨 Rendered PFR vector glyphs → {} bytes", rendered.len());
+
+        let bytes_per_row = ((pfr.char_width + 7) / 8) as usize;
+        let bytes_per_glyph = bytes_per_row * pfr.char_height as usize;
+
+        // Copy the 1-bit glyphs into the RGBA bitmap
+        for glyph_idx in 0..128 {
+            let grid_x = (glyph_idx % pfr.grid_columns as usize) as u8;
+            let grid_y = (glyph_idx / pfr.grid_columns as usize) as u8;
+
+            let dest_x = (grid_x as u16) * (pfr.char_width as u16);
+            let dest_y = (grid_y as u16) * (pfr.char_height as u16);
+
+            let glyph_offset = glyph_idx * bytes_per_glyph;
+
+            for row in 0..pfr.char_height {
+                let row_base = glyph_offset + (row as usize * bytes_per_row);
+                if row_base >= rendered.len() {
+                    break;
+                }
+
+                for col in 0..pfr.char_width {
+                    let b_index = row_base + (col as usize / 8);
+                    if b_index >= rendered.len() {
+                        continue;
+                    }
+
+                    let byte = rendered[b_index];
+                    let bit = (byte >> (7 - (col % 8))) & 1;
+
+                    if bit == 1 {
+                        let px = dest_x + col as u16;
+                        let py = dest_y + row as u16;
+                        let index = (py as usize * bitmap_width as usize + px as usize) * 4;
+
+                        bitmap.data[index..index + 4].copy_from_slice(&[255, 255, 255, 255]);
+                    }
+                }
+            }
+        }
+
+        debug!("✅ Finished assembling PFR bitmap.");
+
+        // Add to the manager and return
+        let bitmap_ref = bitmap_manager.add_bitmap(bitmap);
+
+        PfrBitmap {
+            bitmap_ref,
+            char_width: pfr.char_width,
+            char_height: pfr.char_height,
+            grid_columns: pfr.grid_columns,
+            grid_rows: pfr.grid_rows,
+        }
+    }
+
+    fn log_ole_start(number: u32, cast_lib: u32, chunk: &CastMemberChunk) {
+        debug!(
+            "Processing Ole member #{} in cast lib {} (name: {})",
+            number,
+            cast_lib,
+            chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or("")
+        );
+    }
+
+    fn log_found_swf(number: u32, sig: &[u8], len: usize) {
+        debug!("✅ Found SWF data in Ole member #{} (signature: {:?}, {} bytes)", number, sig, len);
+    }
+
+    fn log_found_swf_at_offset(number: u32, sig: &[u8]) {
+        debug!("✅ Found SWF signature at offset 12 in Ole member #{}: {:?}", number, sig);
+    }
+
+    fn log_unknown_ole(number: u32, chunk: &CastMemberChunk) {
+        debug!(
+            "Cast member #{} has unimplemented type: Ole (name: {})",
+            number,
+            chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or("")
+        );
+    }
+
+    fn make_swf_member(number: u32, chunk: &CastMemberChunk, data: Vec<u8>) -> CastMember {
+        CastMember {
+            number,
+            name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+            member_type: CastMemberType::Flash(FlashMember { data }),
+            color: ColorRef::PaletteIndex(255),
+            bg_color: ColorRef::PaletteIndex(0),
+        }
+    }
+
+    fn get_first_child_bytes(member_def: &CastMemberDef) -> Option<Vec<u8>> {
+        if let Some(Some(ch)) = member_def.children.get(0) {
+            if let Some(bytes) = ch.as_bytes() {
+                return Some(bytes.to_vec());
+            }
+        }
+        None
+    }
+
+    fn try_parse_swf(bytes: Vec<u8>, number: u32, chunk: &CastMemberChunk) -> Option<CastMember> {
+        if bytes.len() < 3 {
+            return None;
+        }
+
+        let sig = &bytes[0..3];
+
+        let is_swf = sig == b"FWS" || sig == b"CWS" || sig == b"ZWS";
+        if is_swf {
+            Self::log_found_swf(number, sig, bytes.len());
+            return Some(Self::make_swf_member(number, chunk, bytes));
+        }
+
+        // Try offset 12 SWF (OLE wrapped SWF)
+        if bytes.len() > 15 {
+            let sig2 = &bytes[12..15];
+            let is_swf2 = sig2 == b"FWS" || sig2 == b"CWS" || sig2 == b"ZWS";
+            if is_swf2 {
+                Self::log_found_swf_at_offset(number, sig2);
+                return Some(Self::make_swf_member(number, chunk, bytes[12..].to_vec()));
+            }
+        }
+
+        None
+    }
+
+    fn scan_children_for_ole(
+        member_def: &CastMemberDef,
+        number: u32,
+        chunk: &CastMemberChunk,
+        bitmap_manager: &mut BitmapManager,
+    ) -> Option<CastMember> 
+    {
+        for opt_child in &member_def.children {
+            let Some(Chunk::XMedia(xm)) = opt_child else { continue };
+
+            // 1) If SWF: return SWF
+            if let Some(cm) = Self::try_parse_swf(xm.raw_data.to_vec(), number, chunk) {
+                return Some(cm);
+            }
+
+            // 2) Font logic
+            return Some(Self::parse_xmedia_font(member_def, number, chunk, xm, bitmap_manager));
+        }
+        None
+    }
+
+    fn parse_xmedia_font(
+        member_def: &CastMemberDef,
+        number: u32,
+        chunk: &CastMemberChunk,
+        xm: &XMediaChunk,
+        bitmap_manager: &mut BitmapManager,
+    ) -> CastMember {
+        let font_name = Self::resolve_font_name(chunk, member_def, number);
+        let preview_text = Self::extract_text_from_xmedia(&xm.raw_data)
+            .filter(|s| s.len() > 3)
+            .unwrap_or_default();
+        let preview_font_name = Self::scan_font_name_from_xmedia(xm);
+        let pfr = Self::extract_pfr(member_def);
+
+        let info_and_bitmap = Self::build_font_info_and_bitmap(
+            pfr,
+            chunk,
+            &font_name,
+            bitmap_manager,
+        );
+
+        let (font_info, bitmap_ref, char_w, char_h, gc, gr) = info_and_bitmap;
+
+        CastMember {
+            number,
+            name: chunk
+                .member_info
+                .as_ref()
+                .map(|x| x.name.to_owned())
+                .unwrap_or_default(),
+            member_type: CastMemberType::Font(FontMember {
+                font_info,
+                preview_text,
+                preview_font_name,
+                preview_html_spans: Vec::new(),
+                fixed_line_space: 14,
+                top_spacing: 0,
+                bitmap_ref,
+                char_width: char_w,
+                char_height: char_h,
+                grid_columns: gc,
+                grid_rows: gr,
+            }),
+            color: ColorRef::PaletteIndex(255),
+            bg_color: ColorRef::PaletteIndex(0),
+        }
+    }
+
+    fn build_font_info_and_bitmap(
+        pfr: Option<PfrFont>,
+        chunk: &CastMemberChunk,
+        default_name: &str,
+        bitmap_manager: &mut BitmapManager,
+    ) -> (
+        FontInfo,
+        Option<BitmapRef>,
+        Option<u16>, // char width
+        Option<u16>, // char height
+        Option<u8>, // grid columns
+        Option<u8>, // grid rows
+        ) {
+        let specific_bytes = chunk.specific_data_raw.clone();
+
+        if let Some(pfr) = pfr {
+            let bmp = Self::render_pfr_to_bitmap(&pfr, bitmap_manager);
+
+            let info = FontInfo {
+                font_id: 0,
+                size: pfr.char_height,
+                style: 0,
+                name: if pfr.font_name.is_empty() {
+                    default_name.to_string()
+                } else {
+                    pfr.font_name.clone()
+                }
+            };
+
+            return (
+                info,
+                Some(bmp.bitmap_ref),
+                Some(bmp.char_width),
+                Some(bmp.char_height),
+                Some(bmp.grid_columns),
+                Some(bmp.grid_rows),
+            );
+        }
+
+        if FontInfo::looks_like_real_font_data(&specific_bytes) {
+            let info = chunk
+                .specific_data
+                .font_info()
+                .map(|fi| fi.clone().with_default_name(default_name))
+                .unwrap_or_else(|| FontInfo::minimal(default_name));
+
+            return (info, None, None, None, None, None);
+        }
+
+        // fallback
+        (FontInfo::minimal(default_name), None, None, None, None, None)
+    }
+
     pub fn from(
         cast_lib: u32,
         number: u32,
@@ -577,405 +1005,38 @@ impl CastMember {
                     name: member_info.name.clone(),
                 })
             }
-            MemberType::Font => {
-                use web_sys::console;
+            MemberType::Flash => {
+                debug!("Creating Flash cast member #{} in cast lib {}", number, cast_lib);
+                if let Some(Some(chunk)) = member_def.children.get(0) {
+                if let Some(flash_chunk_data) = chunk.as_bytes() {
+                    CastMemberType::Flash(FlashMember { data: flash_chunk_data.to_vec() })
+                } else {
+                    warn!("Flash cast member data chunk was not of expected type.");
+                    CastMemberType::Flash(FlashMember { data: vec![] })
+                }
+                } else {
+                warn!("Flash cast member has no data chunk or it is invalid.");
+                CastMemberType::Flash(FlashMember { data: vec![] })
+                }
+            }
+            MemberType::Ole => {
+                Self::log_ole_start(number, cast_lib, chunk);
 
-                let font_name = chunk
-                    .member_info
-                    .as_ref()
-                    .map(|info| info.name.clone())
-                    .unwrap_or_else(|| "<unnamed>".to_string());
-
-                // Try to get font_info from specific_data
-                let font_info_opt = chunk.specific_data.font_info();
-
-                // Get raw specific data for analysis
-                let specific_data_bytes = chunk.specific_data_raw.clone();
-
-                // Step 1: Extract font name from multiple sources
-                let font_name = {
-                    // Try member_info first
-                    if let Some(info) = &chunk.member_info {
-                        if !info.name.is_empty() {
-                            info.name.clone()
-                        } else {
-                            // Try to extract from PFR font data
-                            member_def
-                                .children
-                                .iter()
-                                .find_map(|child_opt| {
-                                    if let Some(Chunk::XMedia(xmedia)) = child_opt {
-                                        if xmedia.is_pfr_font() {
-                                            return xmedia.extract_font_name();
-                                        }
-                                    }
-                                    None
-                                })
-                                .unwrap_or_else(|| {
-                                    // Try to extract from FontInfo in specific_data
-                                    if let Some(info) = chunk.specific_data.font_info() {
-                                        if !info.name.is_empty() {
-                                            return info.name.clone();
-                                        }
-                                    }
-                                    // Last resort: generic name
-                                    format!("Font_{}", number)
-                                })
-                        }
-                    } else {
-                        // No member_info, try PFR
-                        member_def
-                            .children
-                            .iter()
-                            .find_map(|child_opt| {
-                                if let Some(Chunk::XMedia(xmedia)) = child_opt {
-                                    if xmedia.is_pfr_font() {
-                                        return xmedia.extract_font_name();
-                                    }
-                                }
-                                None
-                            })
-                            .unwrap_or_else(|| format!("Font_{}", number))
+                // Try direct OLE data
+                if let Some(bytes) = Self::get_first_child_bytes(member_def) {
+                    if let Some(cm) = Self::try_parse_swf(bytes, number, chunk) {
+                        return cm;
                     }
-                };
+                }
 
-                debug!(
-                    "🎨 Creating Font cast member: '{}' (member #{})",
-                    font_name, number
-                );
+                // Try all XMedia children for SWF or fonts
+                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager) {
+                    return cm;
+                }
 
-                let specific_data_bytes = chunk.specific_data_raw.clone();
-
-                // Step 2: Extract preview text from XMedia (the styled text one)
-                let preview_text = member_def
-                    .children
-                    .iter()
-                    .find_map(|child_opt| {
-                        if let Some(Chunk::XMedia(xmedia)) = child_opt {
-                            if !xmedia.is_pfr_font() && xmedia.raw_data.len() > 100 {
-                                debug!(
-                                    "📄 Analyzing text XMedia chunk ({} bytes)",
-                                    xmedia.raw_data.len()
-                                );
-
-                                // Debug: show first 200 bytes
-                                let preview: String = xmedia
-                                    .raw_data
-                                    .iter()
-                                    .take(200)
-                                    .map(|b| format!("{:02X}", b))
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                debug!("   First 200 bytes: {}", preview);
-
-                                // Look for the pattern "00 XX XX 2C" followed by readable text
-                                for i in 0..xmedia.raw_data.len().saturating_sub(100) {
-                                    if xmedia.raw_data[i] == 0x00
-                                        && i + 3 < xmedia.raw_data.len()
-                                        && xmedia.raw_data[i + 3] == 0x2C
-                                    {
-                                        // comma
-
-                                        debug!(
-                                            "   Found potential text start at offset {}: {:02X} {:02X} {:02X} {:02X}",
-                                            i,
-                                            xmedia.raw_data[i],
-                                            xmedia.raw_data[i + 1],
-                                            xmedia.raw_data[i + 2],
-                                            xmedia.raw_data[i + 3]
-                                        );
-
-                                        // Parse the length from the hex ASCII digits before the comma
-                                        // Pattern is: 00 XX XX 2C where XX XX are ASCII hex digits
-                                        let mut length_str = String::new();
-                                        let mut length_pos = i + 1;
-
-                                        while length_pos < i + 3 && xmedia.raw_data[length_pos] != 0x2C {
-                                            let byte = xmedia.raw_data[length_pos];
-                                            if byte >= 0x30 && byte <= 0x39 { // 0-9
-                                                length_str.push(byte as char);
-                                            } else if byte >= 0x41 && byte <= 0x46 { // A-F
-                                                length_str.push(byte as char);
-                                            } else if byte >= 0x61 && byte <= 0x66 { // a-f
-                                                length_str.push(byte as char);
-                                            }
-                                            length_pos += 1;
-                                        }
-
-                                        debug!("   Length string: '{}'", length_str);
-
-                                        // Parse the length (it's in hex format as ASCII)
-                                        let text_length = if let Ok(len) = usize::from_str_radix(&length_str, 16) {
-                                            debug!(
-                                                "   Parsed length: {} bytes (0x{} hex)",
-                                                len, length_str
-                                            );
-                                            len
-                                        } else {
-                                            debug!("   Failed to parse length, using fallback");
-                                            100 // fallback
-                                        };
-
-                                        // Start reading after the comma
-                                        let text_start = i + 4;
-                                        let mut text = String::new();
-
-                                        for j in text_start..xmedia.raw_data.len().min(text_start + text_length) {
-                                            let byte = xmedia.raw_data[j];
-
-                                            if byte >= 0x20 && byte <= 0x7E {
-                                                text.push(byte as char);
-                                            } else if byte == 0x0D || byte == 0x0A {
-                                                text.push(' ');
-                                            }
-                                        }
-
-                                        // Clean up the text
-                                        let text = text.trim().to_string();
-
-                                        debug!(
-                                            "   Extracted: '{}' ({} chars)",
-                                            text.chars().take(80).collect::<String>(),
-                                            text.len()
-                                        );
-
-                                        if text.len() > 3 {
-                                            return Some(text);
-                                        }
-                                    }
-                                }
-
-                                debug!("   ⚠️ No text found in XMedia chunk");
-                            }
-                        }
-                        None
-                    })
-                    .unwrap_or_default();
-
-                debug!("   Final preview_text length: {}", preview_text.len());
-
-                let preview_font_name = member_def.children.iter().find_map(|child_opt| {
-                    if let Some(Chunk::XMedia(xmedia)) = child_opt {
-                        if !xmedia.is_pfr_font() && xmedia.raw_data.len() > 100 {
-                            // Look for font names in the styled text data
-                            // Fonts are usually referenced as null-terminated strings
-                            for i in 0..xmedia.raw_data.len().saturating_sub(20) {
-                                if xmedia.raw_data[i..].starts_with(b"FFF Reaction") {
-                                    let mut name = Vec::new();
-                                    for &b in &xmedia.raw_data[i..] {
-                                        if b == 0 {
-                                            break;
-                                        }
-                                        if b >= 0x20 && b <= 0x7E {
-                                            name.push(b);
-                                        }
-                                    }
-                                    if !name.is_empty() {
-                                        let name_str = String::from_utf8_lossy(&name).to_string();
-                                        debug!("📝 Found font reference: '{}'", name_str);
-                                        return Some(name_str);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    None
-                });
-
-                // Step 3: Parse PFR font data from XMedia
-                let pfr_font_data = member_def.children.iter().find_map(|child_opt| {
-                    if let Some(Chunk::XMedia(xmedia)) = child_opt {
-                        if xmedia.is_pfr_font() {
-                            debug!("🎨 Found PFR font data ({} bytes)", xmedia.raw_data.len());
-                            return xmedia.parse_pfr_font();
-                        }
-                    }
-                    None
-                });
-
-                // Step 4: Determine what kind of font member this is
-                let is_text_data = FontInfo::looks_like_text_data(&specific_data_bytes);
-                let has_font_binary = FontInfo::looks_like_real_font_data(&specific_data_bytes);
-
-                // Step 5: Create the appropriate FontMember
-                let (font_info, bitmap_ref, char_width, char_height, grid_columns, grid_rows) =
-                    if let Some(pfr) = pfr_font_data {
-                        debug!(
-                            "📝 Creating bitmap from PFR: '{}' ({}x{}, grid {}x{})",
-                            pfr.font_name,
-                            pfr.char_width,
-                            pfr.char_height,
-                            pfr.grid_columns,
-                            pfr.grid_rows
-                        );
-
-                        let bitmap_width = pfr.char_width * pfr.grid_columns as u16;
-                        let bitmap_height = pfr.char_height * pfr.grid_rows as u16;
-
-                        let mut font_bitmap = Bitmap::new(
-                            bitmap_width,
-                            bitmap_height,
-                            32,
-                            32,
-                            0,
-                            PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
-                        );
-
-                        // Clear to transparent
-                        for pixel in font_bitmap.data.chunks_exact_mut(4) {
-                            pixel[0] = 0;
-                            pixel[1] = 0;
-                            pixel[2] = 0;
-                            pixel[3] = 0;
-                        }
-
-                        // ✅ RENDER VECTOR GLYPHS
-                        debug!("🎨 Rendering PFR vector glyphs...");
-
-                        use super::super::director::chunks::pfr_renderer::render_pfr_font;
-
-                        let rendered_bitmap_data = render_pfr_font(
-                            &pfr.glyph_data,
-                            pfr.char_width as usize,
-                            pfr.char_height as usize,
-                            128, // Total glyphs
-                        );
-
-                        debug!(
-                            "✅ Vector rendering complete: {} bytes",
-                            rendered_bitmap_data.len()
-                        );
-
-                        // Copy the rendered 1-bit data into the 32-bit RGBA bitmap
-                        let bytes_per_row = ((pfr.char_width + 7) / 8) as usize;
-                        let bytes_per_glyph = bytes_per_row * pfr.char_height as usize;
-
-                        for glyph_idx in 0..128 {
-                            let grid_x = (glyph_idx % pfr.grid_columns as usize) as u16;
-                            let grid_y = (glyph_idx / pfr.grid_columns as usize) as u16;
-                            let dest_x = grid_x * pfr.char_width;
-                            let dest_y = grid_y * pfr.char_height;
-
-                            let glyph_offset = glyph_idx * bytes_per_glyph;
-
-                            // Decode each row of the glyph
-                            for row in 0..pfr.char_height {
-                                let row_offset = glyph_offset + (row as usize * bytes_per_row);
-
-                                if row_offset >= rendered_bitmap_data.len() {
-                                    break;
-                                }
-
-                                // Process each pixel in the row
-                                for col in 0..pfr.char_width {
-                                    let byte_idx = row_offset + (col as usize / 8);
-
-                                    if byte_idx >= rendered_bitmap_data.len() {
-                                        continue;
-                                    }
-
-                                    let byte = rendered_bitmap_data[byte_idx];
-                                    let bit_idx = 7 - (col % 8);
-                                    let bit_set = (byte >> bit_idx) & 1 == 1;
-
-                                    if bit_set {
-                                        let px = dest_x + col;
-                                        let py = dest_y + row;
-
-                                        if px < bitmap_width && py < bitmap_height {
-                                            let pixel_idx = (py as usize * bitmap_width as usize
-                                                + px as usize)
-                                                * 4;
-                                            if pixel_idx + 3 < font_bitmap.data.len() {
-                                                font_bitmap.data[pixel_idx] = 255; // R
-                                                font_bitmap.data[pixel_idx + 1] = 255; // G
-                                                font_bitmap.data[pixel_idx + 2] = 255; // B
-                                                font_bitmap.data[pixel_idx + 3] = 255;
-                                                // A
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        debug!("✅ PFR font bitmap created!");
-
-                        let bitmap_ref = bitmap_manager.add_bitmap(font_bitmap);
-
-                        let final_font_name = if !pfr.font_name.is_empty() {
-                            pfr.font_name.clone()
-                        } else {
-                            font_name.clone()
-                        };
-
-                        let font_info = FontInfo {
-                            font_id: 0,
-                            size: pfr.char_height,
-                            style: 0,
-                            name: final_font_name,
-                        };
-
-                        debug!("✅ PFR font bitmap created!");
-
-                        (
-                            font_info,
-                            Some(bitmap_ref),
-                            Some(pfr.char_width),
-                            Some(pfr.char_height),
-                            Some(pfr.grid_columns),
-                            Some(pfr.grid_rows),
-                        )
-                    } else if has_font_binary {
-                        // Has font binary but no PFR - use FontInfo
-                        let font_info = if let Some(info) = chunk.specific_data.font_info() {
-                            let mut info = info.clone();
-                            if info.name.is_empty() {
-                                info.name = font_name.clone();
-                            }
-                            info
-                        } else {
-                            FontInfo {
-                                font_id: 0,
-                                size: 12,
-                                style: 0,
-                                name: font_name.clone(),
-                            }
-                        };
-
-                        (font_info, None, None, None, None, None)
-                    } else {
-                        // Text data only - create minimal font info
-                        let font_info = FontInfo {
-                            font_id: 0,
-                            size: 12,
-                            style: 0,
-                            name: font_name.clone(),
-                        };
-                        (font_info, None, None, None, None, None)
-                    };
-
-                // Step 6: Create the single FontMember
-                debug!(
-                    "✅ Creating FontMember: name='{}', has_bitmap={}, preview_text_len={}",
-                    font_info.name,
-                    bitmap_ref.is_some(),
-                    preview_text.len()
-                );
-
-                CastMemberType::Font(FontMember {
-                    font_info,
-                    preview_text,
-                    preview_font_name,
-                    preview_html_spans: Vec::new(),
-                    fixed_line_space: 14,
-                    top_spacing: 0,
-                    bitmap_ref,
-                    char_width,
-                    char_height,
-                    grid_columns,
-                    grid_rows,
-                })
+                // Fallback
+                Self::log_unknown_ole(number, chunk);
+                CastMemberType::Unknown
             }
             MemberType::Bitmap => {
                 let bitmap_info = chunk.specific_data.bitmap_info().unwrap();
@@ -1102,34 +1163,34 @@ impl CastMember {
 
                 // Try to find a sound chunk
                 let sound_chunk_opt = member_def.children.iter()
-          .filter_map(|c_opt| c_opt.as_ref())
-          .find_map(|chunk| match chunk {
-            Chunk::Sound(s) => {
-              debug!("Found Sound chunk with {} bytes", s.data().len());
-              Some(s.clone())
-            },
-            Chunk::Media(m) => {
-              debug!("Found Media chunk: sample_rate={}, data_size_field={}, audio_data.len()={}, is_compressed={}",
-                m.sample_rate, m.data_size_field, m.audio_data.len(), m.is_compressed
-              );
+                .filter_map(|c_opt| c_opt.as_ref())
+                .find_map(|chunk| match chunk {
+                    Chunk::Sound(s) => {
+                    debug!("Found Sound chunk with {} bytes", s.data().len());
+                    Some(s.clone())
+                    },
+                    Chunk::Media(m) => {
+                    debug!("Found Media chunk: sample_rate={}, data_size_field={}, audio_data.len()={}, is_compressed={}",
+                        m.sample_rate, m.data_size_field, m.audio_data.len(), m.is_compressed
+                    );
 
-              // Check if the Media chunk has any sound data
-              // Don't just check is_empty - also check data_size_field
-              if !m.audio_data.is_empty() || m.data_size_field > 0 {
-                let sound = SoundChunk::from_media(&m);
-                debug!(
-                  "Created SoundChunk from Media: {} bytes, rate={}",
-                  sound.data().len(),
-                  sound.sample_rate()
-                );
-                Some(sound)
-              } else {
-                debug!("Media chunk has no audio data");
-                None
-              }
-            },
-            _ => None,
-          });
+                    // Check if the Media chunk has any sound data
+                    // Don't just check is_empty - also check data_size_field
+                    if !m.audio_data.is_empty() || m.data_size_field > 0 {
+                        let sound = SoundChunk::from_media(&m);
+                        debug!(
+                        "Created SoundChunk from Media: {} bytes, rate={}",
+                        sound.data().len(),
+                        sound.sample_rate()
+                        );
+                        Some(sound)
+                    } else {
+                        debug!("Media chunk has no audio data");
+                        None
+                    }
+                    },
+                    _ => None,
+                });
 
                 let found_sound = sound_chunk_opt.is_some();
                 debug!(

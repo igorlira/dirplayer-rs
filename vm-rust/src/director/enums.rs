@@ -17,12 +17,15 @@ pub enum MemberType {
     Picture = (5),
     Sound = (6),
     Button = (7),
-    Shape = (8),
-    Movie = (9),
+    Flash = (8),
+    Shape = (9),
     DigitalVideo = (10),
     Script = (11),
     RTE = (12),
-    Font = (15),
+
+    Ole = (15),
+    Font = (16),
+    Shockwave3d = (17),
     Unknown = (255),
 }
 
@@ -384,6 +387,22 @@ impl FontInfo {
         }
 
         false
+    }
+
+    pub fn minimal(name: &str) -> Self {
+        FontInfo {
+            font_id: 0,
+            size: 12,
+            style: 0,
+            name: name.to_string(),
+        }
+    }
+
+    pub fn with_default_name(mut self, name: &str) -> Self {
+        if self.name.is_empty() {
+            self.name = name.to_string();
+        }
+        self
     }
 }
 

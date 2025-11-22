@@ -76,6 +76,7 @@ pub enum Chunk {
     CstInfo(CastInfoChunk),
     Effect(EffectChunk),
     Thum(ThumChunk),
+    Raw(Vec<u8>),
 }
 
 impl Chunk {
@@ -111,6 +112,13 @@ impl Chunk {
         match self {
             Self::Sound(data) => Some(data),
             _ => None,
+        }
+    }
+
+    pub fn as_bytes(&self) -> Option<&Vec<u8>> {
+        match self {
+            Self::Raw(data) => { Some(data) }
+            _ => { None }
         }
     }
 }
