@@ -96,7 +96,22 @@ impl MovieHandlers {
                         .iter()
                         .find(|fl| fl.label == label);
                     frame_label.map(|frame_label| frame_label.frame_num as u32)
-                }
+                },
+                DatumType::Symbol => {
+                    let symbol = datum.string_value()?;
+                    match symbol.as_str() {
+                        "next" => {
+                            let next_frame = player.movie.current_frame + 1;
+                            Some(next_frame)
+                        },
+                        "previous" => Some(if player.movie.current_frame > 1 { player.movie.current_frame - 1 } else { 1 }),
+                        "loop" => Some(player.movie.current_frame),
+                        _ => {
+                            let frame_label = player.movie.score.frame_labels.iter().find(|fl| fl.label == symbol);
+                            frame_label.map(|frame_label| frame_label.frame_num as u32)
+                        }
+                    }
+                },
                 _ => None,
             };
             match destination_frame {
