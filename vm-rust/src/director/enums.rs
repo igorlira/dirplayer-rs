@@ -22,7 +22,8 @@ pub enum MemberType {
     DigitalVideo = (10),
     Script = (11),
     RTE = (12),
-
+    Transition = (13),
+    Xtra = (14),
     Ole = (15),
     Font = (16),
     Shockwave3d = (17),
@@ -176,6 +177,9 @@ impl From<&[u8]> for ShapeInfo {
         return ShapeInfo {
             shape_type: match shape_type_raw {
                 0x0001 => ShapeType::Rect,
+                0x0002 => ShapeType::OvalRect,
+                0x0003 => ShapeType::Oval,
+                0x0008 => ShapeType::Line,
                 _ => {
                     warn!("Unknown shape type: {:x}", shape_type_raw);
                     ShapeType::Unknown
