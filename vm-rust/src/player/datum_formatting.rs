@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{allocator::ScriptInstanceAllocatorTrait, sprite::ColorRef},
+    player::{allocator::ScriptInstanceAllocatorTrait, sprite::ColorRef, bitmap::bitmap::PaletteRef},
 };
 
 use super::{DatumRef, DirPlayer};
@@ -99,9 +99,18 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
                 bitmap.width, bitmap.height, bitmap.bit_depth
             )
         }
-        Datum::PaletteRef(_) => {
-            format!("<palette>")
-        }
+        Datum::PaletteRef(palette_ref) => match palette_ref {
+            PaletteRef::BuiltIn(builtin) => {
+                format!("{:?}", builtin).to_lowercase()
+            }
+            PaletteRef::Member(member_ref) => {
+                format!(
+                    "(member {} of castLib {})",
+                    member_ref.cast_member,
+                    member_ref.cast_lib
+                )
+            }
+        },
         Datum::Xtra(name) => {
             format!("<Xtra \"{}\" _ _______>", name)
         }
