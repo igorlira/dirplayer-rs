@@ -150,25 +150,69 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
 
 pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
     match datum {
-        Datum::Int(n) => n.to_string(),
-        Datum::Float(f) => format!("{:.3}", f), // or your precision logic
         Datum::String(s) => s.clone(),
-        Datum::Void => "VOID".to_string(),
+        
+        Datum::Int(n) => n.to_string(),
+        
+        // UPDATED: Float concatenation also uses floatPrecision
+        // Director behavior: "value: " & 3.14 → "value: 3.1400" (with floatPrecision=4)
+        Datum::Float(f) => match player.float_precision {
+            1 => format!("{:.1}", f),
+            2 => format!("{:.2}", f),
+            3 => format!("{:.3}", f),
+            4 => format!("{:.4}", f),
+            5 => format!("{:.5}", f),
+            6 => format!("{:.6}", f),
+            _ => f.to_string(),
+        },
+        
+        Datum::Symbol(s) => s.clone(),
+        
+        // Void/Null become empty string in concatenation
+        Datum::Void | Datum::Null => String::new(),
+        
         Datum::Vector(v) => format!("[{},{},{}]", v[0], v[1], v[2]),
-        Datum::IntRect(r) => format!("({}, {}, {}, {})", r.0, r.1, r.2, r.3),
-        Datum::IntPoint(p) => format!("({}, {})", p.0, p.1),
+        
+        Datum::IntRect(r) => format!("rect({}, {}, {}, {})", r.0, r.1, r.2, r.3),
+        
+        Datum::IntPoint(p) => format!("point({}, {})", p.0, p.1),
+        
         Datum::ColorRef(cr) => match cr {
             ColorRef::PaletteIndex(i) => format!("color({})", i),
             ColorRef::Rgb(r, g, b) => format!("rgb({}, {}, {})", r, g, b),
         },
+        
         Datum::List(_, list, _) => {
             let elements: Vec<String> = list
                 .iter()
                 .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
                 .collect();
-            elements.join(", ")
-        }
-        _ => "<unknown datum>".to_string(),
+            format!("[{}]", elements.join(", "))
+        },
+        
+        Datum::PropList(entries, _) => {
+            if entries.is_empty() {
+                return "[:]".to_string();
+            }
+            let elements: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}:{}",
+                        datum_to_string_for_concat(player.get_datum(k), player),
+                        datum_to_string_for_concat(player.get_datum(v), player)
+                    )
+                })
+                .collect();
+            format!("[{}]", elements.join(", "))
+        },
+        
+        Datum::StringChunk(..) => {
+            datum.string_value().unwrap_or(String::new())
+        },
+        
+        // For other complex types, use the standard formatter
+        _ => format_concrete_datum(datum, player),
     }
 }
 

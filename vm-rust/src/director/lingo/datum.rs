@@ -54,7 +54,7 @@ pub enum DatumType {
     Vector,
 }
 
-#[derive(Clone, FromPrimitive)]
+#[derive(Clone, PartialEq, FromPrimitive)]
 pub enum StringChunkType {
     Item,
     Word,

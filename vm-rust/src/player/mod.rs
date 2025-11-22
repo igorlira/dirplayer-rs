@@ -198,7 +198,7 @@ impl DirPlayer {
                 puppet_tempo: 0,
                 exit_lock: false,
                 dir_version: 0,
-                item_delimiter: '.',
+                item_delimiter: ',',
                 alert_hook: None,
                 base_path: "".to_string(),
                 file_name: "".to_string(),

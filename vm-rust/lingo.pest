@@ -1,70 +1,133 @@
-alpha           =  { 'a'..'z' | 'A'..'Z' }
-digit           =  _{ '0'..'9' }
-ident           = @{ !digit ~ (alpha | digit | "_")+ }
-string_interior =  {
-    (!("\"") // unless the next character is a quotation mark
-  // followed by the correct amount of number signs,
-  ~ ANY // consume one character
-  )*
+alpha =  { 'a'..'z' | 'A'..'Z' }
+digit = _{ '0'..'9' }
+
+ident = @{ !digit ~ (alpha | digit | "_")+ }
+
+lang_ident = { !reserved_keyword ~ ident }
+
+reserved_keyword = @{
+    ("into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item" | "put") ~ !(alpha | digit | "_")
 }
-WHITESPACE = _{ " " | "\t" | ("\\" ~ ("\r\n" | "\n" | "\r")) | "\r\n" | "\n" | "\r" }
 
-symbol     =  ${ "#" ~ ident }
-nohash_symbol = { (ident) }
-quote      = _{ "\"" }
-string     =  ${ quote ~ (string_interior) ~ quote }
-string_empty = { "EMPTY" }
-empty_list =  { "[]" }
-multi_list =  { "[" ~ (expr) ~ ("," ~ (expr))* ~ "]" }
-void       =  { "void" | "VOID" | "Void" }
-bool_true       =  { "true" | "True" | "TRUE" }
-bool_false      =  { "false" | "False" | "FALSE" }
+void_keyword = _{ ("void" | "VOID" | "Void") ~ !(alpha | digit | "_") }
+void         =  { void_keyword }
 
-number_sign    = { "+" | "-" }
-float_exponent = ${ "e" ~ number_sign? ~ digit+ }
+dotted_ident = { (ident | number_int) ~ ("." ~ (ident | number_int))+ }
 
+string_interior =  {
+    (!("\"") ~ ANY)*
+}
+WHITESPACE      = _{ " " | "\t" | ("\\" ~ ("\r\n" | "\n" | "\r")) | "\r\n" | "\n" | "\r" }
+
+symbol         = ${ "#" ~ ident }
+nohash_symbol  =  { (ident) }
+quote          = _{ "\"" }
+string         = ${ quote ~ (string_interior) ~ quote }
+string_empty   =  { "EMPTY" }
+return_const   =  { "RETURN" }
+the_prop       =  { ^"the" ~ lang_ident }
+empty_list     =  { "[]" }
+multi_list     =  { "[" ~ (expr) ~ ("," ~ (expr))* ~ "]" }
+bool_true      =  { ^"true" | ^"True" | ^"TRUE" }
+bool_false     =  { ^"false" | ^"False" | ^"FALSE" }
+number_sign    =  { "+" | "-" }
+float_exponent = ${ ^"e" ~ number_sign? ~ digit+ }
 number_int     = ${ (number_sign?) ~ (digit+) }
 number_float_a = ${ (number_sign?) ~ (digit*) ~ "." ~ (digit+) ~ (float_exponent?) }
 number_float_b = ${ (number_sign?) ~ (digit+) ~ "." ~ (digit*) ~ (float_exponent?) }
 number_float   = ${ number_float_a | number_float_b }
 
 prop_list_key   = _{ (symbol | nohash_symbol | string | number_float | number_int | void | bool_true | bool_false | string_empty) }
-prop_list_pair  = { prop_list_key ~ ":" ~ expr }
-empty_prop_list = { "[" ~ ":" ~ "]" }
-multi_prop_list = { "[" ~ (prop_list_pair) ~ ("," ~ (prop_list_pair))* ~ "]" }
+prop_list_pair  =  { prop_list_key ~ ":" ~ expr }
+empty_prop_list =  { "[" ~ ":" ~ "]" }
+multi_prop_list =  { "[" ~ (prop_list_pair) ~ ("," ~ (prop_list_pair))* ~ "]" }
 prop_list       = _{ empty_prop_list | multi_prop_list }
 
 list = _{ empty_list | multi_list }
 
 rgb_num_arg   = { digit{,3} }
-rgb_num_color = { "rgb" ~ "(" ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ ")" }
-rgb_str_color = { "rgb" ~ "(" ~ (string) ~ ")" }
+rgb_num_color = { ^"rgb" ~ "(" ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ ")" }
+rgb_str_color = { ^"rgb" ~ "(" ~ (string) ~ ")" }
 rgb_color     = { rgb_num_color | rgb_str_color }
+rect          = { ^"rect" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ ")" }
+point         = { ^"point" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ ")" }
 
-rect          = { "rect" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ ")" }
-point         = { "point" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ ")" }
+// Chunk expressions for "char 1 of myStr", etc.
+chunk_type = { ^"char" | ^"word" | ^"line" | ^"item" }
+chunk_expr = { chunk_type ~ expr ~ ^"of" ~ (lang_ident | chunk_expr) }
 
 parens_expr = _{ "(" ~ expr ~ ")" }
-primitive       =  _{ (symbol | list | string | prop_list | number_float | number_int | rgb_color | void | rect | bool_true | bool_false | string_empty | point | parens_expr | handler_call | ident) }
+
+// Boolean operators
+and_op = { ^"and" }
+or_op  = { ^"or" }
+not_op = { ^"not" }
+
+// Comparison operators
+eq_op = { "=" }
+ne_op = { "<>" }
+lt_op = { "<" }
+gt_op = { ">" }
+le_op = { "<=" }
+ge_op = { ">=" }
+
+primitive  = _{ handler_call | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_expr | chunk_expr | lang_ident }
 eval_expr  = _{ SOI ~ expr ~ EOI }
 ident_list = _{ !digit ~ ident ~ (" " ~ ident)+ }
 
-handler_call_args = { expr ~ ("," ~ expr)* }
-command_inline_args_comma = _{ expr ~ ("," ~ expr)+ }
-command_inline_args_space = _{ expr ~ expr+ }
-command_inline_args = { command_inline_args_comma | command_inline_args_space | expr }
-handler_call = { ident ~ "(" ~ handler_call_args? ~ ")" }
-command_inline = { ident ~ !(WHITESPACE* ~ ("(" | ".")) ~ command_inline_args? }
-assignment = { (expr | ident) ~ "=" ~ expr }
-command = _{ assignment | command_inline | expr }
-obj_prop = { "." }
-add = { "+" }
-subtract = { "-" }
-multiply = { "*" }
-divide = { "/" }
-join = { "&" }
-join_pad = { "&&"}
-bin_op = _{ obj_prop | add | subtract | multiply | divide | join_pad | join }
-expr = { primitive ~ (bin_op ~ primitive)* }
+handler_call_args         =  { expr ~ ("," ~ expr)* }
+command_inline_args_comma = _{ term ~ ("," ~ term)+ }
+command_inline_args_space = _{ term ~ term+ }
+command_inline_args       =  { command_inline_args_comma | command_inline_args_space | term }
+handler_call              =  { lang_ident ~ "(" ~ handler_call_args? ~ ")" }
+command_inline            =  { lang_ident ~ !(WHITESPACE* ~ ("(" | ".")) ~ command_inline_args? }
 
-command_eval_expr  = _{ SOI ~ command ~ EOI }
+// Put statement variations (order matters - most specific first!)
+put_into_chunk   = { ^"put" ~ expr ~ ^"into" ~ chunk_expr }
+put_before_chunk = { ^"put" ~ expr ~ ^"before" ~ chunk_expr }
+put_after_chunk  = { ^"put" ~ expr ~ ^"after" ~ chunk_expr }
+put_into         = { ^"put" ~ expr ~ ^"into" ~ ident }
+put_before       = { ^"put" ~ expr ~ ^"before" ~ ident }
+put_after        = { ^"put" ~ expr ~ ^"after" ~ ident }
+put_display      = { ^"put" ~ expr }
+
+put_statement = {
+    put_into_chunk
+  | put_before_chunk
+  | put_after_chunk
+  | put_into
+  | put_before
+  | put_after
+  | put_display
+}
+
+assignment =  { (lang_ident | dotted_ident) ~ "=" ~ expr }
+command    = _{ put_statement | assignment | command_inline | expr }
+obj_prop   =  { "." }
+add        =  { "+" }
+subtract   =  { "-" }
+multiply   =  { "*" }
+divide     =  { "/" }
+join       =  { "&" }
+join_pad   =  { "&&" }
+bin_op     = _{
+    obj_prop
+  | and_op
+  | or_op
+  | eq_op
+  | ne_op
+  | lt_op
+  | gt_op
+  | le_op
+  | ge_op
+  | add
+  | subtract
+  | multiply
+  | divide
+  | join_pad
+  | join
+}
+expr       =  { term ~ (bin_op ~ term)* }
+term       = _{ not_op ~ term | primitive }
+
+command_eval_expr = _{ SOI ~ command ~ EOI }

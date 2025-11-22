@@ -505,3 +505,68 @@ pub fn divide_datums(
     };
     Ok(result)
 }
+
+pub fn concat_datums(
+    left: Datum,
+    right: Datum,
+    player: &mut DirPlayer,
+) -> Result<Datum, ScriptError> {
+    let left_str = datum_to_concat_string(&left, player);
+    let right_str = datum_to_concat_string(&right, player);
+    
+    Ok(Datum::String(format!("{}{}", left_str, right_str)))
+}
+
+fn datum_to_concat_string(datum: &Datum, player: &DirPlayer) -> String {
+    match datum {
+        Datum::String(s) => s.clone(),
+        
+        Datum::Int(i) => i.to_string(),
+        
+        Datum::Float(f) => {
+            if f.fract() == 0.0 && f.is_finite() {
+                format!("{:.1}", f)
+            } else {
+                f.to_string()
+            }
+        },
+        
+        // CRITICAL: Symbol concatenation drops the # prefix!
+        // "type: " & #integer → "type: integer"
+        Datum::Symbol(s) => s.clone(),
+        
+        // Void/Null become empty string
+        Datum::Void | Datum::Null => String::new(),
+        
+        Datum::List(_, list, _) => {
+            let items: Vec<String> = list
+                .iter()
+                .map(|r| datum_to_concat_string(player.get_datum(r), player))
+                .collect();
+            format!("[{}]", items.join(", "))
+        },
+        
+        Datum::PropList(prop_list, _) => {
+            let items: Vec<String> = prop_list
+                .iter()
+                .map(|(key, value_ref)| {
+                    let value_str = datum_to_concat_string(player.get_datum(value_ref), player);
+                    format!("[#{}:{}]", key, value_str)
+                })
+                .collect();
+            items.join(", ")
+        },
+        
+        Datum::IntPoint((x, y)) => format!("point({}, {})", x, y),
+        
+        Datum::IntRect((left, top, right, bottom)) => {
+            format!("rect({}, {}, {}, {})", left, top, right, bottom)
+        },
+        
+        // For other complex types, use the formatting system
+        _ => {
+            use crate::player::datum_formatting::format_concrete_datum;
+            format_concrete_datum(datum, player)
+        }
+    }
+}

@@ -65,22 +65,73 @@ impl BuiltInHandlerManager {
         })
     }
 
-    fn put(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn put(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_ref(|player| {
-            let mut line = String::new();
-            let mut i = 0;
-            for arg in args {
-                if i > 0 {
-                    line.push_str(" ");
-                }
-                let arg = player.get_datum(arg);
-                line.push_str(&format_concrete_datum(&arg, player));
-                i += 1;
+            if args.is_empty() {
+                JsApi::dispatch_debug_message("--");
+                return Ok(());
             }
-            JsApi::dispatch_debug_message(format!("-- {}", line.as_str()).as_str());
+            
+            // Format the first argument to determine output
+            let first_arg = player.get_datum(&args[0]);
+            let output = if args.len() == 1 {
+                // Single argument
+                Self::format_for_put(first_arg, player)
+            } else {
+                // Multiple arguments - join with spaces
+                let parts: Vec<String> = args
+                    .iter()
+                    .map(|arg| {
+                        let datum = player.get_datum(arg);
+                        // For multi-arg put, use string representation
+                        match datum {
+                            Datum::String(s) => s.clone(),
+                            _ => format_concrete_datum(datum, player),
+                        }
+                    })
+                    .collect();
+                parts.join(" ")
+            };
+            
+            JsApi::dispatch_debug_message(&format!("-- {}", output));
             Ok(())
         })?;
         Ok(DatumRef::Void)
+    }
+
+    fn format_for_put(datum: &Datum, player: &DirPlayer) -> String {
+        match datum {
+            // Strings are output with quotes
+            Datum::String(s) => format!("\"{}\"", s),
+            
+            // Numbers are output without quotes
+            Datum::Int(i) => i.to_string(),
+            Datum::Float(f) => {
+                if f.fract() == 0.0 && f.is_finite() {
+                    format!("{:.1}", f)
+                } else {
+                    f.to_string()
+                }
+            },
+            
+            // Symbols are output with # prefix
+            Datum::Symbol(s) => format!("#{}", s),
+            
+            // Void outputs as <Void>
+            Datum::Void | Datum::Null => "<Void>".to_string(),
+            
+            // Lists
+            Datum::List(_, list, _) => {
+                let items: Vec<String> = list
+                    .iter()
+                    .map(|r| Self::format_for_put(player.get_datum(r), player))
+                    .collect();
+                format!("[{}]", items.join(", "))
+            },
+            
+            // Everything else uses default formatting
+            _ => format_concrete_datum(datum, player),
+        }
     }
 
     fn clear_globals(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -376,6 +427,8 @@ impl BuiltInHandlerManager {
             "tellStreamStatus" => Self::tell_stream_status(args),
             "label" => Self::label(args),
             "alert" => Self::alert(args),
+            "voidP" => Self::void_p(args),
+            "objectP" => Self::object_p(args),
             _ => {
                 let formatted_args = reserve_player_ref(|player| {
                     let mut formatted_args = String::new();
@@ -544,29 +597,80 @@ impl BuiltInHandlerManager {
             Ok(player.alloc_datum(Datum::Int(player.enable_stream_status_handler as i32)))
         })
     }
-}
-
-fn get_datum_script_instance_ids(
-    value_ref: &DatumRef,
-    player: &DirPlayer,
-) -> Result<Vec<ScriptInstanceRef>, ScriptError> {
-    let value = player.get_datum(value_ref);
-    let mut instance_refs = vec![];
-    match value {
-        Datum::ScriptInstanceRef(instance_id) => {
-            instance_refs.push(instance_id.clone());
-        }
-        Datum::SpriteRef(sprite_id) => {
-            let sprite = player.movie.score.get_sprite(*sprite_id).unwrap();
-            instance_refs.extend(sprite.script_instance_list.clone());
-        }
-        Datum::Int(_) => {}
-        _ => {
-            return Err(ScriptError::new(format!(
-                "Cannot get script instance ids from datum of type: {}",
-                value.type_str()
-            )));
+    
+    fn void_p(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.is_empty() {
+                return Ok(player.alloc_datum(Datum::Int(1)));
+            }
+            
+            let datum = player.get_datum(&args[0]);
+            let is_void = matches!(datum, Datum::Void | Datum::Null);
+            
+            Ok(player.alloc_datum(Datum::Int(if is_void { 1 } else { 0 })))
+        })
+    }
+    
+    fn object_p(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+            reserve_player_mut(|player| {
+                if args.is_empty() {
+                    return Ok(player.alloc_datum(Datum::Int(0)));
+                }
+                
+                let datum = player.get_datum(&args[0]);
+                
+                // Director considers these as objects (not primitives)
+                let is_object = matches!(
+                    datum,
+                    Datum::ScriptInstanceRef(_)
+                    | Datum::SpriteRef(_)
+                    | Datum::CastMember(_)
+                    | Datum::List(..)
+                    | Datum::PropList(..)
+                    | Datum::BitmapRef(_)
+                    | Datum::ScriptRef(_)
+                    | Datum::XmlRef(_)
+                    | Datum::Xtra(_)
+                    | Datum::XtraInstance(..)
+                    | Datum::Matte(..)
+                    | Datum::PlayerRef
+                    | Datum::MovieRef
+                    | Datum::Stage
+                    | Datum::CastLib(_)
+                    | Datum::DateRef(_)
+                    | Datum::MathRef(_)
+                    | Datum::SoundRef(_)
+                    | Datum::SoundChannel(_)
+                    | Datum::CursorRef(_)
+                    | Datum::TimeoutRef(_)
+                );
+                
+                Ok(player.alloc_datum(Datum::Int(if is_object { 1 } else { 0 })))
+            })
         }
     }
-    Ok(instance_refs)
-}
+
+    fn get_datum_script_instance_ids(
+        value_ref: &DatumRef,
+        player: &DirPlayer,
+    ) -> Result<Vec<ScriptInstanceRef>, ScriptError> {
+        let value = player.get_datum(value_ref);
+        let mut instance_refs = vec![];
+        match value {
+            Datum::ScriptInstanceRef(instance_id) => {
+                instance_refs.push(instance_id.clone());
+            }
+            Datum::SpriteRef(sprite_id) => {
+                let sprite = player.movie.score.get_sprite(*sprite_id).unwrap();
+                instance_refs.extend(sprite.script_instance_list.clone());
+            }
+            Datum::Int(_) => {}
+            _ => {
+                return Err(ScriptError::new(format!(
+                    "Cannot get script instance ids from datum of type: {}",
+                    value.type_str()
+                )));
+            }
+        }
+        Ok(instance_refs)
+    }

@@ -4,7 +4,7 @@ use crate::{
     },
     player::{
         context_vars::{player_get_context_var, player_set_context_var, read_context_var_args},
-        datum_formatting::format_concrete_datum,
+        datum_formatting::{format_concrete_datum, datum_to_string_for_concat},
         datum_ref::DatumRef,
         handlers::datum_handlers::string_chunk::StringChunkUtils,
         reserve_player_mut, DirPlayer, HandlerExecutionResult, ScriptError,
@@ -132,16 +132,28 @@ impl StringBytecodeHandler {
 
     pub fn join_str(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let (left_id, right_id) = {
+            let (left_ref, right_ref) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                let right = scope.stack.pop().unwrap();
-                let left = scope.stack.pop().unwrap();
-                (left, right)
+                let right_ref = scope.stack.pop().unwrap();
+                let left_ref = scope.stack.pop().unwrap();
+                (left_ref, right_ref)
             };
-
-            let result_id = Self::concat_datums(left_id, right_id, player, false)?;
+            
+            // Get the actual datums
+            let left = player.get_datum(&left_ref);
+            let right = player.get_datum(&right_ref);
+            
+            let left_str = datum_to_string_for_concat(left, player);
+            let right_str = datum_to_string_for_concat(right, player);
+            
+            // Concatenate
+            let result = Datum::String(format!("{}{}", left_str, right_str));
+            let result_ref = player.alloc_datum(result);
+            
+            // Push result back to stack
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(result_id);
+            scope.stack.push(result_ref);
+            
             Ok(HandlerExecutionResult::Advance)
         })
     }
@@ -360,6 +372,64 @@ impl StringBytecodeHandler {
             let result = player.alloc_datum(datum_bool(result));
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn put_chunk(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let bytecode = player.get_ctx_current_bytecode(ctx);
+            let put_type = PutType::from(((bytecode.obj >> 4) & 0xF) as u8);
+            let var_type = (bytecode.obj & 0xF) as u32;
+            
+            // Read the target variable
+            let (id_ref, cast_id_ref) = read_context_var_args(player, var_type, ctx.scope_ref);
+            
+            // Pop the value to put from the stack
+            let value_ref = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.pop().unwrap()
+            };
+            
+            // Read the chunk expression from the stack
+            let chunk_expr = Self::read_chunk_ref(player, ctx)?;
+            
+            // Get the current value of the variable
+            let string_ref = player_get_context_var(
+                player,
+                &id_ref,
+                cast_id_ref.as_ref(),
+                var_type,
+                ctx,
+            )?;
+            
+            let current_string = player.get_datum(&string_ref).string_value()?;
+            let value_string = player.get_datum(&value_ref).string_value()?;
+            
+            // Apply the chunk operation based on put type
+            let new_string = match put_type {
+                PutType::Into => {
+                    StringChunkUtils::string_by_putting_into_chunk(&current_string, &chunk_expr, &value_string)?
+                }
+                PutType::Before => {
+                    StringChunkUtils::string_by_putting_before_chunk(&current_string, &chunk_expr, &value_string)?
+                }
+                PutType::After => {
+                    StringChunkUtils::string_by_putting_after_chunk(&current_string, &chunk_expr, &value_string)?
+                }
+            };
+            
+            let new_string_ref = player.alloc_datum(Datum::String(new_string));
+            player_set_context_var(
+                player,
+                &id_ref,
+                cast_id_ref.as_ref(),
+                var_type,
+                &new_string_ref,
+                put_type,
+                ctx,
+            )?;
+            
             Ok(HandlerExecutionResult::Advance)
         })
     }
