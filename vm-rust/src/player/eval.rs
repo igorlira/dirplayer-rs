@@ -370,6 +370,11 @@ pub fn parse_lingo_rule_runtime(
             let ast = parse_lingo_expr_runtime(inner_pair, pratt)?;
             Ok(ast)
         }
+        Rule::term_arg => {
+            let inner_pair = pair.into_inner();
+            let ast = parse_lingo_expr_runtime(inner_pair, pratt)?;
+            Ok(ast)
+        }
         Rule::multi_list => {
             let mut result_vec = vec![];
             for inner_pair in pair.into_inner() {
@@ -449,25 +454,94 @@ pub fn parse_lingo_rule_runtime(
             )))
         }
         Rule::empty_list => Ok(LingoExpr::ListLiteral(vec![])),
-        Rule::handler_call | Rule::command_inline => {
+        Rule::put_handler_call => {
+            // For put_handler_call, "put" is not captured as a child, only handler_call_args is
             let mut inner = pair.into_inner();
-            let handler_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?;
-            let handler_name = handler_name_pair.as_str();
             let mut args = vec![];
-            if let Some(args_pair) = inner.next() {
-                // args_pair is handler_call_args which contains expr nodes
-                for arg in args_pair.into_inner() {
-                    // Each arg should be an expr, parse its inner pairs
-                    let arg_pairs = arg.into_inner();
+            
+            if let Some(args_container) = inner.next() {
+                // This should be handler_call_args
+                for arg_pair in args_container.into_inner() {
+                    let arg_pairs = arg_pair.into_inner();
                     let arg_val = parse_lingo_expr_runtime(arg_pairs, pratt)?;
                     args.push(arg_val);
                 }
             }
 
+            Ok(LingoExpr::HandlerCall("put".to_string(), args))
+        }
+        Rule::handler_call | Rule::command_inline => {
+            let mut inner = pair.into_inner();
+            let handler_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?;
+            let handler_name = handler_name_pair.as_str();
+            let mut args = vec![];
+            
+            if let Some(args_container) = inner.next() {
+                match args_container.as_rule() {
+                    Rule::handler_call_args => {
+                        // Process expr children (comma-separated in parentheses)
+                        for arg_pair in args_container.into_inner() {
+                            let arg_pairs = arg_pair.into_inner();
+                            let arg_val = parse_lingo_expr_runtime(arg_pairs, pratt)?;
+                            args.push(arg_val);
+                        }
+                    }
+                    Rule::command_inline_args_comma => {
+                        // Process expr children (comma-separated)
+                        for arg_pair in args_container.into_inner() {
+                            let arg_pairs = arg_pair.into_inner();
+                            let arg_val = parse_lingo_expr_runtime(arg_pairs, pratt)?;
+                            args.push(arg_val);
+                        }
+                    }
+                    Rule::command_inline_args_space => {
+                        // Process term_arg children (space-separated)
+                        for arg_pair in args_container.into_inner() {
+                            // arg_pair is a term_arg, recursively process it
+                            let arg_val = parse_lingo_rule_runtime(arg_pair, pratt)?;
+                            args.push(arg_val);
+                        }
+                    }
+                    Rule::command_inline_args_single => {
+                        // Process single expr
+                        let expr_pair = args_container.into_inner().next()
+                            .ok_or_else(|| ScriptError::new("Expected expr in single arg".to_string()))?;
+                        let arg_pairs = expr_pair.into_inner();
+                        let arg_val = parse_lingo_expr_runtime(arg_pairs, pratt)?;
+                        args.push(arg_val);
+                    }
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Unexpected args rule: {:?}",
+                            args_container.as_rule()
+                        )));
+                    }
+                }
+            }
+
             Ok(LingoExpr::HandlerCall(handler_name.to_owned(), args))
         }
-        Rule::lang_ident | Rule::ident | Rule::dotted_ident => {
+        Rule::lang_ident | Rule::ident => {
             Ok(LingoExpr::Identifier(pair.as_str().to_owned()))
+        }
+        Rule::dotted_ident => {
+            // Parse dotted identifiers like "obj.prop.subprop" into nested ObjProp expressions
+            let full_str = pair.as_str();
+            let parts: Vec<&str> = full_str.split('.').collect();
+            
+            if parts.is_empty() {
+                return Err(ScriptError::new("Empty dotted identifier".to_string()));
+            }
+            
+            // Start with the first identifier
+            let mut result = LingoExpr::Identifier(parts[0].to_owned());
+            
+            // Chain the rest as ObjProp accesses
+            for part in &parts[1..] {
+                result = LingoExpr::ObjProp(Box::new(result), part.to_string());
+            }
+            
+            Ok(result)
         }
         Rule::assignment => {
             let mut inner = pair.into_inner();
@@ -475,9 +549,12 @@ pub fn parse_lingo_rule_runtime(
             let right_pair = inner.next().ok_or_else(|| ScriptError::new("Expected right side of assignment".to_string()))?;
 
             let left_expr = match left_pair.as_rule() {
-                Rule::ident => {
+                Rule::ident | Rule::lang_ident => {
                     let ident_name = left_pair.as_str();
                     LingoExpr::Identifier(ident_name.to_owned())
+                }
+                Rule::dotted_ident => {
+                    parse_lingo_rule_runtime(left_pair, pratt)?
                 }
                 _ => parse_lingo_rule_runtime(left_pair, pratt)?,
             };
@@ -494,6 +571,16 @@ pub fn parse_lingo_rule_runtime(
             let expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected expression in put display".to_string()))?;
             let value_expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
             Ok(LingoExpr::PutDisplay(Box::new(value_expr)))
+        }
+        Rule::put_display_multi => {
+            let mut inner = pair.into_inner();
+            let mut exprs = vec![];
+            for expr_pair in inner {
+                let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
+                exprs.push(expr);
+            }
+            // Multiple comma-separated args means this is a handler call
+            Ok(LingoExpr::HandlerCall("put".to_string(), exprs))
         }
         Rule::put_into => {
             let mut inner = pair.into_inner();
@@ -568,7 +655,7 @@ pub fn parse_lingo_rule_runtime(
             let index_expr = parse_lingo_expr_runtime(index_pair.into_inner(), pratt)?;
             let source_pair = inner.next().ok_or_else(|| ScriptError::new("Expected source expression".to_string()))?;
             let source_expr = match source_pair.as_rule() {
-                Rule::ident => LingoExpr::Identifier(source_pair.as_str().to_owned()),
+                Rule::ident | Rule::lang_ident => LingoExpr::Identifier(source_pair.as_str().to_owned()),
                 Rule::chunk_expr => parse_lingo_rule_runtime(source_pair, pratt)?,
                 _ => parse_lingo_rule_runtime(source_pair, pratt)?,
             };
@@ -581,6 +668,18 @@ pub fn parse_lingo_rule_runtime(
             // Return an identifier that will be resolved at runtime
             // We'll use a special syntax to indicate it's a "the" property
             Ok(LingoExpr::Identifier(format!("the {}", prop_name)))
+        }
+        Rule::parens_list => {
+            let mut inner = pair.into_inner();
+            let mut exprs = vec![];
+            for expr_pair in inner {
+                let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
+                exprs.push(expr);
+            }
+            Ok(LingoExpr::ListLiteral(exprs))
+        }
+        Rule::parens_empty => {
+            Ok(LingoExpr::ListLiteral(vec![]))
         }
         _ => Err(ScriptError::new(format!(
             "Invalid runtime Lingo expression {:?}",

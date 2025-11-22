@@ -6,13 +6,13 @@ ident = @{ !digit ~ (alpha | digit | "_")+ }
 lang_ident = { !reserved_keyword ~ ident }
 
 reserved_keyword = @{
-    ("into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item" | "put") ~ !(alpha | digit | "_")
+    ("into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item") ~ !(alpha | digit | "_")
 }
 
 void_keyword = _{ ("void" | "VOID" | "Void") ~ !(alpha | digit | "_") }
 void         =  { void_keyword }
 
-dotted_ident = { (ident | number_int) ~ ("." ~ (ident | number_int))+ }
+dotted_ident = @{ (lang_ident | number_int) ~ ("." ~ (lang_ident | number_int))+ }
 
 string_interior =  {
     (!("\"") ~ ANY)*
@@ -57,6 +57,8 @@ chunk_type = { ^"char" | ^"word" | ^"line" | ^"item" }
 chunk_expr = { chunk_type ~ expr ~ ^"of" ~ (lang_ident | chunk_expr) }
 
 parens_expr = _{ "(" ~ expr ~ ")" }
+parens_list = { "(" ~ expr ~ ("," ~ expr)+ ~ ")" }
+parens_empty = { "(" ~ ")" }
 
 // Boolean operators
 and_op = { ^"and" }
@@ -71,16 +73,20 @@ gt_op = { ">" }
 le_op = { "<=" }
 ge_op = { ">=" }
 
-primitive  = _{ handler_call | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_expr | chunk_expr | lang_ident }
-eval_expr  = _{ SOI ~ expr ~ EOI }
-ident_list = _{ !digit ~ ident ~ (" " ~ ident)+ }
+primitive       = _{ put_handler_call | handler_call | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | lang_ident }
+eval_expr       = _{ SOI ~ expr ~ EOI }
+ident_list      = _{ !digit ~ ident ~ (" " ~ ident)+ }
 
-handler_call_args         =  { expr ~ ("," ~ expr)* }
-command_inline_args_comma = _{ term ~ ("," ~ term)+ }
-command_inline_args_space = _{ term ~ term+ }
-command_inline_args       =  { command_inline_args_comma | command_inline_args_space | term }
-handler_call              =  { lang_ident ~ "(" ~ handler_call_args? ~ ")" }
-command_inline            =  { lang_ident ~ !(WHITESPACE* ~ ("(" | ".")) ~ command_inline_args? }
+handler_call_args               =  { expr ~ ("," ~ expr)* }
+command_inline_args_comma        =  { expr ~ ("," ~ expr)+ }
+command_inline_args_space        =  { term_arg ~ term_arg+ }
+command_inline_args_single       =  { expr }
+command_inline_args              = _{ command_inline_args_comma | command_inline_args_space | command_inline_args_single }
+// put() with parentheses must have at least one argument, otherwise it's an error
+put_handler_call                 =  { ^"put" ~ "(" ~ handler_call_args ~ ")" }
+// Allow other handlers with parentheses to be called normally
+handler_call                     =  { !^"put" ~ lang_ident ~ "(" ~ handler_call_args? ~ ")" }
+command_inline                   =  { !^"put" ~ lang_ident ~ !(WHITESPACE* ~ ("(" | "." | "=")) ~ WHITESPACE+ ~ command_inline_args }
 
 // Put statement variations (order matters - most specific first!)
 put_into_chunk   = { ^"put" ~ expr ~ ^"into" ~ chunk_expr }
@@ -89,7 +95,10 @@ put_after_chunk  = { ^"put" ~ expr ~ ^"after" ~ chunk_expr }
 put_into         = { ^"put" ~ expr ~ ^"into" ~ ident }
 put_before       = { ^"put" ~ expr ~ ^"before" ~ ident }
 put_after        = { ^"put" ~ expr ~ ^"after" ~ ident }
-put_display      = { ^"put" ~ expr }
+// put_display_multi handles "put 1, 2, 3" as a handler call with multiple args
+put_display_multi = { ^"put" ~ expr ~ ("," ~ expr)+ }
+// put_display handles single expressions (excluding direct parenthesized calls)
+put_display      = { ^"put" ~ !(parens_list | parens_empty) ~ expr }
 
 put_statement = {
     put_into_chunk
@@ -98,11 +107,12 @@ put_statement = {
   | put_into
   | put_before
   | put_after
+  | put_display_multi
   | put_display
 }
 
-assignment =  { (lang_ident | dotted_ident) ~ "=" ~ expr }
-command    = _{ put_statement | assignment | command_inline | expr }
+assignment =  { (dotted_ident | lang_ident) ~ "=" ~ expr }
+command    = _{ assignment | put_statement | command_inline | expr }
 obj_prop   =  { "." }
 add        =  { "+" }
 subtract   =  { "-" }
@@ -129,5 +139,6 @@ bin_op     = _{
 }
 expr       =  { term ~ (bin_op ~ term)* }
 term       = _{ not_op ~ term | primitive }
+term_arg   =  { not_op ~ term_arg | primitive }
 
 command_eval_expr = _{ SOI ~ command ~ EOI }
