@@ -334,6 +334,152 @@ impl StringChunkUtils {
 
         Ok(result)
     }
+
+    pub fn string_by_putting_into_chunk(
+        string: &String,
+        chunk_expr: &StringChunkExpr,
+        replace_with: &String,
+    ) -> Result<String, ScriptError> {
+        // Similar to string_by_setting_chunk but supports all chunk types
+        match chunk_expr.chunk_type {
+            StringChunkType::Char => {
+                let mut new_string = string.clone();
+                let (start, end) =
+                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
+                new_string.replace_range(start..end, replace_with);
+                Ok(new_string)
+            }
+            StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
+                let chunk_list = StringChunkUtils::resolve_chunk_list(
+                    string,
+                    chunk_expr.chunk_type.clone(),
+                    chunk_expr.item_delimiter,
+                )?;
+                let (start, end) = StringChunkUtils::vm_range_to_host(
+                    (chunk_expr.start, chunk_expr.end),
+                    chunk_list.len(),
+                );
+
+                if chunk_list.is_empty() {
+                    return Ok(string.clone());
+                }
+
+                let mut new_chunks = chunk_list;
+                new_chunks.splice(start..end, [replace_with.clone()]);
+
+                let delimiter = match chunk_expr.chunk_type {
+                    StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
+                    StringChunkType::Word => " ".to_string(),
+                    StringChunkType::Line => "\r\n".to_string(),
+                    _ => unreachable!(),
+                };
+                Ok(new_chunks.join(&delimiter))
+            }
+        }
+    }
+
+    pub fn string_by_putting_before_chunk(
+        string: &String,
+        chunk_expr: &StringChunkExpr,
+        insert_value: &String,
+    ) -> Result<String, ScriptError> {
+        match chunk_expr.chunk_type {
+            StringChunkType::Char => {
+                let mut new_string = string.clone();
+                let (start, _) =
+                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
+                new_string.insert_str(start, insert_value);
+                Ok(new_string)
+            }
+            StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
+                let chunk_list = StringChunkUtils::resolve_chunk_list(
+                    string,
+                    chunk_expr.chunk_type.clone(),
+                    chunk_expr.item_delimiter,
+                )?;
+                let (start, _) = StringChunkUtils::vm_range_to_host(
+                    (chunk_expr.start, chunk_expr.end),
+                    chunk_list.len(),
+                );
+
+                if chunk_list.is_empty() {
+                    return Ok(insert_value.clone());
+                }
+
+                let mut new_chunks = chunk_list;
+                
+                // For "put before", prepend to the chunk at the start position
+                if start < new_chunks.len() {
+                    new_chunks[start] = format!("{}{}", insert_value, new_chunks[start]);
+                } else {
+                    // Fallback: append at the end
+                    if let Some(last) = new_chunks.last_mut() {
+                        last.push_str(insert_value);
+                    }
+                }
+
+                let delimiter = match chunk_expr.chunk_type {
+                    StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
+                    StringChunkType::Word => " ".to_string(),
+                    StringChunkType::Line => "\r\n".to_string(),
+                    _ => unreachable!(),
+                };
+                Ok(new_chunks.join(&delimiter))
+            }
+        }
+    }
+
+    pub fn string_by_putting_after_chunk(
+        string: &String,
+        chunk_expr: &StringChunkExpr,
+        insert_value: &String,
+    ) -> Result<String, ScriptError> {
+        match chunk_expr.chunk_type {
+            StringChunkType::Char => {
+                let mut new_string = string.clone();
+                let (_, end) =
+                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
+                new_string.insert_str(end, insert_value);
+                Ok(new_string)
+            }
+            StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
+                let chunk_list = StringChunkUtils::resolve_chunk_list(
+                    string,
+                    chunk_expr.chunk_type.clone(),
+                    chunk_expr.item_delimiter,
+                )?;
+                let (start, end) = StringChunkUtils::vm_range_to_host(
+                    (chunk_expr.start, chunk_expr.end),
+                    chunk_list.len(),
+                );
+
+                if chunk_list.is_empty() {
+                    return Ok(insert_value.clone());
+                }
+
+                let mut new_chunks = chunk_list;
+                
+                // For "put after", append to the last chunk in the range
+                // rather than inserting as a new chunk
+                if end > 0 && end <= new_chunks.len() {
+                    new_chunks[end - 1].push_str(insert_value);
+                } else {
+                    // Fallback: append at the end
+                    if let Some(last) = new_chunks.last_mut() {
+                        last.push_str(insert_value);
+                    }
+                }
+
+                let delimiter = match chunk_expr.chunk_type {
+                    StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
+                    StringChunkType::Word => " ".to_string(),
+                    StringChunkType::Line => "\r\n".to_string(),
+                    _ => unreachable!(),
+                };
+                Ok(new_chunks.join(&delimiter))
+            }
+        }
+    }
 }
 
 impl StringChunkHandlers {

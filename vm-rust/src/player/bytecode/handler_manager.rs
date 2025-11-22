@@ -92,6 +92,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::PushChunkVarRef => StackBytecodeHandler::push_chunk_var_ref(ctx),
             OpCode::DeleteChunk => StringBytecodeHandler::delete_chunk(ctx),
             OpCode::GetTopLevelProp => GetSetBytecodeHandler::get_top_level_prop(ctx),
+            OpCode::PutChunk => StringBytecodeHandler::put_chunk(ctx),
             _ => {
                 let prim = num::ToPrimitive::to_u16(&opcode).unwrap();
                 let name = get_opcode_name(opcode);
