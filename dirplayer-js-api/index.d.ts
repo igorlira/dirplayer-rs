@@ -41,6 +41,7 @@ type TVmCallbacks = {
   onScriptInstanceSnapshot: (scriptInstanceRef: ScriptInstanceId, scriptInstance: JsBridgeDatum) => void,
   onChannelChanged: (channelNumber: number, channelData: ScoreSpriteSnapshot) => void,
   onChannelDisplayNameChanged: (channelNumber: number, displayName: string) => void,
+  onExternalEvent?: (event: string) => void,
 }
 declare let vmCallbacks: TVmCallbacks | undefined;
 
