@@ -28,9 +28,9 @@ pub struct Bytecode {
     pub opcode: OpCode,
     pub obj: i64,
     pub pos: usize,
-    // TODO BytecodeTag
     owner_loop: u32,
-    // TODO translation
+    pub translation: Option<String>,
+    pub line_number: Option<u16>,
 }
 
 impl Bytecode {
@@ -38,7 +38,58 @@ impl Bytecode {
         format_args!("[{}]", pos).to_string()
     }
 
-    pub fn to_bytecode_text(&self, lctx: &ScriptContext, handler: &HandlerDef) -> String {
+    pub fn to_bytecode_text_with_annotation(
+        &self, 
+        lctx: &ScriptContext, 
+        handler: &HandlerDef, 
+        multiplier: u32,
+        annotation: &str,
+    ) -> String {
+        let op_id = num::ToPrimitive::to_u16(&self.opcode).unwrap();
+        let opcode_name = get_opcode_name(op_id);
+
+        let mut writer = String::new();
+        
+        // Position
+        writer.push_str(&format!("[{:3}] ", self.pos));
+        
+        // Opcode and operand
+        writer.push_str(opcode_name);
+        match self.opcode {
+            OpCode::SetLocal | OpCode::GetLocal => {
+                let local_index = (self.obj as u32 / multiplier) as usize;
+                let name = handler.local_name_ids
+                    .get(local_index)
+                    .and_then(|&name_id| lctx.names.get(name_id as usize))
+                    .map(|s| s.as_str())
+                    .unwrap_or("UNKNOWN");
+                writer.push(' ');
+                writer.push_str(name);
+            }
+            _ if op_id > 0x40 => {
+                writer.push(' ');
+                writer.push_str(&self.obj.to_string());
+            }
+            _ => {}
+        }
+        
+        // Padding dots
+        let current_len = writer.len();
+        let target_len = 40; // Adjust as needed
+        if current_len < target_len {
+            writer.push_str(&".".repeat(target_len - current_len));
+        }
+        
+        // Annotation
+        if !annotation.is_empty() {
+            writer.push(' ');
+            writer.push_str(annotation);
+        }
+        
+        writer
+    }
+
+    pub fn to_bytecode_text(&self, lctx: &ScriptContext, handler: &HandlerDef, multiplier: u32) -> String {
         let op_id = num::ToPrimitive::to_u16(&self.opcode).unwrap();
         let opcode_name = get_opcode_name(op_id);
 
@@ -61,19 +112,22 @@ impl Bytecode {
             | OpCode::SetObjProp
             | OpCode::PushSymb
             | OpCode::GetProp
-            | OpCode::GetChainedProp => {
+            | OpCode::GetChainedProp
+            | OpCode::GetGlobal
+            | OpCode::SetGlobal => {
                 let name = lctx.names.get(self.obj as usize).unwrap();
                 writer.push(' ');
                 writer.push_str(name);
             }
             OpCode::SetLocal | OpCode::GetLocal => {
+                let local_index = (self.obj as u32 / multiplier) as usize;
                 let name_id = handler
                     .local_name_ids
-                    .get(self.obj as usize)
+                    .get(local_index)
                     .map(|x| *x as usize);
                 let name = name_id
                     .and_then(|name_id| lctx.names.get(name_id).map(|x| x.as_str()))
-                    .unwrap_or("UNKOWN_LOCAL");
+                    .unwrap_or("UNKNOWN_LOCAL");
                 writer.push(' ');
                 writer.push_str(name);
             }
@@ -211,6 +265,8 @@ impl HandlerRecord {
                 obj,
                 pos,
                 owner_loop: u32::MAX,
+                translation: None,
+                line_number: None,
             };
 
             bytecode_array.push(bytecode);
