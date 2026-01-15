@@ -136,7 +136,12 @@ impl FieldMemberHandlers {
                     measure_text(&text_clone, &font, None, fixed_line_space, top_spacing);
 
                 match prop.as_str() {
-                    "rect" => Ok(Datum::IntRect((0, 0, width as i32, height as i32))),
+                    "rect" => Ok(Datum::Rect([
+                        player.alloc_datum(Datum::Int(0)),
+                        player.alloc_datum(Datum::Int(0)),
+                        player.alloc_datum(Datum::Int(width as i32)),
+                        player.alloc_datum(Datum::Int(height as i32))
+                    ])),
                     "height" => Ok(Datum::Int(height as i32)),
                     "image" => {
                         let mut bitmap = Bitmap::new(
@@ -174,6 +179,10 @@ impl FieldMemberHandlers {
                             color: bitmap.get_fg_color_ref(),
                             bg_color: ColorRef::PaletteIndex(0),
                             mask_image: None,
+                            is_text_rendering: true,
+                            rotation: 0.0,
+                            sprite: None,
+                            original_dst_rect: None,
                         };
 
                         bitmap.draw_text(
@@ -217,13 +226,23 @@ impl FieldMemberHandlers {
             ),
             "rect" => borrow_member_mut(
                 member_ref,
-                |_| value.to_int_rect(),
-                |cast_member, value| {
-                    let value = value?;
-                    let field_data = cast_member.member_type.as_field_mut().unwrap();
-                    field_data.width = value.2 as u16;
-                    Ok(())
+                |player| -> Result<(i32, i32, i32, i32), ScriptError> {
+                    let rect = value.to_rect()?;
+
+                    let x1 = player.get_datum(&rect[0]).int_value()?;
+                    let y1 = player.get_datum(&rect[1]).int_value()?;
+                    let x2 = player.get_datum(&rect[2]).int_value()?;
+                    let y2 = player.get_datum(&rect[3]).int_value()?;
+
+                    Ok((x1, y1, x2, y2))
                 },
+                |cast_member, rect_values: Result<(i32, i32, i32, i32), ScriptError>| {
+                    let (x1, y1, x2, y2) = rect_values?;
+                    let field_data = cast_member.member_type.as_field_mut().unwrap();
+                    field_data.width = x2 as u16;
+
+                    Ok(())
+                }
             ),
             "alignment" => borrow_member_mut(
                 member_ref,

@@ -56,6 +56,13 @@ pub struct StyledSpan {
     pub style: HtmlStyle,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum TextAlignment {
+    Left,
+    Center,
+    Right,
+}
+
 pub struct HtmlParser;
 
 impl HtmlParser {
@@ -322,13 +329,17 @@ impl FontMemberHandlers {
                 )))
             }
             "locToCharPos" => {
-                let (x, y) = player.get_datum(&args[0]).to_int_point()?;
+                let point_ref = player.get_datum(&args[0]).to_point()?;
+                let x = player.get_datum(&point_ref[0]).int_value()?;
+                let y = player.get_datum(&point_ref[1]).int_value()?;
+
                 let params = DrawTextParams {
                     font: &player.font_manager.get_system_font().unwrap(),
                     line_height: None,
                     line_spacing: text.fixed_line_space,
                     top_spacing: text.top_spacing,
                 };
+
                 let index = get_text_index_at_pos(&text.text, &params, x, y);
                 Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
             }
@@ -554,6 +565,10 @@ impl FontMemberHandlers {
                         color: ColorRef::PaletteIndex(color_idx),
                         bg_color: bitmap.get_bg_color_ref(),
                         mask_image: None,
+                        is_text_rendering: true,
+                        rotation: 0.0,
+                        sprite: None,
+                        original_dst_rect: None,
                     };
 
                     bitmap.draw_text(
@@ -574,6 +589,19 @@ impl FontMemberHandlers {
         }
 
         Ok(())
+    }
+
+    fn parse_alignment(value: Datum) -> Result<TextAlignment, ScriptError> {
+        let s = value.string_value()?.to_ascii_lowercase();
+        match s.as_str() {
+            "left" => Ok(TextAlignment::Left),
+            "center" => Ok(TextAlignment::Center),
+            "right" => Ok(TextAlignment::Right),
+            _ => Err(ScriptError::new(format!(
+                "Invalid alignment '{}'",
+                s
+            ))),
+        }
     }
 
     pub fn get_prop(
@@ -656,7 +684,12 @@ impl FontMemberHandlers {
                             measure_text(&text_clone, &font, None, fixed_line_space, top_spacing);
 
                         match prop.as_str() {
-                            "rect" => Ok(Datum::IntRect((0, 0, width as i32, height as i32))),
+                            "rect" => Ok(Datum::Rect([
+                                player.alloc_datum(Datum::Int(0)),
+                                player.alloc_datum(Datum::Int(0)),
+                                player.alloc_datum(Datum::Int(width as i32)),
+                                player.alloc_datum(Datum::Int(height as i32)
+                            )])),
                             "height" => Ok(Datum::Int(height as i32)),
                             "image" => {
                                 // Create 32-bit bitmap for proper transparency
@@ -701,6 +734,10 @@ impl FontMemberHandlers {
                                     color: font_bitmap.get_fg_color_ref(),
                                     bg_color: font_bitmap.get_bg_color_ref(),
                                     mask_image: None,
+                                    is_text_rendering: true,
+                                    rotation: 0.0,
+                                    sprite: None,
+                                    original_dst_rect: None,
                                 };
 
                                 if let Some(mask) = mask {
@@ -748,6 +785,7 @@ impl FontMemberHandlers {
             }
 
             CastMemberType::Font(font_data) => match prop.as_str() {
+                "text" => Ok(Datum::String(font_data.preview_text.clone())),
                 "previewText" => Ok(Datum::String(font_data.preview_text.clone())),
                 "previewHtml" => {
                     let html_string: String = font_data
@@ -784,7 +822,9 @@ impl FontMemberHandlers {
             |player| (), // no extra data needed
             |cast_member, _| {
                 if let CastMemberType::Font(font_member) = &mut cast_member.member_type {
-                    match prop {
+                    let prop = prop.to_ascii_lowercase();
+
+                    match prop.as_str() {
                         "text" => font_member.preview_text = value.string_value()?,
                         "html" => {
                             let html_string = value.string_value()?;
@@ -794,6 +834,12 @@ impl FontMemberHandlers {
                             font_member.preview_text =
                                 spans.iter().map(|s| s.text.clone()).collect();
                             font_member.preview_html_spans = spans;
+                        }
+                        "fixedlinespace" => {
+                            font_member.fixed_line_space = value.int_value()? as u16
+                        }
+                        "alignment" => {
+                            font_member.alignment = Self::parse_alignment(value)?;
                         }
                         _ => {
                             return Err(ScriptError::new(format!(

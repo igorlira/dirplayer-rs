@@ -36,7 +36,16 @@ pub enum PaletteRef {
 impl PaletteRef {
     pub fn from(i: i16, cast_lib: u32) -> Self {
         if i < 0 {
-            PaletteRef::BuiltIn(BuiltInPalette::from_i16(i).unwrap())
+            match BuiltInPalette::from_i16(i) {
+                Some(palette) => PaletteRef::BuiltIn(palette),
+                None => {
+                    // Unknown built-in palette ID, log and default to SystemWin
+                    web_sys::console::warn_1(
+                        &format!("Unknown built-in palette ID: {}, defaulting to SystemWin", i).into()
+                    );
+                    PaletteRef::BuiltIn(BuiltInPalette::SystemWin)
+                }
+            }
         } else {
             PaletteRef::Member(CastMemberRef {
                 cast_lib: cast_lib as i32,
@@ -111,6 +120,9 @@ pub struct Bitmap {
     pub data: Vec<u8>,          // RGBA
     pub palette_ref: PaletteRef,
     pub matte: Option<Arc<BitmapMask>>,
+    pub use_alpha: bool,
+    pub trim_white_space: bool,
+    pub was_trimmed: bool,
 }
 
 impl Bitmap {
@@ -149,14 +161,18 @@ impl Bitmap {
             data,
             palette_ref,
             matte,
+            use_alpha: false,
+            trim_white_space: false,
+            was_trimmed: false,
         }
     }
 }
 
 fn get_num_channels(bit_depth: u8) -> Result<u8, String> {
     match bit_depth {
-        1 | 2 | 4 | 8 | 16 => Ok(1),
-        32 => Ok(4),
+        1 | 2 | 4 | 8 => Ok(1),  // 8-bit and below: 1 byte per pixel
+        16 => Ok(2),              // 16-bit: 2 bytes per pixel
+        32 => Ok(4),              // 32-bit: 4 bytes per pixel
         _ => Err("Invalid bit depth".to_string()),
     }
 }
@@ -165,7 +181,7 @@ fn get_alignment_width(bit_depth: u8) -> Result<u16, String> {
     match bit_depth {
         1 | 4 | 32 => Ok(4),
         2 | 8 => Ok(2),
-        16 => Ok(1),
+        16 => Ok(1),  // 16-bit aligns like 8-bit (1 byte per pixel)
         _ => Err("Invalid bit depth".to_string()),
     }
 }
@@ -217,6 +233,9 @@ fn decode_bitmap_1bit(
         data: result,
         palette_ref,
         matte: None,
+        use_alpha: false,
+        trim_white_space: false,
+        was_trimmed: false,
     })
 }
 
@@ -275,6 +294,9 @@ fn decode_bitmap_2bit(
         data: result_bmp,
         palette_ref,
         matte: None,
+        use_alpha: false,
+        trim_white_space: false,
+        was_trimmed: false,
     })
 }
 
@@ -329,6 +351,75 @@ fn decode_bitmap_4bit(
         data: result_bmp,
         palette_ref,
         matte: None,
+        use_alpha: false,
+        trim_white_space: false,
+        was_trimmed: false,
+    })
+}
+
+fn decode_bitmap_16bit(
+    width: u16,
+    height: u16,
+    scan_width: u16,
+    scan_height: u16,
+    palette_ref: PaletteRef,
+    data: &[u8],
+    skip_compression: bool,
+) -> Result<Bitmap, String> {
+    let expected_size = scan_width as usize * scan_height as usize * 2;
+
+    if data.len() < expected_size {
+        return Err(format!(
+            "16-bit bitmap: insufficient data (got {}, expected {})",
+            data.len(), expected_size
+        ));
+    }
+
+    let mut result = vec![0u8; width as usize * height as usize * 4];
+
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let pixel16: u16 = if skip_compression {
+                // Uncompressed: sequential bytes, 2 per pixel
+                // High byte followed by low byte
+                let offset = (y * scan_width as usize + x) * 2;
+                let high = data[offset];
+                let low = data[offset + 1];
+                u16::from_be_bytes([high, low])
+            } else {
+                // Compressed (RLE-decoded): planar per scanline
+                // For each row: all high bytes, then all low bytes
+                let row_offset = y * scan_width as usize * 2;
+                let high = data[row_offset + x];
+                let low = data[row_offset + scan_width as usize + x];
+                u16::from_be_bytes([high, low])
+            };
+
+            // RGB555 - extract 5-bit components
+            let r5 = ((pixel16 >> 10) & 0x1F) as u8;
+            let g5 = ((pixel16 >> 5) & 0x1F) as u8;
+            let b5 = (pixel16 & 0x1F) as u8;
+
+            // Convert 5-bit to 8-bit by shifting left and filling lower bits
+            let dst = (y * width as usize + x) * 4;
+            result[dst]     = (r5 << 3) | (r5 >> 2);
+            result[dst + 1] = (g5 << 3) | (g5 >> 2);
+            result[dst + 2] = (b5 << 3) | (b5 >> 2);
+            result[dst + 3] = 255;
+        }
+    }
+
+    Ok(Bitmap {
+        width,
+        height,
+        bit_depth: 32,
+        original_bit_depth: 16,
+        data: result,
+        palette_ref,
+        matte: None,
+        use_alpha: false,
+        trim_white_space: false,
+        was_trimmed: false,
     })
 }
 
@@ -416,6 +507,9 @@ fn decode_generic_bitmap(
             data: result,
             palette_ref,
             matte: None,
+            use_alpha: false,
+            trim_white_space: false,
+            was_trimmed: false,
         });
     }
 }
@@ -464,26 +558,45 @@ pub fn decompress_bitmap(
         alignment_width * info.width.div_ceil(alignment_width)
     };
 
-    if reader.length * 8 == scan_width as usize * scan_height as usize * info.bit_depth as usize {
-        // no compression
-        result.append(&mut reader.data.clone());
+    let expected_len = if info.bit_depth == 32 && version >= 400 {
+        info.width as usize * scan_height as usize * num_channels as usize
     } else {
-        while !reader.eof() {
-            let mut r_len = reader.read_u8().map_err(|x| x.to_string())? as u16;
-            if 0x101 - r_len > 0x7F {
-                r_len += 1;
-                for _ in 0..r_len {
-                    let val = reader.read_u8().map_err(|x| x.to_string())?;
-                    result.push(val);
-                    _current_index += 1;
+        scan_width as usize * scan_height as usize * num_channels as usize
+    };
+
+    let skip_compression = reader.length >= expected_len;
+    
+    if skip_compression {
+        result.extend_from_slice(&reader.data[..expected_len]);
+    } else {
+        while result.len() < expected_len {
+            let control = match reader.read_u8() {
+                Ok(v) => v as u16,
+                Err(_) => break, // truncated stream is OK in Director
+            };
+
+            if control < 0x80 {
+                let count = control + 1;
+                for _ in 0..count {
+                    if result.len() >= expected_len {
+                        break;
+                    }
+                    match reader.read_u8() {
+                        Ok(v) => result.push(v),
+                        Err(_) => break,
+                    }
                 }
             } else {
-                r_len = 0x101 - r_len;
-                let val = reader.read_u8().map_err(|x| x.to_string())?;
-
-                for _ in 0..r_len {
+                let count = 257 - control;
+                let val = match reader.read_u8() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                for _ in 0..count {
+                    if result.len() >= expected_len {
+                        break;
+                    }
                     result.push(val);
-                    _current_index += 1;
                 }
             }
         }
@@ -491,13 +604,16 @@ pub fn decompress_bitmap(
 
     if result.len() == info.width as usize * info.height as usize * num_channels as usize {
         scan_width = info.width;
+    } else if info.bit_depth == 32 && version >= 400 {
+        // For 32-bit D4+ format, always use actual width (no padding)
+        scan_width = info.width;
     } else if info.width % alignment_width == 0 {
         scan_width = info.width;
     } else {
         scan_width = alignment_width * info.width.div_ceil(alignment_width);
     }
 
-    match info.bit_depth {
+    let mut bitmap = match info.bit_depth {
         1 => decode_bitmap_1bit(
             info.width,
             info.height,
@@ -532,15 +648,14 @@ pub fn decompress_bitmap(
             PaletteRef::from(info.palette_id, cast_lib),
             &result,
         ),
-        16 => decode_generic_bitmap(
+        16 => decode_bitmap_16bit(
             info.width,
             info.height,
-            16,
-            1,
             scan_width,
             scan_height,
             PaletteRef::from(info.palette_id, cast_lib),
             &result,
+            skip_compression,
         ),
         32 => {
             // For 32-bit bitmaps in Director, the encoding is special:
@@ -574,13 +689,15 @@ pub fn decompress_bitmap(
                     bit_depth: 32,
                     original_bit_depth: 32,
                     data: result_bitmap.data,
-                    palette_ref: PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+                    palette_ref: PaletteRef::from(info.palette_id, cast_lib),
                     matte: None,
+                    use_alpha: info.use_alpha,
+                    trim_white_space: info.trim_white_space,
+                    was_trimmed: false,
                 })
             } else {
                 // D4+ format: each scanline has channels laid out as A R G B sequentially
                 // We need to reorder from [A...A][R...R][G...G][B...B] per line to ARGB per pixel
-
                 let mut final_data = vec![0u8; info.width as usize * info.height as usize * 4];
 
                 for y in 0..info.height as usize {
@@ -590,10 +707,10 @@ pub fn decompress_bitmap(
 
                         // Check bounds
                         if line_offset + x + 3 * scan_width as usize >= result.len() {
-                            warn!(
+                            web_sys::console::warn_1(&format!(
                                 "32-bit decode: Out of bounds access at y={}, x={}. line_offset={}, result.len()={}",
                                 y, x, line_offset, result.len()
-                            );
+                            ).into());
                             continue;
                         }
 
@@ -617,8 +734,11 @@ pub fn decompress_bitmap(
                     bit_depth: 32,
                     original_bit_depth: 32,
                     data: final_data,
-                    palette_ref: PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+                    palette_ref: PaletteRef::from(info.palette_id, cast_lib),
                     matte: None,
+                    use_alpha: info.use_alpha,
+                    trim_white_space: info.trim_white_space,
+                    was_trimmed: false,
                 })
             }
         }
@@ -626,7 +746,12 @@ pub fn decompress_bitmap(
             "Decompression not implemented for bitmap width {}, height {}, bit depth {}",
             info.width, info.height, info.bit_depth
         )),
-    }
+    }?;
+
+    bitmap.use_alpha = info.use_alpha;
+    bitmap.trim_white_space = info.trim_white_space;
+    
+    Ok(bitmap)
 }
 
 pub fn resolve_color_ref(
@@ -812,5 +937,8 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo) -> Result<Bitmap, Stri
         data: rgba_data,
         palette_ref: PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
         matte: None,
+        use_alpha: info.use_alpha,
+        trim_white_space: info.trim_white_space,
+        was_trimmed: false,
     })
 }
