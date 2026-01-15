@@ -40,7 +40,14 @@ impl BitmapDatumHandlers {
                 }
 
                 let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
-                let point = player.get_datum(&args[0]).to_int_point()?;
+
+                let point_ref = player.get_datum(&args[0]).to_point()?;
+
+                let x = player.get_datum(&point_ref[0]).int_value()?;
+                let y = player.get_datum(&point_ref[1]).int_value()?;
+
+                let point_tuple = (x, y);
+
                 let color_ref = player.get_datum(&args[1]).to_color_ref()?;
 
                 // Get palettes once
@@ -69,7 +76,7 @@ impl BitmapDatumHandlers {
                     .get_bitmap_mut(*bitmap_ref)
                     .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
 
-                bitmap.flood_fill(point, target_rgb, &palettes);
+                bitmap.flood_fill(point_tuple, target_rgb, &palettes);
 
                 Ok(player.alloc_datum(Datum::Void))
             }),
@@ -127,7 +134,13 @@ impl BitmapDatumHandlers {
                 Datum::BitmapRef(bitmap) => Ok(bitmap),
                 _ => Err(ScriptError::new("Cannot draw non-bitmap".to_string())),
             }?;
-            let rect = player.get_datum(&args[0]).to_int_rect()?;
+            let rect_refs = player.get_datum(&args[0]).to_rect()?;
+
+            let x1 = player.get_datum(&rect_refs[0]).int_value()?;
+            let y1 = player.get_datum(&rect_refs[1]).int_value()?;
+            let x2 = player.get_datum(&rect_refs[2]).int_value()?;
+            let y2 = player.get_datum(&rect_refs[3]).int_value()?;
+
             let draw_map = player.get_datum(&args[1]).to_map()?;
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
 
@@ -167,7 +180,6 @@ impl BitmapDatumHandlers {
             let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
             match shape_type.as_str() {
                 "rect" => {
-                    let (x1, y1, x2, y2) = rect;
                     bitmap.stroke_rect(x1, y1, x2, y2, color, &palettes, blend as f32 / 100.0);
                 }
                 _ => {
@@ -232,10 +244,16 @@ impl BitmapDatumHandlers {
     pub fn fill(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let bitmap = player.get_datum(datum);
-            let (rect, color_ref) = if args.len() == 2 {
-                let rect = player.get_datum(&args[0]).to_int_rect()?;
+            let (rect_i32, color_ref) = if args.len() == 2 {
+                let rect_refs = player.get_datum(&args[0]).to_rect()?;
                 let color = player.get_datum(&args[1]).to_color_ref()?;
-                (rect, color)
+
+                let x1 = player.get_datum(&rect_refs[0]).int_value()?;
+                let y1 = player.get_datum(&rect_refs[1]).int_value()?;
+                let x2 = player.get_datum(&rect_refs[2]).int_value()?;
+                let y2 = player.get_datum(&rect_refs[3]).int_value()?;
+
+                ((x1, y1, x2, y2), color)
             } else if args.len() == 5 {
                 let x = player.get_datum(&args[0]).int_value()?;
                 let y = player.get_datum(&args[1]).int_value()?;
@@ -252,7 +270,7 @@ impl BitmapDatumHandlers {
                 Datum::BitmapRef(bitmap) => Ok(bitmap),
                 _ => Err(ScriptError::new("Cannot fill non-bitmap".to_string())),
             }?;
-            let (x1, y1, x2, y2) = rect;
+            let (x1, y1, x2, y2) = rect_i32;
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
             let palettes = player.movie.cast_manager.palettes();
             let color = resolve_color_ref(
@@ -279,7 +297,11 @@ impl BitmapDatumHandlers {
                 src_bitmap_ref.to_bitmap_ref()?
             };
             let dest_rect_or_quad = player.get_datum(&args[1]);
-            let src_rect = player.get_datum(&args[2]).to_int_rect()?;
+            let src_rect = player.get_datum(&args[2]).to_rect()?;
+            let sx1 = player.get_datum(&src_rect[0]).int_value()?;
+            let sy1 = player.get_datum(&src_rect[1]).int_value()?;
+            let sx2 = player.get_datum(&src_rect[2]).int_value()?;
+            let sy2 = player.get_datum(&src_rect[3]).int_value()?;
             let param_list = args.get(3).map(|x| player.get_datum(x));
             let mut param_list_concrete = HashMap::new();
             if let Some(param_list) = param_list {
@@ -293,13 +315,42 @@ impl BitmapDatumHandlers {
             }
 
             let dest_rect = match dest_rect_or_quad {
-                Datum::IntRect(rect) => IntRect::from_tuple(*rect),
-                Datum::List(_, list_val, _) => IntRect::from_quad(
-                    player.get_datum(&list_val[0]).to_int_point()?,
-                    player.get_datum(&list_val[1]).to_int_point()?,
-                    player.get_datum(&list_val[2]).to_int_point()?,
-                    player.get_datum(&list_val[3]).to_int_point()?,
-                ),
+                Datum::Rect(rect_refs) => {
+                    let x1 = player.get_datum(&rect_refs[0]).int_value()?;
+                    let y1 = player.get_datum(&rect_refs[1]).int_value()?;
+                    let x2 = player.get_datum(&rect_refs[2]).int_value()?;
+                    let y2 = player.get_datum(&rect_refs[3]).int_value()?;
+                    IntRect::from_tuple((x1, y1, x2, y2))
+                }
+                Datum::List(_, list_val, _) => {
+                    let p1 = {
+                        let p = player.get_datum(&list_val[0]).to_point()?;
+                        let x = player.get_datum(&p[0]).int_value()?;
+                        let y = player.get_datum(&p[1]).int_value()?;
+                        (x, y)
+                    };
+                    let p2 = {
+                        let p = player.get_datum(&list_val[1]).to_point()?;
+                        let x = player.get_datum(&p[0]).int_value()?;
+                        let y = player.get_datum(&p[1]).int_value()?;
+                        (x, y)
+                    };
+                    let p3 = {
+                        let p = player.get_datum(&list_val[2]).to_point()?;
+                        let x = player.get_datum(&p[0]).int_value()?;
+                        let y = player.get_datum(&p[1]).int_value()?;
+                        (x, y)
+                    };
+                    let p4 = {
+                        let p = player.get_datum(&list_val[3]).to_point()?;
+                        let x = player.get_datum(&p[0]).int_value()?;
+                        let y = player.get_datum(&p[1]).int_value()?;
+                        (x, y)
+                    };
+
+                    let dest_rect = IntRect::from_quad(p1, p2, p3, p4);
+                    dest_rect
+                },
                 _ => {
                     return Err(ScriptError::new(
                         "Invalid destRect for copyPixels".to_string(),
@@ -316,12 +367,14 @@ impl BitmapDatumHandlers {
                 .bitmap_manager
                 .get_bitmap_mut(*dst_bitmap_ref)
                 .unwrap();
+
             dst_bitmap.copy_pixels(
                 &palettes,
                 &src_bitmap,
                 dest_rect,
-                IntRect::from_tuple(src_rect),
+                IntRect::from_tuple((sx1, sy1, sx2, sy2)),
                 &param_list_concrete,
+                Some(&player.movie.score),
             );
             Ok(datum.clone())
         })
@@ -340,15 +393,18 @@ impl BitmapDatumHandlers {
             )),
         }?;
         let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
+        let width = bitmap.width as i32;
+        let height = bitmap.height as i32;
         let result = match prop.as_str() {
-            "width" => Ok(Datum::Int(bitmap.width as i32)),
-            "height" => Ok(Datum::Int(bitmap.height as i32)),
-            "rect" => Ok(Datum::IntRect((
-                0,
-                0,
-                bitmap.width as i32,
-                bitmap.height as i32,
-            ))),
+            "width" => Ok(Datum::Int(width)),
+            "height" => Ok(Datum::Int(height)),
+            "rect" => {
+                let x0 = player.alloc_datum(Datum::Int(0));
+                let y0 = player.alloc_datum(Datum::Int(0));
+                let w  = player.alloc_datum(Datum::Int(width));
+                let h  = player.alloc_datum(Datum::Int(height));
+                 Ok(Datum::Rect([x0, y0, w, h]))
+            }
             "depth" => Ok(Datum::Int(bitmap.bit_depth as i32)),
             "paletteRef" => {
                 if let PaletteRef::BuiltIn(palette) = bitmap.palette_ref {

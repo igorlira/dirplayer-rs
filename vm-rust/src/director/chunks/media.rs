@@ -2,6 +2,8 @@ use binary_reader::{BinaryReader, Endian};
 use std::convert::TryInto;
 use web_sys::console;
 
+use log::{debug};
+
 #[derive(Debug, Clone)]
 pub struct MediaChunk {
     pub sample_rate: u32,
@@ -25,13 +27,11 @@ impl MediaChunk {
             .map(|b| format!("{:02X} ", b))
             .collect::<Vec<String>>()
             .join(" ");
-        console::log_1(
-            &format!(
-                "WAV Hex Dump (Full File, {} bytes):\n{}",
-                data_test.len(),
-                hex_dump
-            )
-            .into(),
+
+        debug!(
+            "WAV Hex Dump (Full File, {} bytes):\n{}",
+            data_test.len(),
+            hex_dump
         );
 
         reader.pos = r_begin;

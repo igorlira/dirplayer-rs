@@ -40,6 +40,7 @@ impl MemberType {
 pub enum ScriptType {
     Invalid = (0),
     Score = (1),
+    Member = (2),
     Movie = (3),
     Parent = (7),
     Unknown = (255),
@@ -51,7 +52,7 @@ impl ScriptType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct BitmapInfo {
     pub width: u16,
     pub height: u16,
@@ -59,6 +60,8 @@ pub struct BitmapInfo {
     pub reg_y: i16,
     pub bit_depth: u8,
     pub palette_id: i16,
+    pub use_alpha: bool,
+    pub trim_white_space: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +83,195 @@ pub struct ShapeInfo {
     pub color: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BoxType {
+    Adjust = 0,
+    Scroll = 1,
+    Fixed = 2,
+    Limit = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Alignment {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Debug)]
+#[repr(C, packed)]
+pub struct FieldInfo {
+    pub border: u8,              // Byte 0: 0-5
+    pub margin: u8,              // Byte 1: 0-5
+    pub box_drop_shadow: u8,     // Byte 2: 0-5
+    pub box_type: u8,            // Byte 3: 0=adjust, 1=scroll, 2=fixed, 3=limit
+    
+    pub alignment_high: u8,      // Byte 4
+    pub alignment_low: u8,       // Byte 5
+    
+    pub bg_color_r: u8,          // Byte 6
+    pub bg_color_g: u8,          // Byte 7
+    pub bg_color_r_dup: u8,      // Byte 8 (seems duplicated?)
+    pub bg_color_g_dup: u8,      // Byte 9 (seems duplicated?)
+    pub fg_color_r: u8,          // Byte 10
+    pub fg_color_g: u8,          // Byte 11
+    
+    pub reserved_12: u8,         // Byte 12: always 0x00
+    pub scroll_top: u8,          // Byte 13
+    
+    pub reserved_14_18: [u8; 5], // Bytes 14-18: always 0x00
+    
+    pub reserved_19: u8,         // Byte 19: unknown purpose
+    pub reserved_20: u8,         // Byte 20: always 0x00
+    pub width: u8,               // Byte 21
+    pub reserved_22: u8,         // Byte 22: unknown purpose
+    
+    pub height: u8,              // Byte 23
+    pub font_type: u8,           // Byte 24
+    
+    pub drop_shadow: u8,         // Byte 25: 0-5
+    pub flags: u8,               // Byte 26: editable|autoTab|wordwrap bits
+    
+    pub reserved_27_28: [u8; 2], // Bytes 27-28: always 0x00
+}
+
+impl From<&[u8]> for FieldInfo {
+    fn from(bytes: &[u8]) -> FieldInfo {
+        let mut reader = BinaryReader::from_u8(bytes);
+        reader.set_endian(binary_reader::Endian::Big);
+
+        let border = reader.read_u8().unwrap_or(0);
+        let margin = reader.read_u8().unwrap_or(0);
+        let box_drop_shadow = reader.read_u8().unwrap_or(0);
+        let box_type = reader.read_u8().unwrap_or(0);
+        
+        let alignment_high = reader.read_u8().unwrap_or(0);
+        let alignment_low = reader.read_u8().unwrap_or(0);
+        
+        let bg_color_r = reader.read_u8().unwrap_or(0);
+        let bg_color_g = reader.read_u8().unwrap_or(0);
+        let bg_color_r_dup = reader.read_u8().unwrap_or(0);
+        let bg_color_g_dup = reader.read_u8().unwrap_or(0);
+        let fg_color_r = reader.read_u8().unwrap_or(0);
+        let fg_color_g = reader.read_u8().unwrap_or(0);
+        
+        let reserved_12 = reader.read_u8().unwrap_or(0);
+        let scroll_top = reader.read_u8().unwrap_or(0);
+        
+        let mut reserved_14_18 = [0u8; 5];
+        for i in 0..5 {
+            reserved_14_18[i] = reader.read_u8().unwrap_or(0);
+        }
+        
+        let reserved_19 = reader.read_u8().unwrap_or(0);
+        let reserved_20 = reader.read_u8().unwrap_or(0);
+        let width = reader.read_u8().unwrap_or(0);
+        let reserved_22 = reader.read_u8().unwrap_or(0);
+        
+        let height = reader.read_u8().unwrap_or(0);
+        let font_type = reader.read_u8().unwrap_or(0);
+        
+        let drop_shadow = reader.read_u8().unwrap_or(0);
+        let flags = reader.read_u8().unwrap_or(0);
+        
+        let mut reserved_27_28 = [0u8; 2];
+        reserved_27_28[0] = reader.read_u8().unwrap_or(0);
+        reserved_27_28[1] = reader.read_u8().unwrap_or(0);
+
+        FieldInfo {
+            border,
+            margin,
+            box_drop_shadow,
+            box_type,
+            alignment_high,
+            alignment_low,
+            bg_color_r,
+            bg_color_g,
+            bg_color_r_dup,
+            bg_color_g_dup,
+            fg_color_r,
+            fg_color_g,
+            reserved_12,
+            scroll_top,
+            reserved_14_18,
+            reserved_19,
+            reserved_20,
+            width,
+            reserved_22,
+            height,
+            font_type,
+            drop_shadow,
+            flags,
+            reserved_27_28,
+        }
+    }
+}
+
+impl FieldInfo {
+    pub fn editable(&self) -> bool {
+        (self.flags & 0x01) != 0
+    }
+    
+    pub fn auto_tab(&self) -> bool {
+        (self.flags & 0x02) != 0
+    }
+    
+    pub fn wordwrap(&self) -> bool {
+        (self.flags & 0x04) == 0  // Inverted: 0=true, 1=false
+    }
+    
+    pub fn alignment_str(&self) -> String {
+        match (self.alignment_high, self.alignment_low) {
+            (0x00, 0x00) => "left".to_string(),
+            (0x00, 0x01) => "center".to_string(),
+            (0xFF, 0xFF) => "right".to_string(),
+            _ => "left".to_string(),
+        }
+    }
+    
+    pub fn box_type_str(&self) -> String {
+        match self.box_type {
+            0 => "adjust".to_string(),
+            1 => "scroll".to_string(),
+            2 => "fixed".to_string(),
+            3 => "limit".to_string(),
+            _ => "adjust".to_string(),
+        }
+    }
+    
+    pub fn font_name(&self) -> &str {
+        match self.font_type {
+            0x10 => "Arial",
+            0x0E => "Courier",
+            0x11 => "Times New Roman",
+            0x0F => "Calibri",
+            _ => "Arial",
+        }
+    }
+    
+    // Convert RGB components to a single color value
+    // This depends on your color format - adjust as needed
+    pub fn bg_color(&self) -> u16 {
+        // Example: Convert RGB to 16-bit color (RGB565 format)
+        // Or you might need RGB888 packed into u32
+        // For now, returning a placeholder
+        let r = self.bg_color_r;
+        let g = self.bg_color_g;
+        let b = 0u8; // We still need to find where blue component is
+        
+        // If using RGB565: (R5 << 11) | (G6 << 5) | B5
+        // If using RGB888 packed: (R8 << 16) | (G8 << 8) | B8
+        // Adjust based on your actual color format
+        ((r as u16) << 8) | (g as u16)
+    }
+    
+    pub fn fg_color(&self) -> u16 {
+        let r = self.fg_color_r;
+        let g = self.fg_color_g;
+        ((r as u16) << 8) | (g as u16)
+    }
+}
+
 impl From<&[u8]> for BitmapInfo {
     fn from(bytes: &[u8]) -> BitmapInfo {
         let mut reader = BinaryReader::from_u8(bytes);
@@ -91,6 +283,8 @@ impl From<&[u8]> for BitmapInfo {
         let mut reg_y = 0;
         let mut bit_depth = 1;
         let mut palette_id = 0;
+        let mut use_alpha = false;
+        let mut trim_white_space = false;
 
         let _ = reader.read_u8();
         let _ = reader.read_u8(); // Logo -> 16
@@ -111,7 +305,12 @@ impl From<&[u8]> for BitmapInfo {
         if let Ok(val) = reader.read_i16() {
             reg_x = val;
         }
-        let _ = reader.read_u8();
+        
+        // Read flags byte
+        if let Ok(flags) = reader.read_u8() {
+            use_alpha = (flags & 0x10) != 0;           // Bit 6
+            trim_white_space = (flags & 0x80) == 0;   // Bit 7 (inverted!)
+        }
 
         if !reader.eof() {
             if let Ok(val) = reader.read_u8() {
@@ -130,6 +329,8 @@ impl From<&[u8]> for BitmapInfo {
             reg_y,
             bit_depth,
             palette_id,
+            use_alpha,
+            trim_white_space,
         };
     }
 }
@@ -268,6 +469,7 @@ pub struct SoundInfo {
     pub channels: u16,
     pub sample_count: u32,
     pub duration: u32,
+    pub loop_enabled: bool, 
     //pub compression_type: u16,
 }
 

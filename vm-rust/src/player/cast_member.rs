@@ -3,6 +3,8 @@ use std::fmt::Formatter;
 
 use log::{debug, warn};
 
+use crate::CastMemberRef;
+
 use super::{
     bitmap::{
         bitmap::{decode_jpeg_bitmap, decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef},
@@ -15,11 +17,11 @@ use super::{
 use crate::director::{
     chunks::{cast_member::CastMemberDef, score::ScoreChunk, xmedia::PfrFont, xmedia::XMediaChunk, sound::SoundChunk, Chunk, cast_member::CastMemberChunk},
     enums::{
-        BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, TextMemberData, SoundInfo,
+        BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, TextMemberData, SoundInfo, FieldInfo,
     },
     lingo::script::ScriptContext,
 };
-use crate::player::handlers::datum_handlers::cast_member::font::StyledSpan;
+use crate::player::handlers::datum_handlers::cast_member::font::{StyledSpan, TextAlignment};
 
 #[derive(Clone)]
 pub struct CastMember {
@@ -105,6 +107,26 @@ impl FieldMember {
             back_color: 0,
         }
     }
+
+    pub fn from_field_info(field_info: FieldInfo) -> FieldMember {
+        FieldMember {
+            text: "".to_string(),
+            alignment: field_info.alignment_str(),
+            word_wrap: field_info.wordwrap(),
+            font: field_info.font_name().to_string(),
+            font_style: "plain".to_string(),
+            font_size: 12,
+            fixed_line_space: field_info.height as u16,
+            top_spacing: field_info.scroll_top as i16,
+            box_type: field_info.box_type_str(),
+            anti_alias: false,
+            width: field_info.width as u16,
+            auto_tab: field_info.auto_tab(),
+            editable: field_info.editable(),
+            border: field_info.border as u16,
+            back_color: field_info.bg_color(),
+        }
+    }
 }
 
 impl TextMember {
@@ -150,9 +172,12 @@ pub struct ScriptMember {
 pub struct BitmapMember {
     pub image_ref: BitmapRef,
     pub reg_point: (i16, i16),
+    pub script_id: u32,
+    pub member_script_ref: Option<CastMemberRef>,
+    pub info: BitmapInfo,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PaletteMember {
     pub colors: Vec<(u8, u8, u8)>,
 }
@@ -201,6 +226,7 @@ pub struct FontMember {
     pub char_height: Option<u16>,
     pub grid_columns: Option<u8>,
     pub grid_rows: Option<u8>,
+    pub alignment: TextAlignment,
 }
 
 #[allow(dead_code)]
@@ -579,42 +605,48 @@ impl CastMember {
     }
 
     fn extract_text_from_xmedia(data: &[u8]) -> Option<String> {
-        let len_limit = data.len().saturating_sub(100);
+        let mut i = 0;
 
-        for i in 0..len_limit {
-            // Look for: 00 XX XX 2C   (comma at [i+3])
-            if data[i] != 0x00 || i + 3 >= data.len() || data[i + 3] != 0x2C {
+        while i < data.len() {
+            // find '2C' which marks the start of text
+            if data[i] != 0x2C {
+                i += 1;
                 continue;
             }
 
-            // Parse ASCII hex length: two bytes at [i+1] and [i+2]
-            let length_str = data[i + 1..=i + 2]
-                .iter()
-                .filter_map(|b| {
-                    let c = *b as char;
-                    c.is_ascii_hexdigit().then_some(c)
-                })
-                .collect::<String>();
+            let start = i + 1;
 
-            let text_length = usize::from_str_radix(&length_str, 16).unwrap_or(100);
+            // find following 03 byte
+            let mut end = start;
+            while end < data.len() && data[end] != 0x03 {
+                end += 1;
+            }
 
-            // Extract text
-            let start = i + 4;
-            let end = (start + text_length).min(data.len());
+            // if 03 not found → no valid text block
+            if end >= data.len() {
+                return None;
+            }
+
+            // extract text bytes
+            let raw = &data[start..end];
             let mut text = String::new();
 
-            for &b in &data[start..end] {
+            for &b in raw {
                 match b {
-                    0x20..=0x7E => text.push(b as char),
-                    0x0D | 0x0A => text.push(' '),
-                    _ => {}
+                    0x20..=0x7E => text.push(b as char), // printable ASCII
+                    0x09 => text.push('\t'),             // preserve TAB
+                    0x0D => text.push('\r'),             // preserve CR
+                    0x0A => text.push('\n'),             // preserve LF
+                    _ => {}                              // skip weird bytes
                 }
             }
 
-            let text = text.trim().to_string();
-            if text.len() > 3 {
-                return Some(text);
+            let cleaned = text.trim().to_string();
+            if !cleaned.is_empty() {
+                return Some(cleaned);
             }
+
+            i = end + 1;
         }
 
         None
@@ -914,6 +946,7 @@ impl CastMember {
                 char_height: char_h,
                 grid_columns: gc,
                 grid_rows: gr,
+                alignment: TextAlignment::Left,
             }),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
@@ -973,6 +1006,35 @@ impl CastMember {
         (FontInfo::minimal(default_name), None, None, None, None, None)
     }
 
+    pub fn get_script_id(&self) -> Option<u32> {
+        match &self.member_type {
+            CastMemberType::Bitmap(bitmap) => {
+                if bitmap.script_id > 0 {
+                    Some(bitmap.script_id)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn get_member_script_ref(&self) -> Option<&CastMemberRef> {
+        match &self.member_type {
+            CastMemberType::Bitmap(bitmap) => bitmap.member_script_ref.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn set_member_script_ref(&mut self, script_ref: CastMemberRef) {
+        match &mut self.member_type {
+            CastMemberType::Bitmap(bitmap) => {
+                bitmap.member_script_ref = Some(script_ref);
+            }
+            _ => {}
+        }
+    }
+
     pub fn from(
         cast_lib: u32,
         number: u32,
@@ -989,7 +1051,8 @@ impl CastMember {
                     .unwrap()
                     .as_text()
                     .expect("Not a text chunk");
-                let mut field_member = FieldMember::new();
+                let field_info = FieldInfo::from(chunk.specific_data_raw.as_slice());
+                let mut field_member = FieldMember::from_field_info(field_info);
                 field_member.text = text_chunk.text.clone();
                 CastMemberType::Field(field_member)
             }
@@ -1089,6 +1152,24 @@ impl CastMember {
             MemberType::Bitmap => {
                 let bitmap_info = chunk.specific_data.bitmap_info().unwrap();
 
+                let script_id = chunk
+                    .member_info
+                    .as_ref()
+                    .map(|info| info.header.script_id)
+                    .unwrap_or(0);
+                
+                let behavior_script_ref = if script_id > 0 {
+                    let script_chunk = &lctx.as_ref().unwrap().scripts[&script_id];
+
+                    // Create the behavior script reference
+                    Some(CastMemberRef {
+                        cast_lib: cast_lib as i32,
+                        cast_member: script_id as i32,
+                    })
+                } else {
+                    None
+                };
+
                 // First, check if there's a Media (ediM) chunk with JPEG data
                 let media_chunk = member_def.children.iter().find_map(|c| {
                     c.as_ref().and_then(|chunk| match chunk {
@@ -1163,9 +1244,20 @@ impl CastMember {
                     )
                 };
 
+                debug!(
+                        "BitmapMember created → name: {} palette_id {} useAlpha {} trimWhiteSpace {}",
+                        chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                        bitmap_info.palette_id,
+                        bitmap_info.use_alpha,
+                        bitmap_info.trim_white_space
+                    );
+
                 CastMemberType::Bitmap(BitmapMember {
                     image_ref: new_bitmap_ref,
                     reg_point: (bitmap_info.reg_x, bitmap_info.reg_y),
+                    script_id,
+                    member_script_ref: behavior_script_ref,
+                    info: bitmap_info.clone(),
                 })
             }
             MemberType::Palette => {
@@ -1178,9 +1270,28 @@ impl CastMember {
                     colors: palette_chunk.colors.clone(),
                 })
             }
-            MemberType::Shape => CastMemberType::Shape(ShapeMember {
-                shape_info: chunk.specific_data.shape_info().unwrap().clone(),
-            }),
+            MemberType::Shape => {
+                if !member_def.children.is_empty() {
+                    web_sys::console::log_1(&format!(
+                        "(2)CastMember {} has {} children:",
+                        number,
+                        member_def.children.len()
+                    ).into());
+
+                    for (i, c_opt) in member_def.children.iter().enumerate() {
+                        match c_opt {
+                            Some(c) => web_sys::console::log_1(&format!("child[{}] = {}", i, Self::chunk_type_name(c)).into()),
+                            None => web_sys::console::log_1(&format!("child[{}] = None", i).into()),
+                        }
+                    }
+                }
+
+                web_sys::console::log_1(&format!("Shape member {}", number).into());
+
+                CastMemberType::Shape(ShapeMember {
+                    shape_info: chunk.specific_data.shape_info().unwrap().clone(),
+                })
+            }
             MemberType::FilmLoop => {
                 let score_chunk = member_def.children[0].as_ref().unwrap().as_score().unwrap();
                 let film_loop_info = chunk.specific_data.film_loop_info().unwrap();
@@ -1262,10 +1373,16 @@ impl CastMember {
                         } else {
                             0
                         },
+                        loop_enabled: chunk
+                            .member_info
+                            .as_ref()
+                            .map_or(false, |info| (info.header.flags & 0x10) == 0),
                     };
 
                     debug!(
-                        "SoundMember created → sample_rate: {}, sample_size: {}, channels: {}, sample_count: {}, duration: {:.3}s",
+                        "SoundMember created → name: {}, version: {}, sample_rate: {}, sample_size: {}, channels: {}, sample_count: {}, duration: {:.3}ms",
+                        chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                        sound_chunk.version,
                         info.sample_rate,
                         info.sample_size,
                         info.channels,

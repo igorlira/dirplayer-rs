@@ -16,6 +16,7 @@ pub struct SoundChunk {
     sample_count: u32,
     codec: String,
     data: Vec<u8>,
+pub version: u16,
 }
 
 impl SoundChunk {
@@ -27,6 +28,7 @@ impl SoundChunk {
             sample_count: 0,
             codec: "raw_pcm".into(),
             data,
+            version: 0,
         }
     }
 
@@ -116,12 +118,13 @@ impl Default for SoundChunk {
             sample_count: 0,
             codec: "raw_pcm".to_string(),
             data: Vec::new(),
+            version: 0,
         }
     }
 }
 
 impl SoundChunk {
-    pub fn from_snd_chunk(reader: &mut BinaryReader) -> Result<SoundChunk, String> {
+    pub fn from_snd_chunk(reader: &mut BinaryReader, version: u16) -> Result<SoundChunk, String> {
         let mut data_test = Vec::new();
 
         let r_begin = reader.pos;
@@ -264,19 +267,46 @@ impl SoundChunk {
             return Err("snd chunk contains no audio data after header".to_string());
         }
 
-        // --- 4. Final Calculation ---
+        // --- 4. Detect Codec (MP3 vs PCM) ---
+        
+        // Check for MP3 sync bytes (0xFF 0xFX where X is typically 0xF3, 0xFB, etc.)
+        let is_mp3 = if data.len() >= 2 {
+            data[0] == 0xFF && (data[1] & 0xF0) == 0xF0
+        } else {
+            false
+        };
 
-        let bytes_per_sample = (bits_per_sample / 8) as u32;
-        let bytes_per_frame = channels as u32 * bytes_per_sample;
-        let sample_count = data.len() as u32 / bytes_per_frame;
+        let codec = if is_mp3 {
+            String::from("mp3")
+        } else {
+            String::from("raw_pcm")
+        };
 
-        // Calculate duration and round to 3 decimal places for comparison
-        let duration = (sample_count as f64 / sample_rate as f64 * 1000.0).round() / 1000.0;
+        // --- 5. Final Calculation ---
+
+        let sample_count = if is_mp3 {
+            // For MP3, we CANNOT trust Director's sample_count!
+            // The browser will decode at its native rate (often 48000 Hz)
+            // Set to 0 and let the browser tell us the real count after decoding
+            0
+        } else {
+            // For PCM, calculate normally
+            let bytes_per_sample = (bits_per_sample / 8) as u32;
+            let bytes_per_frame = channels as u32 * bytes_per_sample;
+            data.len() as u32 / bytes_per_frame
+        };
+
+        let duration = if is_mp3 {
+            0.0 // Unknown until decoded
+        } else {
+            (sample_count as f64 / sample_rate as f64 * 1000.0).round() / 1000.0
+        };
 
         debug!(
-            "🎵 Final snd: {} Hz, {}-bit, {} bytes → {} samples, {:.3}s",
+            "Final snd: {} Hz, {}-bit, codec={}, {} bytes → {} samples, {:.3}s",
             sample_rate,
             bits_per_sample,
+            codec,
             data.len(),
             sample_count,
             duration
@@ -287,8 +317,9 @@ impl SoundChunk {
             sample_rate,
             bits_per_sample,
             sample_count,
-            codec: String::from("raw_pcm"),
+            codec,
             data: data_test,
+            version,
         })
     }
 
@@ -354,15 +385,12 @@ impl SoundChunk {
             ((media.audio_data.len() / 2) as u32, 16)
         };
 
-        console::log_1(
-            &format!(
-                "from_media: codec={}, data_size_field={}, audio_data.len()={}, sample_count={}",
-                codec,
-                media.data_size_field,
-                media.audio_data.len(),
-                sample_count
-            )
-            .into(),
+        debug!(
+            "from_media: codec={}, data_size_field={}, audio_data.len()={}, sample_count={}",
+            codec,
+            media.data_size_field,
+            media.audio_data.len(),
+            sample_count
         );
 
         SoundChunk {
@@ -372,6 +400,7 @@ impl SoundChunk {
             sample_count,
             codec: codec.to_string(),
             data: media.audio_data.clone(),
+            version: 0,
         }
     }
 }
