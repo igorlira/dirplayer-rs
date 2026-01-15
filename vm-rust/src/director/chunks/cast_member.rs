@@ -1,8 +1,10 @@
 use binary_reader::{BinaryReader, Endian};
 
+use log::debug;
+
 use crate::director::{
     chunks::cast_member_info::CastMemberInfoChunk,
-    enums::{BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, SoundInfo},
+    enums::{BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, SoundInfo, FieldInfo},
 };
 
 use super::Chunk;
@@ -36,6 +38,26 @@ impl CastMemberChunk {
         dir_version: u16,
     ) -> Result<CastMemberChunk, String> {
         reader.endian = Endian::Big;
+
+        let mut data_test = Vec::new();
+
+        let r_begin = reader.pos;
+        while let Ok(byte) = reader.read_u8() {
+            data_test.push(byte);
+        }
+
+        let hex_dump = data_test
+            .iter()
+            .map(|b| format!("{:02X} ", b))
+            .collect::<Vec<String>>()
+            .join(" ");
+        debug!(
+            "CASt (Full Chunk, {} bytes):\n{}",
+            data_test.len(),
+            hex_dump
+        );
+
+        reader.pos = r_begin;
 
         let mut info: Option<CastMemberInfoChunk> = None;
         let info_len: usize;
@@ -118,6 +140,10 @@ impl CastMemberChunk {
             MemberType::Sound => {
                 specific_data_parsed = CastMemberSpecificData::None;
             }
+            MemberType::Text => {
+                specific_data_parsed =
+                    CastMemberSpecificData::Field(FieldInfo::from(specific_data.as_slice()));
+            }
             _ => {
                 specific_data_parsed = CastMemberSpecificData::None;
             }
@@ -139,6 +165,7 @@ pub enum CastMemberSpecificData {
     FilmLoop(FilmLoopInfo),
     Sound(SoundInfo),
     Font(FontInfo),
+    Field(FieldInfo),
     None,
 }
 
@@ -186,6 +213,14 @@ impl CastMemberSpecificData {
     pub fn font_info(&self) -> Option<&FontInfo> {
         if let CastMemberSpecificData::Font(info) = self {
             Some(info)
+        } else {
+            None
+        }
+    }
+
+    pub fn field_info(&self) -> Option<&FieldInfo> {
+        if let CastMemberSpecificData::Field(field_info) = self {
+            Some(field_info)
         } else {
             None
         }

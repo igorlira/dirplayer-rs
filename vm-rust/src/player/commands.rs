@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use async_std::channel::Receiver;
 use chrono::Local;
-use log::warn;
+use log::{warn, debug};
 use manual_future::ManualFuture;
 use url::Url;
 
@@ -22,6 +22,7 @@ use super::{
     events::{
         player_dispatch_callback_event, player_dispatch_event_to_sprite,
         player_dispatch_targeted_event, player_wait_available,
+        player_dispatch_event_to_sprite_targeted, player_invoke_frame_and_movie_scripts,
     },
     font::player_load_system_font,
     keyboard_events::{player_key_down, player_key_up},
@@ -303,10 +304,13 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let now = Local::now().timestamp_millis().abs();
                 let is_double_click = (now - player.last_mouse_down_time) < 500;
                 player.mouse_loc = (x, y);
+                player.movie.mouse_down = true;  // Track mouse button state
+                player.movie.click_loc = (x, y); // Store click location
                 player.is_double_click = is_double_click;
                 player.last_mouse_down_time = now;
                 let sprite = get_sprite_at(player, x, y, true);
                 if let Some(sprite_number) = sprite {
+                    debug!("🖱️  MouseDown on sprite #{}", sprite_number);
                     let sprite = player.movie.score.get_sprite(sprite_number as i16);
                     let sprite_member = sprite
                         .and_then(|x| x.member.as_ref())
@@ -327,16 +331,96 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                         player.click_on_sprite = 0;
                     }
 
-                    sprite.map(|x| x.script_instance_list.clone())
+                    let instances = sprite.map(|x| x.script_instance_list.clone());
+                    if let Some(ref inst) = instances {
+                        debug!("🖱️  Sprite has {} behaviors", inst.len());
+                    }
+
+                    instances
                 } else {
                     None
                 }
             });
-            player_dispatch_targeted_event(
-                &"mouseDown".to_string(),
-                &vec![],
-                instance_ids.as_ref(),
-            );
+
+            // Get the sprite number we just stored
+            let sprite_num = reserve_player_ref(|player| {
+                if player.mouse_down_sprite > 0 {
+                    Some(player.mouse_down_sprite as u16)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(sprite_num) = sprite_num {
+                player_dispatch_event_to_sprite_targeted(
+                    &"mouseDown".to_string(),
+                    &vec![],
+                    sprite_num,
+                ).await;
+            } else {
+                player_invoke_frame_and_movie_scripts(
+                    &"mouseDown".to_string(),
+                    &vec![]
+                ).await;
+            }
+
+            // Execute cast member script if it exists
+            let cast_member_script_call = reserve_player_mut(|player| {
+                if player.mouse_down_sprite <= 0 {
+                    return None;
+                }
+                
+                let sprite = player.movie.score.get_sprite(player.mouse_down_sprite)?;
+                let member_ref = sprite.member.as_ref()?;
+                let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+                
+                // First check for member behavior script (stored in member_script_ref)
+                if let Some(script_ref) = member.get_member_script_ref() {
+                    debug!(
+                        "Cast member '{}' has behavior script (cast_lib={}, member={}), executing mouseDown",
+                        member.name, script_ref.cast_lib, script_ref.cast_member
+                    );
+                    
+                    if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
+                        if let Some(handler) = script.get_own_handler_ref(&"mouseDown".to_string()) {
+                            return Some((None, handler, vec![]));
+                        }
+                    }
+                }
+                
+                // Fallback: check for script_id and get directly from lctx.scripts
+                let script_id = member.get_script_id()?;
+                
+                debug!(
+                    "Cast member '{}' has script {}, getting from lctx.scripts for mouseDown",
+                    member.name, script_id
+                );
+                
+                let script = {
+                    let cast_lib = player.movie.cast_manager.get_cast_mut(member_ref.cast_lib as u32);
+                    cast_lib.get_behavior_script_from_lctx(script_id)
+                };
+                
+                let script = match script {
+                    Some(s) => {
+                       debug!("✓ Behavior script {} found for mouseDown", script_id);
+                        s
+                    }
+                    None => {
+                        debug!("✗ Behavior script {} NOT FOUND in lctx.scripts for mouseDown", script_id);
+                        return None;
+                    }
+                };
+                
+                let handler = script.get_own_handler_ref(&"mouseDown".to_string())?;
+                
+                Some((None, handler, vec![]))
+            });
+
+            if let Some((receiver, handler, args)) = cast_member_script_call {
+                player_call_script_handler(receiver, handler, &args).await?;
+            }
+
             return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseUp((x, y)) => {
@@ -345,6 +429,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             }
             let result = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
+                player.movie.mouse_down = false;  // Track mouse button state
+                let sprite_num_to_notify = player.mouse_down_sprite;
                 let sprite = if player.mouse_down_sprite > 0 {
                     player.movie.score.get_sprite(player.mouse_down_sprite)
                 } else {
@@ -353,7 +439,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 player.mouse_down_sprite = -1;
                 if let Some(sprite) = sprite {
                     let is_inside = concrete_sprite_hit_test(player, sprite, x, y);
-                    Some((sprite.script_instance_list.clone(), is_inside))
+                    Some((sprite.script_instance_list.clone(), is_inside, sprite_num_to_notify))
                 } else {
                     None
                 }
@@ -365,7 +451,101 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             } else {
                 "mouseUpOutSide"
             };
-            player_dispatch_targeted_event(&event_name.to_string(), &vec![], instance_ids);
+            
+            // Get the sprite number from result
+            if let Some((_, _, sprite_num)) = result.as_ref() {
+                if *sprite_num > 0 {
+                    player_dispatch_event_to_sprite_targeted(
+                        &event_name.to_string(),
+                        &vec![],
+                        *sprite_num as u16,
+                    ).await;
+                }
+            }
+
+            let cast_member_script_call = reserve_player_mut(|player| {
+                let sprite_num = get_sprite_at(player, x, y, false)?;
+                debug!("Getting sprite at ({}, {}): sprite #{}", x, y, sprite_num);
+                
+                let sprite = player.movie.score.get_sprite(sprite_num as i16)?;
+                let member_ref = sprite.member.as_ref()?;
+
+                debug!("Sprite {} uses member: cast_lib={}, cast_member={}", 
+                    sprite_num, member_ref.cast_lib, member_ref.cast_member);
+
+                let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+
+                debug!("Member '{}' (type: {:?})", member.name, 
+                    match &member.member_type {
+                        CastMemberType::Bitmap(_) => "Bitmap",
+                        CastMemberType::Script(_) => "Script",
+                        _ => "Other"
+                    }
+                );
+
+                let handler_name = if is_inside { "mouseUp" } else { "mouseUpOutSide" };
+
+                // Get script_id from bitmap member and look it up in lctx.scripts
+                debug!("Getting script_id from member...");
+                let script_id = match member.get_script_id() {
+                    Some(id) => {
+                        debug!("Member has script_id: {}", id);
+                        id
+                    }
+                    None => {
+                        debug!("⚠️  Member has NO script_id");
+                        return None;
+                    }
+                };
+                
+                // Get the behavior script directly from lctx.scripts
+                debug!("Looking up behavior script {} from lctx.scripts...", script_id);
+                
+                let script = {
+                    let cast_lib = player.movie.cast_manager.get_cast_mut(member_ref.cast_lib as u32);
+                    cast_lib.get_behavior_script_from_lctx(script_id)
+                };
+                
+                let script = match script {
+                    Some(s) => {
+                        debug!("✓ Behavior script {} found! Type: {:?}", script_id, s.script_type);
+                        debug!("Available handlers: {:?}", 
+                            s.handlers.keys().collect::<Vec<_>>()
+                        );
+                        s
+                    }
+                    None => {
+                        debug!("✗ Behavior script {} NOT FOUND in lctx.scripts!", script_id);
+                        return None;
+                    }
+                };
+
+                debug!(
+                    "Looking for '{}' handler in script {}",
+                    handler_name, script_id
+                );
+
+                // Try to get the handler - convert to lowercase for lookup
+                let handler = script.get_own_handler_ref(&handler_name.to_lowercase());
+                
+                // ADD THIS CHECK:
+                if handler.is_none() {
+                    debug!("⚠️  Handler '{}' NOT FOUND in script {}", handler_name, script_id);
+                    return None;
+                }
+                
+                debug!("✓ Handler '{}' found!", handler_name);
+                
+                Some((None, handler.unwrap(), vec![]))
+            });
+
+            if let Some((receiver, handler, args)) = cast_member_script_call {
+                debug!("Calling player_call_script_handler...");
+                
+                player_call_script_handler(receiver, handler, &args).await?;
+                debug!("✓ Handler executed successfully");
+            }
+
             reserve_player_mut(|player| {
                 player.is_double_click = false;
             });
@@ -486,6 +666,30 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                             if let Some(handler) = handler {
                                 Some((None, handler, arg_list))
                             } else {
+                                None
+                            }
+                        }
+                        ScriptReceiver::ScriptText(text) => {
+                            // For mouseDownScript, you'd compile and execute the text
+                            // But for alertHook specifically, you'd look for an alertHook handler
+                            // in the compiled script
+                            
+                            // Option 1: Compile the script text on-the-fly
+                            // This requires your Lingo compiler to be accessible
+                            
+                            // Option 2: For simple cases like "--nothing", just ignore it
+                            if text.trim().starts_with("--") || text.trim().is_empty() {
+                                // It's a comment or empty, do nothing
+                                None
+                            } else {
+                                // TODO: Compile and execute the script text
+                                // You'll need to:
+                                // 1. Parse the text as Lingo code
+                                // 2. Compile it to bytecode
+                                // 3. Execute it with the given arguments
+                                
+                                // For now, log a warning and skip
+                                warn!("Warning: Script text execution not yet implemented for alertHook: {}", text);
                                 None
                             }
                         }
