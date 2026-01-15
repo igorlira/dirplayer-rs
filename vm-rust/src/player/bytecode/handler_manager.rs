@@ -18,7 +18,27 @@ use crate::{
 
 use super::{
     compare::CompareBytecodeHandler, get_set::GetSetBytecodeHandler, string::StringBytecodeHandler,
+    sprite_compare::SpriteCompareBytecodeHandler, expression_tracker::StackExpressionTracker,
 };
+
+thread_local! {
+    pub static EXPRESSION_TRACKER: std::cell::RefCell<StackExpressionTracker> = 
+        std::cell::RefCell::new(StackExpressionTracker::new());
+}
+
+fn trace_output(message: &str, trace_log_file: &str) {
+    use crate::js_api::JsApi;
+    
+    if trace_log_file.is_empty() {
+        // Use the same output as 'put' command, but without the "-- " prefix
+        // since trace messages already have their own prefixes (-->, ==, etc.)
+        JsApi::dispatch_debug_message(message);
+    } else {
+        // TODO: Append to file
+        // For now, output to message window with file indicator
+        JsApi::dispatch_debug_message(&format!("[{}] {}", trace_log_file, message));
+    }
+}
 
 #[derive(Clone)]
 pub struct BytecodeHandlerContext {
@@ -93,6 +113,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::DeleteChunk => StringBytecodeHandler::delete_chunk(ctx),
             OpCode::GetTopLevelProp => GetSetBytecodeHandler::get_top_level_prop(ctx),
             OpCode::PutChunk => StringBytecodeHandler::put_chunk(ctx),
+            OpCode::OntoSpr => SpriteCompareBytecodeHandler::onto_sprite(ctx),
             _ => {
                 let prim = num::ToPrimitive::to_u16(&opcode).unwrap();
                 let name = get_opcode_name(opcode);
@@ -140,19 +161,160 @@ impl StaticBytecodeHandlerManager {
 pub async fn player_execute_bytecode<'a>(
     ctx: &BytecodeHandlerContext,
 ) -> Result<HandlerExecutionResult, ScriptError> {
-    let opcode = {
+    let (opcode, bytecode_text, should_trace) = {
         let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
         let scope = player.scopes.get(ctx.scope_ref).unwrap();
 
         let handler = unsafe { &*ctx.handler_def_ptr };
+        let script = unsafe { &*ctx.script_ptr };
         let bytecode = &handler.bytecode_array[scope.bytecode_index];
 
-        bytecode.opcode
+        let should_trace = player.movie.trace_script;
+        let bytecode_text = if should_trace {
+            let cast = player.movie.cast_manager
+                .get_cast(script.member_ref.cast_lib as u32)
+                .unwrap();
+            let lctx = cast.lctx.as_ref().unwrap();
+            let multiplier = crate::director::file::get_variable_multiplier(
+                cast.capital_x,
+                cast.dir_version
+            );
+
+            // Generate annotation using expression tracker
+            let annotation = EXPRESSION_TRACKER.with(|tracker| {
+                let mut tracker = tracker.borrow_mut();
+                
+                // Get literals from script
+                let script = unsafe { &*ctx.script_ptr };
+                let literals = &script.chunk.literals;
+                
+                tracker.process_bytecode(bytecode, lctx, handler, multiplier, literals)
+            });
+
+            // Format like LASM
+            let op_name = crate::director::lingo::constants::get_opcode_name(bytecode.opcode);
+            let mut text = format!("[{:3}] {}", bytecode.pos, op_name);
+            
+            // Add operand for some opcodes
+            match bytecode.opcode {
+                OpCode::SetLocal | OpCode::GetLocal | OpCode::SetParam | OpCode::GetParam => {
+                    // These show the variable name in the opcode part
+                }
+                _ if bytecode.obj != 0 => {
+                    text.push_str(&format!(" {}", bytecode.obj));
+                }
+                _ => {}
+            }
+            
+            // Pad with dots
+            let current_len = text.len();
+            let target_len = 42;
+            if current_len < target_len {
+                text.push(' ');
+                text.push_str(&".".repeat(target_len - current_len));
+            }
+            
+            // Add annotation
+            if !annotation.is_empty() {
+                text.push(' ');
+                text.push_str(&annotation);
+            }
+            
+            text
+        } else {
+            String::new()
+        };
+
+        (bytecode.opcode, bytecode_text, should_trace)
     };
 
-    if StaticBytecodeHandlerManager::has_async_handler(&opcode) {
+    // Trace bytecode execution before running
+    if should_trace {
+        let trace_file = {
+            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            player.movie.trace_log_file.clone()
+        };
+        
+        let msg = format!("--> {}", bytecode_text);
+        trace_output(&msg, &trace_file);
+    }
+
+    // Execute the bytecode
+    let result = if StaticBytecodeHandlerManager::has_async_handler(&opcode) {
         StaticBytecodeHandlerManager::call_async_handler(opcode, ctx).await
     } else {
         StaticBytecodeHandlerManager::call_sync_handler(opcode, ctx)
+    };
+
+    // Trace assignment results after execution (for specific opcodes)
+    if should_trace && result.is_ok() {
+        match opcode {
+            OpCode::SetLocal | OpCode::SetGlobal | OpCode::SetParam => {
+                let (trace_file, var_name, value) = {
+                    let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+                    let scope = player.scopes.get(ctx.scope_ref).unwrap();
+                    let handler = unsafe { &*ctx.handler_def_ptr };
+                    let script = unsafe { &*ctx.script_ptr };
+                    let bytecode = &handler.bytecode_array[scope.bytecode_index];
+                    
+                    // Get lingo_context and multiplier from the cast
+                    let cast = player.movie.cast_manager
+                        .get_cast(script.member_ref.cast_lib as u32)
+                        .unwrap();
+                    let lctx = cast.lctx.as_ref().unwrap();
+                    let multiplier = crate::director::file::get_variable_multiplier(
+                        cast.capital_x,
+                        cast.dir_version
+                    );
+                    
+                    let var_name = match opcode {
+                        OpCode::SetLocal => {
+                            let local_index = (bytecode.obj as u32 / multiplier) as usize;
+                            handler.local_name_ids
+                                .get(local_index)
+                                .and_then(|&name_id| lctx.names.get(name_id as usize))
+                                .map(|s| s.as_str())
+                                .unwrap_or("UNKNOWN")
+                                .to_string()
+                        }
+                        OpCode::SetGlobal => {
+                            lctx.names
+                                .get(bytecode.obj as usize)
+                                .map(|s| s.as_str())
+                                .unwrap_or("UNKNOWN")
+                                .to_string()
+                        }
+                        OpCode::SetParam => {
+                            let param_index = (bytecode.obj as u32 / multiplier) as usize;
+                            handler.argument_name_ids
+                                .get(param_index)
+                                .and_then(|&name_id| lctx.names.get(name_id as usize))
+                                .map(|s| s.as_str())
+                                .unwrap_or("UNKNOWN")
+                                .to_string()
+                        }
+                        _ => "UNKNOWN".to_string()
+                    };
+                    
+                    // Get the value that was just set (should be on top of stack or stored)
+                    let value_str = if scope.stack.len() > 0 {
+                        use crate::player::datum_formatting::format_datum;
+                        let value_ref = &scope.stack[scope.stack.len() - 1];
+                        format_datum(value_ref, player)
+                    } else {
+                        "void".to_string()
+                    };
+                    
+                    let trace_file = player.movie.trace_log_file.clone();
+                    (trace_file, var_name, value_str)
+                };
+                
+                let msg = format!("== {} = {}", var_name, value);
+                trace_output(&msg, &trace_file);
+            }
+            _ => {}
+        }
     }
+
+    result
 }
