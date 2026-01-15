@@ -112,6 +112,7 @@ impl CastManager {
     ) {
         for cast in self.casts.iter_mut() {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
+                web_sys::console::log_1(&format!("Cast File {} - Preload Mode: {}", cast.file_name, cast.preload_mode).into());
                 match cast.preload_mode {
                     0 => {
                         // Preload: When Needed
