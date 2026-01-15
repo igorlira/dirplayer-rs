@@ -50,106 +50,129 @@ impl RectDatumHandlers {
 
     pub fn intersect(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let rect1 = player.get_datum(datum).to_int_rect()?;
-            let rect2 = player.get_datum(&args[0]).to_int_rect()?;
-            let (left, top, right, bottom) = RectUtils::intersect(rect1, rect2);
-            Ok(player.alloc_datum(Datum::IntRect((left, top, right, bottom))))
+            let r1 = player.get_datum(datum).to_rect()?;
+            let r2 = player.get_datum(&args[0]).to_rect()?;
+
+            // Compute intersection as floats (to preserve mixed Int/Float)
+            let l = Datum::to_f64(&player, &r1[0])?.min(Datum::to_f64(&player, &r2[0])?);
+            let t = Datum::to_f64(&player, &r1[1])?.min(Datum::to_f64(&player, &r2[1])?);
+            let r = Datum::to_f64(&player, &r1[2])?.max(Datum::to_f64(&player, &r2[2])?);
+            let b = Datum::to_f64(&player, &r1[3])?.max(Datum::to_f64(&player, &r2[3])?);
+
+            let rect_refs = [
+                player.alloc_datum(Datum::from_f64(l)),
+                player.alloc_datum(Datum::from_f64(t)),
+                player.alloc_datum(Datum::from_f64(r)),
+                player.alloc_datum(Datum::from_f64(b)),
+            ];
+
+            Ok(player.alloc_datum(Datum::Rect(rect_refs)))
         })
     }
 
     pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let rect = player.get_datum(datum);
-            let rect = match rect {
-                Datum::IntRect(rect_vec) => Ok(rect_vec),
-                _ => Err(ScriptError::new("Cannot get prop of non-rect".to_string())),
-            }?;
-            let list_val = [rect.0, rect.1, rect.2, rect.3];
-            let index = player.get_datum(&args[0]).int_value()?;
-            Ok(player.alloc_datum(Datum::Int(list_val[(index - 1) as usize] as i32)))
+            let arr = match player.get_datum(datum) {
+                Datum::Rect(arr) => arr,
+                _ => return Err(ScriptError::new("Cannot getAt of non-rect".to_string())),
+            };
+
+            let index = player.get_datum(&args[0]).int_value()?; // 1..4
+            if !(1..=4).contains(&index) {
+                return Err(ScriptError::new("Invalid index for rect".to_string()));
+            }
+
+            let value_ref = &arr[(index - 1) as usize];
+            let value = player.get_datum(value_ref);
+
+            match value {
+                Datum::Int(_) | Datum::Float(_) => Ok(value_ref.clone()),
+                other => Err(ScriptError::new(format!(
+                    "Rect component is not numeric: {}",
+                    other.type_str()
+                ))),
+            }
         })
     }
 
     pub fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let pos = player.get_datum(&args[0]).int_value()?;
-            let value = player.get_datum(&args[1]).int_value()?;
+            let index = player.get_datum(&args[0]).int_value()?;
+            let new_val = player.get_datum(&args[1]).clone();
 
-            let rect = player.get_datum_mut(datum);
-            let rect = match rect {
-                Datum::IntRect(rect_vec) => Ok(rect_vec),
-                _ => Err(ScriptError::new("Cannot get prop of non-rect".to_string())),
-            }?;
-            match pos {
-                1 => rect.0 = value,
-                2 => rect.1 = value,
-                3 => rect.2 = value,
-                4 => rect.3 = value,
-                _ => return Err(ScriptError::new("Invalid index for rect".to_string())),
+            if !(1..=4).contains(&index) {
+                return Err(ScriptError::new("Invalid index for rect".to_string()));
             }
+
+            let new_ref = match new_val {
+                Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
+                Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
+                other => return Err(ScriptError::new(format!(
+                    "Rect component must be numeric, got {}",
+                    other.type_str()
+                ))),
+            };
+
+            let arr = match player.get_datum_mut(datum) {
+                Datum::Rect(arr) => arr,
+                _ => return Err(ScriptError::new("Cannot setAt of non-rect".to_string())),
+            };
+
+            arr[(index - 1) as usize] = new_ref;
+
             Ok(DatumRef::Void)
         })
     }
 
-    pub fn get_prop(
-        player: &DirPlayer,
-        datum: &DatumRef,
-        prop: &String,
-    ) -> Result<Datum, ScriptError> {
+    pub fn get_prop(player: &DirPlayer, datum: &DatumRef, prop: &String) -> Result<Datum, ScriptError> {
         let rect = player.get_datum(datum);
-        let (left, top, right, bottom) = match rect {
-            Datum::IntRect(rect_vec) => Ok(rect_vec),
-            _ => Err(ScriptError::new("Cannot get prop of non-rect".to_string())),
-        }?;
+        let rect_arr = match rect {
+            Datum::Rect(arr) => arr,
+            _ => return Err(ScriptError::new("Cannot get prop of non-rect".to_string())),
+        };
+
+        let left = Datum::to_f64(player, &rect_arr[0])?;
+        let top = Datum::to_f64(player, &rect_arr[1])?;
+        let right = Datum::to_f64(player, &rect_arr[2])?;
+        let bottom = Datum::to_f64(player, &rect_arr[3])?;
+
         match prop.as_str() {
-            "width" => Ok(Datum::Int(*right as i32 - *left as i32)),
-            "height" => Ok(Datum::Int(*bottom as i32 - *top as i32)),
-            "left" => Ok(Datum::Int(*left as i32)),
-            "top" => Ok(Datum::Int(*top as i32)),
-            "right" => Ok(Datum::Int(*right as i32)),
-            "bottom" => Ok(Datum::Int(*bottom as i32)),
-            _ => Err(ScriptError::new(format!(
-                "Cannot get rect property {}",
-                prop
-            ))),
+            "width" => Ok(Datum::from_f64(right - left)),
+            "height" => Ok(Datum::from_f64(bottom - top)),
+            "left" => Ok(Datum::from_f64(left)),
+            "top" => Ok(Datum::from_f64(top)),
+            "right" => Ok(Datum::from_f64(right)),
+            "bottom" => Ok(Datum::from_f64(bottom)),
+            _ => Err(ScriptError::new(format!("Cannot get rect property {}", prop))),
         }
     }
 
-    pub fn set_prop(
-        player: &mut DirPlayer,
-        datum: &DatumRef,
-        prop: &String,
-        value_ref: &DatumRef,
-    ) -> Result<(), ScriptError> {
-        match prop.as_str() {
-            "left" => {
-                let value = player.get_datum(value_ref).int_value()?;
-                let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
-                rect.0 = value;
-                Ok(())
-            }
-            "top" => {
-                let value = player.get_datum(value_ref).int_value()?;
-                let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
-                rect.1 = value;
-                Ok(())
-            }
-            "right" => {
-                let value = player.get_datum(value_ref).int_value()?;
-                let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
-                rect.2 = value;
-                Ok(())
-            }
-            "bottom" => {
-                let value = player.get_datum(value_ref).int_value()?;
-                let rect = player.get_datum_mut(datum).to_int_rect_mut()?;
-                rect.3 = value;
-                Ok(())
-            }
-            _ => Err(ScriptError::new(format!(
-                "Cannot set rect property {}",
-                prop
+    pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String, value_ref: &DatumRef) -> Result<(), ScriptError> {
+        let idx = match prop.as_str() {
+            "left" => 0,
+            "top" => 1,
+            "right" => 2,
+            "bottom" => 3,
+            _ => return Err(ScriptError::new(format!("Cannot set rect property {}", prop))),
+        };
+
+        let new_val = player.get_datum(value_ref).clone();
+        let new_ref = match new_val {
+            Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
+            Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
+            other => return Err(ScriptError::new(format!(
+                "Rect property must be numeric, got {}",
+                other.type_str()
             ))),
-        }
+        };
+
+        let arr = match player.get_datum_mut(datum) {
+            Datum::Rect(arr) => arr,
+            _ => return Err(ScriptError::new("Cannot set prop of non-rect".to_string())),
+        };
+
+        arr[idx] = new_ref;
+
+        Ok(())
     }
 }
