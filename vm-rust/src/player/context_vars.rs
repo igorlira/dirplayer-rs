@@ -52,7 +52,8 @@ pub fn player_get_context_var(
         0x5 => {
             // local
             let local_name_ids = &handler.local_name_ids;
-            let local_name = get_name(player, &ctx, local_name_ids[id.int_value()? as usize])
+            let local_index = (id.int_value()? / variable_multiplier as i32) as usize;
+            let local_name = get_name(player, &ctx, local_name_ids[local_index])
                 .unwrap()
                 .to_owned();
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -113,7 +114,8 @@ pub fn player_set_context_var(
         0x5 => {
             // local
             let local_name_ids = &handler.local_name_ids;
-            let local_name = get_name(player, ctx, local_name_ids[id_datum.int_value()? as usize])
+            let local_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
+            let local_name = get_name(player, ctx, local_name_ids[local_index])
                 .unwrap()
                 .to_owned();
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
