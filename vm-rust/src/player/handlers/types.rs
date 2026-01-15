@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use log::warn;
+use log::{debug, warn};
 
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType},
@@ -23,6 +23,7 @@ use super::datum_handlers::{
     player_call_datum_handler,
     prop_list::{PropListDatumHandlers, PropListUtils},
     rect::RectUtils,
+    sound_channel::SoundStatus,
 };
 
 pub struct TypeHandlers {}
@@ -33,6 +34,7 @@ impl TypeUtils {
         match datum {
             Datum::List(..) => Ok(vec!["list", "linearlist"]),
             Datum::Int(..) => Ok(vec!["integer"]),
+            Datum::Float(..) => Ok(vec!["float"]),
             Datum::String(..) => Ok(vec!["string"]),
             Datum::Symbol(..) => Ok(vec!["symbol"]),
             Datum::Void | Datum::Null => Ok(vec!["void"]),
@@ -47,11 +49,12 @@ impl TypeUtils {
             Datum::ColorRef(..) => Ok(vec!["color"]),
             Datum::TimeoutRef(..) => Ok(vec!["timeout"]), // TODO verify this
             Datum::BitmapRef(..) => Ok(vec!["image"]),
-            Datum::IntRect(..) => Ok(vec!["rect"]),
-            Datum::IntPoint(..) => Ok(vec!["point"]),
+            Datum::Rect(..) => Ok(vec!["rect"]),
+            Datum::Point(..) => Ok(vec!["point"]),
             Datum::SpriteRef(..) => Ok(vec!["sprite"]),
             Datum::PaletteRef(..) => Ok(vec!["palette"]),
             Datum::Vector(..) => Ok(vec!["vector"]),
+
             _ => Err(ScriptError::new(format!(
                 "Getting ilk for unknown type: {}",
                 datum.type_str()
@@ -86,21 +89,23 @@ impl TypeUtils {
                 false,
                 formatted_key.clone(),
             )?,
-            Datum::IntRect((left, top, right, bottom)) => {
-                let index = prop_key.int_value()?;
-                let value = match index {
-                    1 => *left,
-                    2 => *top,
-                    3 => *right,
-                    4 => *bottom,
-                    _ => {
-                        return Err(ScriptError::new(format!(
-                            "Rect index {} out of bounds (must be 1-4)",
-                            index
-                        )))
-                    }
-                };
-                player.alloc_datum(Datum::Int(value))
+            Datum::Rect(arr) => {
+                let index = prop_key.int_value()?; // 1..4
+                let idx = index - 1;
+
+                if !(0..4).contains(&idx) {
+                    return Err(ScriptError::new(format!(
+                        "Rect index {} out of bounds (must be 1-4)",
+                        index
+                    )));
+                }
+
+                let val = player.get_datum(&arr[idx as usize]).float_value()?;
+                if val.fract() == 0.0 {
+                    player.alloc_datum(Datum::Int(val as i32))
+                } else {
+                    player.alloc_datum(Datum::Float(val))
+                }
             }
             Datum::List(_, list, _) => {
                 let position = prop_key.int_value()?;
@@ -110,23 +115,27 @@ impl TypeUtils {
                 }
                 list[index as usize].clone()
             }
-            Datum::IntPoint((x, y)) => player.alloc_datum(match prop_key {
-                Datum::Int(position) => match position {
-                    1 => Datum::Int(*x as i32),
-                    2 => Datum::Int(*y as i32),
+            Datum::Point(arr) => {
+                let index = prop_key.int_value()?;
+
+                let (idx, label) = match index {
+                    1 => (0usize, "x"),
+                    2 => (1usize, "y"),
                     _ => {
                         return Err(ScriptError::new(format!(
-                            "Invalid sub-prop position for point: {position}"
+                            "Invalid sub-prop position for point: {}",
+                            index
                         )))
                     }
-                },
-                _ => {
-                    return Err(ScriptError::new(format!(
-                        "Invalid sub-prop type for point: {}",
-                        prop_key.type_str()
-                    )))
+                };
+
+                let val = player.get_datum(&arr[idx]).float_value()?;
+                if val.fract() == 0.0 {
+                    player.alloc_datum(Datum::Int(val as i32))
+                } else {
+                    player.alloc_datum(Datum::Float(val))
                 }
-            }),
+            }
             Datum::ScriptInstanceRef(instance_ref) => {
                 // Numeric index
                 if let Ok(index) = prop_key.int_value() {
@@ -162,6 +171,64 @@ impl TypeUtils {
                 }
 
                 return Ok(DatumRef::Void);
+            }
+            Datum::Int(i) => {
+                let prop_name = player.get_datum(prop_key_ref).string_value()?;
+                match prop_name.as_str() {
+                    "abs" => {
+                        let result = i.abs();
+                        player.alloc_datum(Datum::Int(result))
+                    }
+                    "integer" => {
+                        datum_ref.clone()
+                    }
+                    "float" => {
+                        player.alloc_datum(Datum::Float(*i as f64))
+                    }
+                    "char" => {
+                        // Convert integer to character
+                        if *i >= 0 && *i <= 255 {
+                            let ch = char::from_u32(*i as u32).unwrap_or('?');
+                            player.alloc_datum(Datum::String(ch.to_string()))
+                        } else {
+                            return Err(ScriptError::new(format!("Integer {} out of range for char", i)));
+                        }
+                    }
+                    "string" => {
+                        player.alloc_datum(Datum::String(i.to_string()))
+                    }
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Unknown property '{}' for integer",
+                            prop_name
+                        )));
+                    }
+                }
+            }
+            Datum::Float(f) => {
+                let prop_name = player.get_datum(prop_key_ref).string_value()?;
+                match prop_name.as_str() {
+                    "abs" => {
+                        let result = f.abs();
+                        player.alloc_datum(Datum::Float(result))
+                    }
+                    "integer" => {
+                        let result = f.round() as i32;
+                        player.alloc_datum(Datum::Int(result))
+                    }
+                    "float" => {
+                        datum_ref.clone()
+                    }
+                    "string" => {
+                        player.alloc_datum(Datum::String(f.to_string()))
+                    }
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Unknown property '{}' for float",
+                            prop_name
+                        )));
+                    }
+                }
             }
             _ => {
                 web_sys::console::log_1(
@@ -433,17 +500,17 @@ impl TypeHandlers {
             let value = player.get_datum(&args[0]);
             let result = match value {
                 Datum::Float(f) => Datum::Float(*f),
-                Datum::Int(i) => Datum::Float(*i as f32),
-                Datum::SpriteRef(sprite_num) => Datum::Float(*sprite_num as f32),
+                Datum::Int(i) => Datum::Float(*i as f64),
+                Datum::SpriteRef(sprite_num) => Datum::Float(*sprite_num as f64),
                 Datum::String(s) => {
-                    if let Ok(float_value) = s.parse::<f32>() {
+                    if let Ok(float_value) = s.parse::<f64>() {
                         Datum::Float(float_value)
                     } else {
                         value.to_owned()
                     }
                 }
                 Datum::StringChunk(_, _, s) => {
-                    if let Ok(float_value) = s.parse::<f32>() {
+                    if let Ok(float_value) = s.parse::<f64>() {
                         Datum::Float(float_value)
                     } else {
                         value.to_owned()
@@ -487,35 +554,82 @@ impl TypeHandlers {
 
     pub fn point(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let x = player.get_datum(&args[0]).int_value()?;
-            let y = player.get_datum(&args[1]).int_value()?;
-            Ok(player.alloc_datum(Datum::IntPoint((x, y))))
+            if args.len() != 2 {
+                return Err(ScriptError::new("point() requires exactly 2 arguments".to_string()));
+            }
+
+            let x = player.get_datum(&args[0]).clone();
+            let y = player.get_datum(&args[1]).clone();
+
+            let x_ref = match x {
+                Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
+                Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
+                other => return Err(ScriptError::new(format!(
+                    "Point component must be numeric, got {}",
+                    other.type_str()
+                ))),
+            };
+
+            let y_ref = match y {
+                Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
+                Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
+                other => return Err(ScriptError::new(format!(
+                    "Point component must be numeric, got {}",
+                    other.type_str()
+                ))),
+            };
+
+            Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
         })
     }
 
     pub fn rect(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let first_arg_is_num = player.get_datum(&args[0]).is_number();
-            let (left, top, right, bottom) = if args.len() == 4 && first_arg_is_num {
-                let left = player.get_datum(&args[0]).int_value()?;
-                let top = player.get_datum(&args[1]).int_value()?;
-                let right = player.get_datum(&args[2]).int_value()?;
-                let bottom = player.get_datum(&args[3]).int_value()?;
-                (left, top, right, bottom)
-            } else if args.len() == 4 && !first_arg_is_num {
-                let top_left = player.get_datum(&args[0]).to_int_point()?;
-                let top_right = player.get_datum(&args[1]).to_int_point()?;
-                let bottom_right = player.get_datum(&args[2]).to_int_point()?;
-                let bottom_left = player.get_datum(&args[3]).to_int_point()?;
-                let rect = IntRect::from_quad(top_left, top_right, bottom_right, bottom_left);
-                (rect.left, rect.top, rect.right, rect.bottom)
-            } else {
-                let left_top = player.get_datum(&args[0]).to_int_point()?;
-                let right_bottom = player.get_datum(&args[1]).to_int_point()?;
-                (left_top.0, left_top.1, right_bottom.0, right_bottom.1)
-            };
+            if args.len() != 2 && args.len() != 4 {
+                return Err(ScriptError::new("rect() requires 2 or 4 arguments".to_string()));
+            }
 
-            Ok(player.alloc_datum(Datum::IntRect((left, top, right, bottom))))
+            // Helper (normal function, NOT a closure)
+            fn preserve_numeric(
+                player: &mut DirPlayer,
+                dref: &DatumRef,
+            ) -> Result<DatumRef, ScriptError> {
+                let d = player.get_datum(dref).clone();
+
+                match d {
+                    Datum::Int(n) => Ok(player.alloc_datum(Datum::Int(n))),
+                    Datum::Float(f) => Ok(player.alloc_datum(Datum::Float(f))),
+                    other => Err(ScriptError::new(format!(
+                        "Rect component must be numeric, got {}",
+                        other.type_str()
+                    ))),
+                }
+            }
+
+            // Case 1: rect(left, top, right, bottom)
+            if args.len() == 4 && player.get_datum(&args[0]).is_number() {
+                let left   = preserve_numeric(player, &args[0])?;
+                let top    = preserve_numeric(player, &args[1])?;
+                let right  = preserve_numeric(player, &args[2])?;
+                let bottom = preserve_numeric(player, &args[3])?;
+
+                return Ok(player.alloc_datum(Datum::Rect([left, top, right, bottom])));
+            }
+
+            // Case 2: rect(Point, Point)
+            if args.len() == 2 {
+                let p1 = player.get_datum(&args[0]).to_point()?.clone();
+                let p2 = player.get_datum(&args[1]).to_point()?.clone();
+
+                let left   = preserve_numeric(player, &p1[0])?;
+                let top    = preserve_numeric(player, &p1[1])?;
+                let right  = preserve_numeric(player, &p2[0])?;
+                let bottom = preserve_numeric(player, &p2[1])?;
+
+                return Ok(player.alloc_datum(Datum::Rect([left, top, right, bottom])));
+            }
+
+            Err(ScriptError::new("Invalid rect() arguments".to_string()))
         })
     }
 
@@ -599,8 +713,14 @@ impl TypeHandlers {
 
     pub fn timeout(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let name = player.get_datum(&args[0]).string_value()?;
-            Ok(player.alloc_datum(Datum::TimeoutRef(name)))
+            if args.is_empty() {
+                // Called without arguments: return the timeout factory
+                Ok(player.alloc_datum(Datum::TimeoutFactory))
+            } else {
+                // Called with a name argument: return a timeout reference
+                let name = player.get_datum(&args[0]).string_value()?;
+                Ok(player.alloc_datum(Datum::TimeoutRef(name)))
+            }
         })
     }
 
@@ -778,10 +898,25 @@ impl TypeHandlers {
             if args.len() != 2 {
                 return Err(ScriptError::new("Union requires 2 arguments".to_string()));
             }
-            let left = player.get_datum(&args[0]).to_int_rect()?;
-            let right = player.get_datum(&args[1]).to_int_rect()?;
 
-            Ok(player.alloc_datum(Datum::IntRect(RectUtils::union(left, right))))
+            let left_refs = player.get_datum(&args[0]).to_rect()?;
+            let right_refs = player.get_datum(&args[1]).to_rect()?;
+
+            let rect_to_tuple = |rect: [DatumRef; 4]| -> Result<(i32, i32, i32, i32), ScriptError> {
+                let l = Datum::to_f64(player, &rect[0])? as i32;
+                let t = Datum::to_f64(player, &rect[1])? as i32;
+                let r = Datum::to_f64(player, &rect[2])? as i32;
+                let b = Datum::to_f64(player, &rect[3])? as i32;
+                Ok((l, t, r, b))
+            };
+
+            let left_tuple = rect_to_tuple(left_refs)?;
+            let right_tuple = rect_to_tuple(right_refs)?;
+
+            let (l, t, r, b) = RectUtils::union(left_tuple, right_tuple);
+            let rect = IntRect { left: l, top: t, right: r, bottom: b };
+
+            Ok(player.alloc_datum(rect.to_datum()))
         })
     }
 
@@ -805,9 +940,9 @@ impl TypeHandlers {
             let (x, y, z) = match args.len() {
                 0 => (0.0, 0.0, 0.0),
                 3 => (
-                    player.get_datum(&args[0]).to_float()?,
-                    player.get_datum(&args[1]).to_float()?,
-                    player.get_datum(&args[2]).to_float()?,
+                    player.get_datum(&args[0]).to_float()? as f64,
+                    player.get_datum(&args[1]).to_float()? as f64,
+                    player.get_datum(&args[2]).to_float()? as f64,
                 ),
                 _ => {
                     return Err(ScriptError::new(
@@ -859,7 +994,10 @@ impl TypeHandlers {
                     Ok(player.alloc_datum(Datum::Float(base.powf(*exponent))))
                 }
                 (Datum::Float(base), Datum::Int(exponent)) => {
-                    Ok(player.alloc_datum(Datum::Float(base.powf(*exponent as f32))))
+                    Ok(player.alloc_datum(Datum::Float(base.powf(*exponent as f64))))
+                }
+                (Datum::Int(base), Datum::Float(exponent)) => {
+                    Ok(player.alloc_datum(Datum::Float((*base as f64).powf(*exponent))))
                 }
                 _ => Err(ScriptError::new("Power requires two numbers".to_string())),
             }
@@ -953,25 +1091,81 @@ impl TypeHandlers {
     pub fn intersect(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             if args.len() != 2 {
-                return Err(ScriptError::new(
-                    "Intersect requires 2 arguments".to_string(),
-                ));
+                return Err(ScriptError::new("Intersect requires 2 arguments".to_string()));
             }
-            let left = player.get_datum(&args[0]).to_int_rect()?;
-            let right = player.get_datum(&args[1]).to_int_rect()?;
 
-            Ok(player.alloc_datum(Datum::IntRect(RectUtils::intersect(left, right))))
+            let left_refs = player.get_datum(&args[0]).to_rect()?;
+            let right_refs = player.get_datum(&args[1]).to_rect()?;
+
+            let left = (
+                player.get_datum(&left_refs[0]).int_value()?,
+                player.get_datum(&left_refs[1]).int_value()?,
+                player.get_datum(&left_refs[2]).int_value()?,
+                player.get_datum(&left_refs[3]).int_value()?,
+            );
+            let right = (
+                player.get_datum(&right_refs[0]).int_value()?,
+                player.get_datum(&right_refs[1]).int_value()?,
+                player.get_datum(&right_refs[2]).int_value()?,
+                player.get_datum(&right_refs[3]).int_value()?,
+            );
+
+            let (l, t, r, b) = RectUtils::intersect(left, right);
+            let rect = IntRect { left: l, top: t, right: r, bottom: b };
+
+            Ok(player.alloc_datum(rect.to_datum()))
         })
     }
 
+    // pub fn get_prop_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    //     let datum_ref = args.get(0).unwrap();
+    //     let prop_key_ref = args.get(1).unwrap();
+    //     reserve_player_mut(|player| TypeUtils::get_sub_prop(datum_ref, prop_key_ref, player))
+    // }
+
     pub fn get_prop_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let datum_ref = args.get(0).unwrap();
-        let prop_key_ref = args.get(1).unwrap();
-        reserve_player_mut(|player| TypeUtils::get_sub_prop(datum_ref, prop_key_ref, player))
+        use crate::player::datum_formatting::format_concrete_datum;
+        reserve_player_ref(|player| {
+            let prop_list_ref = &args[0];
+            let position = player.get_datum(&args[1]).int_value()?;
+            let index = (position - 1) as usize;
+            
+            let prop_list = player.get_datum(prop_list_ref);
+            
+            debug!(
+                "🔍 getPropAt: proplist={}, index={}", 
+                format_concrete_datum(prop_list, player),
+                position
+            );
+            
+            match prop_list {
+                Datum::PropList(entries, _) => {
+                    if index >= entries.len() {
+                        return Err(ScriptError::new(format!(
+                            "Index {} out of bounds for proplist of length {}", 
+                            position, 
+                            entries.len()
+                        )));
+                    }
+                    // Return the KEY at this position, not the value!
+                    let key_ref = entries[index].0.clone();
+                    
+                    debug!(
+                        "✅ getPropAt returned key: {}", 
+                        format_concrete_datum(player.get_datum(&key_ref), player)
+                    );
+                    
+                    Ok(key_ref)
+                }
+                _ => Err(ScriptError::new(
+                    "getPropAt requires a property list".to_string()
+                )),
+            }
+        })
     }
 
     pub fn pi(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Float(std::f32::consts::PI))))
+        reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Float(std::f64::consts::PI))))
     }
 
     pub fn sin(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -985,6 +1179,44 @@ impl TypeHandlers {
         reserve_player_mut(|player| {
             let value = player.get_datum(&args[0]).to_float()?;
             Ok(player.alloc_datum(Datum::Float(value.cos())))
+        })
+    }
+
+    pub fn sqrt(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let value = player.get_datum(&args[0]);
+            
+            let num = if let Ok(f) = value.float_value() {
+                f
+            } else if let Ok(i) = value.int_value() {
+                i as f64
+            } else {
+                return Err(ScriptError::new("sqrt requires a number".to_string()));
+            };
+            
+            if num < 0.0 {
+                return Err(ScriptError::new("sqrt of negative number".to_string()));
+            }
+            
+            let result = num.sqrt();
+            Ok(player.alloc_datum(Datum::Float(result)))
+        })
+    }
+
+    pub fn atan(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let value = player.get_datum(&args[0]);
+            
+            let num = if let Ok(f) = value.float_value() {
+                f
+            } else if let Ok(i) = value.int_value() {
+                i as f64
+            } else {
+                return Err(ScriptError::new("atan requires a number".to_string()));
+            };
+            
+            let result = num.atan();
+            Ok(player.alloc_datum(Datum::Float(result)))
         })
     }
 
@@ -1089,5 +1321,38 @@ impl TypeHandlers {
                 object_type
             ))),
         }
+    }
+
+    pub fn sound_busy(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {       
+        reserve_player_mut(|player| {
+            if args.is_empty() {
+                return Err(ScriptError::new("soundBusy requires a channel number".to_string()));
+            }
+            
+            let channel_num_ref = &args[0];
+            let channel_num = player.get_datum(channel_num_ref).int_value()?;
+            
+            // Convert to 0-based index
+            let channel_idx = (channel_num - 1) as usize;
+            
+            // Get the channel directly from sound manager
+            let channel_rc = player.sound_manager.get_channel(channel_idx)
+                .ok_or_else(|| ScriptError::new(format!(
+                    "Sound channel {} out of range",
+                    channel_num
+                )))?;
+            
+            let channel = channel_rc.borrow();
+            
+            // soundBusy returns true (1) if the channel is Playing, Loading, or Queued
+            let is_busy = matches!(
+                channel.status, 
+                SoundStatus::Playing | SoundStatus::Loading | SoundStatus::Queued
+            );
+            debug!("🔍 soundBusy({}) = {} (status: {:?})", 
+                channel_num, is_busy, channel.status);
+            
+            Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })))
+        })
     }
 }

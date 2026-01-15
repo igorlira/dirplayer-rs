@@ -73,7 +73,7 @@ impl MathDatumHandlers {
                 }
             };
 
-            Ok(player.alloc_datum(Datum::Float(result as f32)))
+            Ok(player.alloc_datum(Datum::Float(result)))
         })
     }
 
@@ -85,7 +85,7 @@ impl MathDatumHandlers {
         let name = prop.to_lowercase();
         match name.as_str() {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("math".to_owned()))),
-            "pi" => Ok(player.alloc_datum(Datum::Float(PI as f32))),
+            "pi" => Ok(player.alloc_datum(Datum::Float(PI))),
             _ => Err(ScriptError::new(format!(
                 "Unknown math property '{}'",
                 prop

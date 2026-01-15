@@ -1,6 +1,8 @@
 use log::warn;
 
 use crate::console_warn;
+use crate::player::{reserve_player_mut, DatumRef};
+use crate::director::lingo::datum::Datum;
 
 #[derive(Clone, Debug)]
 pub struct IntRect {
@@ -85,5 +87,16 @@ impl IntRect {
         }
 
         return IntRect::from(left, top, right, bottom);
+    }
+
+    pub fn to_datum(&self) -> Datum {
+        reserve_player_mut(|player| {
+            let left_ref = player.alloc_datum(Datum::Int(self.left));
+            let top_ref = player.alloc_datum(Datum::Int(self.top));
+            let right_ref = player.alloc_datum(Datum::Int(self.right));
+            let bottom_ref = player.alloc_datum(Datum::Int(self.bottom));
+
+            Datum::Rect([left_ref, top_ref, right_ref, bottom_ref])
+        })
     }
 }
