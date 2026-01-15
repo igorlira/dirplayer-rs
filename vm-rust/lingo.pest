@@ -6,7 +6,7 @@ ident = @{ !digit ~ (alpha | digit | "_")+ }
 lang_ident = { !reserved_keyword ~ ident }
 
 reserved_keyword = @{
-    ("into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item") ~ !(alpha | digit | "_")
+    ("sprite" | "castLib" | "set" | "to" | "into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item") ~ !(alpha | digit | "_")
 }
 
 void_keyword = _{ ("void" | "VOID" | "Void") ~ !(alpha | digit | "_") }
@@ -25,7 +25,25 @@ quote          = _{ "\"" }
 string         = ${ quote ~ (string_interior) ~ quote }
 string_empty   =  { "EMPTY" }
 return_const   =  { "RETURN" }
-the_prop       =  { ^"the" ~ lang_ident }
+
+// Multi-word properties that need special handling
+the_long_time        = { ^"the" ~ ^"long" ~ ^"time" }
+the_short_time       = { ^"the" ~ ^"short" ~ ^"time" }
+the_abbrev_time      = { ^"the" ~ (^"abbreviated" | ^"abbrev" | ^"abbr") ~ ^"time" }
+the_long_date        = { ^"the" ~ ^"long" ~ ^"date" }
+the_short_date       = { ^"the" ~ ^"short" ~ ^"date" }
+the_abbrev_date      = { ^"the" ~ (^"abbreviated" | ^"abbrev" | ^"abbr") ~ ^"date" }
+the_multi_word_prop  = { the_long_time | the_short_time | the_abbrev_time | the_long_date | the_short_date | the_abbrev_date }
+
+// Regular single-word properties
+the_prop       =  { the_multi_word_prop | (^"the" ~ lang_ident) }
+the_prop_of    =  { ^"the" ~ lang_ident ~ ^"of" ~ (castlib_of_expr | sprite_of_expr | prop_of_expr | expr) }
+
+// Special handling for "X of castLib Y" and "X of sprite Y" 
+// These must come BEFORE prop_of_expr to match first
+castlib_of_expr = { lang_ident ~ ^"of" ~ castlib_ref }
+sprite_of_expr = { lang_ident ~ ^"of" ~ sprite_ref }
+prop_of_expr   =  { lang_ident ~ ^"of" ~ expr }
 empty_list     =  { "[]" }
 multi_list     =  { "[" ~ (expr) ~ ("," ~ (expr))* ~ "]" }
 bool_true      =  { ^"true" | ^"True" | ^"TRUE" }
@@ -36,6 +54,7 @@ number_int     = ${ (number_sign?) ~ (digit+) }
 number_float_a = ${ (number_sign?) ~ (digit*) ~ "." ~ (digit+) ~ (float_exponent?) }
 number_float_b = ${ (number_sign?) ~ (digit+) ~ "." ~ (digit*) ~ (float_exponent?) }
 number_float   = ${ number_float_a | number_float_b }
+number         = _{ number_float | number_int }
 
 prop_list_key   = _{ (symbol | nohash_symbol | string | number_float | number_int | void | bool_true | bool_false | string_empty) }
 prop_list_pair  =  { prop_list_key ~ ":" ~ expr }
@@ -49,16 +68,28 @@ rgb_num_arg   = { digit{,3} }
 rgb_num_color = { ^"rgb" ~ "(" ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ ")" }
 rgb_str_color = { ^"rgb" ~ "(" ~ (string) ~ ")" }
 rgb_color     = { rgb_num_color | rgb_str_color }
-rect          = { ^"rect" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ "," ~ (number_int) ~ ")" }
-point         = { ^"point" ~ "(" ~ (number_int) ~ "," ~ (number_int) ~ ")" }
+rect          = { ^"rect" ~ "(" ~ number ~ "," ~ number ~ "," ~ number ~ "," ~ number ~ ")" }
+point         = { ^"point" ~ "(" ~ number ~ "," ~ number ~ ")" }
+
+// CastLib references: "castLib 1" or "castLib "levels""
+castlib_ref = { ^"castLib" ~ term_arg }
+
+// Member references: "member 5" or "member 5 of castLib 1"
+member_ref = { ^"member" ~ term_arg ~ (^"of" ~ castlib_ref)? }
+
+// Sprite references: "sprite 17"
+sprite_ref = { ^"sprite" ~ term_arg }
 
 // Chunk expressions for "char 1 of myStr", etc.
 chunk_type = { ^"char" | ^"word" | ^"line" | ^"item" }
-chunk_expr = { chunk_type ~ expr ~ ^"of" ~ (lang_ident | chunk_expr) }
+chunk_expr = { chunk_type ~ expr ~ ^"of" ~ (the_prop_of | lang_ident | chunk_expr) }
 
 parens_expr = _{ "(" ~ expr ~ ")" }
 parens_list = { "(" ~ expr ~ ("," ~ expr)+ ~ ")" }
 parens_empty = { "(" ~ ")" }
+
+// List indexing - postfix operator for accessing list elements
+list_index = { "[" ~ expr ~ "]" }
 
 // Boolean operators
 and_op = { ^"and" }
@@ -73,7 +104,10 @@ gt_op = { ">" }
 le_op = { "<=" }
 ge_op = { ">=" }
 
-primitive       = _{ put_handler_call | handler_call | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | lang_ident }
+// Property name after dot - can be any identifier including reserved keywords
+prop_name  =  { ident }
+
+primitive       = _{ put_handler_call | sprite_ref | member_ref | handler_call | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
 eval_expr       = _{ SOI ~ expr ~ EOI }
 ident_list      = _{ !digit ~ ident ~ (" " ~ ident)+ }
 
@@ -85,8 +119,8 @@ command_inline_args              = _{ command_inline_args_comma | command_inline
 // put() with parentheses must have at least one argument, otherwise it's an error
 put_handler_call                 =  { ^"put" ~ "(" ~ handler_call_args ~ ")" }
 // Allow other handlers with parentheses to be called normally
-handler_call                     =  { !^"put" ~ lang_ident ~ "(" ~ handler_call_args? ~ ")" }
-command_inline                   =  { !^"put" ~ lang_ident ~ !(WHITESPACE* ~ ("(" | "." | "=")) ~ WHITESPACE+ ~ command_inline_args }
+handler_call                     =  { !^"put" ~ !^"set" ~ lang_ident ~ "(" ~ handler_call_args? ~ ")" }
+command_inline                   =  { !^"put" ~ !^"set" ~ lang_ident ~ !(WHITESPACE* ~ ("(" | "." | "=")) ~ WHITESPACE+ ~ command_inline_args }
 
 // Put statement variations (order matters - most specific first!)
 put_into_chunk   = { ^"put" ~ expr ~ ^"into" ~ chunk_expr }
@@ -111,8 +145,15 @@ put_statement = {
   | put_display
 }
 
-assignment =  { (dotted_ident | lang_ident) ~ "=" ~ expr }
-command    = _{ assignment | put_statement | command_inline | expr }
+// Set statement: "set the locV of sprite 17 to 233"
+// This is syntactic sugar for assignment
+set_statement = { ^"set" ~ expr ~ ^"to" ~ expr }
+
+// Assignment can be to any expression (identifier, property access, function result property, etc.)
+// The parser will validate that the left side is a valid lvalue
+assignment_expr = { term ~ (obj_prop ~ (prop_name | term))* }
+assignment = { assignment_expr ~ "=" ~ expr }
+command    = _{ set_statement | assignment | put_statement | command_inline | expr }
 obj_prop   =  { "." }
 add        =  { "+" }
 subtract   =  { "-" }
@@ -137,8 +178,12 @@ bin_op     = _{
   | join_pad
   | join
 }
-expr       =  { term ~ (bin_op ~ term)* }
-term       = _{ not_op ~ term | primitive }
+postfix_op = _{ list_index }
+expr       =  { term ~ (bin_op ~ term | postfix_op)* }
+term       = _{ not_op ~ term | primitive | prop_name }
 term_arg   =  { not_op ~ term_arg | primitive }
 
 command_eval_expr = _{ SOI ~ command ~ EOI }
+// Configuration key support - allows asterisks and dots in keys
+config_ident_part = @{ (alpha | digit | "_" | "*")+ }
+config_key = @{ !digit ~ config_ident_part ~ ("." ~ config_ident_part)* }
