@@ -69,7 +69,7 @@ impl CastListChunk {
                     preload_settings = read_u16(
                         &item_bufs,
                         (i * header.items_per_cast + 3) as usize,
-                        item_endian,
+                        Endian::Big,
                     );
                 }
                 if header.items_per_cast >= 4 {
