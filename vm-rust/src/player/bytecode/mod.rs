@@ -5,3 +5,5 @@ pub mod get_set;
 pub mod handler_manager;
 pub mod stack;
 pub mod string;
+pub mod sprite_compare;
+pub mod expression_tracker;
