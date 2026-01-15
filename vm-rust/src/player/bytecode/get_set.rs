@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::{
         constants::{
-            get_anim_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names,
+            get_anim_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names, get_sound_prop_name,
         },
         datum::{Datum, StringChunkType},
     },
@@ -18,9 +18,8 @@ use crate::{
         DatumRef, DirPlayer, HandlerExecutionResult, ScriptError, PLAYER_OPT,
     },
 };
-
 use super::handler_manager::BytecodeHandlerContext;
-use crate::player::handlers::datum_handlers::list_handlers::ListDatumHandlers;
+use crate::player::handlers::datum_handlers::{list_handlers::ListDatumHandlers, sound_channel::SoundChannelDatumHandlers};
 
 pub struct GetSetBytecodeHandler {}
 pub struct GetSetUtils {}
@@ -224,6 +223,21 @@ impl GetSetBytecodeHandler {
                             property_type
                         )))
                     }
+                }
+                0x04 => {
+                    // Sound channel properties
+                    let prop_name = get_sound_prop_name(property_id as u16);
+                    let channel_num_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let channel_num = player.get_datum(&channel_num_ref).int_value()?;
+                    
+                    // Create a SoundChannel datum with the channel number
+                    let sound_channel_datum = player.alloc_datum(Datum::SoundChannel(channel_num as u16));
+                    
+                    SoundChannelDatumHandlers::set_prop(player, &sound_channel_datum, &prop_name, &value_ref)?;
+                    Ok(HandlerExecutionResult::Advance)
                 }
                 0x06 => {
                     let prop_name = get_sprite_prop_name(property_id as u16);
@@ -457,51 +471,48 @@ impl GetSetBytecodeHandler {
 
             let result_ref = match obj_type {
                 crate::director::lingo::datum::DatumType::SpriteRef => {
-                    // Handle sprite references - resolve to script instance first
+                    // Handle sprite references
                     let sprite_num = player.get_datum(&obj_ref).to_sprite_ref()?;
-                    let sprite = player.movie.score.get_sprite(sprite_num);
-
-                    if let Some(sprite) = sprite {
-                        // Clone the script instance list to avoid borrow issues
-                        let instance_refs = sprite.script_instance_list.clone();
-
-                        // Try to get the property from the first script instance
-                        for instance_ref in instance_refs {
-                            if let Ok(result) = crate::player::script::script_get_prop(
-                                player,
-                                &instance_ref,
-                                &prop_name,
-                            ) {
-                                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                                scope.stack.push(result);
-                                return Ok(HandlerExecutionResult::Advance);
-                            }
+                    
+                    // Try built-in sprite properties FIRST
+                    // This ensures properties like 'visible', 'loc', etc. work correctly
+                    match crate::player::score::sprite_get_prop(
+                        player,
+                        sprite_num as i16,
+                        &prop_name,
+                    ) {
+                        Ok(datum) => {
+                            let result = player.alloc_datum(datum);
+                            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                            scope.stack.push(result);
+                            return Ok(HandlerExecutionResult::Advance);
                         }
+                        Err(_) => {
+                            // Not a built-in property, try script instances
+                            // Clone the script instance list to avoid borrow issues
+                            let instance_refs = {
+                                let sprite = player.movie.score.get_sprite(sprite_num);
+                                sprite.map(|s| s.script_instance_list.clone()).unwrap_or_default()
+                            };
 
-                        // If not found in script instances, try built-in sprite properties
-                        match crate::player::score::sprite_get_prop(
-                            player,
-                            sprite_num as i16,
-                            &prop_name,
-                        ) {
-                            Ok(datum) => {
-                                let result = player.alloc_datum(datum);
-                                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                                scope.stack.push(result);
-                                return Ok(HandlerExecutionResult::Advance);
+                            // Try to get the property from script instances
+                            for instance_ref in instance_refs {
+                                if let Ok(result) = crate::player::script::script_get_prop(
+                                    player,
+                                    &instance_ref,
+                                    &prop_name,
+                                ) {
+                                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                                    scope.stack.push(result);
+                                    return Ok(HandlerExecutionResult::Advance);
+                                }
                             }
-                            Err(_) => {
-                                // Property not found anywhere
-                                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                                scope.stack.push(DatumRef::Void);
-                                return Ok(HandlerExecutionResult::Advance);
-                            }
+                            
+                            // Property not found anywhere
+                            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                            scope.stack.push(DatumRef::Void);
+                            return Ok(HandlerExecutionResult::Advance);
                         }
-                    } else {
-                        return Err(ScriptError::new(format!(
-                            "Sprite {} does not exist",
-                            sprite_num
-                        )));
                     }
                 }
                 crate::director::lingo::datum::DatumType::XmlRef => {
@@ -713,6 +724,39 @@ impl GetSetBytecodeHandler {
                     player.get_anim2_prop(prop_id as u16)?
                 };
                 Ok(player.alloc_datum(datum))
+            } else if prop_type == 0x09 {
+                // anim prop (alternate type)
+                Ok(player.alloc_datum(player.get_anim_prop(prop_id as u16)?))
+            } else if prop_type == 0x0b {
+                // sound properties
+                if prop_id == 2 {
+                    // "the number of sounds" or similar global sound property
+                    // Pop the value from stack (typically 0 for global properties)
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    scope.stack.pop().unwrap();
+                    
+                    // Return the number of active sounds/channels
+                    Ok(player.alloc_datum(Datum::Int(player.sound_manager.num_channels() as i32)))
+                } else {
+                    // Regular sound channel property access
+                    let prop_name = get_sound_prop_name(prop_id as u16);
+                    let datum_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let channel_num = player.get_datum(&datum_ref).int_value()?;
+                    
+                    if channel_num == 0 {
+                        return Err(ScriptError::new(format!(
+                            "Sound channel index must be >= 1 for property '{}'",
+                            prop_name
+                        )));
+                    }
+                    
+                    let sound_channel_datum = player.alloc_datum(Datum::SoundChannel(channel_num as u16));
+                    let result = SoundChannelDatumHandlers::get_prop(player, &sound_channel_datum, &prop_name)?;
+                    Ok(player.alloc_datum(result))
+                }
             } else if prop_type == 0x01 {
                 // number of chunks
                 let string_id = {

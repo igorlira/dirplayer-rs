@@ -238,3 +238,16 @@ pub fn get_anim2_prop_name(name_id: u16) -> &'static str {
 pub fn get_sprite_prop_name(name_id: u16) -> &'static str {
     sprite_prop_names().get(&name_id).unwrap().as_ref()
 }
+
+pub fn get_sound_prop_name(property_id: u16) -> String {
+    match property_id {
+        0x01 => "volume".to_string(),
+        0x02 => "pan".to_string(),
+        0x03 => "loopCount".to_string(),
+        0x04 => "startTime".to_string(),
+        0x05 => "endTime".to_string(),
+        0x06 => "loopStartTime".to_string(),
+        0x07 => "loopEndTime".to_string(),
+        _ => format!("unknown_sound_prop_{}", property_id),
+    }
+}
