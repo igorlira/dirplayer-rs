@@ -63,7 +63,9 @@ impl NetManager {
         self.base_path = Some(sanitized_path);
     }
 
-    // TODO findTask
+    pub fn find_task_by_url(&self, url: &str) -> Option<u32> {
+        find_task_with_url(&self.tasks, &url.to_string()).map(|task| task.id)
+    }
 
     pub fn get_task_state(&self, task_id: Option<u32>) -> Option<NetTaskState> {
         let shared_state = self.shared_state.try_lock().unwrap();
