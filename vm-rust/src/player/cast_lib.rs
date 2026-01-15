@@ -5,12 +5,13 @@ use url::Url;
 
 use crate::{
     director::{
-        cast::CastDef,
+        cast::CastDef, enums::{ScriptType, BitmapInfo},
         file::{read_director_file_bytes, DirectorFile},
-        lingo::{datum::Datum, script::ScriptContext},
+        lingo::{datum::Datum, datum::DatumType, script::ScriptContext},
     },
     js_api::{self, JsApi},
     utils::{get_base_url, get_basename_no_extension, log_i},
+    player::{cast_member::ScriptMember, ColorRef},
 };
 
 use super::{
@@ -208,6 +209,9 @@ impl CastLib {
             "fileName" => Ok(Datum::String(self.file_name.clone())),
             "number" => Ok(Datum::Int(self.number as i32)),
             "name" => Ok(Datum::String(self.name.clone())),
+            "number of castMembers" | "number of members" => {
+                Ok(Datum::Int(self.members.len() as i32))
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castLib property {}",
                 prop
@@ -340,6 +344,9 @@ impl CastLib {
                     CastMemberType::Bitmap(BitmapMember {
                         image_ref: bitmap_ref,
                         reg_point: (0, 0),
+                        script_id: 0,
+                        member_script_ref: None,
+                        info: BitmapInfo::default(),
                     }),
                 ))
             }
@@ -359,6 +366,54 @@ impl CastLib {
 
     pub fn get_script_for_member(&self, number: u32) -> Option<&Rc<Script>> {
         self.scripts.get(&number)
+    }
+
+    pub fn get_behavior_script_from_lctx(&mut self, script_id: u32) -> Option<Rc<Script>> {
+        // Use an offset to avoid collision with cast member numbers
+        // Behavior scripts are stored at script_id + 1000000
+        let cache_key = script_id + 1000000;
+        
+        // Check if already cached
+        if let Some(cached) = self.scripts.get(&cache_key) {
+            return Some(cached.clone());
+        }
+        
+        // Get script chunk from lctx.scripts
+        let script_chunk = self.lctx.as_ref()?.scripts.get(&script_id)?;
+        
+        // Build handler map
+        let mut handler_names = Vec::new();
+        let mut handler_name_map = FxHashMap::default();
+        for handler in &script_chunk.handlers {
+            let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
+            handler_name_map.insert(handler_name.to_lowercase(), Rc::new(handler.clone()));
+            handler_names.push(handler_name.to_owned());
+        }
+
+        // Build properties
+        let property_names = script_chunk
+            .property_name_ids
+            .iter()
+            .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
+        let mut properties = FxHashMap::default();
+        for name in property_names {
+            properties.insert(name.clone(), DatumRef::Void);
+        }
+
+        let script = Rc::new(Script {
+            member_ref: cast_member_ref(self.number as i32, cache_key as i32),
+            name: format!("BehaviorScript_{}", script_id),
+            chunk: script_chunk.clone(),
+            script_type: ScriptType::Member,
+            handlers: handler_name_map,
+            handler_names,
+            properties: RefCell::new(properties),
+        });
+        
+        // Cache it with the offset key
+        self.scripts.insert(cache_key, script.clone());
+        
+        Some(script)
     }
 }
 
