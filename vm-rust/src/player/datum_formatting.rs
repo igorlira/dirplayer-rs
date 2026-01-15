@@ -1,5 +1,5 @@
 use crate::{
-    director::lingo::datum::Datum,
+    director::lingo::datum::{Datum, DatumType},
     player::{allocator::ScriptInstanceAllocatorTrait, sprite::ColorRef, bitmap::bitmap::PaletteRef},
 };
 
@@ -9,15 +9,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
     match datum {
         Datum::String(s) => format!("\"{s}\""),
         Datum::Int(i) => i.to_string(),
-        Datum::Float(f) => match player.float_precision {
-            1 => format!("{:.1}", f),
-            2 => format!("{:.2}", f),
-            3 => format!("{:.3}", f),
-            4 => format!("{:.4}", f),
-            5 => format!("{:.5}", f),
-            6 => format!("{:.6}", f),
-            _ => f.to_string(),
-        },
+        Datum::Float(f) => format_float_with_precision(*f, player),
         Datum::List(_, items, _) => {
             let formatted_items: Vec<String> =
                 items.iter().map(|x| format_datum(x, player)).collect();
@@ -69,11 +61,27 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
         Datum::SpriteRef(sprite_ref) => {
             format!("(sprite {})", sprite_ref)
         }
-        Datum::IntRect((x1, y1, x2, y2)) => {
-            format!("rect({}, {}, {}, {})", x1, y1, x2, y2)
+        Datum::Rect(refs) => {
+            let x1 = player.get_datum(&refs[0]);
+            let y1 = player.get_datum(&refs[1]);
+            let x2 = player.get_datum(&refs[2]);
+            let y2 = player.get_datum(&refs[3]);
+            format!(
+                "rect({}, {}, {}, {})",
+                format_numeric_value(x1, player),
+                format_numeric_value(y1, player),
+                format_numeric_value(x2, player),
+                format_numeric_value(y2, player)
+            )
         }
-        Datum::IntPoint((x, y)) => {
-            format!("point({}, {})", x, y)
+        Datum::Point(refs) => {
+            let x = player.get_datum(&refs[0]);
+            let y = player.get_datum(&refs[1]);
+            format!(
+                "point({}, {})",
+                format_numeric_value(x, player),
+                format_numeric_value(y, player)
+            )
         }
         Datum::SoundChannel(_) => {
             format!("<soundChannel>")
@@ -83,6 +91,12 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
         }
         Datum::TimeoutRef(name) => {
             format!("timeout(\"{name}\")")
+        }
+        Datum::TimeoutFactory => {
+            format!("<timeoutFactory>")
+        }
+        Datum::TimeoutInstance { name, .. } => {
+            format!("timeoutInstance(\"{0}\")", name)
         }
         Datum::ColorRef(color_ref) => match color_ref {
             ColorRef::PaletteIndex(i) => {
@@ -136,8 +150,13 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
         Datum::MathRef(_) => {
             format!("<math>")
         }
-        Datum::Vector(_) => {
-            format!("<vector>")
+        Datum::Vector(v) => {
+            format!(
+                "vector({}, {}, {})", 
+                format_float_with_precision(v[0], player),
+                format_float_with_precision(v[1], player),
+                format_float_with_precision(v[2], player),
+            )
         }
         Datum::SoundRef(_) => {
             format!("<_sound>")
@@ -151,31 +170,11 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
 pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
     match datum {
         Datum::String(s) => s.clone(),
-        
-        Datum::Int(n) => n.to_string(),
-        
-        // UPDATED: Float concatenation also uses floatPrecision
-        // Director behavior: "value: " & 3.14 → "value: 3.1400" (with floatPrecision=4)
-        Datum::Float(f) => match player.float_precision {
-            1 => format!("{:.1}", f),
-            2 => format!("{:.2}", f),
-            3 => format!("{:.3}", f),
-            4 => format!("{:.4}", f),
-            5 => format!("{:.5}", f),
-            6 => format!("{:.6}", f),
-            _ => f.to_string(),
-        },
-        
+               
         Datum::Symbol(s) => s.clone(),
         
         // Void/Null become empty string in concatenation
         Datum::Void | Datum::Null => String::new(),
-        
-        Datum::Vector(v) => format!("[{},{},{}]", v[0], v[1], v[2]),
-        
-        Datum::IntRect(r) => format!("rect({}, {}, {}, {})", r.0, r.1, r.2, r.3),
-        
-        Datum::IntPoint(p) => format!("point({}, {})", p.0, p.1),
         
         Datum::ColorRef(cr) => match cr {
             ColorRef::PaletteIndex(i) => format!("color({})", i),
@@ -219,4 +218,51 @@ pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
 pub fn format_datum(datum_ref: &DatumRef, player: &DirPlayer) -> String {
     let datum = player.get_datum(datum_ref);
     format_concrete_datum(datum, player)
+}
+
+// Helper function to format a numeric value according to floatPrecision
+pub fn format_float_with_precision(val: f64, player: &DirPlayer) -> String {
+    // Normalize negative zero to positive zero
+    let val = if val == 0.0 { 0.0 } else { val };
+
+    let fp = player.float_precision as i32;
+    
+    // Calculate how many characters the decimal notation would take
+    let integer_digits = if val.abs() < 1.0 {
+        1 // Just "0"
+    } else {
+        (val.abs().log10().floor() as i32 + 1).max(1)
+    };
+    
+    let decimal_places = if fp > 0 { fp } else { 0 };
+    let total_chars = integer_digits + 1 + decimal_places; // digits + '.' + decimals
+    
+    // Director switches to scientific notation when formatted string >= 18 chars
+    if total_chars >= 18 {
+        return format!("{:.14e}", val);
+    }
+    
+    // Normal formatting based on floatPrecision
+    if fp > 0 {
+        let p = fp.min(15) as usize;
+        format!("{:.*}", p, val)
+    } else if fp == 0 {
+        format!("{}", val.round() as i32)
+    } else {
+        let p = (-fp).min(15);
+        let pow = 10f64.powi(p);
+        let rounded = (val * pow).round() / pow;
+        let s = format!("{:.*}", p as usize, rounded);
+        s.trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
+pub fn format_numeric_value(datum: &Datum, player: &DirPlayer) -> String {
+    match datum {
+        Datum::Int(i) => i.to_string(),
+        Datum::Float(f) => format_float_with_precision(*f, player),
+        _ => format_concrete_datum(datum, player),
+    }
 }

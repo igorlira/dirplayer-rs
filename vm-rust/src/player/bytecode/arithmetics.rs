@@ -60,7 +60,7 @@ impl ArithmeticsBytecodeHandler {
         }
     }
 
-    fn safe_mod_float(left: f32, right: f32) -> f32 {
+    fn safe_mod_float(left: f64, right: f64) -> f64 {
         if right == 0.0 {
             0.0
         } else {
@@ -86,10 +86,10 @@ impl ArithmeticsBytecodeHandler {
                     Datum::Int(Self::safe_mod_int(*left, *right))
                 }
                 (Datum::Int(left), Datum::Float(right)) => {
-                    Datum::Float(Self::safe_mod_float(*left as f32, *right))
+                    Datum::Float(Self::safe_mod_float(*left as f64, *right))
                 }
                 (Datum::Float(left), Datum::Int(right)) => {
-                    Datum::Float(Self::safe_mod_float(*left, *right as f32))
+                    Datum::Float(Self::safe_mod_float(*left, *right as f64))
                 }
                 (Datum::Float(left), Datum::Float(right)) => {
                     Datum::Float(Self::safe_mod_float(*left, *right))
@@ -99,7 +99,7 @@ impl ArithmeticsBytecodeHandler {
                     for item in list {
                         let item_datum = player.get_datum(item);
                         let result_datum = match item_datum {
-              Datum::Int(n) => Datum::Int(Self::safe_mod_float(*n as f32, *right) as i32),
+              Datum::Int(n) => Datum::Int(Self::safe_mod_float(*n as f64, *right) as i32),
               Datum::Float(n) => Datum::Int(Self::safe_mod_float(*n, *right) as i32),
               _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, player)))),
             };
@@ -117,7 +117,7 @@ impl ArithmeticsBytecodeHandler {
                         let item_datum = player.get_datum(item);
                         let result_datum = match item_datum {
               Datum::Int(n) => Datum::Int(Self::safe_mod_int(*n, *right)),
-              Datum::Float(n) => Datum::Int(Self::safe_mod_float(*n, *right as f32) as i32),
+              Datum::Float(n) => Datum::Int(Self::safe_mod_float(*n, *right as f64) as i32),
               _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, player)))),
             };
                         new_list.push(result_datum);
@@ -181,11 +181,31 @@ impl ArithmeticsBytecodeHandler {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.pop().unwrap()
             };
-            let value = player.get_datum(&value_id);
-            let result = match value {
+            let value = player.get_datum(&value_id).clone(); 
+            let result_datum = match value {
                 Datum::Int(n) => Datum::Int(-n),
                 Datum::Float(n) => Datum::Float(-n),
-                Datum::IntPoint((x, y)) => Datum::IntPoint((-x, -y)),
+                Datum::Point(arr) => {
+                    let x_val = player.get_datum(&arr[0]).clone();
+                    let y_val = player.get_datum(&arr[1]).clone();
+
+                    let x_ref = match x_val {
+                        Datum::Int(n) => player.alloc_datum(Datum::Int(-n)),
+                        Datum::Float(n) => player.alloc_datum(Datum::Float(-n)),
+                        _ => return Err(ScriptError::new(
+                            "Point component must be Int or Float".to_string(),
+                        )),
+                    };
+
+                    let y_ref = match y_val {
+                        Datum::Int(n) => player.alloc_datum(Datum::Int(-n)),
+                        Datum::Float(n) => player.alloc_datum(Datum::Float(-n)),
+                        _ => return Err(ScriptError::new(
+                            "Point component must be Int or Float".to_string(),
+                        )),
+                    };
+                    Datum::Point([x_ref, y_ref])
+                }
                 _ => {
                     return Err(ScriptError::new(format!(
                         "Cannot inv non-numeric value: {}",
@@ -193,7 +213,8 @@ impl ArithmeticsBytecodeHandler {
                     )))
                 }
             };
-            let result_id = player.alloc_datum(result);
+
+            let result_id = player.alloc_datum(result_datum);
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)

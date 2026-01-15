@@ -18,13 +18,17 @@ impl FilmLoopMemberHandlers {
             .unwrap();
         let film_loop = member.member_type.as_film_loop().unwrap();
         let film_loop_info = &film_loop.info;
+
+        let film_width = film_loop_info.width as i32;
+        let film_height = film_loop_info.height as i32;
+
         match prop.as_str() {
-            "rect" => Ok(Datum::IntRect((
-                0,
-                0,
-                film_loop_info.width as i32,
-                film_loop_info.height as i32,
-            ))),
+            "rect" => Ok(Datum::Rect([
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(film_width)),
+                player.alloc_datum(Datum::Int(film_height)),
+            ])),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for film loop",
                 prop

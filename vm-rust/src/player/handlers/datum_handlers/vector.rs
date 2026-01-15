@@ -6,21 +6,21 @@ use crate::{
 pub struct VectorDatumHandlers {}
 
 impl VectorDatumHandlers {
-    /// Convert a Datum (Vector or List) into a [f32;3] array
-    fn datum_to_vec(player: &DirPlayer, datum: &Datum) -> Result<[f32; 3], ScriptError> {
+    /// Convert a Datum (Vector or List) into a [f64;3] array
+    fn datum_to_vec(player: &DirPlayer, datum: &Datum) -> Result<[f64; 3], ScriptError> {
         match datum {
             Datum::Vector(arr) => Ok(*arr),
             Datum::List(_, list, _) if list.len() == 3 => Ok([
-                player.get_datum(&list[0]).float_value()? as f32,
-                player.get_datum(&list[1]).float_value()? as f32,
-                player.get_datum(&list[2]).float_value()? as f32,
+                player.get_datum(&list[0]).float_value()?,
+                player.get_datum(&list[1]).float_value()?,
+                player.get_datum(&list[2]).float_value()?,
             ]),
             _ => Err(ScriptError::new("Expected a vector".to_string())),
         }
     }
 
-    /// Convert a [f32;3] array into a Datum::Vector
-    fn vec_to_datum(player: &mut DirPlayer, vec: [f32; 3]) -> DatumRef {
+    /// Convert a [f64;3] array into a Datum::Vector
+    fn vec_to_datum(player: &mut DirPlayer, vec: [f64; 3]) -> DatumRef {
         player.alloc_datum(Datum::Vector(vec))
     }
 
@@ -72,7 +72,7 @@ impl VectorDatumHandlers {
                 ));
             }
 
-            let value = player.get_datum(&args[1]).float_value()? as f32;
+            let value = player.get_datum(&args[1]).float_value()? as f64;
             vec[index] = value;
 
             *player.get_datum_mut(datum) = Datum::Vector(vec);
@@ -115,7 +115,7 @@ impl VectorDatumHandlers {
             }
         };
 
-        let value = player.get_datum(value_ref).float_value()? as f32;
+        let value = player.get_datum(value_ref).float_value()? as f64;
 
         match prop {
             "x" => vec[0] = value,
@@ -165,9 +165,9 @@ impl VectorDatumHandlers {
                 Datum::Float(f) => Ok(Self::vec_to_datum(
                     player,
                     [
-                        va[0] * (*f as f32),
-                        va[1] * (*f as f32),
-                        va[2] * (*f as f32),
+                        va[0] * (*f as f64),
+                        va[1] * (*f as f64),
+                        va[2] * (*f as f64),
                     ],
                 )),
                 Datum::Vector(vb) => Ok(Self::vec_to_datum(
@@ -193,9 +193,9 @@ impl VectorDatumHandlers {
                     Ok(Self::vec_to_datum(
                         player,
                         [
-                            va[0] / (*f as f32),
-                            va[1] / (*f as f32),
-                            va[2] / (*f as f32),
+                            va[0] / (*f as f64),
+                            va[1] / (*f as f64),
+                            va[2] / (*f as f64),
                         ],
                     ))
                 }

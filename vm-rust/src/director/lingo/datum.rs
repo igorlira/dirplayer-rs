@@ -8,7 +8,7 @@ use crate::player::{
     datum_ref::DatumRef,
     script_ref::ScriptInstanceRef,
     sprite::{ColorRef, CursorRef},
-    ScriptError,
+    ScriptError, DirPlayer,
 };
 
 #[allow(dead_code)]
@@ -34,12 +34,14 @@ pub enum DatumType {
     ArgListNoRet,
     PropList,
     Eval,
-    IntRect,
-    IntPoint,
+    Rect,
+    Point,
     SoundRef,
     SoundChannel,
     CursorRef,
     TimeoutRef,
+    TimeoutFactory,
+    TimeoutInstance,
     ColorRef,
     BitmapRef,
     PaletteRef,
@@ -119,7 +121,7 @@ pub enum StringChunkSource {
 #[derive(Clone)]
 pub enum Datum {
     Int(i32),
-    Float(f32),
+    Float(f64),
     String(String),
     StringChunk(StringChunkSource, StringChunkExpr, String),
     Void,
@@ -133,11 +135,18 @@ pub enum Datum {
     ScriptInstanceRef(ScriptInstanceRef),
     CastMember(CastMemberRef),
     SpriteRef(i16),
-    IntRect((i32, i32, i32, i32)),
-    IntPoint((i32, i32)),
+    Rect([DatumRef; 4]),
+    Point([DatumRef; 2]),
     SoundChannel(u16),
     CursorRef(CursorRef),
     TimeoutRef(TimeoutRef),
+    TimeoutFactory,
+    TimeoutInstance {
+        name: String,
+        duration: i32,
+        callback: DatumRef,
+        target: DatumRef,
+    },
     ColorRef(ColorRef),
     BitmapRef(BitmapRef),
     PaletteRef(PaletteRef),
@@ -150,7 +159,7 @@ pub enum Datum {
     XmlRef(u32),
     DateRef(u32),
     MathRef(u32),
-    Vector([f32; 3]),
+    Vector([f64; 3]),
     Null,
 }
 
@@ -177,12 +186,14 @@ impl DatumType {
             DatumType::ArgList => "arg_list".to_string(),
             DatumType::ArgListNoRet => "arg_list_no_ret".to_string(),
             DatumType::Eval => "eval".to_string(),
-            DatumType::IntRect => "int_rect".to_string(),
-            DatumType::IntPoint => "int_point".to_string(),
+            DatumType::Rect => "rect".to_string(),
+            DatumType::Point => "point".to_string(),
             DatumType::SoundChannel => "sound_channel".to_string(),
             DatumType::SoundRef => "sound".to_string(),
             DatumType::CursorRef => "cursor_ref".to_string(),
             DatumType::TimeoutRef => "timeout".to_string(),
+            DatumType::TimeoutFactory => "timeout_factory".to_string(),
+            DatumType::TimeoutInstance => "timeout_instance".to_string(),
             DatumType::ColorRef => "color_ref".to_string(),
             DatumType::BitmapRef => "bitmap_ref".to_string(),
             DatumType::PaletteRef => "palette_ref".to_string(),
@@ -217,12 +228,14 @@ impl Datum {
             Datum::ScriptInstanceRef(_) => DatumType::ScriptInstanceRef,
             Datum::CastMember(_) => DatumType::CastMemberRef,
             Datum::SpriteRef(_) => DatumType::SpriteRef,
-            Datum::IntRect(_) => DatumType::IntRect,
-            Datum::IntPoint(_) => DatumType::IntPoint,
+            Datum::Rect(_) => DatumType::Rect,
+            Datum::Point(_) => DatumType::Point,
             Datum::SoundChannel(_) => DatumType::SoundChannel,
             Datum::SoundRef(_) => DatumType::SoundRef,
             Datum::CursorRef(_) => DatumType::CursorRef,
             Datum::TimeoutRef(_) => DatumType::TimeoutRef,
+            Datum::TimeoutFactory => DatumType::TimeoutRef,
+            Datum::TimeoutInstance { .. } => DatumType::TimeoutRef,
             Datum::ColorRef(_) => DatumType::ColorRef,
             Datum::BitmapRef(_) => DatumType::BitmapRef,
             Datum::PaletteRef(_) => DatumType::PaletteRef,
@@ -248,10 +261,9 @@ impl Datum {
             Datum::String(s) => Ok(s.clone()),
             Datum::StringChunk(_, _, str_value) => Ok(str_value.to_owned()),
             Datum::Int(n) => Ok(n.to_string()),
-            Datum::Float(n) => Ok(n.to_string()),
             Datum::Symbol(s) => Ok(s.clone()),
             Datum::Vector(v) => Ok(format!("[{},{},{}]", v[0], v[1], v[2])),
-            Datum::IntRect(r) => Ok(format!("({}, {}, {}, {})", r.0, r.1, r.2, r.3)),
+            Datum::Rect(r) => Ok(format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3])),
             Datum::ColorRef(cr) => Ok(format!("{:?}", cr)),
             Datum::Void => Ok("VOID".to_string()),
             _ => Err(ScriptError::new(format!(
@@ -289,13 +301,13 @@ impl Datum {
         }
     }
 
-    pub fn float_value(&self) -> Result<f32, ScriptError> {
+    pub fn float_value(&self) -> Result<f64, ScriptError> {
         match self {
             Datum::Float(n) => Ok(*n),
-            Datum::Int(n) => Ok(*n as f32),
-            Datum::String(s) => Ok(s.parse::<f32>().unwrap_or(0.0)),
-            Datum::StringChunk(_, _, s) => Ok(s.parse::<f32>().unwrap_or(0.0)),
-            Datum::SpriteRef(n) => Ok(*n as f32),
+            Datum::Int(n) => Ok(*n as f64),
+            Datum::String(s) => Ok(s.parse::<f64>().unwrap_or(0.0)),
+            Datum::StringChunk(_, _, s) => Ok(s.parse::<f64>().unwrap_or(0.0)),
+            Datum::SpriteRef(n) => Ok(*n as f64),
             Datum::Void => Ok(0.0),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum of type {} to float",
@@ -363,9 +375,9 @@ impl Datum {
         }
     }
 
-    pub fn to_float(&self) -> Result<f32, ScriptError> {
+    pub fn to_float(&self) -> Result<f64, ScriptError> {
         match self {
-            Datum::Int(n) => Ok(*n as f32),
+            Datum::Int(n) => Ok(*n as f64),
             Datum::Float(n) => Ok(*n),
             Datum::String(s) => Ok(s.parse().unwrap_or(0.0)),
             _ => Err(ScriptError::new(
@@ -377,9 +389,13 @@ impl Datum {
     pub fn to_bool(&self) -> Result<bool, ScriptError> {
         match self {
             Datum::Int(n) => Ok(*n != 0),
+            Datum::Float(f) => Ok(*f != 0.0 && !f.is_nan()),
             Datum::String(s) => Ok(!s.is_empty()),
-            Datum::Void => Ok(false),
-            Datum::Symbol(_) => Ok(true),
+            Datum::Void | Datum::Null => Ok(false),
+            Datum::Symbol(s) => {
+                let lower = s.to_lowercase();
+                Ok(lower != "false")
+            },
             _ => Err(ScriptError::new("Cannot convert datum to bool".to_string())),
         }
     }
@@ -438,20 +454,20 @@ impl Datum {
         }
     }
 
-    pub fn to_int_rect(&self) -> Result<(i32, i32, i32, i32), ScriptError> {
+    pub fn to_rect(&self) -> Result<[DatumRef; 4], ScriptError> {
         match self {
-            Datum::IntRect(rect) => Ok(*rect),
+            Datum::Rect(rect) => Ok(rect.clone()),
             _ => Err(ScriptError::new(
-                "Cannot convert datum to int rect".to_string(),
+                "Cannot convert datum to rect".to_string(),
             )),
         }
     }
 
-    pub fn to_int_rect_mut(&mut self) -> Result<&mut (i32, i32, i32, i32), ScriptError> {
+    pub fn to_rect_mut(&mut self) -> Result<&mut [DatumRef; 4], ScriptError> {
         match self {
-            Datum::IntRect(rect) => Ok(rect),
+            Datum::Rect(rect) => Ok(rect),
             _ => Err(ScriptError::new(
-                "Cannot convert datum to int rect".to_string(),
+                "Cannot convert datum to rect".to_string(),
             )),
         }
     }
@@ -483,18 +499,18 @@ impl Datum {
         }
     }
 
-    pub fn to_int_point(&self) -> Result<(i32, i32), ScriptError> {
+    pub fn to_point(&self) -> Result<[DatumRef; 2], ScriptError> {
         match self {
-            Datum::IntPoint(point) => Ok(*point),
+            Datum::Point(point) => Ok(point.clone()),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to point".to_string(),
             )),
         }
     }
 
-    pub fn to_int_point_mut(&mut self) -> Result<&mut (i32, i32), ScriptError> {
+    pub fn to_point_mut(&mut self) -> Result<&mut [DatumRef; 2], ScriptError> {
         match self {
-            Datum::IntPoint(point) => Ok(point),
+            Datum::Point(point) => Ok(point),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to point".to_string(),
             )),
@@ -591,13 +607,32 @@ impl Datum {
         }
     }
 
-    pub fn to_vector(&self) -> Result<[f32; 3], ScriptError> {
+    pub fn to_vector(&self) -> Result<[f64; 3], ScriptError> {
         match self {
             Datum::Vector(v) => Ok(*v),
             _ => Err(ScriptError::new(format!(
                 "Expected Vector, got {}",
                 self.type_str()
             ))),
+        }
+    }
+
+    pub fn to_f64(player: &DirPlayer, datum_ref: &DatumRef) -> Result<f64, ScriptError> {
+        match player.get_datum(datum_ref) {
+            Datum::Int(n) => Ok(*n as f64),
+            Datum::Float(f) => Ok(*f),
+            other => Err(ScriptError::new(format!(
+                "Rect/Point component must be numeric, got {}",
+                other.type_str()
+            ))),
+        }
+    }
+
+    pub fn from_f64(value: f64) -> Datum {
+        if value.fract() == 0.0 {
+            Datum::Int(value as i32)
+        } else {
+            Datum::Float(value as f64)
         }
     }
 }

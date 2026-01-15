@@ -1,6 +1,6 @@
 use log::warn;
 
-use crate::{console_warn, director::lingo::datum::Datum};
+use crate::{console_warn, director::lingo::datum::{Datum, DatumType}};
 
 use super::{
     allocator::{DatumAllocator, DatumAllocatorTrait},
@@ -16,13 +16,13 @@ pub fn datum_equals(
 ) -> Result<bool, ScriptError> {
     match (left, right) {
         (Datum::Int(left), Datum::Int(right)) => Ok(*left == *right),
-        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f32) == *right), // TODO: is this correct? Flutter compares ints instead
+        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) == *right), // TODO: is this correct? Flutter compares ints instead
         (Datum::Int(left), Datum::Void) => Ok(*left == 0),
         // Handle string-to-int comparison (e.g., "2" should match key 2)
         (Datum::String(s), Datum::Int(i)) | (Datum::Int(i), Datum::String(s)) => {
             Ok(s.parse::<i32>().ok() == Some(*i))
         }
-        (Datum::Float(left), Datum::Int(right)) => Ok(*left == (*right as f32)),
+        (Datum::Float(left), Datum::Int(right)) => Ok(*left == (*right as f64)),
         (Datum::Float(left), Datum::Float(right)) => Ok(*left == *right),
         // String equality: case-insensitive (like Director `=` operator)
         (Datum::String(l), Datum::String(r)) => Ok(l.eq_ignore_ascii_case(r)),
@@ -49,7 +49,10 @@ pub fn datum_equals(
         (Datum::String(_), Datum::ScriptInstanceRef(_)) => Ok(false),
         (Datum::CastMember(member_ref), Datum::Void) => Ok(!member_ref.is_valid()), // TODO return true if member is empty?
         (Datum::ScriptInstanceRef(_), Datum::Int(_)) => Ok(false),
-        (Datum::IntPoint(_), Datum::Int(_)) => Ok(false),
+        (Datum::Point(_), Datum::Int(_)) 
+        | (Datum::Int(_), Datum::Point(_))
+        | (Datum::Rect(_), Datum::Int(_))
+        | (Datum::Int(_), Datum::Rect(_)) => Ok(false),
         (Datum::PropList(..), Datum::Int(_)) => Ok(false),
         (Datum::BitmapRef(_), Datum::Void) => Ok(false),
         (Datum::Symbol(_), Datum::CastMember(_)) => Ok(false),
@@ -88,7 +91,16 @@ pub fn datum_equals(
                 right.cast_member as u32,
             ))
         }
-        (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left == right),
+        (Datum::Point(left), Datum::Point(right)) => {
+            for i in 0..2 {
+                let left_val = allocator.get_datum(&left[i]);
+                let right_val = allocator.get_datum(&right[i]);
+                if !datum_equals(left_val, right_val, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
         (Datum::Null, Datum::Int(_)) => Ok(false),
         (Datum::PropList(..), Datum::Void) => Ok(false),
         (Datum::Symbol(_), Datum::Int(_)) => Ok(false),
@@ -100,8 +112,15 @@ pub fn datum_equals(
         },
         (Datum::String(_), Datum::Void) => Ok(false),
         (Datum::Void, Datum::Symbol(_)) => Ok(false),
-        (Datum::IntRect(left), Datum::IntRect(right)) => {
-            Ok(left.0 == right.0 && left.1 == right.1 && left.2 == right.2 && left.3 == right.3)
+        (Datum::Rect(left), Datum::Rect(right)) => {
+            for i in 0..4 {
+                let left_val = allocator.get_datum(&left[i]);
+                let right_val = allocator.get_datum(&right[i]);
+                if !datum_equals(left_val, right_val, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         }
         (Datum::ColorRef(color_ref), Datum::String(string)) => {
             warn!(
@@ -122,11 +141,12 @@ pub fn datum_equals(
 }
 
 #[allow(dead_code)]
-pub fn datum_greater_than(left: &Datum, right: &Datum) -> Result<bool, ScriptError> {
+pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
     match (left, right) {
+        // Int comparisons
         (Datum::Int(left), Datum::Int(right)) => Ok(*left > *right),
-        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f32) > *right), // TODO: is this correct? Flutter compares ints instead
-        (Datum::Int(_), Datum::Void) => Ok(false),
+        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) > *right),
+        (Datum::Int(left), Datum::Void) => Ok(*left > 0),
         (Datum::Int(left), Datum::String(right)) => {
             if let Ok(right_number) = right.parse::<i32>() {
                 Ok(*left > right_number)
@@ -134,14 +154,26 @@ pub fn datum_greater_than(left: &Datum, right: &Datum) -> Result<bool, ScriptErr
                 Ok(right.is_empty())
             }
         }
-        (Datum::Int(_), _) => {
-            warn!("Datum isGreaterThan not supported for int");
-            Ok(false)
-        }
-        (Datum::Float(left), Datum::Int(right)) => Ok(*left > (*right as f32)),
+        
+        // Float comparisons
+        (Datum::Float(left), Datum::Int(right)) => Ok(*left > (*right as f64)),
         (Datum::Float(left), Datum::Float(right)) => Ok(*left > *right),
-        (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left.0 > right.0 && left.1 > right.1),
+        (Datum::Float(left), Datum::Void) => Ok(*left > 0.0),
+        
+        // Void comparisons - Void is never > any number
         (Datum::Void, Datum::Int(_)) => Ok(false),
+        (Datum::Void, Datum::Float(_)) => Ok(false),
+        
+        // Point comparisons
+        (Datum::Point(left), Datum::Point(right)) => {
+            let left_x = allocator.get_datum(&left[0]).int_value()?;
+            let left_y = allocator.get_datum(&left[1]).int_value()?;
+            let right_x = allocator.get_datum(&right[0]).int_value()?;
+            let right_y = allocator.get_datum(&right[1]).int_value()?;
+            Ok(left_x > right_x && left_y > right_y)
+        }
+        
+        // Catch-all
         _ => {
             warn!(
                 "datum_greater_than not supported for types: {} and {}",
@@ -153,11 +185,12 @@ pub fn datum_greater_than(left: &Datum, right: &Datum) -> Result<bool, ScriptErr
     }
 }
 
-pub fn datum_less_than(left: &Datum, right: &Datum) -> Result<bool, ScriptError> {
+pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
     match (left, right) {
+        // Int comparisons
         (Datum::Int(left), Datum::Int(right)) => Ok(*left < *right),
-        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f32) < *right), // TODO: is this correct? Flutter compares ints instead
-        (Datum::Int(_), Datum::Void) => Ok(false),
+        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) < *right),
+        (Datum::Int(left), Datum::Void) => Ok(*left < 0),
         (Datum::Int(left), Datum::String(right)) => {
             if let Ok(right_number) = right.parse::<i32>() {
                 Ok(*left < right_number)
@@ -165,14 +198,29 @@ pub fn datum_less_than(left: &Datum, right: &Datum) -> Result<bool, ScriptError>
                 Ok(!right.is_empty())
             }
         }
-        (Datum::Int(_), _) => {
-            warn!("Datum isLessThan not supported for int");
-            Ok(false)
-        }
-        (Datum::Float(left), Datum::Int(right)) => Ok(*left < (*right as f32)),
+        
+        // Float comparisons
+        (Datum::Float(left), Datum::Int(right)) => Ok(*left < (*right as f64)),
         (Datum::Float(left), Datum::Float(right)) => Ok(*left < *right),
-        (Datum::IntPoint(left), Datum::IntPoint(right)) => Ok(left.0 < right.0 && left.1 < right.1),
+        (Datum::Float(left), Datum::Void) => Ok(*left < 0.0),
+        
+        // Void comparisons - Void is always < any number
+        (Datum::Void, Datum::Int(_)) => Ok(true),
+        (Datum::Void, Datum::Float(_)) => Ok(true),
+        
+        // Point comparisons
+        (Datum::Point(left), Datum::Point(right)) => {
+            let left_x = allocator.get_datum(&left[0]).int_value()?;
+            let left_y = allocator.get_datum(&left[1]).int_value()?;
+            let right_x = allocator.get_datum(&right[0]).int_value()?;
+            let right_y = allocator.get_datum(&right[1]).int_value()?;
+            Ok(left_x < right_x && left_y < right_y)
+        }
+
+        // String comparisons
         (Datum::String(..), Datum::String(..)) => Ok(false),
+        
+        // Catch-all
         _ => {
             warn!(
                 "datum_less_than not supported for types: {} and {}",
@@ -191,7 +239,18 @@ pub fn datum_is_zero(datum: &Datum, datums: &DatumAllocator) -> Result<bool, Scr
         Datum::Void => true,
         Datum::ScriptInstanceRef(_) => false,
         Datum::Null => true,
-        Datum::IntPoint(_) => false,
+        Datum::Point(arr) => {
+            let x = datums.get_datum(&arr[0]).int_value()?;
+            let y = datums.get_datum(&arr[1]).int_value()?;
+            x == 0 && y == 0
+        }
+        Datum::Rect(arr) => {
+            let l = datums.get_datum(&arr[0]).int_value()?;
+            let t = datums.get_datum(&arr[1]).int_value()?;
+            let r = datums.get_datum(&arr[2]).int_value()?;
+            let b = datums.get_datum(&arr[3]).int_value()?;
+            l == 0 && t == 0 && r == 0 && b == 0
+        }
         _ => {
             warn!("datum_is_zero not supported for type: {}", datum.type_str());
             datum.int_value()? == 0
@@ -210,11 +269,19 @@ pub fn sort_datums(
 
         if datum_equals(left, right, allocator).unwrap() {
             return std::cmp::Ordering::Equal;
-        } else if datum_less_than(left, right).unwrap() {
+        } else if datum_less_than(left, right, allocator).unwrap() {
             std::cmp::Ordering::Less
         } else {
             std::cmp::Ordering::Greater
         }
     });
     Ok(sorted_list)
+}
+
+fn datum_to_f64(datum: &Datum) -> Result<f64, ScriptError> {
+    match datum {
+        Datum::Int(i) => Ok(*i as f64),
+        Datum::Float(f) => Ok(*f),
+        _ => datum.float_value()
+    }
 }

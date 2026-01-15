@@ -24,42 +24,76 @@ impl PointDatumHandlers {
 
     pub fn inside(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let point = player.get_datum(datum).to_int_point()?;
-            let rect = player.get_datum(&args[0]).to_int_rect()?;
-            Ok(player.alloc_datum(datum_bool(
-                rect.0 <= point.0 && point.0 < rect.2 && rect.1 <= point.1 && point.1 < rect.3,
-            )))
+            let point = player.get_datum(datum).to_point()?;
+            let rect = player.get_datum(&args[0]).to_rect()?;
+
+            let px = player.get_datum(&point[0]).int_value()?;
+            let py = player.get_datum(&point[1]).int_value()?;
+
+            let x1 = player.get_datum(&rect[0]).int_value()?;
+            let y1 = player.get_datum(&rect[1]).int_value()?;
+            let x2 = player.get_datum(&rect[2]).int_value()?;
+            let y2 = player.get_datum(&rect[3]).int_value()?;
+
+            let inside = x1 <= px && px < x2 && y1 <= py && py < y2;
+
+            Ok(player.alloc_datum(datum_bool(inside)))
         })
     }
 
     pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let rect = player.get_datum(datum);
-            let rect = match rect {
-                Datum::IntPoint(point_vec) => Ok(point_vec),
-                _ => Err(ScriptError::new("Cannot get prop of non-point".to_string())),
-            }?;
-            let list_val = [rect.0, rect.1];
-            let index = player.get_datum(&args[0]).int_value()?;
-            Ok(player.alloc_datum(Datum::Int(list_val[(index - 1) as usize] as i32)))
+            let point_arr = match player.get_datum(datum) {
+                Datum::Point(arr) => arr,
+                _ => return Err(ScriptError::new("Cannot getAt of non-point".to_string())),
+            };
+
+            let index = player.get_datum(&args[0]).int_value()?; // 1 or 2
+            if !(1..=2).contains(&index) {
+                return Err(ScriptError::new("Invalid index for point".to_string()));
+            }
+
+            let value_ref = &point_arr[(index - 1) as usize];
+            let value = player.get_datum(value_ref);
+
+            match value {
+                Datum::Int(_) | Datum::Float(_) => Ok(value_ref.clone()),
+                other => Err(ScriptError::new(format!(
+                    "Point component is not numeric: {}",
+                    other.type_str()
+                ))),
+            }
         })
     }
 
     pub fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let pos = player.get_datum(&args[0]).int_value()?;
-            let value = player.get_datum(&args[1]).int_value()?;
+            let index = player.get_datum(&args[0]).int_value()?;
 
-            let point = player.get_datum_mut(datum);
-            let point = match point {
-                Datum::IntPoint(point_vec) => Ok(point_vec),
-                _ => Err(ScriptError::new("Cannot get prop of non-point".to_string())),
-            }?;
-            match pos {
-                1 => point.0 = value,
-                2 => point.1 = value,
-                _ => return Err(ScriptError::new("Invalid index for point".to_string())),
+            if !(1..=2).contains(&index) {
+                return Err(ScriptError::new("Invalid index for point".to_string()));
             }
+
+            let new_val = player.get_datum(&args[1]).clone();
+
+            let new_ref = match new_val {
+                Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
+                Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
+                other => {
+                    return Err(ScriptError::new(format!(
+                        "Point component must be numeric, got {}",
+                        other.type_str()
+                    )))
+                }
+            };
+
+            let point_arr = match player.get_datum_mut(datum) {
+                Datum::Point(arr) => arr,
+                _ => return Err(ScriptError::new("Cannot setAt of non-point".to_string())),
+            };
+
+            point_arr[(index - 1) as usize] = new_ref;
+
             Ok(DatumRef::Void)
         })
     }
@@ -69,19 +103,19 @@ impl PointDatumHandlers {
         datum: &DatumRef,
         prop: &String,
     ) -> Result<Datum, ScriptError> {
-        let rect = player.get_datum(datum);
-        let (left, top) = match rect {
-            Datum::IntPoint(point) => Ok(point),
-            _ => Err(ScriptError::new("Cannot get prop of non-point".to_string())),
-        }?;
+        let point_arr = match player.get_datum(datum) {
+            Datum::Point(arr) => arr,
+            _ => return Err(ScriptError::new("Cannot get prop of non-point".to_string())),
+        };
+
+        let x = Datum::to_f64(player, &point_arr[0])?;
+        let y = Datum::to_f64(player, &point_arr[1])?;
+
         match prop.as_str() {
-            "locH" => Ok(Datum::Int(*left as i32)),
-            "locV" => Ok(Datum::Int(*top as i32)),
-            "ilk" => Ok(Datum::Symbol("point".to_string())),
-            _ => Err(ScriptError::new(format!(
-                "Cannot get point property {}",
-                prop
-            ))),
+            "locH" => Ok(Datum::from_f64(x)),
+            "locV" => Ok(Datum::from_f64(y)),
+            "ilk"  => Ok(Datum::Symbol("point".to_string())),
+            _ => Err(ScriptError::new(format!("Cannot get point property {}", prop))),
         }
     }
 
@@ -91,24 +125,30 @@ impl PointDatumHandlers {
         prop: &String,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
-        let value = player.get_datum(value_ref);
-        match prop.as_str() {
-            "locH" => {
-                let value = value.int_value()?;
-                let point = player.get_datum_mut(datum).to_int_point_mut()?;
-                point.0 = value;
-                Ok(())
-            }
-            "locV" => {
-                let value = value.int_value()?;
-                let point = player.get_datum_mut(datum).to_int_point_mut()?;
-                point.1 = value;
-                Ok(())
-            }
-            _ => Err(ScriptError::new(format!(
-                "Cannot set point property {}",
-                prop
+        let new_val = player.get_datum(value_ref).clone();
+
+        let idx = match prop.as_str() {
+            "locH" => 0,
+            "locV" => 1,
+            _ => return Err(ScriptError::new(format!("Cannot set point property {}", prop))),
+        };
+
+        let new_ref = match new_val {
+            Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
+            Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
+            other => return Err(ScriptError::new(format!(
+                "Point property must be numeric, got {}",
+                other.type_str()
             ))),
-        }
+        };
+
+        let point_arr = match player.get_datum_mut(datum) {
+            Datum::Point(arr) => arr,
+            _ => return Err(ScriptError::new("Cannot set prop of non-point".to_string())),
+        };
+
+        point_arr[idx] = new_ref;
+
+        Ok(())
     }
 }

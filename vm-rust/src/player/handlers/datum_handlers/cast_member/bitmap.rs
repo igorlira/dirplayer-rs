@@ -25,6 +25,10 @@ impl BitmapMemberHandlers {
         let bitmap_member = member.member_type.as_bitmap().unwrap();
         let bitmap_ref = bitmap_member.image_ref;
         let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref);
+
+        let reg_x = bitmap_member.reg_point.0 as i32;
+        let reg_y = bitmap_member.reg_point.1 as i32;
+
         if !bitmap.is_some() {
             return Err(ScriptError::new(format!(
                 "Cannot get prop of invalid bitmap ref"
@@ -39,14 +43,19 @@ impl BitmapMemberHandlers {
                     .map(|x| x.palette_ref.clone())
                     .unwrap_or(PaletteRef::BuiltIn(BuiltInPalette::GrayScale)),
             )),
-            "regPoint" => Ok(Datum::IntPoint((
-                bitmap_member.reg_point.0 as i32,
-                bitmap_member.reg_point.1 as i32,
-            ))),
+            "regPoint" => Ok(Datum::Point([
+                player.alloc_datum(Datum::Int(reg_x)),
+                player.alloc_datum(Datum::Int(reg_y)),
+            ])),
             "rect" => {
                 let width = bitmap.map(|x| x.width as i32).unwrap_or(0);
                 let height = bitmap.map(|x| x.height as i32).unwrap_or(0);
-                Ok(Datum::IntRect((0, 0, width, height)))
+                Ok(Datum::Rect([
+                    player.alloc_datum(Datum::Int(0)),
+                    player.alloc_datum(Datum::Int(0)),
+                    player.alloc_datum(Datum::Int(width)),
+                    player.alloc_datum(Datum::Int(height))
+                ]))
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for bitmap",
@@ -86,10 +95,19 @@ impl BitmapMemberHandlers {
                 member_ref,
                 |_| {},
                 |cast_member, _| {
-                    let value = value.to_int_point()?;
-                    let value: (i16, i16) = (value.0 as i16, value.1 as i16);
-                    cast_member.member_type.as_bitmap_mut().unwrap().reg_point = value;
-                    Ok(())
+                    let arr = match value {
+                        Datum::Point(ref point_arr) => point_arr,
+                        _ => return Err(ScriptError::new("regPoint must be a Point".to_string())),
+                    };
+
+                    reserve_player_mut(|player| {
+                        let x = player.get_datum(&arr[0]).int_value()? as i16;
+                        let y = player.get_datum(&arr[1]).int_value()? as i16;
+
+                        cast_member.member_type.as_bitmap_mut().unwrap().reg_point = (x, y);
+
+                        Ok(())
+                    })
                 },
             ),
             "paletteRef" => {

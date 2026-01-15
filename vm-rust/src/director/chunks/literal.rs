@@ -80,11 +80,11 @@ impl LiteralStore {
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],
                             ]);
-                            let val = val_f64 as f32;
+                            let val = val_f64 as f64;
                             val
                         } else if length == 10 {
                             // Apple 80-bit extended precision
-                            let val = reader.read_apple_float_80().unwrap() as f32;
+                            let val = reader.read_apple_float_80().unwrap() as f64;
                             val
                         } else {
                             0.0

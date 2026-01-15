@@ -27,8 +27,12 @@ impl StackBytecodeHandler {
     pub fn push_f32(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let obj_value = player.get_ctx_current_bytecode(ctx).obj as u32;
-            let result = f32::from_bits(obj_value);
-            let datum_ref = player.alloc_datum(Datum::Float(result));
+            
+            // Interpret the 32 bits as f32, THEN convert to f64
+            let float_f32 = f32::from_bits(obj_value);
+            let float_f64 = float_f32 as f64;
+            
+            let datum_ref = player.alloc_datum(Datum::Float(float_f64));
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(datum_ref);
         });
