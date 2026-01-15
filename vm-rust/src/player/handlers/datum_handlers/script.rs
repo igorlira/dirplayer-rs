@@ -137,28 +137,30 @@ impl ScriptDatumHandlers {
         })
     }
 
-    pub fn create_script_instance(script_ref: &CastMemberRef) -> (ScriptInstanceRef, DatumRef) {
+    pub fn create_script_instance(script_ref: &CastMemberRef) -> Result<(ScriptInstanceRef, DatumRef), ScriptError> {
         reserve_player_mut(|player| {
             let instance_id = player.allocator.get_free_script_instance_id();
             let script = player
                 .movie
                 .cast_manager
                 .get_script_by_ref(script_ref)
-                .unwrap();
+                .ok_or_else(|| ScriptError::new(format!("Script not found: {:?}", script_ref)))?;
 
-            let lctx_ptr: *const crate::director::lingo::script::ScriptContext =
-                get_lctx_for_script(player, script).unwrap() as *const _;
+            let lctx = get_lctx_for_script(player, script)
+                .ok_or_else(|| ScriptError::new(format!("No script context for script: {}", script.name)))?;
+            
+            let lctx_ptr: *const crate::director::lingo::script::ScriptContext = lctx as *const _;
 
             let instance = ScriptInstance::new(
                 instance_id,
                 script_ref.to_owned(),
                 script,
-                unsafe { &*lctx_ptr }, // safe because lctx_ptr is still valid
+                unsafe { &*lctx_ptr },
             );
 
             let instance_ref = player.allocator.alloc_script_instance(instance);
             let datum_ref = player.alloc_datum(Datum::ScriptInstanceRef(instance_ref.clone()));
-            (instance_ref, datum_ref)
+            Ok((instance_ref, datum_ref))
         })
     }
 
@@ -195,7 +197,13 @@ impl ScriptDatumHandlers {
                 ))
             })?;
 
-        let (instance_ref, datum_ref) = Self::create_script_instance(&script_ref);
+        let (script_instance_ref, datum_ref) = match Self::create_script_instance(&script_ref) {
+            Ok((instance_ref, datum_ref)) => (instance_ref, datum_ref),
+            Err(e) => {
+                web_sys::console::error_1(&format!("Failed to create script instance: {}", e.message).into());
+                return Err(e); // Return the error
+            }
+        };
 
         if let Some(new_handler_ref) = new_handler_ref {
             let mut padded_args = args.clone();
@@ -204,7 +212,7 @@ impl ScriptDatumHandlers {
             }
 
             let result_scope =
-                match player_call_script_handler(Some(instance_ref), new_handler_ref, &padded_args)
+                match player_call_script_handler(Some(script_instance_ref), new_handler_ref, &padded_args)
                     .await
                 {
                     Ok(scope) => scope,
