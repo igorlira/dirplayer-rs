@@ -42,7 +42,7 @@ impl Drop for ScriptInstanceRef {
         unsafe {
             // Check if we can safely dereference the ref_count pointer
             // During allocator reset, the Rc may have been freed
-            if let Some(player) = PLAYER_OPT.as_mut() {
+            if let Some(player) = unsafe { PLAYER_OPT.as_mut() } {
                 // Only proceed if the script instance still exists in the allocator
                 if player.allocator.script_instances.contains_key(&self.0) {
                     let mut_ref = &mut *self.1;

@@ -71,7 +71,7 @@ impl Drop for DatumRef {
                 // Check if we can safely dereference the ref_count pointer
                 // During allocator reset, the Rc may have been freed
                 // We need to check if the player still exists and if the datum is still in the allocator
-                if let Some(player) = PLAYER_OPT.as_mut() {
+                if let Some(player) = unsafe { PLAYER_OPT.as_mut() } {
                     // Only proceed if the datum still exists in the allocator
                     if player.allocator.datums.contains_key(id) {
                         let ref_count = &mut **ref_count;
