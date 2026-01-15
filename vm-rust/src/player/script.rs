@@ -15,10 +15,6 @@ use super::{
     bytecode::handler_manager::BytecodeHandlerContext,
     cast_lib::{player_cast_lib_set_prop, CastMemberRef},
     datum_formatting::{format_concrete_datum, format_datum},
-    handlers::datum_handlers::date::DateDatumHandlers,
-    handlers::datum_handlers::math::MathDatumHandlers,
-    handlers::datum_handlers::vector::VectorDatumHandlers,
-    handlers::datum_handlers::xml::XmlDatumHandlers,
     handlers::{
         datum_handlers::{
             bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers,
@@ -27,6 +23,9 @@ use super::{
             sound_channel::SoundChannelDatumHandlers, string::StringDatumUtils,
             string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers,
             timeout::TimeoutDatumHandlers, void::VoidDatumHandlers,
+            date::DateDatumHandlers, math::MathDatumHandlers,
+            vector::VectorDatumHandlers, xml::XmlDatumHandlers,
+            float::FloatDatumHandlers,
         },
         types::TypeUtils,
     },
@@ -57,6 +56,7 @@ pub struct ScriptInstance {
     pub script: CastMemberRef,
     pub ancestor: Option<ScriptInstanceRef>,
     pub properties: FxHashMap<String, DatumRef>,
+    pub begin_sprite_called: bool,
 }
 
 impl ScriptInstance {
@@ -83,6 +83,7 @@ impl ScriptInstance {
             script: script_ref,
             ancestor: None,
             properties,
+            begin_sprite_called: false,
         }
     }
 }
@@ -395,10 +396,11 @@ pub async fn player_set_obj_prop(
         Datum::BitmapRef(bitmap_ref) => reserve_player_mut(|player| {
             BitmapDatumHandlers::set_bitmap_ref_prop(player, bitmap_ref, prop_name, value_ref)
         }),
-        Datum::IntPoint(..) => reserve_player_mut(|player| {
+        Datum::Point(..) => reserve_player_mut(|player| {
             PointDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
-        Datum::TimeoutRef(_) => reserve_player_mut(|player| {
+        Datum::TimeoutRef(_) | Datum::TimeoutInstance { .. } | Datum::TimeoutFactory 
+            => reserve_player_mut(|player| {
             TimeoutDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
         Datum::PropList(..) => reserve_player_mut(|player| {
@@ -412,7 +414,7 @@ pub async fn player_set_obj_prop(
                 prop_name.clone(),
             )
         }),
-        Datum::IntRect(..) => reserve_player_mut(|player| {
+        Datum::Rect(..) => reserve_player_mut(|player| {
             RectDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
         Datum::StringChunk(..) => reserve_player_mut(|player| {
@@ -488,10 +490,10 @@ pub fn get_obj_prop(
             let result = get_stage_prop(player, &prop_name)?;
             Ok(player.alloc_datum(result))
         }
-        Datum::IntRect(..) => {
+        Datum::Rect(..) => {
             Ok(player.alloc_datum(RectDatumHandlers::get_prop(player, obj_ref, &prop_name)?))
         }
-        Datum::IntPoint(..) => {
+        Datum::Point(..) => {
             Ok(player.alloc_datum(PointDatumHandlers::get_prop(player, obj_ref, &prop_name)?))
         }
         Datum::SpriteRef(sprite_id) => {
@@ -506,10 +508,12 @@ pub fn get_obj_prop(
             &obj_clone.string_value()?,
             &prop_name,
         )?)),
-        Datum::TimeoutRef(_) => Ok(TimeoutDatumHandlers::get_prop(player, obj_ref, &prop_name)?),
+        Datum::TimeoutRef(_) | Datum::TimeoutInstance { .. } | Datum::TimeoutFactory
+             => Ok(TimeoutDatumHandlers::get_prop(player, obj_ref, &prop_name)?),
         Datum::Symbol(_) => SymbolDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::Void => VoidDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::Int(_) => IntDatumHandlers::get_prop(player, obj_ref, &prop_name),
+        Datum::Float(_) => FloatDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::ColorRef(_) => ColorDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::PlayerRef => player.get_player_prop(prop_name),
         Datum::XmlRef(_) => XmlDatumHandlers::get_prop(player, obj_ref, prop_name),

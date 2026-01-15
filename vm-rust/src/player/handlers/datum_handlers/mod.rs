@@ -21,6 +21,7 @@ pub mod timeout;
 pub mod vector;
 pub mod void;
 pub mod xml;
+pub mod float;
 
 use player::PlayerDatumHandlers;
 
@@ -51,6 +52,37 @@ pub async fn player_call_datum_handler(
     handler_name: &String,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
+    // Track handler depth
+    reserve_player_mut(|player| {
+        player.handler_stack_depth += 1;
+    });
+   
+    // Block recursive getPropertyDescriptionList calls
+    if handler_name == "getPropertyDescriptionList" {
+        let should_skip = reserve_player_mut(|player| {
+            if player.is_getting_property_descriptions {
+                web_sys::console::warn_1(&"BLOCKED recursive getPropertyDescriptionList".into());
+                true
+            } else {
+                player.is_getting_property_descriptions = true;
+                false
+            }
+        });
+        
+        if should_skip {
+            // Decrement handler depth before returning
+            reserve_player_mut(|player| {
+                player.handler_stack_depth -= 1;
+            });
+            
+            // Return empty property list
+            web_sys::console::warn_1(&"Returning empty property list to prevent recursion".into());
+            return reserve_player_mut(|player| {
+                Ok(player.alloc_datum(crate::director::lingo::datum::Datum::PropList(vec![], false)))
+            });
+        }
+    }
+
     let datum_type = reserve_player_ref(|player| player.get_datum(obj_ref).type_enum());
 
     // let profile_token = start_profiling(format!("{}::{}", datum_type.type_str(), handler_name));
@@ -82,7 +114,7 @@ pub async fn player_call_datum_handler(
                 script_instance::ScriptInstanceDatumHandlers::call(obj_ref, handler_name, args)
             }
         }
-        DatumType::TimeoutRef => {
+        DatumType::TimeoutRef | DatumType::TimeoutInstance | DatumType::TimeoutFactory => {
             if TimeoutDatumHandlers::has_async_handler(handler_name) {
                 TimeoutDatumHandlers::call_async(obj_ref, handler_name, args).await
             } else {
@@ -92,8 +124,8 @@ pub async fn player_call_datum_handler(
         DatumType::CastMemberRef => {
             cast_member_ref::CastMemberRefHandlers::call(obj_ref, handler_name, args)
         }
-        DatumType::IntRect => RectDatumHandlers::call(obj_ref, handler_name, args),
-        DatumType::IntPoint => PointDatumHandlers::call(obj_ref, handler_name, args),
+        DatumType::Rect => RectDatumHandlers::call(obj_ref, handler_name, args),
+        DatumType::Point => PointDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::BitmapRef => BitmapDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::SpriteRef => {
             if SpriteDatumHandlers::has_async_handler(obj_ref, handler_name)? {
@@ -131,6 +163,18 @@ pub async fn player_call_datum_handler(
             ))
         }),
     };
+
+    if handler_name == "getPropertyDescriptionList" {
+        reserve_player_mut(|player| {
+            player.is_getting_property_descriptions = false;
+        });
+    }
+
+    // Always decrement, even on error
+    reserve_player_mut(|player| {
+        player.handler_stack_depth -= 1;
+    });
+
     // end_profiling(profile_token);
     result
 }
