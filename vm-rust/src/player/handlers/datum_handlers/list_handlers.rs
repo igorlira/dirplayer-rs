@@ -26,7 +26,7 @@ impl ListDatumUtils {
         while low < high {
             let mid = (low + high) / 2;
             let left = allocator.get_datum(list_vec.get(mid as usize).unwrap());
-            if datum_less_than(left, item)? {
+            if datum_less_than(left, item, &allocator)? {
                 low = mid + 1;
             } else {
                 high = mid;
@@ -317,7 +317,7 @@ impl ListDatumHandlers {
 
                 if datum_equals(left, right, &player.allocator).unwrap() {
                     return std::cmp::Ordering::Equal;
-                } else if datum_less_than(left, right).unwrap() {
+                } else if datum_less_than(left, right, &player.allocator).unwrap() {
                     std::cmp::Ordering::Less
                 } else {
                     std::cmp::Ordering::Greater

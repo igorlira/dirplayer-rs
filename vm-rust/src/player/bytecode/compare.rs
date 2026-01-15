@@ -24,7 +24,7 @@ impl CompareBytecodeHandler {
             let right = player.get_datum(&right);
             let left = player.get_datum(&left);
 
-            let is_gt = datum_greater_than(left, right)?;
+            let is_gt = datum_greater_than(left, right, &player.allocator)?;
 
             let result_id = player.alloc_datum(datum_bool(is_gt));
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -44,7 +44,7 @@ impl CompareBytecodeHandler {
             let right = player.get_datum(&right);
             let left = player.get_datum(&left);
 
-            let is_lt = datum_less_than(left, right)?;
+            let is_lt = datum_less_than(left, right, &player.allocator)?;
 
             let result_id = player.alloc_datum(datum_bool(is_lt));
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -64,7 +64,7 @@ impl CompareBytecodeHandler {
             let right = player.get_datum(&right);
             let left = player.get_datum(&left);
 
-            let is_lt = datum_less_than(left, right)?;
+            let is_lt = datum_less_than(left, right, &player.allocator)?;
             let is_eq = datum_equals(left, right, &player.allocator)?;
 
             let result_id = player.alloc_datum(datum_bool(is_lt || is_eq));
@@ -85,7 +85,7 @@ impl CompareBytecodeHandler {
             let right = player.get_datum(&right);
             let left = player.get_datum(&left);
 
-            let is_gt = datum_greater_than(left, right)?;
+            let is_gt = datum_greater_than(left, right, &player.allocator)?;
             let is_eq = datum_equals(left, right, &player.allocator)?;
 
             let result_id = player.alloc_datum(datum_bool(is_gt || is_eq));
@@ -106,7 +106,7 @@ impl CompareBytecodeHandler {
             let is_not = match obj {
                 Datum::Void => true,
                 Datum::Int(num) => *num == 0,
-                Datum::Float(num) => num.to_u32().unwrap() == 0,
+                Datum::Float(num) => num.to_u64().unwrap() == 0,
                 _ => false,
             };
             let result_id = player.alloc_datum(datum_bool(is_not));
