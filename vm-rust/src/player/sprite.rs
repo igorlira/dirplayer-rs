@@ -15,6 +15,27 @@ impl ColorRef {
         let b = u8::from_str_radix(&hex[4..6], 16).unwrap();
         ColorRef::Rgb(r, g, b)
     }
+    // Convert a ColorRef to a palette index using a palette slice.
+    pub fn to_index(&self, palette: &[(u8, u8, u8)]) -> u8 {
+        match self {
+            ColorRef::PaletteIndex(i) => *i,
+            ColorRef::Rgb(r, g, b) => {
+                let mut best_index = 0;
+                let mut best_distance = u32::MAX;
+                for (i, &(pr, pg, pb)) in palette.iter().enumerate() {
+                    let dr = *r as i32 - pr as i32;
+                    let dg = *g as i32 - pg as i32;
+                    let db = *b as i32 - pb as i32;
+                    let distance = (dr*dr + dg*dg + db*db) as u32;
+                    if distance < best_distance {
+                        best_distance = distance;
+                        best_index = i;
+                    }
+                }
+                best_index as u8
+            }
+        }
+    }
 }
 
 impl ToString for ColorRef {
@@ -47,8 +68,8 @@ pub struct Sprite {
     pub height: i32,
     pub ink: i32,
     pub blend: i32,
-    pub rotation: f32,
-    pub skew: f32,
+    pub rotation: f64,
+    pub skew: f64,
     pub flip_h: bool,
     pub flip_v: bool,
     pub back_color: i32,
@@ -61,6 +82,22 @@ pub struct Sprite {
     pub entered: bool,
     pub exited: bool,
     pub quad: Option<[(i32, i32); 4]>, // [topLeft, topRight, bottomRight, bottomLeft] -- TODO: Tie this to position and size
+    pub fore_color: i32,
+    pub has_fore_color: bool,
+    pub has_back_color: bool,
+    pub has_size_tweened: bool,
+    pub has_size_changed: bool,
+    pub bitmap_size_owned_by_sprite: bool,
+    // Base (score-defined) values
+    pub base_loc_h: i32,
+    pub base_loc_v: i32,
+    pub base_width: i32,
+    pub base_height: i32,
+    pub base_rotation: f64,
+    pub base_blend: i32,
+    pub base_skew: f64,
+    pub base_color: ColorRef,
+    pub base_bg_color: ColorRef,
 }
 
 impl Sprite {
@@ -92,6 +129,21 @@ impl Sprite {
             entered: false,
             exited: false,
             quad: None,
+            fore_color: 255,
+            has_fore_color: false,
+            has_back_color: false,
+            has_size_tweened: false,
+            has_size_changed: false,
+            bitmap_size_owned_by_sprite: false,
+            base_loc_h: 0,
+            base_loc_v: 0,
+            base_width: 0,
+            base_height: 0,
+            base_rotation: 0.0,
+            base_blend: 100,
+            base_skew: 0.0,
+            base_color: ColorRef::PaletteIndex(255),
+            base_bg_color: ColorRef::PaletteIndex(0),
         }
     }
 
@@ -121,5 +173,11 @@ impl Sprite {
         self.entered = false;
         self.exited = false;
         self.quad = None;
+        self.fore_color = 255;
+        self.has_fore_color = false;
+        self.has_back_color = false;
+        self.has_size_tweened = false;
+        self.has_size_changed = false;
+        self.bitmap_size_owned_by_sprite = false;
     }
 }
