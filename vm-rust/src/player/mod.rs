@@ -31,11 +31,14 @@ pub mod sprite;
 pub mod stage;
 pub mod timeout;
 pub mod xtra;
+pub mod score_keyframes;
 
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock},
     time::Duration,
+    pin::Pin,
+    future::Future,
 };
 
 use allocator::{
@@ -81,6 +84,8 @@ use crate::{
         geometry::IntRect,
         profiling::get_profiler_report,
         scope::Scope,
+        events::{player_invoke_event_to_instances, player_dispatch_event_beginsprite,
+        dispatch_event_to_all_behaviors, player_invoke_frame_and_movie_scripts, dispatch_system_event_to_timeouts},
     },
     rendering::with_canvas_renderer_mut,
     utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks},
@@ -114,8 +119,22 @@ use crate::player::handlers::datum_handlers::sound_channel::{
     AudioData, SoundChannelDatumHandlers, SoundManager,
 };
 use crate::player::handlers::datum_handlers::xml::{XmlDocument, XmlNode};
-
+use crate::player::handlers::movie::MovieHandlers;
 use crate::player::handlers::datum_handlers::player_call_datum_handler;
+
+fn trace_output(message: &str, trace_log_file: &str) {
+    use crate::js_api::JsApi;
+    
+    if trace_log_file.is_empty() {
+        // Use the same output as 'put' command, but without the "-- " prefix
+        // since trace messages already have their own prefixes (-->, ==, etc.)
+        JsApi::dispatch_debug_message(message);
+    } else {
+        // TODO: Append to file
+        // For now, output to message window with file indicator
+        JsApi::dispatch_debug_message(&format!("[{}] {}", trace_log_file, message));
+    }
+}
 
 pub enum HandlerExecutionResult {
     Advance,
@@ -183,11 +202,26 @@ pub struct DirPlayer {
     pub date_objects: HashMap<u32, DateObject>,
     pub math_objects: HashMap<u32, MathObject>,
     pub enable_stream_status_handler: bool,
+    pub is_in_frame_update: bool,
+    pub system_start_time: chrono::DateTime<chrono::Local>, // For ticks & milliSeconds (system uptime)
+    pub handler_stack_depth: usize,
+    pub in_frame_script: bool,
+    pub in_enter_frame: bool,
+    pub in_prepare_frame: bool,
+    pub in_event_dispatch: bool,
+    pub current_frame_tempo: u32,  // Cached tempo for the current frame
+    pub has_player_frame_changed: bool,
+    pub has_frame_changed_in_go: bool,
+    pub go_direction: u8,
+    pub is_getting_property_descriptions: bool,
+    pub is_initializing_behavior_props: bool,
+    pub last_initialized_frame: Option<u32>,
 }
 
 impl DirPlayer {
     pub fn new<'a>(tx: Sender<PlayerVMExecutionItem>) -> DirPlayer {
         let sound_manager = SoundManager::new(8).expect("Sound manager failed to initialize"); // 8 sound channels (Director standard)
+        let now = chrono::Local::now();
 
         let mut result = DirPlayer {
             movie: Movie {
@@ -195,17 +229,27 @@ impl DirPlayer {
                 cast_manager: CastManager::empty(),
                 score: Score::empty(),
                 current_frame: 1,
-                puppet_tempo: 0,
+                puppet_tempo: 30,
                 exit_lock: false,
                 dir_version: 0,
                 item_delimiter: ',',
                 alert_hook: None,
                 base_path: "".to_string(),
                 file_name: "".to_string(),
-                stage_color: (0, 0, 0),
+                stage_color: (255, 255, 255),
+                stage_color_ref: ColorRef::PaletteIndex(255),
                 frame_rate: 30,
                 file: None,
                 update_lock: false,
+                mouse_down_script: None,
+                mouse_up_script: None,
+                allow_custom_caching: false,
+                trace_script: false,
+                trace_log_file: String::new(),
+                mouse_down: false,
+                click_loc: (0,0),
+                frame_script_instance: None,
+                frame_script_member: None,
             },
             net_manager: NetManager {
                 base_path: None,
@@ -225,7 +269,7 @@ impl DirPlayer {
             stage_size: (100, 100),
             bitmap_manager: bitmap::manager::BitmapManager::new(),
             cursor: CursorRef::System(0),
-            start_time: chrono::Local::now(), // supposed to be time at which computer started, but we don't have access from browser. this is sufficient for calculating elapsed time.
+            start_time: now, // supposed to be time at which computer started, but we don't have access from browser. this is sufficient for calculating elapsed time.
             timeout_manager: TimeoutManager::new(),
             title: "".to_string(),
             bg_color: ColorRef::Rgb(0, 0, 0),
@@ -255,6 +299,20 @@ impl DirPlayer {
             math_objects: HashMap::new(),
             click_on_sprite: 0,
             enable_stream_status_handler: false,
+            is_in_frame_update: false,
+            system_start_time: now - chrono::Duration::days(8), // Simulated system start
+            handler_stack_depth: 0,
+            in_frame_script: false,
+            in_enter_frame: false,
+            in_prepare_frame: false,
+            in_event_dispatch: false,
+            current_frame_tempo: 30,  // Default to 30 fps
+            has_player_frame_changed: false,
+            has_frame_changed_in_go: false,
+            go_direction: 0,
+            is_getting_property_descriptions: false,
+            is_initializing_behavior_props: false,
+            last_initialized_frame: None,
         };
 
         result.reset();
@@ -271,9 +329,14 @@ impl DirPlayer {
             .unwrap()
             .unwrap();
 
+        let file_name = task.resolved_url
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .unwrap_or("untitled.dcr");
+
         let movie_file = read_director_file_bytes(
             &data_bytes,
-            &get_basename_no_extension(task.resolved_url.path()),
+            &file_name,
             &get_base_url(&task.resolved_url).to_string(),
         )
         .unwrap();
@@ -289,8 +352,8 @@ impl DirPlayer {
                 &mut self.dir_cache,
             )
             .await;
-        let (r, g, b) = self.movie.stage_color;
-        self.bg_color = ColorRef::Rgb(r, g, b);
+
+        self.bg_color = self.movie.stage_color_ref.clone();
 
         // Load all fonts from cast members into the font manager
         log::debug!("Loading fonts from cast members...");
@@ -308,6 +371,9 @@ impl DirPlayer {
         });
 
         JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
+        
+        self.begin_all_sprites();
+        JsApi::dispatch_frame_changed(self.movie.current_frame);
     }
 
     pub fn play(&mut self) {
@@ -316,23 +382,208 @@ impl DirPlayer {
         }
         self.is_playing = true;
         self.is_script_paused = false;
-        // TODO runVM()
+        
         async_std::task::spawn_local(async move {
-            if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await
-            {
+            // Relay prepareMovie to timeout targets
+            dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
+            
+            // 1. prepareMovie - sent to movie scripts
+            if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
                 reserve_player_mut(|player| player.on_script_error(&err));
                 return;
             }
+            
+            player_wait_available().await;
+            
+            // Initialize sprites for the current frame
             reserve_player_mut(|player| {
-                // player.movie.score.begin_sprites(player.movie.current_frame);
+                player.movie.frame_script_instance = None;
                 player.begin_all_sprites();
+
+                player.movie.score.apply_tween_modifiers(player.movie.current_frame);
             });
+
+            player_wait_available().await;
+
+            // Collect behaviors that need initialization
+            let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
+                player
+                    .movie
+                    .score
+                    .channels
+                    .iter()
+                    .flat_map(|ch| {
+                        let sprite_num = ch.sprite.number as u32;
+                        ch.sprite.script_instance_list
+                            .iter()
+                            .filter(|behavior_ref| {
+                                // ONLY initialize behaviors that haven't had beginSprite called
+                                // This means they're NEW this frame
+                                if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
+                                    !entry.script_instance.begin_sprite_called
+                                } else {
+                                    false
+                                }
+                            })
+                            .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
+                    })
+                    .collect()
+            });
+
+            // Initialize behavior default properties
+            for (behavior_ref, sprite_num) in behaviors_to_init {
+                if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
+                    web_sys::console::warn_1(
+                        &format!("Failed to initialize behavior defaults: {}", err.message).into()
+                    );
+                }
+            }
+
+            player_wait_available().await;
+
+            reserve_player_mut(|player| {
+                player.is_in_frame_update = true;
+            });
+
+            let begin_sprite_nums = player_dispatch_event_beginsprite(
+                &"beginSprite".to_string(),
+                &vec![]
+            ).await;
+
+            player_wait_available().await;
+
+            // Mark beginSprite as called for these behaviors
+            reserve_player_mut(|player| {
+                for sprite_list in begin_sprite_nums.iter() {
+                    for (score_source, sprite_num) in sprite_list.iter() {
+                        if let Some(sprite) = get_score_sprite_mut(
+                            &mut player.movie,
+                            score_source,
+                            *sprite_num as i16,
+                        ) {
+                            for script_ref in &sprite.script_instance_list {
+                                if let Some(entry) =
+                                    player.allocator.script_instances.get_mut(&script_ref.id())
+                                {
+                                    entry.script_instance.begin_sprite_called = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            
+            player_wait_available().await;
+
+            // 3. Send stepFrame to actorList
+            let actor_list_snapshot = reserve_player_ref(|player| {
+                let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
+                let actor_list_datum = player.get_datum(&actor_list_ref);
+                match actor_list_datum {
+                    Datum::List(_, items, _) => items.clone(),
+                    _ => vec![],
+                }
+            });
+
+            for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
+                let still_active = reserve_player_ref(|player| {
+                    let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
+                    let actor_list_datum = player.get_datum(&actor_list_ref);
+                    match actor_list_datum {
+                        Datum::List(_, items, _) => items.contains(&actor_ref),
+                        _ => false,
+                    }
+                });
+
+                if still_active {
+                    let result =
+                        player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+
+                    if let Err(err) = result {
+                        web_sys::console::log_1(
+                            &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
+                        );
+                        reserve_player_mut(|player| {
+                            player.on_script_error(&err);
+                            player.is_in_frame_update = false;
+                        });
+                        return;
+                    }
+                }
+            }
+            
+            reserve_player_mut(|player| {
+                player.in_prepare_frame = true;
+            });
+            
+            // Relay prepareFrame to timeout targets
+            dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
+
+            // 4. prepareFrame - sent to sprite behaviors and then to frame behavior
+            let _ = dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
+            
+            reserve_player_mut(|player| {
+                player.in_prepare_frame = false;
+            });
+            
+            // Relay startMovie to timeout targets
+            dispatch_system_event_to_timeouts(&"startMovie".to_string(), &vec![]).await;
+
+            // 5. startMovie - sent to movie scripts in first frame
+            if let Err(err) = player_invoke_global_event(&"startMovie".to_string(), &vec![]).await {
+                reserve_player_mut(|player| player.on_script_error(&err));
+                return;
+            }
+            
+            player_wait_available().await;
+            
+            reserve_player_mut(|player| {
+                player.in_enter_frame = true;
+            });
+            
+            // 6. enterFrame - sent to sprite behaviors and then to frame behavior
+            let _ = dispatch_event_to_all_behaviors(&"enterFrame".to_string(), &vec![]).await;
+                       
+            reserve_player_mut(|player| {
+                player.in_enter_frame = false;
+            });
+            
+            player_wait_available().await;
+            
+            // Relay exitFrame to timeout targets
+            dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
+
+            // 7. exitFrame - sent to sprite behaviors and then to frame behavior
+            let _ = dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
+                      
+            player_wait_available().await;
+
+            reserve_player_mut(|player| {
+                player.is_in_frame_update = false;
+            });
+            
+            // Now start the frame loop which calls frame_update (stepFrame/prepareFrame/enterFrame)
+            // and after that exitFrame/endSprite/beginSprite
             run_frame_loop().await;
         });
     }
 
     pub fn begin_all_sprites(&mut self) {
         self.movie.score.begin_sprites(self.movie.current_frame);
+        
+        // Cache the tempo for this frame
+        self.current_frame_tempo = self.movie.get_effective_tempo();
+        
+        // If the player isn't playing yet (i.e., during initial load),
+        // reset the entered flags so that beginSprite will be called again
+        // when the movie actually starts playing with the fixed spriteNum
+        if !self.is_playing {
+            for channel in &mut self.movie.score.channels {
+                channel.sprite.entered = false;
+                channel.sprite.script_instance_list.clear();
+            }
+        }
+        
         for channel in self.movie.score.channels.iter() {
             let member_ref = channel.sprite.member.as_ref();
             let member_type = member_ref
@@ -356,13 +607,13 @@ impl DirPlayer {
         }
     }
 
-    pub fn end_all_sprites(&mut self) -> Vec<(ScoreRef, u32)> {
+    pub async fn end_all_sprites(&mut self) -> Vec<(ScoreRef, u32)> {
         let next_frame = self.get_next_frame();
         let mut all_ended_sprite_nums: Vec<(ScoreRef, u32)> = vec![];
         let ended_sprite_nums = self
             .movie
             .score
-            .end_sprites(self.movie.current_frame, next_frame);
+            .end_sprites(self.movie.current_frame, next_frame).await;
         all_ended_sprite_nums.extend(ended_sprite_nums.iter().map(|&x| (ScoreRef::Stage, x)));
 
         for channel in self.movie.score.channels.iter() {
@@ -384,7 +635,7 @@ impl DirPlayer {
                         .unwrap();
                     let ended_sprite_nums = film_loop
                         .score
-                        .end_sprites(self.movie.current_frame, next_frame);
+                        .end_sprites(self.movie.current_frame, next_frame).await;
                     all_ended_sprite_nums.extend(
                         ended_sprite_nums
                             .iter()
@@ -472,6 +723,7 @@ impl DirPlayer {
         // Only dispatch and render if updateLock is off
         if !self.movie.update_lock && prev_frame != self.movie.current_frame {
             JsApi::dispatch_frame_changed(self.movie.current_frame);
+            self.has_player_frame_changed = true;
         }
     }
 
@@ -482,7 +734,7 @@ impl DirPlayer {
         //scopes.clear();
         // currentBreakpoint?.completer.completeError(CancelledException());
         // currentBreakpoint = null;
-        self.timeout_manager.clear();
+        //self.timeout_manager.clear();
         //notifyListeners();
 
         warn!("Profiler report: {}", get_profiler_report());
@@ -511,12 +763,7 @@ impl DirPlayer {
         // Now it's safe to reset the allocator
         self.allocator.reset();
 
-        // Initialize the actorList as a global variable
-        let actor_list_datum = self.alloc_datum(Datum::List(DatumType::List, vec![], false));
-        self.globals.insert("actorList".to_string(), actor_list_datum);
-
-        // Initialize VOID constant
-        self.globals.insert("VOID".to_string(), DatumRef::Void);
+        self.initialize_globals();
 
         // Initialize scopes (call stack)
         for i in 0..MAX_STACK_SIZE {
@@ -527,6 +774,44 @@ impl DirPlayer {
         JsApi::dispatch_scope_list(self);
         JsApi::dispatch_script_error_cleared();
         JsApi::dispatch_global_list(self);
+    }
+
+    pub fn initialize_globals(&mut self) {
+        // Initialize the actorList as a global variable
+        let actor_list_datum = self.alloc_datum(Datum::List(DatumType::List, vec![], false));
+        self.globals.insert("actorList".to_string(), actor_list_datum);
+
+        // Mathematical constant
+        let pi_datum = self.alloc_datum(Datum::Float(std::f64::consts::PI));
+        self.globals.insert("PI".to_string(), pi_datum);
+        
+        // Special values
+        let void_datum = self.alloc_datum(Datum::Void);
+        self.globals.insert("VOID".to_string(), void_datum);
+        
+        let empty_datum = self.alloc_datum(Datum::String("".to_string()));
+        self.globals.insert("EMPTY".to_string(), empty_datum);
+        
+        // String constants
+        let return_datum = self.alloc_datum(Datum::String("\r".to_string()));
+        self.globals.insert("RETURN".to_string(), return_datum);
+        
+        let quote_datum = self.alloc_datum(Datum::String("\"".to_string()));
+        self.globals.insert("QUOTE".to_string(), quote_datum);
+        
+        let tab_datum = self.alloc_datum(Datum::String("\t".to_string()));
+        self.globals.insert("TAB".to_string(), tab_datum);
+        
+        // Backspace character
+        let backspace_datum = self.alloc_datum(Datum::String("\x08".to_string()));
+        self.globals.insert("BACKSPACE".to_string(), backspace_datum);
+        
+        // Boolean constants (these are typically handled as keywords, but can be globals)
+        let true_datum = self.alloc_datum(Datum::Int(1));
+        self.globals.insert("TRUE".to_string(), true_datum);
+        
+        let false_datum = self.alloc_datum(Datum::Int(0));
+        self.globals.insert("FALSE".to_string(), false_datum);
     }
 
     pub fn alloc_datum(&mut self, datum: Datum) -> DatumRef {
@@ -541,14 +826,23 @@ impl DirPlayer {
             ))),
             "milliSeconds" => Ok(self.alloc_datum(Datum::Int(
                 chrono::Local::now()
-                    .signed_duration_since(self.start_time)
+                    .signed_duration_since(self.system_start_time)
                     .num_milliseconds() as i32,
             ))),
             "keyboardFocusSprite" => {
                 Ok(self.alloc_datum(Datum::Int(self.keyboard_focus_sprite as i32)))
             }
-            "frameTempo" => Ok(self.alloc_datum(Datum::Int(self.movie.puppet_tempo as i32))),
-            "mouseLoc" => Ok(self.alloc_datum(Datum::IntPoint(self.mouse_loc))),
+            "frameTempo" => {
+                // Get tempo from current frame in score, or use default frame_rate
+                let frame_tempo = self.movie.score.get_frame_tempo(self.movie.current_frame)
+                    .unwrap_or(self.movie.frame_rate as u32);
+                Ok(self.alloc_datum(Datum::Int(frame_tempo as i32)))
+            }
+            "mouseLoc" => {
+                let x_ref = self.alloc_datum(Datum::Int(self.mouse_loc.0));
+                let y_ref = self.alloc_datum(Datum::Int(self.mouse_loc.1));
+                Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
+            }
             "mouseH" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
             "mouseV" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
             "rollover" => {
@@ -568,7 +862,7 @@ impl DirPlayer {
             "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
             "floatPrecision" => Ok(self.alloc_datum(Datum::Int(self.float_precision as i32))),
             "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
-            "ticks" => Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.start_time)))),
+            "ticks" => Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))),
             "frameLabel" => {
                 let frame_label = self
                     .movie
@@ -589,15 +883,21 @@ impl DirPlayer {
                     .get(self.current_scope_ref())
                     .and_then(|scope| scope.receiver.clone());
 
-                let datum_ref = script_instance_ref
-                    .and_then(|x| script_get_prop_opt(self, &x, &"spriteNum".to_owned()));
-                if let Some(datum_ref) = datum_ref {
-                    let datum = self.get_datum(&datum_ref);
-                    let sprite_num = datum.int_value()?;
-                    Ok(self.alloc_datum(Datum::Int(sprite_num)))
-                } else {
-                    Ok(self.alloc_datum(Datum::Int(0)))
+                if let Some(script_instance_ref) = script_instance_ref {
+                    // Try to get spriteNum from the script instance
+                    if let Some(datum_ref) = script_get_prop_opt(self, &script_instance_ref, &"spriteNum".to_owned()) {
+                        let datum = self.get_datum(&datum_ref);
+                        // Check if it's Void - if so, return 0 as default
+                        if !matches!(datum, Datum::Void) {
+                            if let Ok(sprite_num) = datum.int_value() {
+                                return Ok(self.alloc_datum(Datum::Int(sprite_num)));
+                            }
+                        }
+                    }
                 }
+                
+                // Default: return 0 when no sprite context is available
+                Ok(self.alloc_datum(Datum::Int(0)))
             }
             // Return the actual DatumRef from globals
             "actorList" => {
@@ -609,6 +909,73 @@ impl DirPlayer {
                     .clone())
             }
             "clickOn" => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
+            "environment" => {
+                // Build the environment property list
+                let props = vec![
+                    (
+                        self.alloc_datum(Datum::Symbol("shockMachine".to_string())),
+                        self.alloc_datum(Datum::Int(0))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("shockMachineVersion".to_string())),
+                        self.alloc_datum(Datum::String("".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("platform".to_string())),
+                        self.alloc_datum(Datum::String("Windows,32".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("runMode".to_string())),
+                        self.alloc_datum(Datum::String("Plugin".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("colorDepth".to_string())),
+                        self.alloc_datum(Datum::Int(32))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("internetConnected".to_string())),
+                        self.alloc_datum(Datum::Symbol("online".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("uiLanguage".to_string())),
+                        self.alloc_datum(Datum::String("English".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("osLanguage".to_string())),
+                        self.alloc_datum(Datum::String("English".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("productBuildVersion".to_string())),
+                        self.alloc_datum(Datum::String("188".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("productVersion".to_string())),
+                        self.alloc_datum(Datum::String("10.1".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("osVersion".to_string())),
+                        self.alloc_datum(Datum::String("Windows XP,5,1,148,2,Service Pack 3".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("directXVersion".to_string())),
+                        self.alloc_datum(Datum::String("9.0.0".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("licenseType".to_string())),
+                        self.alloc_datum(Datum::String("Full".to_string()))
+                    ),
+                    (
+                        self.alloc_datum(Datum::Symbol("trialTime".to_string())),
+                        self.alloc_datum(Datum::Int(0))
+                    ),
+                ];
+                Ok(self.alloc_datum(Datum::PropList(props, false)))
+            },
+            "clickLoc" => {
+                let x_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.0));
+                let y_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.1));
+                Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
+            }
             _ => {
                 let datum = self.movie.get_prop(prop)?;
                 Ok(self.alloc_datum(datum))
@@ -643,6 +1010,7 @@ impl DirPlayer {
         let prop_name = get_anim_prop_name(prop_id);
         match prop_name {
             "colorDepth" => Ok(Datum::Int(32)),
+            "fullColorPermit" => Ok(Datum::Int(1)), // Full color mode is permitted
             "timer" => Ok(Datum::Int(get_elapsed_ticks(self.start_time))),
             _ => Err(ScriptError::new(format!("Unknown anim prop {}", prop_name))),
         }
@@ -741,17 +1109,8 @@ impl DirPlayer {
 
     // Lingo: sound(channelNum)
     pub fn get_sound_channel(&mut self, channel_num: i32) -> Result<DatumRef, ScriptError> {
-        // if channel_num < 1 || channel_num > self.sound_manager.num_channels() as i32 {
-        //     return Err(ScriptError::new(format!(
-        //         "Sound channel {} out of range (1-{})",
-        //         channel_num,
-        //         self.sound_manager.num_channels()
-        //     )));
-        // }
-
-        // Channel numbers in Lingo are 1-based, convert to 0-based index
-        let channel_idx = (channel_num - 1) as usize;
-        Ok(self.alloc_datum(Datum::SoundChannel(channel_idx as u16)))
+        // Store the 1-based channel number (conversion to 0-based happens in get_channel_index)
+        Ok(self.alloc_datum(Datum::SoundChannel(channel_num as u16)))
     }
 
     // Lingo: puppetSound channelNum, memberRef
@@ -761,6 +1120,40 @@ impl DirPlayer {
         member_ref: DatumRef,
     ) -> Result<(), ScriptError> {
         let sound_channel = self.get_sound_channel(channel_num)?;
+        
+        // Get the loop setting from the cast member
+        let loop_count = {
+            let member_datum = self.get_datum(&member_ref);
+            if let Datum::CastMember(ref cast_member_ref) = member_datum {
+                if let Some(cast_member) = self.movie.cast_manager.find_member_by_ref(cast_member_ref) {
+                    if let CastMemberType::Sound(sound_member) = &cast_member.member_type {
+                        if sound_member.info.loop_enabled {
+                            0  // Loop forever
+                        } else {
+                            1  // Play once
+                        }
+                    } else {
+                        1
+                    }
+                } else {
+                    1
+                }
+            } else {
+                1
+            }
+        };
+        
+        // Set the loop count on the channel BEFORE playing
+        let channel_rc = self.sound_manager
+            .get_channel_mut((channel_num - 1) as usize)
+            .ok_or_else(|| ScriptError::new(format!("Invalid sound channel {}", channel_num)))?;
+        
+        {
+            let mut channel = channel_rc.borrow_mut();
+            channel.loop_count = loop_count;
+            channel.loops_remaining = loop_count;
+        }
+        
         SoundChannelDatumHandlers::handle_play_file(self, &sound_channel, &member_ref)
     }
 
@@ -800,6 +1193,14 @@ impl DirPlayer {
             .collect();
         fonts.sort();
         fonts
+    }
+
+    pub fn is_yield_safe(&self) -> bool {
+        !self.is_in_frame_update
+        && !self.in_frame_script
+        && !self.in_enter_frame
+        && !self.in_prepare_frame
+        && !self.in_event_dispatch
     }
 }
 
@@ -941,11 +1342,24 @@ where
     }
 }
 
+fn reserve_player_mut_async<F, R>(callback: F) -> impl Future<Output = R>
+where
+    F: for<'a> FnOnce(&'a mut DirPlayer) -> Pin<Box<dyn Future<Output = R> + 'a>>,
+{
+    async move {
+        unsafe {
+            let player = PLAYER_OPT.as_mut().unwrap();
+            callback(player).await
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum ScriptReceiver {
     Script(CastMemberRef),
     ScriptInstance(ScriptInstanceRef),
+    ScriptText(String),
 }
 
 pub async fn player_call_script_handler(
@@ -963,6 +1377,29 @@ pub async fn player_call_script_handler_raw_args(
     use_raw_arg_list: bool,
 ) -> Result<ScopeResult, ScriptError> {
     let (script_member_ref, handler_name) = &handler_ref;
+
+    // Check if this is a frame script handler
+    let is_frame_script = reserve_player_ref(|player| {
+        let frame_script = player.movie.score.get_script_in_frame(player.movie.current_frame);
+        if let Some(fs) = frame_script {
+            let frame_script_ref = CastMemberRef {
+                cast_lib: fs.cast_lib.into(),
+                cast_member: fs.cast_member.into(),
+            };
+            script_member_ref == &frame_script_ref
+        } else {
+            false
+        }
+    });
+
+    // Track handler depth and frame script execution
+    reserve_player_mut(|player| {
+        player.handler_stack_depth += 1;
+        if is_frame_script {
+            player.in_frame_script = true;
+        }
+    });
+
     let (scope_ref, handler_ptr, script_ptr) = reserve_player_mut(|player| {
         let (script_ptr, handler_ptr, handler_name_id, script_type) = {
             let script_rc = player
@@ -1026,6 +1463,28 @@ pub async fn player_call_script_handler_raw_args(
         script_ptr,
     };
 
+    // Trace handler entry if traceScript is enabled
+    reserve_player_ref(|player| {
+        if player.movie.trace_script {
+            let trace_file = player.movie.trace_log_file.clone();
+            let (cast_lib, cast_member) = (
+                script_member_ref.cast_lib,
+                script_member_ref.cast_member
+            );
+            let msg = format!(
+                "== Script: (member {} of castLib {}) Handler: {}",
+                cast_member, cast_lib, handler_name
+            );
+            trace_output(&msg, &trace_file);
+            
+            // ADD THIS BLOCK HERE - Clear expression tracker for new handler
+            use crate::player::bytecode::handler_manager::EXPRESSION_TRACKER;
+            EXPRESSION_TRACKER.with(|tracker| {
+                tracker.borrow_mut().clear();
+            });
+        }
+    });
+
     let mut should_return = false;
 
     loop {
@@ -1050,7 +1509,21 @@ pub async fn player_call_script_handler_raw_args(
             )
             .await;
         }
-        let result = player_execute_bytecode(&ctx).await?; // TODO catch error
+
+        let result = match player_execute_bytecode(&ctx).await {
+            Ok(result) => result,
+            Err(err) => {
+                // Cleanup on error
+                reserve_player_mut(|player| {
+                    player.handler_stack_depth -= 1;
+                    if is_frame_script {
+                        player.in_frame_script = false;
+                    }
+                    player.pop_scope();
+                });
+                return Err(err);
+            }
+        };
 
         match result {
             HandlerExecutionResult::Advance => {
@@ -1062,6 +1535,14 @@ pub async fn player_call_script_handler_raw_args(
                 should_return = true;
             }
             HandlerExecutionResult::Error(err) => {
+                // Cleanup on error
+                reserve_player_mut(|player| {
+                    player.handler_stack_depth -= 1;
+                    if is_frame_script {
+                        player.in_frame_script = false;
+                    }
+                    player.pop_scope();
+                });
                 return Err(err);
             }
             HandlerExecutionResult::Jump => {}
@@ -1075,6 +1556,12 @@ pub async fn player_call_script_handler_raw_args(
     }
 
     let scope = reserve_player_mut(|player| {
+        // Trace handler exit
+        if player.movie.trace_script {
+            let trace_file = player.movie.trace_log_file.clone();
+            trace_output("--> end", &trace_file);
+        }
+
         let result = {
             let scope = player.scopes.get(scope_ref).unwrap();
             player.last_handler_result = scope.return_value.clone();
@@ -1088,102 +1575,73 @@ pub async fn player_call_script_handler_raw_args(
         result
     });
 
+    // Cleanup after successful execution
+    reserve_player_mut(|player| {
+        player.handler_stack_depth -= 1;
+        if is_frame_script {
+            player.in_frame_script = false;
+        }
+    });
+
     return Ok(scope);
 }
 
 pub async fn run_frame_loop() {
-    let mut fps: u32;
     unsafe {
         let player = PLAYER_OPT.as_ref().unwrap();
         if !player.is_playing {
             return;
         }
-        fps = player.get_fps();
     }
 
     let mut is_playing = true;
     let mut is_script_paused = false;
+    let mut last_frame_time = chrono::Local::now();
     while is_playing {
         if !is_script_paused {
             player_wait_available().await;
+            
+            let update_result = MovieHandlers::execute_frame_update().await;
+
             reserve_player_mut(|player| {
-                // player.movie.score.begin_sprites(player.movie.current_frame);
-                player.begin_all_sprites();
-            });
-            player_wait_available().await;
-            player_unwrap_result(
-                player_invoke_global_event(&"prepareFrame".to_string(), &vec![]).await,
-            );
-            player_unwrap_result(
-                player_invoke_global_event(&"enterFrame".to_string(), &vec![]).await,
-            );
-
-            // Send stepFrame to all items in actorList
-            let actor_list_snapshot = reserve_player_ref(|player| {
-                let actor_list_ref = player
-                    .globals
-                    .get("actorList")
-                    .unwrap_or(&DatumRef::Void)
-                    .clone();
-                let actor_list_datum = player.get_datum(&actor_list_ref);
-                match actor_list_datum {
-                    Datum::List(_, items, _) => items.clone(),
-                    _ => vec![],
+                if let Err(err) = update_result {
+                    player.on_script_error(&err);
                 }
             });
-
-            // Call stepFrame on each actor in the snapshot
-            for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-                // Verify the actor is still in actorList
-                let still_active = reserve_player_ref(|player| {
-                    let actor_list_ref = player
-                        .globals
-                        .get("actorList")
-                        .unwrap_or(&DatumRef::Void)
-                        .clone();
-                    let actor_list_datum = player.get_datum(&actor_list_ref);
-                    match actor_list_datum {
-                        Datum::List(_, items, _) => items.contains(&actor_ref),
-                        _ => false,
-                    }
-                });
-
-                if !still_active {
-                    continue;
-                }
-
-                // Don't catch errors, let them propagate
-                let result =
-                    player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
-
-                // Propagate the error
-                if let Err(err) = result {
-                    web_sys::console::log_1(
-                        &format!("❌ stepFrame[{}] error: {}", idx, err.message).into(),
-                    );
-                    // Stop the frame loop and show the error
-                    reserve_player_mut(|player| {
-                        player.on_script_error(&err);
-                    });
-                    return; // Exit the frame loop
-                }
-            }
         }
 
+        // Get the target frame delay based on cached tempo for current frame
+        let target_delay_ms = reserve_player_ref(|player| {
+            let tempo = player.current_frame_tempo;
+            if tempo == 0 {
+                1000.0 / 30.0  // Default to 30fps if tempo is 0
+            } else {
+                1000.0 / tempo as f64
+            }
+        });
+
+        // Wait for the frame delay using the tempo-based timing
         timeout(
-            Duration::from_millis(1000 / fps as u64),
+            Duration::from_millis(target_delay_ms.ceil() as u64),
             future::pending::<()>(),
         )
         .await
         .unwrap_err();
         player_wait_available().await;
 
+        // Check if enough time has actually passed
+        let now = chrono::Local::now();
+        let elapsed_ms = now
+            .signed_duration_since(last_frame_time)
+            .num_milliseconds() as f64;
+        
+        let should_advance_frame = elapsed_ms >= target_delay_ms;
+
         let mut prev_frame = 0;
         let mut new_frame = 0;
         reserve_player_mut(|player| {
             is_playing = player.is_playing;
             is_script_paused = player.is_script_paused;
-            fps = player.get_fps();
             if !player.is_playing {
                 return;
             }
@@ -1195,6 +1653,48 @@ pub async fn run_frame_loop() {
             }
         });
         if !is_playing {
+            // Movie stopped - send stopMovie event
+            player_wait_available().await;
+            
+            // Relay stopMovie to timeout targets
+            dispatch_system_event_to_timeouts(&"stopMovie".to_string(), &vec![]).await;
+
+            // clear timeouts
+            reserve_player_mut(|player| {
+                player.timeout_manager.clear();
+            });
+
+            player_wait_available().await;
+
+            // Send stopMovie
+            if let Err(err) = player_invoke_global_event(&"stopMovie".to_string(), &vec![]).await {
+                reserve_player_mut(|player| player.on_script_error(&err));
+                return;
+            }
+
+            player_wait_available().await;
+
+            // Send endSprite: Frame behaviors -> Sprite behaviors
+            let ended_sprite_nums = reserve_player_mut_async(|player| {
+                Box::pin(async move {
+                    player.end_all_sprites().await
+                })
+            }).await;
+
+            player_wait_available().await;
+
+            reserve_player_mut(|player| {
+                for (score_source, sprite_num) in ended_sprite_nums.iter() {
+                    // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
+                    if let Some(sprite) =
+                        get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
+                    {
+                        sprite.exited = true;
+                    }
+                }
+            });
+
+            player_wait_available().await;
             return;
         }
         if new_frame > 1 && prev_frame <= 1 {
@@ -1212,34 +1712,193 @@ pub async fn run_frame_loop() {
                     .await;
             }
         }
-        if !is_script_paused {
-            let frame_skipped =
-                reserve_player_ref(|player| player.next_frame.is_some() || !player.is_playing);
-            if !frame_skipped {
-                player_unwrap_result(
-                    player_invoke_global_event(&"exitFrame".to_string(), &vec![]).await,
-                );
-            }
-            let ended_sprite_nums = reserve_player_mut(|player| {
-                let next_frame = player.get_next_frame(); // an exitFrame handler may have changed the next frame
-                                                          // player.movie.score.end_sprites(prev_frame, next_frame)
-                player.end_all_sprites()
-            });
+
+        // Only advance frame if enough time has passed AND not paused
+        if should_advance_frame && !is_script_paused {
+            let (has_player_frame_changed, has_frame_changed_in_go, go_direction) =
+                reserve_player_ref(|player| {
+                    (
+                        player.has_player_frame_changed,
+                        player.has_frame_changed_in_go,
+                        player.go_direction
+                    )
+                });
+
             player_wait_available().await;
+
+            // Relay exitFrame to timeout targets
+            dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
+
+            if has_player_frame_changed {
+                player_wait_available().await;
+
+                if has_frame_changed_in_go && go_direction == 1 { // backwards
+                    dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
+                } else {
+                    player_invoke_frame_and_movie_scripts(&"exitFrame".to_string(), &vec![]).await;
+                }
+
+                player_wait_available().await;
+
+                if has_frame_changed_in_go {
+                    reserve_player_mut(|player| {
+                        player.has_frame_changed_in_go = false;
+
+                        if player.go_direction > 0 {
+                            player.go_direction = 0;
+                        }
+                    });
+                }
+
+                let ended_sprite_nums = reserve_player_mut_async(|player| {
+                    Box::pin(async move {
+                        player.end_all_sprites().await
+                    })
+                }).await;
+                player_wait_available().await;
+                reserve_player_mut(|player| {
+                    for (score_source, sprite_num) in ended_sprite_nums.iter() {
+                        // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
+                        if let Some(sprite) =
+                            get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
+                        {
+                            sprite.exited = true;
+                        }
+                    }
+                });
+
+                (is_playing, is_script_paused) = reserve_player_mut(|player| {
+                    player.advance_frame();
+
+                    player.has_player_frame_changed = false;
+                    (player.is_playing, player.is_script_paused)
+                });
+            } else {
+                player_wait_available().await;
+
+                dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
+
+                player_wait_available().await;
+
+                let has_frame_changed = reserve_player_ref(|player| player.has_frame_changed_in_go);
+
+                if !has_frame_changed {
+                    let ended_sprite_nums = reserve_player_mut_async(|player| {
+                        Box::pin(async move {
+                            player.end_all_sprites().await
+                        })
+                    }).await;
+                    player_wait_available().await;
+                    reserve_player_mut(|player| {
+                        for (score_source, sprite_num) in ended_sprite_nums.iter() {
+                            // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
+                            if let Some(sprite) =
+                                get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
+                            {
+                                sprite.exited = true;
+                            }
+                        }
+                    });
+
+                    (is_playing, is_script_paused) = reserve_player_mut(|player| {
+                        player.advance_frame();
+
+                        player.has_player_frame_changed = false;
+                        (player.is_playing, player.is_script_paused)
+                    });
+                } else {
+                    reserve_player_mut(|player| {
+                        player.has_frame_changed_in_go = false;
+                    });
+                }
+
+                player_wait_available().await;
+            }
+
+            player_wait_available().await;
+
             reserve_player_mut(|player| {
-                for (score_source, sprite_num) in ended_sprite_nums.iter() {
-                    // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
-                    if let Some(sprite) =
-                        get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
-                    {
-                        sprite.exited = true;
+                player.movie.frame_script_instance = None;
+                player.begin_all_sprites();
+
+                player.movie.score.apply_tween_modifiers(player.movie.current_frame);
+            });
+
+            player_wait_available().await;
+
+            // Collect behaviors that need initialization
+            let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
+                player
+                    .movie
+                    .score
+                    .channels
+                    .iter()
+                    .flat_map(|ch| {
+                        let sprite_num = ch.sprite.number as u32;
+                        ch.sprite.script_instance_list
+                            .iter()
+                            .filter(|behavior_ref| {
+                                // ONLY initialize behaviors that haven't had beginSprite called
+                                // This means they're NEW this frame
+                                if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
+                                    !entry.script_instance.begin_sprite_called
+                                } else {
+                                    false
+                                }
+                            })
+                            .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
+                    })
+                    .collect()
+            });
+            
+            // Initialize behavior default properties
+            for (behavior_ref, sprite_num) in behaviors_to_init {
+                if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
+                    web_sys::console::warn_1(
+                        &format!("Failed to initialize behavior defaults: {}", err.message).into()
+                    );
+                }
+            }
+
+            player_wait_available().await;
+
+            reserve_player_mut(|player| {
+                player.is_in_frame_update = true;
+            });
+
+            let begin_sprite_nums = player_dispatch_event_beginsprite(
+                &"beginSprite".to_string(),
+                &vec![]
+            ).await;
+
+            player_wait_available().await;
+
+            reserve_player_mut(|player| {
+                for sprite_list in begin_sprite_nums.iter() {
+                    for (score_source, sprite_num) in sprite_list.iter() {
+                        if let Some(sprite) = get_score_sprite_mut(
+                            &mut player.movie,
+                            score_source,
+                            *sprite_num as i16,
+                        ) {
+                            for script_ref in &sprite.script_instance_list {
+                                if let Some(entry) =
+                                    player.allocator.script_instances.get_mut(&script_ref.id())
+                                {
+                                    entry.script_instance.begin_sprite_called = true;
+                                }
+                            }
+                        }
                     }
                 }
             });
-            (is_playing, is_script_paused) = reserve_player_mut(|player| {
-                player.advance_frame();
-                (player.is_playing, player.is_script_paused)
+
+            reserve_player_mut(|player| {
+                player.is_in_frame_update = false;
             });
+
+            // Update last frame time
+            last_frame_time = now;
         };
     }
 }
@@ -1368,11 +2027,15 @@ async fn player_ext_call<'a>(
     args: &Vec<DatumRef>,
     scope_ref: ScopeRef,
 ) -> (HandlerExecutionResult, DatumRef) {
+    // Track handler depth
+    reserve_player_mut(|player| {
+        player.handler_stack_depth += 1;
+    });
     // let formatted_args: Vec<String> = reserve_player_ref(|player| {
     //   args.iter().map(|datum_ref| format_datum(*datum_ref, player)).collect()
     // });
     // warn!("ext_call: {name}({})", formatted_args.join(", "));
-    match name.as_str() {
+    let result = match name.as_str() {
         "return" => {
             let return_value = if let Some(return_value) = args.first() {
                 reserve_player_mut(|player| {
@@ -1399,7 +2062,14 @@ async fn player_ext_call<'a>(
                 Err(err) => (HandlerExecutionResult::Error(err), DatumRef::Void),
             }
         }
-    }
+    };
+    
+    // Always decrement handler depth before returning
+    reserve_player_mut(|player| {
+        player.handler_stack_depth -= 1;
+    });
+    
+    result
 }
 
 fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {

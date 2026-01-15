@@ -1,11 +1,13 @@
 use async_std::channel::Receiver;
-use log::warn;
+use log::{warn, debug};
+use std::collections::HashSet;
 
 use crate::{
     console_warn,
     director::lingo::datum::{Datum, VarRef},
     player::{
         handlers::datum_handlers::player_call_datum_handler, player_is_playing, reserve_player_mut,
+        Score,
     },
 };
 
@@ -13,6 +15,7 @@ use super::{
     cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils,
     player_call_script_handler, player_semaphone, reserve_player_ref, script::ScriptInstanceId,
     script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX,
+    score::ScoreRef,
 };
 
 pub enum PlayerVMEvent {
@@ -85,13 +88,39 @@ pub fn player_dispatch_event_to_sprite(
     .unwrap();
 }
 
+pub async fn player_dispatch_event_to_sprite_targeted(
+    handler_name: &String,
+    args: &Vec<DatumRef>,
+    sprite_num: u16,
+) {
+    let instance_ids = reserve_player_ref(|player| {
+        player
+            .movie
+            .score
+            .get_sprite(sprite_num as i16)
+            .map(|sprite| sprite.script_instance_list.clone())
+    });
+    let Some(instance_ids) = instance_ids else {
+        return;
+    };
+
+    player_wait_available().await;
+
+     for instance_id in instance_ids {
+        player_invoke_targeted_event(
+            handler_name,
+            args,
+            Some(&vec![instance_id].as_ref()),
+        ).await;
+    }
+}
+
 pub async fn player_invoke_event_to_instances(
     handler_name: &String,
     args: &Vec<DatumRef>,
     instance_refs: &Vec<ScriptInstanceRef>,
 ) -> Result<bool, ScriptError> {
     let recv_instance_handlers = reserve_player_ref(|player| {
-        // let receiver_refs = get_active_scripts(&player.movie, &player.get_hydrated_globals());
         let mut result = vec![];
         for instance_ref in instance_refs {
             let handler_pair = ScriptInstanceUtils::get_script_instance_handler(
@@ -105,23 +134,38 @@ pub async fn player_invoke_event_to_instances(
         }
         Ok(result)
     })?;
+    
     let mut handled = false;
     for (script_instance_ref, handler_ref) in recv_instance_handlers {
-        let scope =
-            player_call_script_handler(Some(script_instance_ref), handler_ref, args).await?;
-        if !scope.passed {
-            handled = true;
-            break;
+        match player_call_script_handler(Some(script_instance_ref), handler_ref, args).await {
+            Ok(scope) => {
+                if !scope.passed {
+                    handled = true;
+                    break;
+                }
+            }
+            Err(err) => {
+                // Log the error to console
+                web_sys::console::error_1(
+                    &format!("⚠ Error in handler '{}': {}", handler_name, err.message).into()
+                );
+                // Report to player's error handler
+                reserve_player_mut(|player| {
+                    player.on_script_error(&err);
+                });
+                // Return the error to caller
+                return Err(err);
+            }
         }
     }
-
+    
     Ok(handled)
 }
 
-pub async fn player_invoke_static_event(
+pub async fn player_invoke_frame_and_movie_scripts(
     handler_name: &String,
     args: &Vec<DatumRef>,
-) -> Result<bool, ScriptError> {
+) -> Result<DatumRef, ScriptError> {
     let active_static_scripts = reserve_player_mut(|player| {
         let frame_script = player
             .movie
@@ -131,6 +175,8 @@ pub async fn player_invoke_static_event(
         let movie_scripts = movie_scripts.as_ref().unwrap();
 
         let mut active_static_scripts: Vec<CastMemberRef> = vec![];
+        
+        // Frame script first
         if let Some(frame_script) = frame_script {
             let script_ref = CastMemberRef {
                 cast_lib: frame_script.cast_lib.into(),
@@ -138,13 +184,15 @@ pub async fn player_invoke_static_event(
             };
             active_static_scripts.push(script_ref);
         }
+        
+        // Then movie scripts
         for movie_script in movie_scripts {
             active_static_scripts.push(movie_script.member_ref.to_owned());
         }
+        
         active_static_scripts
     });
 
-    let mut handled = false;
     for script_member_ref in active_static_scripts {
         let has_handler = reserve_player_ref(|player| {
             let script = player
@@ -157,15 +205,27 @@ pub async fn player_invoke_static_event(
         if !has_handler {
             continue;
         }
-        let result =
-            player_call_script_handler(None, (script_member_ref, handler_name.to_owned()), args)
-                .await?;
+        
+        // NEW: Check if this is the frame script
+        let receiver = reserve_player_ref(|player| {
+            if player.movie.frame_script_member.as_ref() == Some(&script_member_ref) {
+                player.movie.frame_script_instance.clone()
+            } else {
+                None
+            }
+        });
+        
+        let result = player_call_script_handler(
+            receiver,  // Changed from None to receiver
+            (script_member_ref, handler_name.to_owned()),
+            args
+        ).await?;
+        
         if !result.passed {
-            handled = true;
             break;
         }
     }
-    Ok(handled)
+    Ok(DatumRef::Void)
 }
 
 pub async fn player_invoke_targeted_event(
@@ -183,6 +243,68 @@ pub async fn player_invoke_targeted_event(
         player_invoke_static_event(handler_name, args).await?;
     }
     Ok(DatumRef::Void)
+}
+
+pub async fn player_invoke_static_event(
+    handler_name: &String,
+    args: &Vec<DatumRef>,
+) -> Result<bool, ScriptError> {
+    let active_static_scripts = reserve_player_mut(|player| {
+        let frame_script = player
+            .movie
+            .score
+            .get_script_in_frame(player.movie.current_frame);
+        let movie_scripts = player.movie.cast_manager.get_movie_scripts();
+        let movie_scripts = movie_scripts.as_ref().unwrap();
+        let mut active_static_scripts: Vec<CastMemberRef> = vec![];
+        if let Some(frame_script) = frame_script {
+            let script_ref = CastMemberRef {
+                cast_lib: frame_script.cast_lib.into(),
+                cast_member: frame_script.cast_member.into(),
+            };
+            active_static_scripts.push(script_ref);
+        }
+        for movie_script in movie_scripts {
+            active_static_scripts.push(movie_script.member_ref.to_owned());
+        }
+        active_static_scripts
+    });
+    
+    let mut handled = false;
+    for script_member_ref in active_static_scripts {
+        let has_handler = reserve_player_ref(|player| {
+            let script = player
+                .movie
+                .cast_manager
+                .get_script_by_ref(&script_member_ref);
+            let handler = script.and_then(|x| x.get_handler(handler_name));
+            handler.is_some()
+        });
+        if !has_handler {
+            continue;
+        }
+        
+        // NEW: Check if this is the frame script
+        let receiver = reserve_player_ref(|player| {
+            if player.movie.frame_script_member.as_ref() == Some(&script_member_ref) {
+                player.movie.frame_script_instance.clone()
+            } else {
+                None
+            }
+        });
+        
+        let result = player_call_script_handler(
+            receiver,  // Changed from None to receiver
+            (script_member_ref, handler_name.to_owned()),
+            args
+        ).await?;
+        
+        if !result.passed {
+            handled = true;
+            break;
+        }
+    }
+    Ok(handled)
 }
 
 pub async fn player_invoke_global_event(
@@ -262,6 +384,248 @@ pub fn player_unwrap_result(result: Result<DatumRef, ScriptError>) -> DatumRef {
     }
 }
 
+pub async fn player_dispatch_event_beginsprite(
+    handler_name: &String,
+    args: &Vec<DatumRef>
+) -> Result<Vec<(ScoreRef, u32)>, ScriptError> {
+    let (mut sprite_instances, mut frame_instances, all_channels) = 
+        reserve_player_mut(|player| {
+            let mut sprite_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
+            let mut frame_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
+            let mut all_channels = Vec::new();
+            
+            let active_channel_numbers: HashSet<u32> = player.movie.score.sprite_spans
+                .iter()
+                .filter(|span| Score::is_span_in_frame(span, player.movie.current_frame))
+                .map(|span| span.channel_number as u32)
+                .collect();
+          
+            let filtered_channels: Vec<_> = player.movie.score.channels.iter()
+                .filter(|channel| !channel.sprite.script_instance_list.is_empty())
+                .filter(|channel| channel.sprite.entered)
+                .filter(|channel| active_channel_numbers.contains(&(channel.number as u32)))
+                .filter(|channel| {
+                    channel.sprite.script_instance_list.iter().all(|script_ref| {
+                        player
+                            .allocator
+                            .script_instances
+                            .get(&script_ref.id())
+                            .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
+                    })
+                })
+                .collect();
+                
+            for channel in filtered_channels {
+                let instances = channel.sprite.script_instance_list.clone();
+                
+                if channel.number == 0 {
+                    // Frame behavior (channel 0)
+                    frame_instances.extend(
+                        instances.into_iter().map(|inst| (channel.number, inst))
+                    );
+                } else {
+                    // Sprite behaviors (channel > 0)
+                    sprite_instances.extend(
+                        instances.into_iter().map(|inst| (channel.number, inst))
+                    );
+                }
+                
+                all_channels.push((ScoreRef::Stage, channel.number as u32));
+            }
+            (sprite_instances, frame_instances, all_channels)
+        });
+    
+    if sprite_instances.is_empty() && frame_instances.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    if frame_instances.len() > 0 {
+        let _ = player_invoke_frame_and_movie_scripts(
+            handler_name,
+            args,
+        )
+        .await;
+    }
+    
+    // Dispatch to sprite behaviors (number > 0)
+    for (sprite_number, behavior) in sprite_instances {
+        let receivers = vec![behavior.clone()];
+        if let Err(err) = player_invoke_targeted_event(handler_name, args, Some(receivers).as_ref()).await {
+            web_sys::console::error_1(
+                &format!("Error in {} for sprite {}: {}", handler_name, sprite_number, err.message).into()
+            );
+            reserve_player_mut(|player| {
+                player.on_script_error(&err);
+            });
+        }
+    }
+    Ok(all_channels)
+}
+
+pub async fn dispatch_event_endsprite(sprite_nums: Vec<u32>) {
+    let (sprite_tuple, frame_tuple) =
+        reserve_player_mut(|player| {
+            let mut sprite_tuple = Vec::new();
+            let mut frame_tuple = Vec::new();
+
+            for channel in player.movie.score.channels.iter() {
+                // Skip if channel is not active in current frame (for sprite channels)
+                if !sprite_nums.contains(&(channel.number as u32)) {
+                    continue;
+                }
+
+                // Skip channels with no sprite instances
+                if channel.sprite.script_instance_list.is_empty() {
+                    continue;
+                }
+
+                let entry = (
+                    channel.sprite.number as u16,
+                    channel.sprite.script_instance_list.clone(),
+                );
+
+                if channel.number > 0 {
+                    // Sprite channels (only those active in current frame)
+                    sprite_tuple.push(entry);
+                } else {
+                    // Frame channel (number == 0, always included)
+                    frame_tuple.push(entry);
+                }
+            }
+
+            (sprite_tuple, frame_tuple)
+        });
+
+    // Dispatch to frame behaviors first (number == 0)
+    if frame_tuple.len() > 0 {
+        let _ = player_invoke_frame_and_movie_scripts(&"endSprite".to_string(), &vec![]).await;
+    }
+
+    // Dispatch to sprite behaviors (number > 0)
+    for (sprite_num, behaviors) in sprite_tuple {
+        for behavior in behaviors {
+            let receivers = vec![behavior.clone()];
+
+            if let Err(err) = player_invoke_event_to_instances(
+                    &"endSprite".to_string(), &vec![], &receivers
+                ).await {
+                web_sys::console::error_1(
+                    &format!("Error in endSprite for sprite {}: {}", sprite_num, err.message).into()
+                );
+                reserve_player_mut(|player| {
+                    player.on_script_error(&err);
+                });
+            }
+        }
+    }
+}
+
+pub async fn dispatch_event_to_all_behaviors(
+    handler_name: &String,
+    args: &Vec<DatumRef>,
+) {
+    use crate::player::allocator::ScriptInstanceAllocatorTrait;
+    use crate::js_api::ascii_safe;
+    // Skip event dispatch if we're initializing behavior properties
+    let skip = reserve_player_mut(|player| {
+        if player.is_initializing_behavior_props {
+            web_sys::console::warn_1(&format!(
+                "Blocking event '{}' during property initialization", 
+                handler_name
+            ).into());
+        }
+        player.is_initializing_behavior_props
+    });
+    
+    if skip {
+        return;
+    }
+    let (sprite_behaviors, frame_behaviors) = reserve_player_mut(|player| {
+        let mut sprites = Vec::new();
+        let mut frames = Vec::new();
+        let active_channel_numbers: HashSet<u32> = player.movie.score.sprite_spans
+            .iter()
+            .filter(|span| Score::is_span_in_frame(span, player.movie.current_frame))
+            .map(|span| span.channel_number as u32)
+            .collect();
+        for channel in player.movie.score.channels.iter() {            
+            if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered ||
+                !active_channel_numbers.contains(&(channel.number as u32)) {
+                continue;
+            }
+            let behaviors = channel.sprite.script_instance_list.clone();
+            if channel.number > 0 {
+                sprites.push((channel.number, behaviors));  // Store tuple with channel number
+            } else if channel.number == 0 {
+                frames.push((channel.number, behaviors));  // Store tuple with channel number
+            } 
+        }
+        (sprites, frames)
+    });
+    // Dispatch to sprite behaviors first (channel order)
+    for (sprite_number, behaviors) in sprite_behaviors {
+        for behavior in behaviors {
+            let (script_name, instance_id, scope_count) = reserve_player_ref(|player| {
+                let script_instance = player.allocator.get_script_instance(&behavior);
+                let name = player.movie.cast_manager
+                    .get_script_by_ref(&script_instance.script)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                (name, script_instance.instance_id, player.scope_count)
+            });
+            debug!(
+                "Invoking '{}' on sprite {} behavior '{}' (instance #{}) scope_count {}", 
+                handler_name,
+                sprite_number,
+                ascii_safe(&script_name.to_string()),
+                instance_id,
+                scope_count
+            );
+            let receivers = vec![behavior.clone()];
+
+            if let Err(err) = player_invoke_event_to_instances(handler_name, args, &receivers).await {
+                web_sys::console::error_1(
+                    &format!("Error in {} for sprite {}: {}", handler_name, sprite_number, err.message).into()
+                );
+                reserve_player_mut(|player| {
+                    player.on_script_error(&err);
+                });
+            }
+        }
+    }
+    // Dispatch event to frame/movie scripts
+    let _ = player_invoke_frame_and_movie_scripts(handler_name, args).await;
+}
+
 pub async fn player_wait_available() {
     player_semaphone().lock().await;
+}
+
+/// Dispatch system events to all timeout targets
+/// System events include: prepareMovie, startMovie, stopMovie, prepareFrame, exitFrame
+pub async fn dispatch_system_event_to_timeouts(
+    handler_name: &String,
+    args: &Vec<DatumRef>,
+) {
+    // Get all timeout targets that are currently scheduled
+    let timeout_targets = reserve_player_ref(|player| {
+        let mut targets = Vec::new();
+        for (_timeout_name, timeout) in player.timeout_manager.timeouts.iter() {
+            if timeout.is_scheduled {
+                targets.push(timeout.target_ref.clone());
+            }
+        }
+        targets
+    });
+
+    // Dispatch the event to each timeout target
+    for target_ref in timeout_targets {
+        let result = player_call_datum_handler(&target_ref, handler_name, args).await;
+        if let Err(err) = result {
+            // Log error but continue with other timeouts
+            web_sys::console::error_1(
+                &format!("⚠ Timeout system event {} error: {}", handler_name, err.message
+            ).into());
+        }
+    }
 }
