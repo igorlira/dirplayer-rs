@@ -238,7 +238,7 @@ pub fn make_chunk(
                 &mut chunk_reader,
             )?))
         }
-        "snd " => return Ok(Chunk::Sound(SoundChunk::from_snd_chunk(&mut chunk_reader)?)),
+        "snd " => return Ok(Chunk::Sound(SoundChunk::from_snd_chunk(&mut chunk_reader, version)?)),
         "STXT" => return Ok(Chunk::Text(TextChunk::read(&mut chunk_reader)?)),
         "BITD" => {
             return Ok(Chunk::Bitmap(BitmapChunk::read(

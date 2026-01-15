@@ -859,7 +859,7 @@ fn get_chunk_data(
                         chunk_reader.endian = Endian::Big;
 
                         // Try to parse into a SoundChunk (your code)
-                        match SoundChunk::from_snd_chunk(&mut chunk_reader) {
+                        match SoundChunk::from_snd_chunk(&mut chunk_reader, 0) {
                             Ok(sound_chunk) => {
                                 let wav_bytes = sound_chunk.to_wav(); // convert to usable PCM
                                 chunk_container

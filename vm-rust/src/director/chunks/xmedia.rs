@@ -188,7 +188,7 @@ impl XMediaChunk {
         let grid_rows = 8u8;
 
         // Calculate expected data size
-        let bytes_per_row = ((char_width as usize + 7) / 8);
+        let bytes_per_row = (char_width as usize + 7) / 8;
         let bytes_per_glyph = bytes_per_row * char_height as usize;
         let total_glyphs = grid_columns as usize * grid_rows as usize;
         let expected_bitmap_bytes = bytes_per_glyph * total_glyphs;

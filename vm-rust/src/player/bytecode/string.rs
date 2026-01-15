@@ -38,7 +38,6 @@ impl StringBytecodeHandler {
             Datum::String(s) => Ok(s.clone()),
             Datum::StringChunk(..) => datum.string_value(),
             Datum::Int(i) => Ok(i.to_string()),
-            Datum::Float(f) => Ok(f.to_string()), // TODO how to format this?
             Datum::Symbol(s) => Ok(s.to_string()),
             Datum::Void => Ok("".to_string()),
             _ => Ok(format_concrete_datum(datum, &player)),
@@ -237,20 +236,8 @@ impl StringBytecodeHandler {
         })
     }
 
-    fn read_chunk_ref(
-        player: &mut DirPlayer,
-        ctx: &BytecodeHandlerContext,
-    ) -> Result<StringChunkExpr, ScriptError> {
-        let (
-            last_line,
-            first_line,
-            last_item,
-            first_item,
-            last_word,
-            first_word,
-            last_char,
-            first_char,
-        ) = {
+    fn read_single_chunk_ref(player: &mut DirPlayer, ctx: &BytecodeHandlerContext) -> Result<StringChunkExpr, ScriptError> {
+        let (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char) = {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             let last_line = scope.stack.pop().unwrap();
             let first_line = scope.stack.pop().unwrap();
@@ -260,11 +247,9 @@ impl StringBytecodeHandler {
             let first_word = scope.stack.pop().unwrap();
             let last_char = scope.stack.pop().unwrap();
             let first_char = scope.stack.pop().unwrap();
-            (
-                last_line, first_line, last_item, first_item, last_word, first_word, last_char,
-                first_char,
-            )
+            (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char)
         };
+        
         let last_line = player.get_datum(&last_line).int_value()?;
         let first_line = player.get_datum(&first_line).int_value()?;
         let last_item = player.get_datum(&last_item).int_value()?;
@@ -273,7 +258,7 @@ impl StringBytecodeHandler {
         let first_word = player.get_datum(&first_word).int_value()?;
         let last_char = player.get_datum(&last_char).int_value()?;
         let first_char = player.get_datum(&first_char).int_value()?;
-
+        
         if first_line != 0 || last_line != 0 {
             Ok(StringChunkExpr {
                 chunk_type: StringChunkType::Line,
@@ -303,25 +288,94 @@ impl StringBytecodeHandler {
                 item_delimiter: player.movie.item_delimiter.to_owned(),
             })
         } else {
-            Err(ScriptError::new(
-                "getChunk: invalid chunk range".to_string(),
-            ))
+            Err(ScriptError::new("getChunk: invalid chunk range".to_string()))
         }
+    }
+
+    fn read_all_chunks(player: &mut DirPlayer,ctx: &BytecodeHandlerContext) -> Result<Vec<StringChunkExpr>, ScriptError> {
+        let (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char) = {
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let last_line = scope.stack.pop().unwrap();
+            let first_line = scope.stack.pop().unwrap();
+            let last_item = scope.stack.pop().unwrap();
+            let first_item = scope.stack.pop().unwrap();
+            let last_word = scope.stack.pop().unwrap();
+            let first_word = scope.stack.pop().unwrap();
+            let last_char = scope.stack.pop().unwrap();
+            let first_char = scope.stack.pop().unwrap();
+            (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char)
+        };
+        
+        let last_line = player.get_datum(&last_line).int_value()?;
+        let first_line = player.get_datum(&first_line).int_value()?;
+        let last_item = player.get_datum(&last_item).int_value()?;
+        let first_item = player.get_datum(&first_item).int_value()?;
+        let last_word = player.get_datum(&last_word).int_value()?;
+        let first_word = player.get_datum(&first_word).int_value()?;
+        let last_char = player.get_datum(&last_char).int_value()?;
+        let first_char = player.get_datum(&first_char).int_value()?;
+        
+        let mut chunks = Vec::new();
+        
+        // Add chunks in the order they should be applied
+        if first_line != 0 || last_line != 0 {
+            chunks.push(StringChunkExpr {
+                chunk_type: StringChunkType::Line,
+                start: first_line,
+                end: last_line,
+                item_delimiter: player.movie.item_delimiter.to_owned(),
+            });
+        }
+        if first_item != 0 || last_item != 0 {
+            chunks.push(StringChunkExpr {
+                chunk_type: StringChunkType::Item,
+                start: first_item,
+                end: last_item,
+                item_delimiter: player.movie.item_delimiter.to_owned(),
+            });
+        }
+        if first_word != 0 || last_word != 0 {
+            chunks.push(StringChunkExpr {
+                chunk_type: StringChunkType::Word,
+                start: first_word,
+                end: last_word,
+                item_delimiter: player.movie.item_delimiter.to_owned(),
+            });
+        }
+        if first_char != 0 || last_char != 0 {
+            chunks.push(StringChunkExpr {
+                chunk_type: StringChunkType::Char,
+                start: first_char,
+                end: last_char,
+                item_delimiter: player.movie.item_delimiter.to_owned(),
+            });
+        }
+        
+        if chunks.is_empty() {
+            return Err(ScriptError::new("getChunk: no valid chunks specified".to_string()));
+        }
+        
+        Ok(chunks)
     }
 
     pub fn get_chunk(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let string = {
+            let string_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.pop().unwrap()
             };
-            let chunk_expr = Self::read_chunk_ref(player, ctx)?;
-            let string_value = player.get_datum(&string).string_value()?;
-            let resolved_str =
-                StringChunkUtils::resolve_chunk_expr_string(&string_value, &chunk_expr)?;
-
-            let result = Datum::String(resolved_str);
-            let result_ref = player.alloc_datum(result);
+            
+            // Read all chunk parameters
+            let chunks = Self::read_all_chunks(player, ctx)?;
+            
+            // Apply chunks sequentially
+            let mut result = player.get_datum(&string_ref).string_value()?;
+            for chunk_expr in chunks {
+                result = StringChunkUtils::resolve_chunk_expr_string(&result, &chunk_expr)?;
+            }
+            
+            let result_datum = Datum::String(result);
+            let result_ref = player.alloc_datum(result_datum);
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_ref);
             Ok(HandlerExecutionResult::Advance)
@@ -343,7 +397,7 @@ impl StringBytecodeHandler {
                 ctx,
             )?;
             // let string = player.get_datum(string_ref);
-            let chunk_expr = Self::read_chunk_ref(player, ctx)?;
+            let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
 
             StringChunkUtils::delete(player, &StringChunkSource::Datum(string_ref), &chunk_expr)?;
 
@@ -392,7 +446,7 @@ impl StringBytecodeHandler {
             };
             
             // Read the chunk expression from the stack
-            let chunk_expr = Self::read_chunk_ref(player, ctx)?;
+            let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
             
             // Get the current value of the variable
             let string_ref = player_get_context_var(

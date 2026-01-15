@@ -1,4 +1,4 @@
-use log::warn;
+use log::{warn, debug};
 
 use crate::{
     director::lingo::datum::Datum,
@@ -75,20 +75,20 @@ impl CastMemberRefHandlers {
                         .unwrap();
                     let text_data = cast_member.member_type.as_text().unwrap();
                     let char_pos = player.get_datum(&args[0]).int_value()? as u16;
-                    let char_width: u16 = 7; // TODO: Implement char width
-                    let line_height = get_text_member_line_height(&text_data);
-                    let result = if text_data.text.is_empty() || char_pos <= 0 {
-                        Datum::IntPoint((0, 0))
+                    let char_width: i32 = 7;
+                    let line_height: i32 = get_text_member_line_height(&text_data) as i32;
+
+                    let (x, y) = if text_data.text.is_empty() || char_pos <= 0 {
+                        (0, 0)
                     } else if char_pos > text_data.text.len() as u16 {
-                        Datum::IntPoint((
-                            (char_width * (text_data.text.len() as u16)) as i32,
-                            line_height as i32,
-                        ))
+                        (char_width * text_data.text.len() as i32, line_height)
                     } else {
-                        Datum::IntPoint(((char_width * (char_pos - 1)) as i32, line_height as i32))
+                        (char_width * (char_pos - 1) as i32, line_height)
                     };
-                    // TODO this is a stub!
-                    Ok(player.alloc_datum(result))
+
+                    let x_ref = player.alloc_datum(Datum::Int(x));
+                    let y_ref = player.alloc_datum(Datum::Int(y));
+                    Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
                 })
             }
             "getProp" => {
@@ -112,6 +112,49 @@ impl CastMemberRefHandlers {
                 } else {
                     Ok(result_ref)
                 }
+            }
+            "count" => {
+                reserve_player_mut(|player| {
+                    let cast_member_ref = match player.get_datum(datum) {
+                        Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
+                        _ => {
+                            return Err(ScriptError::new(
+                                "Cannot call count on non-cast-member".to_string(),
+                            ))
+                        }
+                    };
+                    
+                    if args.is_empty() {
+                        return Err(ScriptError::new("count requires 1 argument".to_string()));
+                    }
+                    
+                    let count_of = player.get_datum(&args[0]).string_value()?;
+                    
+                    // Try to get the member's text
+                    // First try "text" property, then fallback to "previewText" for Font members
+                    let text = match Self::get_prop(player, &cast_member_ref, &"text".to_string()) {
+                        Ok(datum) => datum.string_value()?,
+                        Err(_) => {
+                            // Try previewText for Font members
+                            match Self::get_prop(player, &cast_member_ref, &"previewText".to_string()) {
+                                Ok(datum) => datum.string_value()?,
+                                Err(_) => {
+                                    return Err(ScriptError::new(format!(
+                                        "Member type does not support count operation"
+                                    )));
+                                }
+                            }
+                        }
+                    };
+                    
+                    let delimiter = player.movie.item_delimiter;
+                    let count = crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils::resolve_chunk_count(
+                        &text,
+                        crate::director::lingo::datum::StringChunkType::from(&count_of),
+                        delimiter,
+                    )?;
+                    Ok(player.alloc_datum(Datum::Int(count as i32)))
+                })
             }
             _ => Self::call_member_type(datum, handler_name, args),
         }
@@ -209,7 +252,7 @@ impl CastMemberRefHandlers {
     }
 
     fn get_invalid_member_prop(
-        _: &DirPlayer,
+        player: &mut DirPlayer,
         member_ref: &CastMemberRef,
         prop: &String,
     ) -> Result<Datum, ScriptError> {
@@ -218,11 +261,13 @@ impl CastMemberRefHandlers {
             "number" => Ok(Datum::Int(-1)),
             "type" => Ok(Datum::String("empty".to_string())),
             "castLibNum" => Ok(Datum::Int(-1)),
-            "width" => Ok(Datum::Void),
-            "height" => Ok(Datum::Void),
-            "rect" => Ok(Datum::Void),
-            "duration" => Ok(Datum::Void),
             "memberNum" => Ok(Datum::Int(-1)),
+            "width" | "height" | "rect" | "duration" => Ok(Datum::Void),
+            "image" => Ok(Datum::Void),
+            "regPoint" => Ok(Datum::Point([
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(0)),
+            ])),
             _ => Err(ScriptError::new(format!(
                 "Cannot get prop {} of invalid cast member ({}, {})",
                 prop, member_ref.cast_lib, member_ref.cast_member
@@ -236,6 +281,7 @@ impl CastMemberRefHandlers {
         member_type: &CastMemberTypeId,
         prop: &String,
     ) -> Result<Datum, ScriptError> {
+        debug!("Getting prop '{}' for member type {:?}", prop, member_type);
         match &member_type {
             CastMemberTypeId::Bitmap => {
                 BitmapMemberHandlers::get_prop(player, cast_member_ref, prop)
@@ -247,6 +293,25 @@ impl CastMemberRefHandlers {
             }
             CastMemberTypeId::Sound => SoundMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Font => FontMemberHandlers::get_prop(player, cast_member_ref, prop),
+            CastMemberTypeId::Script => {
+                if prop == "text" {
+                    let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                        .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+                    
+                    if let CastMemberType::Script(script_data) = &cast_member.member_type {
+                        // Scripts in Director typically don't have editable text
+                        // This member might be misclassified
+                        web_sys::console::log_1(&format!("⚠️ Trying to get .text from Script member #{}", cast_member.number).into());
+                        
+                        // Return empty string for now, but this suggests the member type is wrong
+                        Ok(Datum::String("".to_string()))
+                    } else {
+                        Err(ScriptError::new("Script member has no text".to_string()))
+                    }
+                } else {
+                    Err(ScriptError::new(format!("Script members don't support property {}", prop)))
+                }
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember prop {} for member of type {:?}",
                 prop, member_type
