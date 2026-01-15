@@ -6,9 +6,9 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     director::{
-        chunks::{script::ScriptChunk, ChunkContainer},
+        chunks::{script::ScriptChunk, ChunkContainer, score::ScoreFrameChannelData},
         enums::ScriptType,
-        file::DirectorFile,
+        file::{DirectorFile, get_variable_multiplier},
         lingo::{datum::Datum, script::ScriptContext},
         utils::fourcc_to_string,
     },
@@ -17,7 +17,7 @@ use crate::{
         bitmap::bitmap::PaletteRef,
         cast_lib::CastMemberRef,
         cast_member::{CastMember, CastMemberType, ScriptMember},
-        datum_formatting::{format_concrete_datum, format_datum},
+        datum_formatting::{format_concrete_datum, format_datum, format_float_with_precision, format_numeric_value},
         datum_ref::{DatumId, DatumRef},
         handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
         reserve_player_ref,
@@ -25,10 +25,28 @@ use crate::{
         score::Score,
         script::ScriptInstanceId,
         script_ref::ScriptInstanceRef,
-        DirPlayer, ScriptError, PLAYER_OPT,
+        DirPlayer, ScriptError, PLAYER_OPT, sprite::{ColorRef, CursorRef},
     },
     rendering::RENDERER_LOCK,
 };
+
+#[derive(Clone)]
+pub struct ScoreSpriteSpan {
+    pub channel_number: u16,
+    pub start_frame: u32,
+    pub end_frame: u32,
+    pub member_ref: [u16; 2], // [cast_lib, cast_member]
+}
+
+impl ToJsValue for ScoreSpriteSpan {
+    fn to_js_value(&self) -> JsValue {
+        let span_map = js_sys::Map::new();
+        span_map.str_set("startFrame", &self.start_frame.to_js_value());
+        span_map.str_set("endFrame", &self.end_frame.to_js_value());
+        span_map.str_set("channelNumber", &self.channel_number.to_js_value());
+        span_map.to_js_object().into()
+    }
+}
 
 pub fn ascii_safe(string: &str) -> String {
     string
@@ -200,6 +218,7 @@ extern "C" {
     pub fn onClearTimeouts();
     pub fn onDatumSnapshot(datum_id: DatumId, data: js_sys::Object);
     pub fn onScriptInstanceSnapshot(script_ref: ScriptInstanceId, data: js_sys::Object);
+    pub fn onExternalEvent(event: &str);
 }
 
 pub struct JsApi {}
@@ -321,7 +340,7 @@ impl JsApi {
                 .get_cast(member_ref.cast_lib as u32)
                 .unwrap();
             let member = cast.members.get(&(member_ref.cast_member as u32)).unwrap();
-            let member_map = Self::get_member_snapshot(member, cast.lctx.as_ref(), player);
+            let member_map = Self::get_member_snapshot(member, member_ref.cast_lib as u32, cast.lctx.as_ref(), player);
 
             onCastMemberChanged(member_ref.to_js().to_js_value(), member_map.to_js_object());
         });
@@ -361,18 +380,19 @@ impl JsApi {
     }
 
     pub fn dispatch_channel_changed(channel: i16) {
-        async_std::task::spawn_local(async move {
-            let selected_channel = RENDERER_LOCK.with(|x| {
-                x.borrow()
-                    .as_ref()
-                    .and_then(|y| y.debug_selected_channel_num)
-            });
-            if selected_channel.is_some() && selected_channel.unwrap() == channel {
+        let selected_channel = RENDERER_LOCK.with(|x| {
+            x.borrow()
+                .as_ref()
+                .and_then(|y| y.debug_selected_channel_num)
+        });
+
+        if selected_channel == Some(channel) {
+            async_std::task::spawn_local(async move {
                 let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
                 let snapshot = Self::get_channel_snapshot(player, &channel);
                 onChannelChanged(channel, snapshot.to_js_object());
-            }
-        });
+            });
+        }
     }
 
     pub fn dispatch_frame_changed(frame: u32) {
@@ -392,6 +412,7 @@ impl JsApi {
 
     pub fn get_member_snapshot(
         member: &CastMember,
+        cast_lib: u32,
         lctx: Option<&ScriptContext>,
         player: &DirPlayer,
     ) -> js_sys::Map {
@@ -410,9 +431,19 @@ impl JsApi {
             CastMemberType::Script(script_data) => {
                 let lctx = lctx.unwrap();
                 let script = &lctx.scripts[&script_data.script_id];
+
+                // Get cast info for variable multiplier
+                let cast = player
+                    .movie
+                    .cast_manager
+                    .get_cast(cast_lib)
+                    .unwrap();
+                let capital_x = cast.capital_x;
+                let dir_version = cast.dir_version;
+
                 member_map.str_set(
                     "script",
-                    &Self::get_script_snapshot(&script_data, &script, &lctx).to_js_object(),
+                    &Self::get_script_snapshot(&script_data, &script, &lctx, capital_x, dir_version).to_js_object(),
                 );
             }
             CastMemberType::Bitmap(bitmap_data) => {
@@ -453,7 +484,7 @@ impl JsApi {
         return member_map;
     }
 
-    pub fn get_score_snapshot(_: &DirPlayer, score: &Score) -> js_sys::Map {
+    pub fn get_score_snapshot(player: &DirPlayer, score: &Score) -> js_sys::Map {
         let member_map = js_sys::Map::new();
         member_map.str_set("channelCount", &JsValue::from(score.get_channel_count()));
 
@@ -477,6 +508,14 @@ impl JsApi {
             ),
         );
 
+        // Build sprite spans from the raw channel data
+        let sprite_spans = Self::create_sprite_spans_from_channels(score, player);
+        
+        member_map.str_set(
+            "spriteSpans",
+            &js_sys::Array::from_iter(sprite_spans.iter().map(|span| span.to_js_value())),
+        );
+        
         member_map.str_set(
             "channelInitData",
             &js_sys::Array::from_iter(score.channel_initialization_data.iter().map(
@@ -506,18 +545,79 @@ impl JsApi {
             )),
         );
 
-        member_map.str_set(
-            "spriteSpans",
-            &js_sys::Array::from_iter(score.sprite_spans.iter().map(|span| {
-                let span_map = js_sys::Map::new();
-                span_map.str_set("startFrame", &span.start_frame.to_js_value());
-                span_map.str_set("endFrame", &span.end_frame.to_js_value());
-                span_map.str_set("channelNumber", &span.channel_number.to_js_value());
-                span_map.to_js_object()
-            })),
-        );
-
         return member_map;
+    }
+
+    // Create sprite spans by examining actual channel state across frames
+    fn create_sprite_spans_from_channels(score: &Score, _player: &DirPlayer) -> Vec<ScoreSpriteSpan> {
+        use std::collections::HashMap;
+        
+        let mut spans = Vec::new();
+        let mut channel_data: HashMap<u16, Vec<(u32, u16, u16)>> = HashMap::new();
+        
+        // Collect all frame data per channel from channel_initialization_data
+        for (frame_index, channel_index, init_data) in &score.channel_initialization_data {
+            let channel_num = get_channel_number_from_index(*channel_index as u32) as u16;
+            let cast_lib = init_data.cast_lib;
+            let cast_member = init_data.cast_member;
+            
+            // Skip empty sprites
+            if cast_lib == 0 && cast_member == 0 {
+                continue;
+            }
+            
+            channel_data
+                .entry(channel_num)
+                .or_insert_with(Vec::new)
+                .push((*frame_index, cast_lib, cast_member));
+        }
+        
+        // For each channel, create spans from consecutive frames
+        for (channel_num, mut frames) in channel_data {
+            // Sort by frame
+            frames.sort_by_key(|(frame, _, _)| *frame);
+            
+            let mut current_span: Option<ScoreSpriteSpan> = None;
+            
+            for (frame, cast_lib, cast_member) in frames {
+                let member_ref = [cast_lib, cast_member];
+                
+                if let Some(ref mut span) = current_span {
+                    // Check if this continues the current span
+                    if span.member_ref == member_ref && span.end_frame + 1 == frame {
+                        // Extend the current span
+                        span.end_frame = frame;
+                    } else {
+                        // Save the current span and start a new one
+                        spans.push(span.clone());
+                        current_span = Some(ScoreSpriteSpan {
+                            channel_number: channel_num,
+                            start_frame: frame,
+                            end_frame: frame,
+                            member_ref,
+                        });
+                    }
+                } else {
+                    // Start the first span for this channel
+                    current_span = Some(ScoreSpriteSpan {
+                        channel_number: channel_num,
+                        start_frame: frame,
+                        end_frame: frame,
+                        member_ref,
+                    });
+                }
+            }
+            
+            // Don't forget the last span!
+            if let Some(span) = current_span {
+                spans.push(span);
+            }
+        }
+        
+        // Sort spans by channel, then start frame
+        spans.sort_by_key(|s| (s.channel_number, s.start_frame));
+        
+        spans
     }
 
     pub fn dispatch_channel_name_changed(channel: i16) {
@@ -600,6 +700,8 @@ impl JsApi {
         member: &ScriptMember,
         chunk: &ScriptChunk,
         lctx: &ScriptContext,
+        capital_x: bool,
+        dir_version: u16,
     ) -> js_sys::Map {
         let member_map = js_sys::Map::new();
         member_map.str_set("name", &member.name.to_js_value());
@@ -612,6 +714,9 @@ impl JsApi {
                 _ => "unknown".to_owned().to_js_value(),
             },
         );
+
+        // Calculate multiplier once
+        let multiplier = get_variable_multiplier(capital_x, dir_version);
 
         let handlers_array = js_sys::Array::new();
         for handler in &chunk.handlers {
@@ -626,7 +731,7 @@ impl JsApi {
                 bytecode_map.str_set("pos", &JsValue::from(bytecode.pos));
                 bytecode_map.str_set(
                     "text",
-                    &bytecode.to_bytecode_text(lctx, &handler).to_js_value(),
+                    &bytecode.to_bytecode_text(lctx, &handler, multiplier).to_js_value(),
                 );
 
                 bytecode_array.push(&bytecode_map.to_js_object());
@@ -758,6 +863,10 @@ impl JsApi {
     pub fn dispatch_script_error_cleared() {
         onScriptErrorCleared();
     }
+
+    pub fn dispatch_external_event(event: &str) {
+        onExternalEvent(event);
+    }
 }
 
 pub trait JsSerializable {
@@ -826,7 +935,8 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         }
         Datum::Float(val) => {
             map.str_set("type", &safe_js_string("number"));
-            map.str_set("value", &JsValue::from_f64(*val as f64));
+            map.str_set("numericValue", &JsValue::from_f64(*val as f64));
+            map.str_set("value", &safe_js_string(&format_float_with_precision(*val, player)));
         }
         Datum::Void => {
             map.str_set("type", &safe_js_string("void"));
@@ -877,32 +987,95 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::SpriteRef(_) => {
             map.str_set("type", &safe_js_string("spriteRef"));
         }
-        Datum::IntRect(..) => {
-            map.str_set("type", &safe_js_string("intRect"));
+        Datum::Rect(arr) => {
+            let x1 = player.get_datum(&arr[0]);
+            let y1 = player.get_datum(&arr[1]);
+            let x2 = player.get_datum(&arr[2]);
+            let y2 = player.get_datum(&arr[3]);
+            
+            map.str_set("type", &safe_js_string("Rect"));
+            map.str_set("left", &concrete_datum_to_js_bridge(x1, player, depth + 1));
+            map.str_set("top", &concrete_datum_to_js_bridge(y1, player, depth + 1));
+            map.str_set("right", &concrete_datum_to_js_bridge(x2, player, depth + 1));
+            map.str_set("bottom", &concrete_datum_to_js_bridge(y2, player, depth + 1));
+            map.str_set("value", &safe_js_string(&format!(
+                "rect({}, {}, {}, {})",
+                format_numeric_value(x1, player),
+                format_numeric_value(y1, player),
+                format_numeric_value(x2, player),
+                format_numeric_value(y2, player)
+            )));
         }
-        Datum::IntPoint(..) => {
-            map.str_set("type", &safe_js_string("intPoint"));
+        Datum::Point(arr) => {
+            let x = player.get_datum(&arr[0]);
+            let y = player.get_datum(&arr[1]);
+            
+            map.str_set("type", &safe_js_string("Point"));
+            map.str_set("x", &concrete_datum_to_js_bridge(x, player, depth + 1));
+            map.str_set("y", &concrete_datum_to_js_bridge(y, player, depth + 1));
+            map.str_set("value", &safe_js_string(&format!(
+                "point({}, {})",
+                format_numeric_value(x, player),
+                format_numeric_value(y, player)
+            )));
         }
-        Datum::CursorRef(_) => {
+        Datum::CursorRef(cursor_ref) => {
             map.str_set("type", &safe_js_string("cursorRef"));
+            match cursor_ref {
+                CursorRef::System(id) => {
+                    map.str_set("cursorType", &safe_js_string("system"));
+                    map.str_set("id", &JsValue::from(*id));
+                }
+                CursorRef::Member(member_ref) => {
+                    map.str_set("cursorType", &safe_js_string("member"));
+                    map.str_set("memberRef", &member_ref.to_js_value());
+                }
+            }
         }
-        Datum::TimeoutRef(_) => {
+        Datum::TimeoutRef(name) => {
             map.str_set("type", &safe_js_string("timeout"));
+            map.str_set("name", &safe_js_string(name));
         }
-        Datum::ColorRef(_) => {
+        Datum::TimeoutFactory => {
+            map.str_set("type", &safe_js_string("timeoutFactory"));
+        }
+        Datum::TimeoutInstance { name, .. } => {
+            map.str_set("type", &safe_js_string("timeoutInstance"));
+            map.str_set("name", &safe_js_string(name));
+        }
+        Datum::ColorRef(color_ref) => {
             map.str_set("type", &safe_js_string("colorRef"));
+            match color_ref {
+                ColorRef::PaletteIndex(i) => {
+                    map.str_set("paletteIndex", &JsValue::from(*i));
+                }
+                ColorRef::Rgb(r, g, b) => {
+                    map.str_set("r", &JsValue::from(*r));
+                    map.str_set("g", &JsValue::from(*g));
+                    map.str_set("b", &JsValue::from(*b));
+                }
+            }
         }
-        Datum::BitmapRef(_) => {
+        Datum::BitmapRef(bitmap_ref) => {
             map.str_set("type", &safe_js_string("bitmapRef"));
+            if let Some(bitmap) = player.bitmap_manager.get_bitmap(*bitmap_ref) {
+                map.str_set("width", &JsValue::from(bitmap.width));
+                map.str_set("height", &JsValue::from(bitmap.height));
+                map.str_set("bitDepth", &JsValue::from(bitmap.bit_depth));
+            }
         }
-        Datum::PaletteRef(_) => {
+        Datum::PaletteRef(palette_ref) => {
             map.str_set("type", &safe_js_string("paletteRef"));
+            map.str_set("value", &palette_ref.to_js_value());
         }
-        Datum::Xtra(_) => {
+        Datum::Xtra(name) => {
             map.str_set("type", &safe_js_string("xtra"));
+            map.str_set("name", &safe_js_string(name));
         }
-        Datum::XtraInstance(..) => {
+        Datum::XtraInstance(name, instance_id) => {
             map.str_set("type", &safe_js_string("xtraInstance"));
+            map.str_set("name", &safe_js_string(name));
+            map.str_set("instanceId", &JsValue::from(*instance_id));
         }
         Datum::Matte(..) => {
             map.str_set("type", &safe_js_string("matte"));
@@ -916,11 +1089,13 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::MovieRef => {
             map.str_set("type", &safe_js_string("movieRef"));
         }
-        Datum::SoundRef(..) => {
+        Datum::SoundRef(sound_id) => {
             map.str_set("type", &safe_js_string("sound"));
+            map.str_set("id", &JsValue::from(*sound_id));
         }
-        Datum::SoundChannel(..) => {
+        Datum::SoundChannel(channel_id) => {
             map.str_set("type", &safe_js_string("soundChannel"));
+            map.str_set("channel", &JsValue::from(*channel_id));
         }
         Datum::XmlRef(id) => {
             map.str_set("type", &safe_js_string("xmlRef"));
@@ -932,8 +1107,13 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::MathRef(_) => {
             map.str_set("type", &safe_js_string("math"));
         }
-        Datum::Vector(_) => {
+        Datum::Vector(vec) => {
             map.str_set("type", &safe_js_string("vector"));
+            let vec_array = js_sys::Array::new();
+            for val in vec.iter() {
+                vec_array.push(&JsValue::from_f64(*val as f64));
+            }
+            map.str_set("values", &vec_array);
         }
     }
     return map.to_js_object();
@@ -968,6 +1148,12 @@ impl ToJsValue for usize {
 }
 
 impl ToJsValue for u16 {
+    fn to_js_value(&self) -> JsValue {
+        JsValue::from_f64(*self as f64)
+    }
+}
+
+impl ToJsValue for i16 {
     fn to_js_value(&self) -> JsValue {
         JsValue::from_f64(*self as f64)
     }

@@ -86,3 +86,11 @@ export function onChannelChanged(channel, value) {
 export function onChannelDisplayNameChanged(channel, displayName) {
   vmCallbacks.onChannelDisplayNameChanged(channel, displayName)
 }
+
+export function onExternalEvent(event) {
+  if (vmCallbacks?.onExternalEvent) {
+    vmCallbacks.onExternalEvent(event);
+  } else {
+    console.log('🔔 externalEvent:', event);
+  }
+}
