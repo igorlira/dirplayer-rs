@@ -70,13 +70,17 @@ impl TextMemberHandlers {
                 )))
             }
             "locToCharPos" => {
-                let (x, y) = player.get_datum(&args[0]).to_int_point()?;
+                let point = player.get_datum(&args[0]).to_point()?;
+                let x = player.get_datum(&point[0]).int_value()?;
+                let y = player.get_datum(&point[1]).int_value()?;
+
                 let params = DrawTextParams {
                     font: &player.font_manager.get_system_font().unwrap(),
                     line_height: None,
                     line_spacing: text.fixed_line_space,
                     top_spacing: text.top_spacing,
                 };
+
                 let index = get_text_index_at_pos(&text.text, &params, x, y);
                 Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
             }
@@ -124,7 +128,12 @@ impl TextMemberHandlers {
                     text_data.fixed_line_space,
                     text_data.top_spacing,
                 );
-                Ok(Datum::IntRect((0, 0, width as i32, height as i32)))
+                Ok(Datum::Rect([
+                    player.alloc_datum(Datum::Int(0)),
+                    player.alloc_datum(Datum::Int(0)),
+                    player.alloc_datum(Datum::Int(width as i32)),
+                    player.alloc_datum(Datum::Int(height as i32))
+                ]))
             }
             "height" => {
                 let font = player.font_manager.get_system_font().unwrap();
@@ -165,6 +174,10 @@ impl TextMemberHandlers {
                     color: bitmap.get_fg_color_ref(),
                     bg_color: bitmap.get_bg_color_ref(),
                     mask_image: None,
+                    is_text_rendering: true,
+                    rotation: 0.0,
+                    sprite: None,
+                    original_dst_rect: None,
                 };
 
                 bitmap.draw_text(
@@ -296,10 +309,14 @@ impl TextMemberHandlers {
             "rect" => borrow_member_mut(
                 member_ref,
                 |player| {
-                    let rect = value.to_int_rect()?;
-                    let rect: (i16, i16, i16, i16) =
-                        (rect.1 as i16, rect.0 as i16, rect.3 as i16, rect.2 as i16);
-                    Ok(rect)
+                    let rect = value.to_rect()?;
+
+                    let r1 = player.get_datum(&rect[1]).int_value()? as i16;
+                    let r0 = player.get_datum(&rect[0]).int_value()? as i16;
+                    let r3 = player.get_datum(&rect[3]).int_value()? as i16;
+                    let r2 = player.get_datum(&rect[2]).int_value()? as i16;
+
+                    Ok((r1, r0, r3, r2))
                 },
                 |cast_member, value| {
                     let value = value?;

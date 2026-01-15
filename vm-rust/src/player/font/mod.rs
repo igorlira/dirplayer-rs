@@ -313,6 +313,9 @@ pub async fn player_load_system_font(path: &str) {
                 original_bit_depth: 32,
                 palette_ref: PaletteRef::BuiltIn(get_system_default_palette()),
                 matte: None,
+                use_alpha: false,
+                trim_white_space: false,
+                was_trimmed: false,
             };
 
             reserve_player_mut(|player| {

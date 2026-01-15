@@ -188,6 +188,8 @@ pub fn render_score_to_bitmap(
                         get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                     get_concrete_sprite_rect(player, sprite).clone()
                 };
+                let logical_rect = sprite_rect.clone();
+
                 let sprite_bitmap = player
                     .bitmap_manager
                     .get_bitmap_mut(bitmap_member.image_ref);
@@ -204,7 +206,35 @@ pub fn render_score_to_bitmap(
                 } else {
                     None
                 };
-                let src_rect = IntRect::from(0, 0, sprite.width as i32, sprite.height as i32);
+
+                let mut src_rect = IntRect::from(0, 0, 0, 0);
+
+                let mut option = 0;
+
+                if sprite.has_size_tweened || sprite.has_size_changed {
+                    src_rect = IntRect::from(0, 0, src_bitmap.width as i32, src_bitmap.height as i32);
+                } else if sprite.width > player.movie.rect.width() && sprite.height >  player.movie.rect.height() {
+                    // sprite dimensions > movie dimensions
+                    src_rect = IntRect::from(0, 0, bitmap_member.info.width as i32, bitmap_member.info.height as i32);
+                    option = 1;
+                } else if bitmap_member.info.width == 0 && bitmap_member.info.height == 0 {
+                    // bitmap dimensions are 0
+                    src_rect = IntRect::from(0, 0, sprite.width as i32, sprite.height as i32);
+                    option = 2;
+                } else if i32::from(bitmap_member.info.width) < sprite.width && i32::from(bitmap_member.info.height) < sprite.height || 
+                    i32::from(bitmap_member.info.width) > sprite.width && i32::from(bitmap_member.info.height) > sprite.height {
+                    // bitmap dimensions are < than sprite dimensions OR bitmap dimensions are > than sprite dimensions
+                    src_rect = IntRect::from(0, 0, bitmap_member.info.width as i32, bitmap_member.info.height as i32);
+                    option = 3;
+                } else if sprite.width > i32::from(bitmap_member.info.width) || sprite.height > i32::from(bitmap_member.info.height) {
+                    // sprite dimensions > bitmap dimensions
+                    src_rect = IntRect::from(0, 0, bitmap_member.info.width as i32, bitmap_member.info.height as i32);
+                    option = 4;
+                } else {
+                    src_rect = IntRect::from(0, 0, sprite.width as i32, sprite.height as i32);
+                    option = 5;
+                }
+
                 let dst_rect = sprite_rect;
                 let dst_rect = IntRect::from(
                     if sprite.flip_h {
@@ -229,37 +259,49 @@ pub fn render_score_to_bitmap(
                     },
                 );
 
+                // 6) Params
                 let mut params = CopyPixelsParams {
-                    blend: sprite.blend as i32,
+                    blend: sprite.blend,
                     ink: sprite.ink as u32,
                     color: sprite.color.clone(),
                     bg_color: sprite.bg_color.clone(),
                     mask_image: None,
+                    is_text_rendering: false,
+                    rotation: sprite.rotation,
+                    sprite: Some(&sprite.clone()),
+                    original_dst_rect: Some(logical_rect),
                 };
+
                 if let Some(mask) = mask {
                     let mask_bitmap: &BitmapMask = mask.borrow();
                     params.mask_image = Some(mask_bitmap);
                 }
-                bitmap.copy_pixels_with_params(&palettes, &src_bitmap, dst_rect, src_rect, &params);
+
+                debug!(
+                    "DRAW Sprite {} dimensions {}x{} bitmap dimensions {}x{} bitmap_member.info dimensions {}x{} Option {} src_rect: {:?}",
+                    sprite.number,
+                    sprite.width,
+                    sprite.height,
+                    bitmap.width,
+                    bitmap.height,
+                    bitmap_member.info.width,
+                    bitmap_member.info.height,
+                    option,
+                    src_rect
+                );
+
+                bitmap.copy_pixels_with_params(
+                    &palettes,
+                    &src_bitmap,
+                    dst_rect,
+                    src_rect,
+                    &params,
+                );
             }
             CastMemberType::Shape(_) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                 let sprite_rect = get_concrete_sprite_rect(player, sprite);
-                let dst_rect = sprite_rect;
-                bitmap.fill_rect(
-                    dst_rect.left,
-                    dst_rect.top,
-                    dst_rect.right,
-                    dst_rect.bottom,
-                    resolve_color_ref(
-                        &palettes,
-                        &sprite.color,
-                        &PaletteRef::BuiltIn(get_system_default_palette()),
-                        bitmap.original_bit_depth,
-                    ),
-                    &palettes,
-                    sprite.blend as f32 / 100.0,
-                );
+                bitmap.fill_shape_rect_with_sprite(sprite, sprite_rect, &palettes);
             }
             CastMemberType::Field(field_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
@@ -281,6 +323,10 @@ pub fn render_score_to_bitmap(
                         color: sprite.color.clone(),
                         bg_color: sprite.bg_color.clone(),
                         mask_image: None,
+                        is_text_rendering: true,
+                        rotation: 0.0,
+                        sprite: None,
+                        original_dst_rect: None,
                     };
 
                     bitmap.draw_text(
@@ -346,6 +392,10 @@ pub fn render_score_to_bitmap(
                     color: sprite.color.clone(),
                     bg_color: sprite.bg_color.clone(),
                     mask_image: None,
+                    is_text_rendering: true,
+                    rotation: 0.0,
+                    sprite: None,
+                    original_dst_rect: None,
                 };
 
                 if let Some(mask) = mask {
@@ -401,6 +451,10 @@ pub fn render_score_to_bitmap(
                         color: sprite.color.clone(),
                         bg_color: sprite.bg_color.clone(),
                         mask_image: None,
+                        is_text_rendering: true,
+                        rotation: 0.0,
+                        sprite: None,
+                        original_dst_rect: None,
                     };
 
                     bitmap.draw_text(
@@ -549,6 +603,10 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
                 bg_color: bitmap.get_bg_color_ref(),
                 color: bitmap.get_fg_color_ref(),
                 mask_image: mask.as_ref(),
+                is_text_rendering: false,
+                rotation: 0.0,
+                sprite: None,
+                original_dst_rect: None,
             },
         );
     }
@@ -656,6 +714,7 @@ impl PlayerCanvasRenderer {
                         sprite_bitmap.height as i32,
                     ),
                     &HashMap::new(),
+                    None,
                 );
                 bitmap.set_pixel(
                     sprite_member.reg_point.0 as i32,
@@ -789,6 +848,10 @@ impl PlayerCanvasRenderer {
                 color: bitmap.get_fg_color_ref(),
                 bg_color: bitmap.get_bg_color_ref(),
                 mask_image: None,
+                is_text_rendering: false,
+                rotation: 0.0,
+                sprite: None,
+                original_dst_rect: None,
             };
 
             bitmap.draw_text(
