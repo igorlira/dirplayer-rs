@@ -1,6 +1,9 @@
+use crate::director::lingo::datum::Datum;
+
 use crate::player::{
     player_call_script_handler, player_handle_scope_return, reserve_player_mut, reserve_player_ref,
     script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
+    score::get_concrete_sprite_rect,
 };
 
 use super::script_instance::ScriptInstanceUtils;
@@ -55,6 +58,44 @@ impl SpriteDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
+            "intersects" => {
+                reserve_player_mut(|player| {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "intersects requires 1 argument (sprite number)".to_string(),
+                        ));
+                    }
+
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let other_sprite_num =
+                        player.get_datum(&args[0]).int_value()? as i16;
+
+                    // Get both sprites' rects
+                    let sprite1 = player.movie.score.get_sprite(sprite_num);
+                    let sprite2 = player.movie.score.get_sprite(other_sprite_num);
+
+                    if sprite1.is_none() || sprite2.is_none() {
+                        return Ok(player.alloc_datum(Datum::Int(0)));
+                    }
+
+                    let sprite1 = sprite1.unwrap();
+                    let sprite2 = sprite2.unwrap();
+
+                    // Get the concrete rects of both sprites
+                    let rect1 = get_concrete_sprite_rect(player, sprite1);
+                    let rect2 = get_concrete_sprite_rect(player, sprite2);
+
+                    // Check if rectangles intersect
+                    let intersects = !(
+                        rect1.right <= rect2.left
+                            || rect1.left >= rect2.right
+                            || rect1.bottom <= rect2.top
+                            || rect1.top >= rect2.bottom
+                    );
+
+                    Ok(player.alloc_datum(Datum::Int(if intersects { 1 } else { 0 })))
+                })
+            }
             "getProp" => {
                 reserve_player_mut(|player| {
                     if args.is_empty() {
