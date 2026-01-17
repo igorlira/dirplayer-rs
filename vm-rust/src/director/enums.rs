@@ -62,6 +62,7 @@ pub struct BitmapInfo {
     pub palette_id: i16,
     pub use_alpha: bool,
     pub trim_white_space: bool,
+    pub center_reg_point: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -285,6 +286,7 @@ impl From<&[u8]> for BitmapInfo {
         let mut palette_id = 0;
         let mut use_alpha = false;
         let mut trim_white_space = false;
+        let mut center_reg_point = false;
 
         let _ = reader.read_u8();
         let _ = reader.read_u8(); // Logo -> 16
@@ -305,10 +307,13 @@ impl From<&[u8]> for BitmapInfo {
         if let Ok(val) = reader.read_i16() {
             reg_x = val;
         }
-        
+
         // Read flags byte
         if let Ok(flags) = reader.read_u8() {
-            use_alpha = (flags & 0x10) != 0;           // Bit 6
+            // ScummVM: kFlagCenterRegPointD4 = 0x01 (bit 0) for D4
+            // ScummVM: kFlagCenterRegPoint = 0x20 (bit 5) for D6+
+            center_reg_point = (flags & 0x20) != 0;   // Bit 5: centerRegPoint (D6+ format)
+            use_alpha = (flags & 0x10) != 0;           // Bit 4
             trim_white_space = (flags & 0x80) == 0;   // Bit 7 (inverted!)
         }
 
@@ -322,6 +327,13 @@ impl From<&[u8]> for BitmapInfo {
             } // TODO why -1?
         };
 
+        // If centerRegPoint is enabled, calculate the centered registration point
+        // The raw reg_x/reg_y values need to be converted to centered coordinates
+        if center_reg_point && width > 0 && height > 0 {
+            reg_x = (width / 2) as i16;
+            reg_y = (height / 2) as i16;
+        }
+
         return BitmapInfo {
             width,
             height,
@@ -331,6 +343,7 @@ impl From<&[u8]> for BitmapInfo {
             palette_id,
             use_alpha,
             trim_white_space,
+            center_reg_point,
         };
     }
 }

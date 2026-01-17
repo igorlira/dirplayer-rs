@@ -854,8 +854,22 @@ pub fn parse_lingo_rule_runtime(
             let index_expr = parse_lingo_expr_runtime(index_pair.into_inner(), pratt)?;
             let source_pair = inner.next().ok_or_else(|| ScriptError::new("Expected source expression".to_string()))?;
             let source_expr = match source_pair.as_rule() {
-                Rule::ident | Rule::lang_ident => LingoExpr::Identifier(source_pair.as_str().to_owned()),
-                Rule::chunk_expr => parse_lingo_rule_runtime(source_pair, pratt)?,
+                Rule::ident | Rule::lang_ident => {
+                    // Regular identifier - just use it as-is
+                    LingoExpr::Identifier(source_pair.as_str().to_string())
+                },
+                Rule::the_prop => {
+                    // "the X" property - parse it to get the full "the X" form
+                    parse_lingo_rule_runtime(source_pair, pratt)?
+                },
+                Rule::the_prop_of => {
+                    // "the X of Y" - parse recursively
+                    parse_lingo_rule_runtime(source_pair, pratt)?
+                },
+                Rule::chunk_expr => {
+                    // Nested chunk expression
+                    parse_lingo_rule_runtime(source_pair, pratt)?
+                },
                 _ => parse_lingo_rule_runtime(source_pair, pratt)?,
             };
             Ok(LingoExpr::ChunkExpr(chunk_type, Box::new(index_expr), Box::new(source_expr)))

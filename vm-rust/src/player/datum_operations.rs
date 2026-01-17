@@ -123,7 +123,24 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             }
             Ok(Datum::List(DatumType::List, result_refs, false))
         }
+        // (Datum::String(s), Datum::List(_, list, _)) => {
+        //     let formatted = list
+        //         .iter()
+        //         .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
+        //         .collect::<Vec<_>>()
+        //         .join(", ");
+        //     Ok(Datum::String(format!("{}{}", s, formatted)))
+        // }
+        // (Datum::List(_, list, _), Datum::String(s)) => {
+        //     let formatted = list
+        //         .iter()
+        //         .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
+        //         .collect::<Vec<_>>()
+        //         .join(", ");
+        //     Ok(Datum::String(format!("{}{}", formatted, s)))
+        // }
         (Datum::String(s), Datum::List(_, list, _)) => {
+            use crate::player::datum_formatting::datum_to_string_for_concat;  // ADD THIS
             let formatted = list
                 .iter()
                 .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
@@ -132,6 +149,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             Ok(Datum::String(format!("{}{}", s, formatted)))
         }
         (Datum::List(_, list, _), Datum::String(s)) => {
+            use crate::player::datum_formatting::datum_to_string_for_concat;  // ADD THIS
             let formatted = list
                 .iter()
                 .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
@@ -857,47 +875,49 @@ pub fn concat_datums(
     right: Datum,
     player: &mut DirPlayer,
 ) -> Result<Datum, ScriptError> {
-    let left_str = datum_to_concat_string(&left, player);
-    let right_str = datum_to_concat_string(&right, player);
+    use crate::player::datum_formatting::datum_to_string_for_concat;
+    
+    let left_str = datum_to_string_for_concat(&left, player);
+    let right_str = datum_to_string_for_concat(&right, player);
     
     Ok(Datum::String(format!("{}{}", left_str, right_str)))
 }
 
-fn datum_to_concat_string(datum: &Datum, player: &DirPlayer) -> String {
-    match datum {
-        Datum::String(s) => s.clone(),
+// fn datum_to_concat_string(datum: &Datum, player: &DirPlayer) -> String {
+//     match datum {
+//         Datum::String(s) => s.clone(),
         
-        Datum::Int(i) => i.to_string(),
+//         Datum::Int(i) => i.to_string(),
         
-        Datum::Symbol(s) => s.clone(),
+//         Datum::Symbol(s) => s.clone(),
         
-        // Void/Null show as <Void> when concatenated
-        Datum::Void => "<Void>".to_string(),
-        Datum::Null => "<Void>".to_string(),
+//         // Void/Null show as <Void> when concatenated
+//         Datum::Void => String::new(),  // ← CHANGED from "<Void>"
+//         Datum::Null => String::new(),  // ← CHANGED from "<Void>"
         
-        Datum::List(_, list, _) => {
-            let items: Vec<String> = list
-                .iter()
-                .map(|r| datum_to_concat_string(player.get_datum(r), player))
-                .collect();
-            format!("[{}]", items.join(", "))
-        },
+//         Datum::List(_, list, _) => {
+//             let items: Vec<String> = list
+//                 .iter()
+//                 .map(|r| datum_to_concat_string(player.get_datum(r), player))
+//                 .collect();
+//             format!("[{}]", items.join(", "))
+//         },
         
-        Datum::PropList(prop_list, _) => {
-            let items: Vec<String> = prop_list
-                .iter()
-                .map(|(key, value_ref)| {
-                    let value_str = datum_to_concat_string(player.get_datum(value_ref), player);
-                    format!("[#{}:{}]", key, value_str)
-                })
-                .collect();
-            items.join(", ")
-        },
+//         Datum::PropList(prop_list, _) => {
+//             let items: Vec<String> = prop_list
+//                 .iter()
+//                 .map(|(key, value_ref)| {
+//                     let value_str = datum_to_concat_string(player.get_datum(value_ref), player);
+//                     format!("[#{}:{}]", key, value_str)
+//                 })
+//                 .collect();
+//             items.join(", ")
+//         },
 
-        // For other complex types, use the formatting system
-        _ => {
-            use crate::player::datum_formatting::format_concrete_datum;
-            format_concrete_datum(datum, player)
-        }
-    }
-}
+//         // For other complex types, use the formatting system
+//         _ => {
+//             use crate::player::datum_formatting::format_concrete_datum;
+//             format_concrete_datum(datum, player)
+//         }
+//     }
+// }

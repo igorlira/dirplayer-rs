@@ -23,6 +23,7 @@ use super::datum_handlers::{
     player_call_datum_handler,
     prop_list::{PropListDatumHandlers, PropListUtils},
     rect::RectUtils,
+    script_instance::ScriptInstanceDatumHandlers,
     sound_channel::SoundStatus,
 };
 
@@ -1009,6 +1010,12 @@ impl TypeHandlers {
             return Err(ScriptError::new("Add requires 2 arguments".to_string()));
         }
         let left_type = reserve_player_ref(|player| player.get_datum(&args[0]).type_enum());
+
+        if left_type == DatumType::Void {
+            // Operations on void return void
+            return Ok(DatumRef::Void);
+        }
+
         match left_type {
             DatumType::List => {
                 ListDatumHandlers::add(args.get(0).unwrap(), &vec![args.get(1).unwrap().clone()])
@@ -1026,14 +1033,30 @@ impl TypeHandlers {
 
     pub fn get_a_prop(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let datum_ref = args.get(0).unwrap();
-        let datum_type = reserve_player_mut(|player| player.get_datum(&args[0]).type_enum());
+        let (datum_type, datum_debug) = reserve_player_mut(|player| {
+            let datum = player.get_datum(&args[0]);
+            let debug_str = match datum {
+                Datum::Symbol(s) => format!("#{}", s),
+                Datum::String(s) => format!("\"{}\"", s),
+                Datum::Int(i) => format!("{}", i),
+                _ => format!("{:?}", datum.type_enum()),
+            };
+            (datum.type_enum(), debug_str)
+        });
         match datum_type {
             DatumType::PropList => {
                 PropListDatumHandlers::get_a_prop(datum_ref, &vec![args.get(1).unwrap().clone()])
             }
+            DatumType::Void => {
+                Ok(DatumRef::Void)
+            }
+            DatumType::ScriptInstanceRef => {
+                ScriptInstanceDatumHandlers::get_a_prop(datum_ref, &vec![args.get(1).unwrap().clone()])
+            }
             _ => Err(ScriptError::new(format!(
-                "Cannot getaProp prop of type: {}",
-                datum_type.type_str()
+                "Cannot getaProp prop of type: {} (value: {})",
+                datum_type.type_str(),
+                datum_debug
             ))),
         }
     }

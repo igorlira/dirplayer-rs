@@ -222,8 +222,13 @@ impl ListDatumHandlers {
     }
 
     pub fn add(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let item = &args[0];
         reserve_player_mut(|player| {
+            let datum_value = player.get_datum(datum);
+            if datum_value.is_void() {
+                return Ok(DatumRef::Void);
+            }
+            
+            let item = &args[0];
             let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
             let index_to_add = if is_sorted {
                 ListDatumUtils::find_index_to_add(&list_vec, &item, &player.allocator)?
@@ -289,6 +294,18 @@ impl ListDatumHandlers {
 
     pub fn add_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            let datum_value = player.get_datum(datum);
+            // Return void gracefully if datum is void or not a list
+            // Director typically silently fails rather than erroring on wrong types
+            if datum_value.is_void() {
+                return Ok(DatumRef::Void);
+            }
+
+            // Check if it's actually a list before trying to mutate
+            if !matches!(datum_value, Datum::List(..)) {
+                return Ok(DatumRef::Void);
+            }
+
             let position = player.get_datum(&args[0]).int_value()? - 1;
             let item_ref = &args[1];
 
@@ -299,8 +316,13 @@ impl ListDatumHandlers {
     }
 
     pub fn append(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let item = &args[0];
         reserve_player_mut(|player| {
+            let datum_value = player.get_datum(datum);
+            if datum_value.is_void() {
+                return Ok(DatumRef::Void);
+            }
+            
+            let item = &args[0];
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.push(item.clone());
             Ok(DatumRef::Void)

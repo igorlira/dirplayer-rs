@@ -53,6 +53,7 @@ impl FlowControlBytecodeHandler {
 
         let (result_ctx, return_value) =
             player_ext_call(name.clone(), &arg_ref_list, ctx.scope_ref).await;
+
         if !is_no_ret {
             reserve_player_mut(|player| {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -104,6 +105,7 @@ impl FlowControlBytecodeHandler {
         let scope = player_call_script_handler_raw_args(receiver, handler_ref, &args, true).await?;
         player_handle_scope_return(&scope);
         let result = scope.return_value;
+
         if !is_no_ret {
             reserve_player_mut(|player| {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();

@@ -13,6 +13,11 @@ impl VoidDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
+            "addAt" | "add" | "append" => {
+                // Calling addAt/add/append on void should just return void
+                // In Director, operations on void typically no-op and return void
+                Ok(DatumRef::Void)
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for void"
             ))),
@@ -49,10 +54,11 @@ impl VoidDatumHandlers {
                 // Return void for attributes on void
                 Ok(player.alloc_datum(Datum::Void))
             }
-            _ => Err(ScriptError::new(format!(
-                "Cannot get Void property {}",
-                prop
-            ))),
+            _ => {
+                // Instead of throwing an error, return void for any unknown property
+                // This matches Lingo behavior where void.anything returns void
+                Ok(player.alloc_datum(Datum::Void))
+            }
         }
     }
 }

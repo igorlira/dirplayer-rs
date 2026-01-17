@@ -114,6 +114,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::GetTopLevelProp => GetSetBytecodeHandler::get_top_level_prop(ctx),
             OpCode::PutChunk => StringBytecodeHandler::put_chunk(ctx),
             OpCode::OntoSpr => SpriteCompareBytecodeHandler::onto_sprite(ctx),
+            OpCode::IntoSpr => SpriteCompareBytecodeHandler::into_sprite(ctx),
             _ => {
                 let prim = num::ToPrimitive::to_u16(&opcode).unwrap();
                 let name = get_opcode_name(opcode);

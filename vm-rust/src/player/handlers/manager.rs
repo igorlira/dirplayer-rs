@@ -47,7 +47,14 @@ impl BuiltInHandlerManager {
                 Datum::PropList(prop_list, ..) => {
                     Ok(player.alloc_datum(Datum::Int(prop_list.len() as i32)))
                 }
-                _ => Err(ScriptError::new(format!("Cannot get count of non-list"))),
+                // Director treats count(VOID) as 0 - this allows "repeat with i in VOID" to not iterate
+                Datum::Void => Ok(player.alloc_datum(Datum::Int(0))),
+                _ => {
+                    Err(ScriptError::new(format!(
+                        "Cannot get count of non-list (type: {})",
+                        obj.type_str()
+                    )))
+                }
             }
         })
     }
@@ -818,14 +825,19 @@ impl BuiltInHandlerManager {
                     let ch = key_str
                         .chars()
                         .next()
-                        .unwrap()
-                        .to_lowercase()
-                        .next()
                         .unwrap();
-                    let mapped_code = *keyboard_map::get_char_to_keycode_map()
-                        .get(&ch)
-                        .unwrap_or(&0);
-                    mapped_code
+
+                    // First check for special Director characters (arrow keys, etc.)
+                    // These are control characters like ASCII 28-31 for arrow keys
+                    if let Some(&code) = keyboard_map::get_director_special_char_to_keycode_map().get(&ch) {
+                        code
+                    } else {
+                        // Regular character - lowercase and look up
+                        let ch_lower = ch.to_lowercase().next().unwrap();
+                        *keyboard_map::get_char_to_keycode_map()
+                            .get(&ch_lower)
+                            .unwrap_or(&0)
+                    }
                 } else {
                     // Try to parse as number string (like "123")
                     if let Ok(code) = key_str.parse::<i32>() {

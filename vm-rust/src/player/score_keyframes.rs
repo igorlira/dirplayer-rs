@@ -1330,9 +1330,11 @@ impl SpritePathKeyframes {
             // 4️⃣ Collect effective keyframes for this interval
             let property_frames = collect_property_keyframes::<Position>(&sorted_frames);
 
-            for (frame, Position(x, y)) in property_frames {
+            for (frame_idx, Position(x, y)) in property_frames {
+                // Convert 0-based frame_idx to 1-based Director frame
+                let director_frame = frame_idx + 1;
                 keyframes.keyframes.push(PathKeyframe {
-                    frame,
+                    frame: director_frame,
                     x,
                     y,
                 });

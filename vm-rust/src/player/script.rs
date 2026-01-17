@@ -128,25 +128,38 @@ pub fn script_get_prop_opt(
     prop_name: &String,
 ) -> Option<DatumRef> {
     let script_instance = player.allocator.get_script_instance(&script_instance_ref);
+
+    // Handle special "ancestor" property
     if prop_name == "ancestor" {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         if let Some(ancestor_id) = &script_instance.ancestor {
-            Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())))
+            return Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())));
         } else {
-            Some(DatumRef::Void)
-        }
-    } else {
-        // Try to find the property on the current instance
-        let prop_value = script_instance.properties.get(prop_name).map(|x| x.clone());
-        if let Some(prop) = prop_value {
-            Some(prop)
-        } else if script_instance.ancestor.is_some() {
-            let ancestor_ref = script_instance.ancestor.as_ref().unwrap().clone();
-            script_get_prop_opt(player, &ancestor_ref, prop_name)
-        } else {
-            None
+            return Some(DatumRef::Void);
         }
     }
+
+    // Try to find the property on the current instance first
+    let prop_value = script_instance.properties.get(prop_name).map(|x| x.clone());
+    if let Some(prop) = prop_value {
+        return Some(prop);
+    }
+
+    // Check ancestor for the property
+    if script_instance.ancestor.is_some() {
+        let ancestor_ref = script_instance.ancestor.as_ref().unwrap().clone();
+        if let Some(result) = script_get_prop_opt(player, &ancestor_ref, prop_name) {
+            return Some(result);
+        }
+    }
+
+    // Fall back to built-in "class" property if not found in instance or ancestors
+    if prop_name == "class" {
+        let script_instance = player.allocator.get_script_instance(&script_instance_ref);
+        return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
+    }
+
+    None
 }
 
 pub fn script_get_static_prop(

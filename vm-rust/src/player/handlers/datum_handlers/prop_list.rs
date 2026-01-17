@@ -463,7 +463,7 @@ impl PropListDatumHandlers {
             let prop_list = player.get_datum(datum);
 
             debug!(
-                "PropList getaProp: looking for key={} in proplist={}", 
+                "PropList getaProp: looking for key={} in proplist={}",
                 format_concrete_datum(key, player),
                 format_concrete_datum(prop_list, player)
             );
@@ -471,29 +471,38 @@ impl PropListDatumHandlers {
             match prop_list {
                 Datum::PropList(ref entries, ..) => {
                     debug!(
-                        "PropList has {} entries", 
+                        "PropList has {} entries",
                         entries.len()
                     );
-                    
+
                     for (i, (k, v)) in entries.iter().enumerate() {
                         debug!(
-                            "   [{}] key={}, value={}", 
+                            "   [{}] key={}, value={}",
                             i,
                             format_concrete_datum(player.get_datum(k), player),
                             format_concrete_datum(player.get_datum(v), player)
                         );
                     }
-                    
+
                     let key_index = PropListUtils::get_key_index(entries, key, &player.allocator)?;
                     if key_index >= 0 {
                         let result = entries[key_index as usize].1.clone();
                         debug!(
-                            "Found at index {}: {}", 
+                            "Found at index {}: {}",
                             key_index,
                             format_concrete_datum(player.get_datum(&result), player)
                         );
                         Ok(result)
                     } else {
+                        // Debug logging for #point lookups
+                        if let Datum::Symbol(s) = key {
+                            if s == "point" {
+                                web_sys::console::log_1(&format!(
+                                    "getaProp #point NOT FOUND in proplist with {} entries",
+                                    entries.len()
+                                ).into());
+                            }
+                        }
                         warn!("get_a_prop: Key not found, returning void");
                         Ok(DatumRef::Void)
                     }
@@ -508,6 +517,10 @@ impl PropListDatumHandlers {
     pub fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let base_prop_ref = reserve_player_mut(|player| {
             let key = player.get_datum(&args[0]);
+            // Director returns VOID when looking up VOID key in a prop list
+            if matches!(key, Datum::Void) {
+                return Ok(DatumRef::Void);
+            }
             let prop_list = player.get_datum(datum).to_map()?;
             let key_index = PropListUtils::get_key_index(prop_list, key, &player.allocator)?;
             if key_index >= 0 {

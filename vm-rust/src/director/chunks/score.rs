@@ -34,8 +34,11 @@ pub struct ScoreFrameChannelData {
     pub back_color: u8,
     pub cast_lib: u16,
     pub cast_member: u16,
-    pub unk1: u16,
-    pub unk2: u16,
+    /// In D6+, this is the high 16 bits of spriteListIdx (uint32)
+    /// spriteListIdx indexes into sprite detail offsets for behaviors
+    pub sprite_list_idx_hi: u16,
+    /// In D6+, this is the low 16 bits of spriteListIdx
+    pub sprite_list_idx_lo: u16,
     pub pos_y: i16,
     pub pos_x: i16,
     pub height: u16,
@@ -48,6 +51,14 @@ pub struct ScoreFrameChannelData {
     pub blend: u8,
     pub rotation: f64,
     pub skew: f64,
+}
+
+impl ScoreFrameChannelData {
+    /// Get the full 32-bit spriteListIdx value (D6+)
+    /// This indexes into sprite detail offsets for behavior attachment
+    pub fn sprite_list_idx(&self) -> u32 {
+        ((self.sprite_list_idx_hi as u32) << 16) | (self.sprite_list_idx_lo as u32)
+    }
 }
 
 impl ScoreFrameChannelData {
@@ -70,12 +81,12 @@ impl ScoreFrameChannelData {
         let cast_member = reader
             .read_u16()
             .map_err(|e| format!("Failed to read cast_member: {:?}", e))?;
-        let unk1 = reader
+        let sprite_list_idx_hi = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read unk1: {:?}", e))?;
-        let unk2 = reader
+            .map_err(|e| format!("Failed to read sprite_list_idx_hi: {:?}", e))?;
+        let sprite_list_idx_lo = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read unk2: {:?}", e))?;
+            .map_err(|e| format!("Failed to read sprite_list_idx_lo: {:?}", e))?;
         let pos_y = reader
             .read_u16()
             .map_err(|e| format!("Failed to read pos_y: {:?}", e))? as i16;
@@ -151,8 +162,8 @@ impl ScoreFrameChannelData {
             back_color,
             cast_lib,
             cast_member,
-            unk1,
-            unk2,
+            sprite_list_idx_hi,
+            sprite_list_idx_lo,
             pos_y,
             pos_x,
             height,
@@ -779,12 +790,28 @@ impl ScoreChunkHeader {
     }
 }
 
+/// Behavior element parsed from sprite detail data (D6+)
+#[derive(Clone, Debug)]
+pub struct SpriteBehavior {
+    pub cast_lib: u16,
+    pub cast_member: u16,
+}
+
+/// Sprite detail info parsed from sprite detail offset (D6+)
+#[derive(Clone, Debug, Default)]
+pub struct SpriteDetailInfo {
+    pub behaviors: Vec<SpriteBehavior>,
+}
+
 #[derive(Clone)]
 pub struct ScoreChunk {
     pub header: ScoreChunkHeader,
     pub entries: Vec<Vec<u8>>,
     pub frame_intervals: Vec<(FrameIntervalPrimary, Option<FrameIntervalSecondary>)>,
     pub frame_data: ScoreFrameData,
+    /// Sprite detail offsets for D6+ behavior attachment
+    /// Key is spriteListIdx, value is the sprite detail info with behaviors
+    pub sprite_details: std::collections::HashMap<u32, SpriteDetailInfo>,
 }
 
 impl ScoreChunk {
@@ -879,12 +906,280 @@ impl ScoreChunk {
         };
         let frame_intervals = Self::analyze_behavior_attachment_entries(&entries)?;
 
+        // Parse sprite detail offsets from Entry[1] (D6+)
+        // Entry[1] contains a table of offsets into the rest of Entry[1] where sprite detail data is stored
+        let sprite_details = Self::parse_sprite_details(&entries);
+
         Ok(ScoreChunk {
             header,
             entries,
             frame_intervals,
             frame_data,
+            sprite_details,
         })
+    }
+
+    /// Parse sprite detail offsets from Entry[0] (D6+)
+    ///
+    /// Based on ScummVM's loadFrames():
+    /// - Bytes 0-3: framesStreamSize
+    /// - Bytes 4-7: version
+    /// - Bytes 8-11: listStart (position of sprite detail info)
+    ///
+    /// At listStart:
+    /// - numEntries (u32): count of sprite detail offset entries
+    /// - listSize (u32): size of the offset index (should equal numEntries)
+    /// - maxDataLen (u32): max data size
+    /// - Offset table: numEntries x u32 (relative offsets from frameDataOffset)
+    ///
+    /// The offsets point to sprite detail data. For a sprite with spriteListIdx = N:
+    /// - Sprite info is at offset[N]
+    /// - Behaviors are at offset[N+1]
+    /// - Sprite name is at offset[N+2]
+    fn parse_sprite_details(entries: &Vec<Vec<u8>>) -> std::collections::HashMap<u32, SpriteDetailInfo> {
+        let mut details = std::collections::HashMap::new();
+
+        // Log entry count for diagnosis
+        debug!(
+            "🔎 parse_sprite_details: {} entries, entry0 size: {}",
+            entries.len(),
+            if entries.is_empty() { 0 } else { entries[0].len() }
+        );
+
+        // Entry[0] contains the frames stream with sprite detail offsets embedded
+        if entries.is_empty() || entries[0].len() < 12 {
+            debug!("   → Entry[0] missing or too small");
+            return details;
+        }
+
+        let entry0 = &entries[0];
+        let entry0_len = entry0.len();
+
+        let mut reader = BinaryReader::from_u8(entry0);
+        reader.set_endian(Endian::Big);
+
+        // Read header: framesStreamSize, version, listStart
+        let frames_stream_size = match reader.read_u32() {
+            Ok(n) => n as usize,
+            Err(_) => return details,
+        };
+        let version = match reader.read_u32() {
+            Ok(n) => n,
+            Err(_) => return details,
+        };
+        let list_start = match reader.read_u32() {
+            Ok(n) => n as usize,
+            Err(_) => return details,
+        };
+
+        debug!(
+            "   → framesStreamSize={} version={} listStart={}",
+            frames_stream_size, version, list_start
+        );
+
+        // listStart of 0 means no sprite details present
+        if list_start == 0 {
+            debug!("   → listStart=0, no sprite details");
+            return details;
+        }
+
+        // Validate listStart - it should be within entry0 bounds
+        // Note: listStart is an ABSOLUTE position in the stream. It can point anywhere
+        // within Entry[0], including inside the frame data region. ScummVM does the same.
+        if list_start >= entry0_len {
+            return details;
+        }
+
+        // Need enough space for the sprite detail header (3 x u32 = 12 bytes)
+        if list_start + 12 > entry0_len {
+            return details;
+        }
+
+        reader.jmp(list_start);
+
+        // Read sprite detail header at listStart
+        let num_entries = match reader.read_u32() {
+            Ok(n) => n as usize,
+            Err(_) => return details,
+        };
+        let list_size = match reader.read_u32() {
+            Ok(n) => n as usize,
+            Err(_) => return details,
+        };
+        let max_data_len = match reader.read_u32() {
+            Ok(n) => n as usize,
+            Err(_) => return details,
+        };
+
+        if num_entries == 0 {
+            return details;
+        }
+
+        // Sanity check
+        if num_entries > 100000 {
+            debug!(
+                "⚠️ Sprite detail numEntries {} too large, skipping",
+                num_entries
+            );
+            return details;
+        }
+
+        // Calculate key positions:
+        // - index_start: where the offset table begins (after the 3 u32 header values)
+        // - frame_data_offset: where the actual sprite detail data begins (after the offset table)
+        let index_start = list_start + 12; // After numEntries, listSize, maxDataLen
+        let frame_data_offset = index_start + list_size * 4; // After the offset table
+
+        debug!(
+            "📋 Sprite detail table: framesStreamSize={} version={} listStart={} numEntries={} listSize={} maxDataLen={} frameDataOffset={}",
+            frames_stream_size, version, list_start, num_entries, list_size, max_data_len, frame_data_offset
+        );
+
+        // Read all offsets and convert to absolute positions (like ScummVM does)
+        // ScummVM: _spriteDetailOffsets[i] = _frameDataOffset + off
+        let mut absolute_offsets: Vec<usize> = Vec::with_capacity(num_entries);
+        for i in 0..num_entries {
+            match reader.read_u32() {
+                Ok(relative_off) => {
+                    let abs_off = frame_data_offset + relative_off as usize;
+                    absolute_offsets.push(abs_off);
+                }
+                Err(_) => {
+                    debug!(
+                        "⚠️ Failed to read offset {}/{}", i, num_entries
+                    );
+                    break;
+                }
+            }
+        }
+
+        if absolute_offsets.len() != num_entries {
+            debug!(
+                "⚠️ Only read {} of {} sprite detail offsets",
+                absolute_offsets.len(), num_entries
+            );
+        }
+
+        // Log first few absolute offsets for debugging
+        if !absolute_offsets.is_empty() {
+            let first_few: Vec<String> = absolute_offsets.iter().take(10)
+                .map(|&off| format!("{}", off))
+                .collect();
+            debug!(
+                "   First {} absolute offsets: [{}]",
+                first_few.len(), first_few.join(", ")
+            );
+        }
+
+        // Now parse sprite details using the ScummVM mapping:
+        // For a sprite with spriteListIdx = N:
+        //   - Behaviors are at getSpriteDetailsStream(N + 1), i.e., absolute_offsets[N + 1]
+        //
+        // So we iterate through spriteListIdx values (0, 1, 2, ...) and look up behaviors
+        // at index spriteListIdx + 1
+
+        let mut behavior_count = 0;
+        for sprite_list_idx in 0..num_entries.saturating_sub(1) {
+            // Behavior stream is at index sprite_list_idx + 1
+            let behavior_stream_idx = sprite_list_idx + 1;
+
+            if behavior_stream_idx >= absolute_offsets.len() {
+                continue;
+            }
+
+            let behavior_start = absolute_offsets[behavior_stream_idx];
+
+            // Calculate behavior stream size (to next offset or end of entry0)
+            let behavior_end = if behavior_stream_idx + 1 < absolute_offsets.len() {
+                absolute_offsets[behavior_stream_idx + 1]
+            } else {
+                entry0_len
+            };
+
+            // Validate bounds
+            if behavior_start >= entry0_len || behavior_start >= behavior_end {
+                continue;
+            }
+
+            let behavior_size = behavior_end - behavior_start;
+            if behavior_size < 8 {
+                // Need at least 8 bytes for one behavior element
+                continue;
+            }
+
+            // Parse behaviors from this stream
+            let behavior_data = &entry0[behavior_start..behavior_end];
+            let mut behavior_reader = BinaryReader::from_u8(behavior_data);
+            behavior_reader.set_endian(Endian::Big);
+
+            let mut info = SpriteDetailInfo::default();
+
+            // BehaviorElement format (from ScummVM spriteinfo.h):
+            //   castLib (u16), member (u16), initializerIndex (u32)
+            while behavior_reader.pos + 8 <= behavior_size {
+                let cast_lib = match behavior_reader.read_u16() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let cast_member = match behavior_reader.read_u16() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let _initializer_idx = match behavior_reader.read_u32() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+
+                // Check for valid behavior reference
+                // cast_lib == 0 && cast_member == 0 is end marker
+                if cast_lib == 0 && cast_member == 0 {
+                    break;
+                }
+
+                // cast_lib can be 65535 (-1 as u16) meaning "use parent cast lib"
+                // cast_member should be > 0 for a valid reference
+                if cast_member > 0 && cast_member < 10000 {
+                    info.behaviors.push(SpriteBehavior { cast_lib, cast_member });
+                }
+            }
+
+            if !info.behaviors.is_empty() {
+                behavior_count += info.behaviors.len();
+                // Log behaviors for debugging (limit to first 30 to avoid spam)
+                if details.len() < 30 {
+                    let behavior_strs: Vec<String> = info.behaviors.iter()
+                        .map(|b| {
+                            if b.cast_lib == 65535 {
+                                format!("(-1)/{}", b.cast_member)
+                            } else {
+                                format!("{}/{}", b.cast_lib, b.cast_member)
+                            }
+                        })
+                        .collect();
+                    debug!(
+                        "   spriteListIdx {}: {} behaviors [{}] (stream at {}..{})",
+                        sprite_list_idx, info.behaviors.len(),
+                        behavior_strs.join(", "),
+                        behavior_start, behavior_end
+                    );
+                }
+                details.insert(sprite_list_idx as u32, info);
+            }
+        }
+
+        if !details.is_empty() {
+            debug!(
+                "✅ Parsed {} sprite details with {} total behaviors from Entry[0]",
+                details.len(), behavior_count
+            );
+        } else if num_entries > 0 {
+            debug!(
+                "⚠️ No behaviors found despite {} sprite detail entries",
+                num_entries
+            );
+        }
+
+        details
     }
 
     /// Analyze score entries beyond Entry[0] for behavior attachment data
@@ -895,6 +1190,15 @@ impl ScoreChunk {
         let mut i = 2; // Start at 2, skip entries 0 and 1
 
         debug!("🔍 Starting to analyze {} entries", entries.len());
+
+        // Log all entry sizes for debugging filmloop behavior issues
+        if entries.len() > 2 && entries.len() < 50 {
+            let sizes: Vec<usize> = entries.iter().map(|e| e.len()).collect();
+            debug!(
+                "📊 analyze_behavior_attachment_entries: {} entries, sizes: {:?}",
+                entries.len(), sizes
+            );
+        }
 
         while i < entries.len() {
             let entry_bytes = &entries[i];
@@ -915,6 +1219,30 @@ impl ScoreChunk {
                             "🎯 Found primary at entry {}: channel={}, frames={}-{}",
                             i, primary.channel_index, primary.start_frame, primary.end_frame
                         );
+
+                        // Log primary entries for filmloop debugging
+                        // Only log for main movie entries (high entry numbers, channels 55-100)
+                        let is_main_movie_digit_channel = i > 3500 && primary.channel_index >= 55 && primary.channel_index <= 100;
+                        if is_main_movie_digit_channel {
+                            debug!(
+                                "🎯 Primary entry {}: channel={} frames={}-{}",
+                                i, primary.channel_index, primary.start_frame, primary.end_frame
+                            );
+
+                            // Log the secondary entry sizes for debugging
+                            if i + 1 < entries.len() {
+                                let sec_size = entries[i + 1].len();
+                                let sec_bytes: String = entries[i + 1].iter()
+                                    .take(32)
+                                    .map(|b| format!("{:02x}", b))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                debug!(
+                                    "   Secondary entry {} size={} bytes: {}",
+                                    i + 1, sec_size, sec_bytes
+                                );
+                            }
+                        }
 
                         // Look ahead to collect ALL secondary entries for this primary
                         let mut secondaries = Vec::new();
@@ -1008,6 +1336,11 @@ impl ScoreChunk {
                                 }
                             } else {
                                 debug!("  ⏹️ Not a behavior entry size, stopping");
+                                // Log entries that don't match behavior pattern
+                                debug!(
+                                    "   ⏹️ Entry {} size {} doesn't match behavior pattern (8-byte multiple)",
+                                    j, next_size
+                                );
                                 break; // Not a behavior entry size
                             }
                         }
@@ -1017,6 +1350,18 @@ impl ScoreChunk {
                             primary.channel_index,
                             secondaries.len()
                         );
+
+                        // Log behaviors found
+                        debug!(
+                            "📊 Channel {} has {} behaviors",
+                            primary.channel_index, secondaries.len()
+                        );
+                        for sec in &secondaries {
+                            debug!(
+                                "   Behavior: cast {}/{}",
+                                sec.cast_lib, sec.cast_member
+                            );
+                        }
 
                         // Create a separate result entry for EACH secondary
                         if secondaries.is_empty() {

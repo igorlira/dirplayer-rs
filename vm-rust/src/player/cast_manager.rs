@@ -356,6 +356,18 @@ impl CastManager {
         }
     }
 
+    /// Search for a script by member number across all cast libraries.
+    /// Returns the first script found with the given member number, along with its cast_lib.
+    pub fn find_script_in_all_casts(&self, cast_member: i32) -> Option<(i32, &Rc<Script>)> {
+        for (idx, cast) in self.casts.iter().enumerate() {
+            let cast_lib = (idx + 1) as i32; // Cast libraries are 1-indexed
+            if let Some(script) = cast.get_script_for_member(cast_member as u32) {
+                return Some((cast_lib, script));
+            }
+        }
+        None
+    }
+
     pub fn get_field_value_by_identifiers(
         &self,
         member_name_or_num: &Datum,

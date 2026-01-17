@@ -200,6 +200,11 @@ pub struct FilmLoopMember {
     pub info: FilmLoopInfo,
     pub score_chunk: ScoreChunk,
     pub score: Score,
+    pub current_frame: u32,
+    /// The bounding rectangle encompassing all sprites in the filmloop.
+    /// Used to translate sprite coordinates when rendering.
+    /// Similar to ScummVM's _initialRect.
+    pub initial_rect: super::geometry::IntRect,
 }
 
 #[derive(Clone)]
@@ -245,7 +250,7 @@ pub enum CastMemberType {
     Unknown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum CastMemberTypeId {
     Field,
     Text,
@@ -559,6 +564,85 @@ impl CastMember {
             },
             None => None,
         }
+    }
+
+    /// Compute the initial bounding rectangle for a filmloop by finding the
+    /// bounding box of all sprites across all frames.
+    /// This is similar to ScummVM's _initialRect calculation.
+    ///
+    /// The coordinate system for filmloop sprites is relative to this initial_rect.
+    /// When rendering, sprite positions are translated by subtracting initial_rect.left/top.
+    fn compute_filmloop_initial_rect(
+        frame_channel_data: &[(u32, u16, crate::director::chunks::score::ScoreFrameChannelData)],
+        _reg_point: (i16, i16),
+    ) -> super::geometry::IntRect {
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+        let mut found_any = false;
+
+        for (_frame_idx, channel_idx, data) in frame_channel_data.iter() {
+            // Skip effect channels (channels 0-5 in the raw data)
+            // Real sprite channels start at index 6
+            if *channel_idx < 6 {
+                continue;
+            }
+
+            // Skip empty sprites (no cast member assigned)
+            // Also skip sprites with cast_lib == 0 which are typically invalid/placeholder entries
+            // (cast_lib 65535 is valid - it's used for internal/embedded casts)
+            if data.cast_member == 0 || data.cast_lib == 0 || (data.width == 0 && data.height == 0) {
+                continue;
+            }
+
+            // The sprite's position (pos_x, pos_y) is its loc (registration point location).
+            // In Director, loc is where the reg point is placed.
+            // ScummVM subtracts the cast member's registration offset to get top-left.
+            // Since we don't have access to cast members here, we assume CENTER registration
+            // which is the default for bitmaps. This means:
+            //   sprite_left = pos_x - width/2
+            //   sprite_top = pos_y - height/2
+            let reg_offset_x = data.width as i32 / 2;
+            let reg_offset_y = data.height as i32 / 2;
+            let sprite_left = data.pos_x as i32 - reg_offset_x;
+            let sprite_top = data.pos_y as i32 - reg_offset_y;
+            let sprite_right = sprite_left + data.width as i32;
+            let sprite_bottom = sprite_top + data.height as i32;
+
+            debug!(
+                "FilmLoop initial_rect: frame {} channel {} cast {}:{} pos ({}, {}) size {}x{} -> bounds ({}, {}, {}, {})",
+                _frame_idx, channel_idx, data.cast_lib, data.cast_member,
+                data.pos_x, data.pos_y, data.width, data.height,
+                sprite_left, sprite_top, sprite_right, sprite_bottom
+            );
+
+            if sprite_left < min_x {
+                min_x = sprite_left;
+            }
+            if sprite_top < min_y {
+                min_y = sprite_top;
+            }
+            if sprite_right > max_x {
+                max_x = sprite_right;
+            }
+            if sprite_bottom > max_y {
+                max_y = sprite_bottom;
+            }
+            found_any = true;
+        }
+
+        if !found_any {
+            // No sprites found, return a default rect at origin
+            debug!("FilmLoop initial_rect: no sprites found, using default (0, 0, 1, 1)");
+            return super::geometry::IntRect::from(0, 0, 1, 1);
+        }
+
+        debug!(
+            "FilmLoop initial_rect computed: ({}, {}, {}, {})",
+            min_x, min_y, max_x, max_y
+        );
+        super::geometry::IntRect::from(min_x, min_y, max_x, max_y)
     }
 
     fn decode_bitmap_from_bitd(
@@ -1244,14 +1328,6 @@ impl CastMember {
                     )
                 };
 
-                debug!(
-                        "BitmapMember created → name: {} palette_id {} useAlpha {} trimWhiteSpace {}",
-                        chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
-                        bitmap_info.palette_id,
-                        bitmap_info.use_alpha,
-                        bitmap_info.trim_white_space
-                    );
-
                 CastMemberType::Bitmap(BitmapMember {
                     image_ref: new_bitmap_ref,
                     reg_point: (bitmap_info.reg_x, bitmap_info.reg_y),
@@ -1297,10 +1373,37 @@ impl CastMember {
                 let film_loop_info = chunk.specific_data.film_loop_info().unwrap();
                 let mut score = Score::empty();
                 score.load_from_score_chunk(score_chunk);
+
+                // Compute initial_rect by finding the bounding box of all sprites
+                // Similar to ScummVM's _initialRect calculation
+                let initial_rect = Self::compute_filmloop_initial_rect(
+                    &score_chunk.frame_data.frame_channel_data,
+                    film_loop_info.reg_point,
+                );
+
+                debug!(
+                    "FilmLoop {} initial_rect: ({}, {}, {}, {}), info size: {}x{}, reg_point: ({}, {})",
+                    number,
+                    initial_rect.left, initial_rect.top, initial_rect.right, initial_rect.bottom,
+                    film_loop_info.width, film_loop_info.height,
+                    film_loop_info.reg_point.0, film_loop_info.reg_point.1
+                );
+
+                // Log sprite_spans info
+                debug!(
+                    "FilmLoop {} has {} sprite_spans, {} frame_intervals, {} frame_channel_data entries",
+                    number,
+                    score.sprite_spans.len(),
+                    score_chunk.frame_intervals.len(),
+                    score_chunk.frame_data.frame_channel_data.len()
+                );
+
                 CastMemberType::FilmLoop(FilmLoopMember {
                     info: film_loop_info.clone(),
                     score_chunk: score_chunk.clone(),
                     score,
+                    current_frame: 1, // Start at frame 1
+                    initial_rect,
                 })
             }
             MemberType::Sound => {

@@ -536,8 +536,7 @@ impl JsApi {
                     init_data_map.str_set("height", &init_data.height.to_js_value());
                     init_data_map.str_set("locH", &init_data.pos_x.to_js_value());
                     init_data_map.str_set("locV", &init_data.pos_y.to_js_value());
-                    init_data_map.str_set("unk1", &init_data.unk1.to_js_value());
-                    init_data_map.str_set("unk2", &init_data.unk2.to_js_value());
+                    init_data_map.str_set("spriteListIdx", &init_data.sprite_list_idx().to_js_value());
 
                     channel_map.str_set("initData", &init_data_map.to_js_object());
                     channel_map.to_js_object()

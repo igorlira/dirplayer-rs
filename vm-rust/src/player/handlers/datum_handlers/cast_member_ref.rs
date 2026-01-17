@@ -297,12 +297,12 @@ impl CastMemberRefHandlers {
                 if prop == "text" {
                     let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
                         .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-                    
+
                     if let CastMemberType::Script(script_data) = &cast_member.member_type {
                         // Scripts in Director typically don't have editable text
                         // This member might be misclassified
                         web_sys::console::log_1(&format!("⚠️ Trying to get .text from Script member #{}", cast_member.number).into());
-                        
+
                         // Return empty string for now, but this suggests the member type is wrong
                         Ok(Datum::String("".to_string()))
                     } else {
@@ -310,6 +310,33 @@ impl CastMemberRefHandlers {
                     }
                 } else {
                     Err(ScriptError::new(format!("Script members don't support property {}", prop)))
+                }
+            }
+            CastMemberTypeId::Shape => {
+                let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+
+                if let CastMemberType::Shape(shape_member) = &cast_member.member_type {
+                    match prop.as_str() {
+                        "rect" => {
+                            // Shape members have width/height in shape_info
+                            let width = shape_member.shape_info.width as i32;
+                            let height = shape_member.shape_info.height as i32;
+                            Ok(Datum::Rect([
+                                player.alloc_datum(Datum::Int(0)),
+                                player.alloc_datum(Datum::Int(0)),
+                                player.alloc_datum(Datum::Int(width)),
+                                player.alloc_datum(Datum::Int(height)),
+                            ]))
+                        }
+                        "width" => Ok(Datum::Int(shape_member.shape_info.width as i32)),
+                        "height" => Ok(Datum::Int(shape_member.shape_info.height as i32)),
+                        _ => Err(ScriptError::new(format!(
+                            "Shape members don't support property {}", prop
+                        ))),
+                    }
+                } else {
+                    Err(ScriptError::new("Expected shape member".to_string()))
                 }
             }
             _ => Err(ScriptError::new(format!(

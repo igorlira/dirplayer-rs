@@ -410,11 +410,37 @@ impl MovieHandlers {
     }
 
     pub async fn send_all_sprites(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // Check for re-entrant sendAllSprites call
+        let skip = reserve_player_mut(|player| {
+            if player.is_in_send_all_sprites {
+                web_sys::console::warn_1(&format!(
+                    "Blocking re-entrant sendAllSprites call to prevent infinite recursion"
+                ).into());
+                return true;
+            }
+            player.is_in_send_all_sprites = true;
+            false
+        });
+
+        if skip {
+            return Ok(DatumRef::Void);
+        }
+
         let (message, remaining_args, receivers) = reserve_player_mut(|player| {
             let message = player.get_datum(&args[0]).symbol_value()
                 .map_err(|e| ScriptError::new(format!("sendAllSprites: invalid message: {:?}", e)))?;
             let remaining_args = &args[1..].to_vec();
-            let receivers = player.movie.score.get_active_script_instance_list();
+
+            // Collect receivers from stage score
+            let mut receivers = player.movie.score.get_active_script_instance_list();
+
+            // Also collect receivers from filmloop scores
+            let active_filmloops = player.get_active_filmloop_scores();
+            for (_, filmloop_score) in active_filmloops {
+                let filmloop_receivers = filmloop_score.get_active_script_instance_list();
+                receivers.extend(filmloop_receivers);
+            }
+
             Ok((message.clone(), remaining_args.clone(), receivers))
         })?;
         
@@ -434,12 +460,14 @@ impl MovieHandlers {
                 }
             }
         }
-        
+
         if !handled_by_sprite {
             player_invoke_static_event(&message, &remaining_args).await?;
         }
-        
+
         reserve_player_mut(|player: &mut crate::player::DirPlayer| {
+            // Reset the re-entrancy flag
+            player.is_in_send_all_sprites = false;
             Ok(player.alloc_datum(Datum::Int(handled_by_sprite as i32)))
         })
     }
