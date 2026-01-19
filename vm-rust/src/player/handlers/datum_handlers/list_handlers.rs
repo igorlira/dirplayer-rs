@@ -213,22 +213,36 @@ impl ListDatumHandlers {
         reserve_player_mut(|player| {
             let find = player.get_datum(&args[0]);
             let list_vec = player.get_datum(datum).to_list()?;
+
             let position = list_vec
                 .iter()
                 .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
                 .map(|x| x as i32);
-            Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
+            let result = position.unwrap_or(-1) + 1;
+
+            // Debug logging for sprite release tracking - only log FOUND cases
+            #[cfg(target_arch = "wasm32")]
+            {
+                if let Datum::Int(search_val) = find {
+                    if *search_val > 0 && *search_val < 150 && result > 0 {
+                        let list_contents: Vec<i32> = list_vec.iter()
+                            .filter_map(|x| player.get_datum(x).int_value().ok())
+                            .collect();
+                        web_sys::console::log_1(&format!(
+                            "getPos: FOUND {} at position {} in list of {} items (first 20: {:?})",
+                            search_val, result, list_vec.len(), &list_contents[..list_contents.len().min(20)]
+                        ).into());
+                    }
+                }
+            }
+
+            Ok(player.alloc_datum(Datum::Int(result)))
         })
     }
 
     pub fn add(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let item = &args[0];
         reserve_player_mut(|player| {
-            let datum_value = player.get_datum(datum);
-            if datum_value.is_void() {
-                return Ok(DatumRef::Void);
-            }
-            
-            let item = &args[0];
             let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
             let index_to_add = if is_sorted {
                 ListDatumUtils::find_index_to_add(&list_vec, &item, &player.allocator)?
@@ -294,18 +308,6 @@ impl ListDatumHandlers {
 
     pub fn add_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let datum_value = player.get_datum(datum);
-            // Return void gracefully if datum is void or not a list
-            // Director typically silently fails rather than erroring on wrong types
-            if datum_value.is_void() {
-                return Ok(DatumRef::Void);
-            }
-
-            // Check if it's actually a list before trying to mutate
-            if !matches!(datum_value, Datum::List(..)) {
-                return Ok(DatumRef::Void);
-            }
-
             let position = player.get_datum(&args[0]).int_value()? - 1;
             let item_ref = &args[1];
 
@@ -316,13 +318,8 @@ impl ListDatumHandlers {
     }
 
     pub fn append(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let item = &args[0];
         reserve_player_mut(|player| {
-            let datum_value = player.get_datum(datum);
-            if datum_value.is_void() {
-                return Ok(DatumRef::Void);
-            }
-            
-            let item = &args[0];
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.push(item.clone());
             Ok(DatumRef::Void)

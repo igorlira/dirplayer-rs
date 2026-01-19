@@ -43,6 +43,7 @@ use crate::player::font::BitmapFont;
 use crate::player::font::FontManager;
 use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
 use crate::player::score_keyframes::SpritePathKeyframes;
+use crate::rendering_gpu::{DynamicRenderer, Renderer};
 
 /// Interpolate path position between keyframes for filmloop animation.
 /// Returns interpolated (x, y) position for the given frame, or None if no interpolation is needed.
@@ -1763,16 +1764,55 @@ impl PlayerCanvasRenderer {
             _ => {}
         }
     }
+
+    /// Get the backend name
+    pub fn backend_name(&self) -> &'static str {
+        "Canvas2D"
+    }
+}
+
+impl Renderer for PlayerCanvasRenderer {
+    fn draw_frame(&mut self, player: &mut DirPlayer) {
+        PlayerCanvasRenderer::draw_frame(self, player)
+    }
+
+    fn draw_preview_frame(&mut self, player: &mut DirPlayer) {
+        PlayerCanvasRenderer::draw_preview_frame(self, player)
+    }
+
+    fn set_size(&mut self, width: u32, height: u32) {
+        PlayerCanvasRenderer::set_size(self, width, height)
+    }
+
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn backend_name(&self) -> &'static str {
+        PlayerCanvasRenderer::backend_name(self)
+    }
+
+    fn canvas(&self) -> &web_sys::HtmlCanvasElement {
+        &self.canvas
+    }
+
+    fn set_preview_member_ref(&mut self, member_ref: Option<CastMemberRef>) {
+        self.preview_member_ref = member_ref;
+    }
+
+    fn set_preview_container_element(&mut self, container_element: Option<web_sys::HtmlElement>) {
+        PlayerCanvasRenderer::set_preview_container_element(self, container_element)
+    }
 }
 
 thread_local! {
-    pub static RENDERER_LOCK: RefCell<Option<PlayerCanvasRenderer>> = RefCell::new(None);
+    pub static RENDERER_LOCK: RefCell<Option<DynamicRenderer>> = RefCell::new(None);
 }
 
 #[allow(dead_code)]
-pub fn with_canvas_renderer_ref<F, R>(f: F) -> R
+pub fn with_renderer_ref<F, R>(f: F) -> R
 where
-    F: FnOnce(&PlayerCanvasRenderer) -> R,
+    F: FnOnce(&DynamicRenderer) -> R,
 {
     RENDERER_LOCK.with(|renderer_lock| {
         let renderer = renderer_lock.borrow();
@@ -1780,28 +1820,81 @@ where
     })
 }
 
-pub fn with_canvas_renderer_mut<F, R>(f: F) -> R
+pub fn with_renderer_mut<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut Option<PlayerCanvasRenderer>) -> R,
+    F: FnOnce(&mut Option<DynamicRenderer>) -> R,
 {
     RENDERER_LOCK.with_borrow_mut(|renderer_lock| f(renderer_lock))
 }
 
+/// Helper to access Canvas2D renderer for Canvas2D-specific operations
+#[allow(dead_code)]
+pub fn with_canvas2d_renderer<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&PlayerCanvasRenderer) -> R,
+{
+    RENDERER_LOCK.with(|renderer_lock| {
+        let renderer = renderer_lock.borrow();
+        if let Some(dynamic) = renderer.as_ref() {
+            if let Some(canvas2d) = dynamic.as_canvas2d() {
+                return Some(f(canvas2d));
+            }
+        }
+        None
+    })
+}
+
+/// Helper to access Canvas2D renderer mutably for Canvas2D-specific operations
+pub fn with_canvas2d_renderer_mut<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut PlayerCanvasRenderer) -> R,
+{
+    RENDERER_LOCK.with_borrow_mut(|renderer_lock| {
+        if let Some(dynamic) = renderer_lock {
+            if let Some(canvas2d) = dynamic.as_canvas2d_mut() {
+                return Some(f(canvas2d));
+            }
+        }
+        None
+    })
+}
+
+/// Legacy helper - kept for backward compatibility with existing code
+/// Prefer using with_renderer_mut or with_canvas2d_renderer_mut
+#[allow(dead_code)]
+pub fn with_canvas_renderer_mut<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut PlayerCanvasRenderer) -> R,
+    R: Default,
+{
+    with_canvas2d_renderer_mut(f).unwrap_or_default()
+}
+
 #[wasm_bindgen]
 pub fn player_set_preview_member_ref(cast_lib: i32, cast_num: i32) -> Result<(), JsValue> {
-    with_canvas_renderer_mut(|renderer| {
-        renderer.as_mut().unwrap().preview_member_ref = Some(CastMemberRef {
-            cast_lib,
-            cast_member: cast_num,
-        });
+    use crate::rendering_gpu::Renderer;
+    with_renderer_mut(|renderer_lock| {
+        if let Some(dynamic) = renderer_lock {
+            dynamic.set_preview_member_ref(Some(CastMemberRef {
+                cast_lib,
+                cast_member: cast_num,
+            }));
+        }
     });
     Ok(())
 }
 
 #[wasm_bindgen]
 pub fn player_set_debug_selected_channel(channel_num: i16) -> Result<(), JsValue> {
-    with_canvas_renderer_mut(|renderer| {
-        renderer.as_mut().unwrap().debug_selected_channel_num = Some(channel_num);
+    // Set on whichever renderer is active (Canvas2D or WebGL2)
+    with_renderer_mut(|renderer_lock| {
+        if let Some(dynamic) = renderer_lock {
+            if let Some(canvas2d) = dynamic.as_canvas2d_mut() {
+                canvas2d.debug_selected_channel_num = Some(channel_num);
+            } else if let Some(webgl2) = dynamic.as_webgl2_mut() {
+                webgl2.debug_selected_channel_num = Some(channel_num);
+            }
+        }
     });
     JsApi::dispatch_channel_changed(channel_num);
     Ok(())
@@ -1809,12 +1902,12 @@ pub fn player_set_debug_selected_channel(channel_num: i16) -> Result<(), JsValue
 
 #[wasm_bindgen]
 pub fn player_set_preview_parent(parent_selector: &str) -> Result<(), JsValue> {
+    use crate::rendering_gpu::Renderer;
     if parent_selector.is_empty() {
-        with_canvas_renderer_mut(|renderer| {
-            renderer
-                .as_mut()
-                .unwrap()
-                .set_preview_container_element(None);
+        with_renderer_mut(|renderer_lock| {
+            if let Some(dynamic) = renderer_lock {
+                dynamic.set_preview_container_element(None);
+            }
         });
         return Ok(());
     }
@@ -1827,14 +1920,156 @@ pub fn player_set_preview_parent(parent_selector: &str) -> Result<(), JsValue> {
         .unwrap()
         .dyn_into::<web_sys::HtmlElement>()?;
 
-    with_canvas_renderer_mut(|renderer| {
-        renderer
-            .as_mut()
-            .unwrap()
-            .set_preview_container_element(Some(parent_element));
+    with_renderer_mut(|renderer_lock| {
+        if let Some(dynamic) = renderer_lock {
+            dynamic.set_preview_container_element(Some(parent_element));
+        }
     });
 
     Ok(())
+}
+
+/// Helper to set pixel-perfect rendering styles on a canvas
+fn set_pixelated_canvas_style(canvas: &web_sys::HtmlCanvasElement) {
+    canvas
+        .style()
+        .set_property("image-rendering", "pixelated")
+        .unwrap_or(());
+    canvas
+        .style()
+        .set_property("image-rendering", "-moz-crisp-edges")
+        .unwrap_or(());
+    canvas
+        .style()
+        .set_property("image-rendering", "crisp-edges")
+        .unwrap_or(());
+}
+
+/// Create a Canvas2D renderer (fallback)
+fn create_canvas2d_renderer(
+    canvas_size: (u32, u32),
+) -> PlayerCanvasRenderer {
+    let canvas = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .create_element("canvas")
+        .unwrap()
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .unwrap();
+
+    let preview_canvas = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .create_element("canvas")
+        .unwrap()
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .unwrap();
+
+    canvas.set_width(canvas_size.0);
+    canvas.set_height(canvas_size.1);
+
+    preview_canvas.set_width(1);
+    preview_canvas.set_height(1);
+
+    set_pixelated_canvas_style(&canvas);
+    set_pixelated_canvas_style(&preview_canvas);
+
+    let ctx = canvas
+        .get_context("2d")
+        .unwrap()
+        .unwrap()
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .unwrap();
+
+    let preview_ctx = preview_canvas
+        .get_context("2d")
+        .unwrap()
+        .unwrap()
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .unwrap();
+
+    ctx.set_image_smoothing_enabled(false);
+    preview_ctx.set_image_smoothing_enabled(false);
+
+    PlayerCanvasRenderer {
+        container_element: None,
+        preview_container_element: None,
+        canvas,
+        preview_canvas,
+        ctx2d: ctx,
+        preview_ctx2d: preview_ctx,
+        size: canvas_size,
+        preview_size: (1, 1),
+        preview_member_ref: None,
+        debug_selected_channel_num: None,
+        bitmap: Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            0,
+            PaletteRef::BuiltIn(get_system_default_palette()),
+        ),
+    }
+}
+
+/// Try to create a WebGL2 renderer, returns None if not supported or fails
+fn try_create_webgl2_renderer(
+    canvas_size: (u32, u32),
+) -> Option<crate::rendering_gpu::webgl2::WebGL2Renderer> {
+    use crate::rendering_gpu::webgl2::WebGL2Renderer;
+
+    // TEMPORARY: Force Canvas2D for debugging
+    // TODO: Remove this line to re-enable WebGL2
+    console::log_1(&"WebGL2 disabled for debugging, using Canvas2D".into());
+    return None;
+
+    // Check if WebGL2 is supported
+    if !crate::rendering_gpu::is_webgl2_supported() {
+        console::log_1(&"WebGL2 not supported, falling back to Canvas2D".into());
+        return None;
+    }
+
+    // Create canvases for WebGL2
+    let canvas = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .create_element("canvas")
+        .ok()?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .ok()?;
+
+    let preview_canvas = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .create_element("canvas")
+        .ok()?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .ok()?;
+
+    canvas.set_width(canvas_size.0);
+    canvas.set_height(canvas_size.1);
+    preview_canvas.set_width(1);
+    preview_canvas.set_height(1);
+
+    set_pixelated_canvas_style(&canvas);
+    set_pixelated_canvas_style(&preview_canvas);
+
+    // Try to create the WebGL2 renderer
+    match WebGL2Renderer::new(canvas, preview_canvas) {
+        Ok(renderer) => {
+            console::log_1(&"WebGL2 renderer created successfully".into());
+            Some(renderer)
+        }
+        Err(e) => {
+            console::warn_1(&format!("Failed to create WebGL2 renderer: {:?}, falling back to Canvas2D", e).into());
+            None
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -1849,26 +2084,8 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
         .dyn_into::<web_sys::HtmlElement>()?;
 
     // Create renderer if it doesn't exist
-    with_canvas_renderer_mut(|renderer_lock| {
+    with_renderer_mut(|renderer_lock| {
         if renderer_lock.is_none() {
-            let canvas = web_sys::window()
-                .unwrap()
-                .document()
-                .unwrap()
-                .create_element("canvas")
-                .unwrap()
-                .dyn_into::<web_sys::HtmlCanvasElement>()
-                .unwrap();
-
-            let preview_canvas = web_sys::window()
-                .unwrap()
-                .document()
-                .unwrap()
-                .create_element("canvas")
-                .unwrap()
-                .dyn_into::<web_sys::HtmlCanvasElement>()
-                .unwrap();
-
             let canvas_size = reserve_player_ref(|player| {
                 (
                     player.movie.rect.width() as u32,
@@ -1876,88 +2093,36 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 )
             });
 
-            canvas.set_width(canvas_size.0);
-            canvas.set_height(canvas_size.1);
-
-            preview_canvas.set_width(1);
-            preview_canvas.set_height(1);
-
-            canvas
-                .style()
-                .set_property("image-rendering", "pixelated")
-                .unwrap_or(());
-            canvas
-                .style()
-                .set_property("image-rendering", "-moz-crisp-edges")
-                .unwrap_or(());
-            canvas
-                .style()
-                .set_property("image-rendering", "crisp-edges")
-                .unwrap_or(());
-
-            preview_canvas
-                .style()
-                .set_property("image-rendering", "pixelated")
-                .unwrap_or(());
-            preview_canvas
-                .style()
-                .set_property("image-rendering", "-moz-crisp-edges")
-                .unwrap_or(());
-            preview_canvas
-                .style()
-                .set_property("image-rendering", "crisp-edges")
-                .unwrap_or(());
-
-            let ctx = canvas
-                .get_context("2d")
-                .unwrap()
-                .unwrap()
-                .dyn_into::<web_sys::CanvasRenderingContext2d>()
-                .unwrap();
-
-            let preview_ctx = preview_canvas
-                .get_context("2d")
-                .unwrap()
-                .unwrap()
-                .dyn_into::<web_sys::CanvasRenderingContext2d>()
-                .unwrap();
-
-            ctx.set_image_smoothing_enabled(false);
-            preview_ctx.set_image_smoothing_enabled(false);
-
-            let renderer = PlayerCanvasRenderer {
-                container_element: None,
-                preview_container_element: None,
-                canvas,
-                preview_canvas,
-                ctx2d: ctx,
-                preview_ctx2d: preview_ctx,
-                size: canvas_size,
-                preview_size: (1, 1),
-                preview_member_ref: None,
-                debug_selected_channel_num: None,
-                bitmap: Bitmap::new(
-                    1,
-                    1,
-                    32,
-                    32,
-                    0,
-                    PaletteRef::BuiltIn(get_system_default_palette()),
-                ),
+            // Try WebGL2 first, fall back to Canvas2D
+            let dynamic_renderer = if let Some(webgl2_renderer) = try_create_webgl2_renderer(canvas_size) {
+                DynamicRenderer::WebGL2(webgl2_renderer)
+            } else {
+                DynamicRenderer::Canvas2D(create_canvas2d_renderer(canvas_size))
             };
 
-            *renderer_lock = Some(renderer);
+            *renderer_lock = Some(dynamic_renderer);
             spawn_local(async {
                 run_draw_loop().await;
             });
         }
     });
 
-    with_canvas_renderer_mut(|renderer| {
-        renderer
-            .as_mut()
-            .unwrap()
-            .set_container_element(container_element);
+    // Set container element - need to handle both renderer types
+    with_renderer_mut(|renderer_lock| {
+        if let Some(renderer) = renderer_lock {
+            match renderer {
+                DynamicRenderer::Canvas2D(canvas_renderer) => {
+                    canvas_renderer.set_container_element(container_element.clone());
+                }
+                DynamicRenderer::WebGL2(webgl_renderer) => {
+                    // For WebGL2, we need to append the canvas to the container
+                    if webgl_renderer.canvas().parent_node().is_some() {
+                        webgl_renderer.canvas().remove();
+                    }
+                    container_element.append_child(webgl_renderer.canvas()).unwrap();
+                }
+            }
+        }
     });
 
     Ok(())
@@ -1981,10 +2146,11 @@ async fn run_draw_loop() {
 
         if Local::now().timestamp_millis() - last_frame_ms >= 1000 / draw_fps as i64 {
             last_frame_ms = Local::now().timestamp_millis();
-            with_canvas_renderer_mut(|renderer| {
-                let renderer = renderer.as_mut().unwrap();
-                renderer.draw_frame(&mut player);
-                renderer.draw_preview_frame(&mut player);
+            with_renderer_mut(|renderer_lock| {
+                if let Some(renderer) = renderer_lock {
+                    renderer.draw_frame(&mut player);
+                    renderer.draw_preview_frame(&mut player);
+                }
             });
         }
 

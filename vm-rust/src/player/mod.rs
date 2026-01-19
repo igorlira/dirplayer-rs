@@ -87,7 +87,7 @@ use crate::{
         events::{player_invoke_event_to_instances, player_dispatch_event_beginsprite,
         dispatch_event_to_all_behaviors, player_invoke_frame_and_movie_scripts, dispatch_system_event_to_timeouts},
     },
-    rendering::with_canvas_renderer_mut,
+    rendering::with_renderer_mut,
     utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks},
 };
 
@@ -205,6 +205,8 @@ pub struct DirPlayer {
     pub is_in_frame_update: bool,
     pub is_dispatching_events: bool, // Prevents re-entrant event dispatch
     pub is_in_send_all_sprites: bool, // Prevents re-entrant sendAllSprites calls
+    pub is_in_endsprite: bool, // Prevents re-entrant endSprite dispatch
+    pub is_in_beginsprite: bool, // Prevents re-entrant beginSprite dispatch
     pub system_start_time: chrono::DateTime<chrono::Local>, // For ticks & milliSeconds (system uptime)
     pub handler_stack_depth: usize,
     pub in_frame_script: bool,
@@ -304,6 +306,8 @@ impl DirPlayer {
             is_in_frame_update: false,
             is_dispatching_events: false,
             is_in_send_all_sprites: false,
+            is_in_endsprite: false,
+            is_in_beginsprite: false,
             system_start_time: now - chrono::Duration::days(8), // Simulated system start
             handler_stack_depth: 0,
             in_frame_script: false,
@@ -371,14 +375,28 @@ impl DirPlayer {
             .cast_manager
             .load_fonts_into_manager(&mut self.font_manager);
 
-        with_canvas_renderer_mut(|renderer| {
-            if let Some(renderer) = renderer.as_mut() {
+        with_renderer_mut(|renderer_opt| {
+            if let Some(renderer) = renderer_opt {
+                use crate::rendering_gpu::Renderer;
                 renderer.set_size(
                     self.movie.rect.width() as u32,
                     self.movie.rect.height() as u32,
                 );
             }
         });
+
+        self.external_params.insert("sw1".to_string(), "connection.info.host=127.0.0.1".to_string());
+        // Use WebSocket proxy port (3091) instead of raw TCP port (3090)
+        // Run: node ws-tcp-proxy.js --ws-port=3091 --tcp-port=3090
+        self.external_params.insert("sw2".to_string(), "connection.info.port=3091".to_string());
+        self.external_params.insert("sw3".to_string(), "client.reload.url=http://localhost/v7/index.htm".to_string());
+        self.external_params.insert("sw4".to_string(), "connection.mus.host=127.0.0.1".to_string());
+        // Use WebSocket proxy port (3081) instead of raw TCP port (3080)
+        // Run: node ws-tcp-proxy.js --ws-port=3081 --tcp-port=3080
+        self.external_params.insert("sw5".to_string(), "connection.mus.port=3081".to_string());
+        self.external_params.insert("sw6".to_string(), "external.variables.txt=http://localhost/v7/ext/external_variables.txt".to_string());
+        self.external_params.insert("sw7".to_string(), "external.texts.txt=http://localhost/v7/ext/external_texts.txt".to_string());
+        self.external_params.insert("sw8".to_string(), "site.url=http://localhost/v7/".to_string());
 
         JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
         
@@ -1656,7 +1674,7 @@ pub fn player_handle_scope_return(scope: &ScopeResult) {
     }
 }
 
-async fn player_call_global_handler(
+pub async fn player_call_global_handler(
     handler_name: &String,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
@@ -2134,6 +2152,9 @@ pub async fn run_frame_loop() {
                     )
                 });
 
+            // Track if go() already handled sprites - we'll use this to skip sprite init later
+            let go_handled_sprites = has_frame_changed_in_go;
+
             player_wait_available().await;
 
             // Relay exitFrame to timeout targets
@@ -2151,6 +2172,8 @@ pub async fn run_frame_loop() {
                 player_wait_available().await;
 
                 if has_frame_changed_in_go {
+                    // go() already handled end_all_sprites(), begin_all_sprites(), etc.
+                    // Just reset flags and advance frame
                     reserve_player_mut(|player| {
                         player.has_frame_changed_in_go = false;
 
@@ -2158,31 +2181,39 @@ pub async fn run_frame_loop() {
                             player.go_direction = 0;
                         }
                     });
-                }
 
-                let ended_sprite_nums = reserve_player_mut_async(|player| {
-                    Box::pin(async move {
-                        player.end_all_sprites().await
-                    })
-                }).await;
-                player_wait_available().await;
-                reserve_player_mut(|player| {
-                    for (score_source, sprite_num) in ended_sprite_nums.iter() {
-                        // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
-                        if let Some(sprite) =
-                            get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
-                        {
-                            sprite.exited = true;
+                    // Skip end_all_sprites since go() already called it
+                    (is_playing, is_script_paused) = reserve_player_mut(|player| {
+                        player.advance_frame();
+
+                        player.has_player_frame_changed = false;
+                        (player.is_playing, player.is_script_paused)
+                    });
+                } else {
+                    let ended_sprite_nums = reserve_player_mut_async(|player| {
+                        Box::pin(async move {
+                            player.end_all_sprites().await
+                        })
+                    }).await;
+                    player_wait_available().await;
+                    reserve_player_mut(|player| {
+                        for (score_source, sprite_num) in ended_sprite_nums.iter() {
+                            // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
+                            if let Some(sprite) =
+                                get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
+                            {
+                                sprite.exited = true;
+                            }
                         }
-                    }
-                });
+                    });
 
-                (is_playing, is_script_paused) = reserve_player_mut(|player| {
-                    player.advance_frame();
+                    (is_playing, is_script_paused) = reserve_player_mut(|player| {
+                        player.advance_frame();
 
-                    player.has_player_frame_changed = false;
-                    (player.is_playing, player.is_script_paused)
-                });
+                        player.has_player_frame_changed = false;
+                        (player.is_playing, player.is_script_paused)
+                    });
+                }
             } else {
                 player_wait_available().await;
 
@@ -2227,105 +2258,108 @@ pub async fn run_frame_loop() {
 
             player_wait_available().await;
 
-            reserve_player_mut(|player| {
-                player.movie.frame_script_instance = None;
-                player.begin_all_sprites();
-
-                player.movie.score.apply_tween_modifiers(player.movie.current_frame);
-            });
-
-            player_wait_available().await;
-
-            let changed_filmloops = reserve_player_mut_async(|player| {
-                Box::pin(async move {
-                    player.update_filmloop_frames().await
-                })
-            }).await;
-
-            if !changed_filmloops.is_empty() {
+            // Only do sprite initialization if go() didn't already handle it
+            if !go_handled_sprites {
                 reserve_player_mut(|player| {
-                    for (member_ref, _, new_frame) in changed_filmloops {
-                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                            if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                                film_loop.score.apply_tween_modifiers(new_frame);
+                    player.movie.frame_script_instance = None;
+                    player.begin_all_sprites();
+
+                    player.movie.score.apply_tween_modifiers(player.movie.current_frame);
+                });
+
+                player_wait_available().await;
+
+                let changed_filmloops = reserve_player_mut_async(|player| {
+                    Box::pin(async move {
+                        player.update_filmloop_frames().await
+                    })
+                }).await;
+
+                if !changed_filmloops.is_empty() {
+                    reserve_player_mut(|player| {
+                        for (member_ref, _, new_frame) in changed_filmloops {
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                    film_loop.score.apply_tween_modifiers(new_frame);
+                                }
+                            }
+                        }
+                    });
+                }
+
+                player_wait_available().await;
+
+                // Collect behaviors that need initialization
+                let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
+                    player
+                        .movie
+                        .score
+                        .channels
+                        .iter()
+                        .flat_map(|ch| {
+                            let sprite_num = ch.sprite.number as u32;
+                            ch.sprite.script_instance_list
+                                .iter()
+                                .filter(|behavior_ref| {
+                                    // ONLY initialize behaviors that haven't had beginSprite called
+                                    // This means they're NEW this frame
+                                    if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
+                                        !entry.script_instance.begin_sprite_called
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
+                        })
+                        .collect()
+                });
+
+                // Initialize behavior default properties
+                for (behavior_ref, sprite_num) in behaviors_to_init {
+                    if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
+                        web_sys::console::warn_1(
+                            &format!("Failed to initialize behavior defaults: {}", err.message).into()
+                        );
+                    }
+                }
+
+                player_wait_available().await;
+
+                reserve_player_mut(|player| {
+                    player.is_in_frame_update = true;
+                });
+
+                let begin_sprite_nums = player_dispatch_event_beginsprite(
+                    &"beginSprite".to_string(),
+                    &vec![]
+                ).await;
+
+                player_wait_available().await;
+
+                reserve_player_mut(|player| {
+                    for sprite_list in begin_sprite_nums.iter() {
+                        for (score_source, sprite_num) in sprite_list.iter() {
+                            if let Some(sprite) = get_score_sprite_mut(
+                                &mut player.movie,
+                                score_source,
+                                *sprite_num as i16,
+                            ) {
+                                for script_ref in &sprite.script_instance_list {
+                                    if let Some(entry) =
+                                        player.allocator.script_instances.get_mut(&script_ref.id())
+                                    {
+                                        entry.script_instance.begin_sprite_called = true;
+                                    }
+                                }
                             }
                         }
                     }
                 });
+
+                reserve_player_mut(|player| {
+                    player.is_in_frame_update = false;
+                });
             }
-
-            player_wait_available().await;
-
-            // Collect behaviors that need initialization
-            let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
-                player
-                    .movie
-                    .score
-                    .channels
-                    .iter()
-                    .flat_map(|ch| {
-                        let sprite_num = ch.sprite.number as u32;
-                        ch.sprite.script_instance_list
-                            .iter()
-                            .filter(|behavior_ref| {
-                                // ONLY initialize behaviors that haven't had beginSprite called
-                                // This means they're NEW this frame
-                                if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
-                                    !entry.script_instance.begin_sprite_called
-                                } else {
-                                    false
-                                }
-                            })
-                            .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
-                    })
-                    .collect()
-            });
-            
-            // Initialize behavior default properties
-            for (behavior_ref, sprite_num) in behaviors_to_init {
-                if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
-                    web_sys::console::warn_1(
-                        &format!("Failed to initialize behavior defaults: {}", err.message).into()
-                    );
-                }
-            }
-
-            player_wait_available().await;
-
-            reserve_player_mut(|player| {
-                player.is_in_frame_update = true;
-            });
-
-            let begin_sprite_nums = player_dispatch_event_beginsprite(
-                &"beginSprite".to_string(),
-                &vec![]
-            ).await;
-
-            player_wait_available().await;
-
-            reserve_player_mut(|player| {
-                for sprite_list in begin_sprite_nums.iter() {
-                    for (score_source, sprite_num) in sprite_list.iter() {
-                        if let Some(sprite) = get_score_sprite_mut(
-                            &mut player.movie,
-                            score_source,
-                            *sprite_num as i16,
-                        ) {
-                            for script_ref in &sprite.script_instance_list {
-                                if let Some(entry) =
-                                    player.allocator.script_instances.get_mut(&script_ref.id())
-                                {
-                                    entry.script_instance.begin_sprite_called = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-
-            reserve_player_mut(|player| {
-                player.is_in_frame_update = false;
-            });
 
             // Update last frame time
             last_frame_time = now;

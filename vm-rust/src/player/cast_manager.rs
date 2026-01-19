@@ -68,6 +68,23 @@ impl CastManager {
         for index in 0..dir.cast_entries.len() {
             let cast_entry = &dir.cast_entries[index];
             let cast_def = dir.casts.iter().find(|cast| cast.id == cast_entry.id);
+
+            // Debug: Log cast initialization
+            web_sys::console::log_1(&format!(
+                "Initializing cast {} ('{}'): id={}, has_cast_def={}, file_path='{}'",
+                index + 1,
+                cast_entry.name,
+                cast_entry.id,
+                cast_def.is_some(),
+                cast_entry.file_path
+            ).into());
+            if let Some(def) = cast_def {
+                web_sys::console::log_1(&format!(
+                    "  Cast def: {} members",
+                    def.members.len()
+                ).into());
+            }
+
             let mut cast = CastLib {
                 name: cast_entry.name.to_owned(),
                 file_name: normalize_cast_lib_path(&net_manager.base_path, &cast_entry.file_path)
@@ -112,7 +129,7 @@ impl CastManager {
     ) {
         for cast in self.casts.iter_mut() {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
-                web_sys::console::log_1(&format!("Cast File {} - Preload Mode: {}", cast.file_name, cast.preload_mode).into());
+                web_sys::console::log_1(&format!("Cast {} ({}) - Preload Mode: {}", cast.number, cast.file_name, cast.preload_mode).into());
                 match cast.preload_mode {
                     0 => {
                         // Preload: When Needed
@@ -302,6 +319,26 @@ impl CastManager {
     }
 
     pub fn find_member_by_ref(&self, member_ref: &CastMemberRef) -> Option<&CastMember> {
+        // Direct lookup without slot number conversion for explicit cast_lib references
+        if member_ref.cast_lib > 0 {
+            let cast = self.get_cast_or_null(member_ref.cast_lib as u32);
+            if let Some(cast) = cast {
+                let result = cast.find_member_by_number(member_ref.cast_member as u32);
+                if result.is_none() {
+                    web_sys::console::log_1(&format!(
+                        "Cast member not found: member {} in castLib {} ('{}'), state: {:?}, members: {:?}",
+                        member_ref.cast_member,
+                        member_ref.cast_lib,
+                        cast.name,
+                        cast.state,
+                        cast.members.keys().collect::<Vec<_>>()
+                    ).into());
+                }
+                return result;
+            }
+            return None;
+        }
+        // Fall back to slot number lookup for global references
         let slot_number = CastMemberRefHandlers::get_cast_slot_number(
             member_ref.cast_lib as u32,
             member_ref.cast_member as u32,

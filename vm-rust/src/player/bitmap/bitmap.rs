@@ -123,6 +123,8 @@ pub struct Bitmap {
     pub use_alpha: bool,
     pub trim_white_space: bool,
     pub was_trimmed: bool,
+    /// Version counter for cache invalidation (incremented when bitmap data changes)
+    pub version: u32,
 }
 
 impl Bitmap {
@@ -164,7 +166,14 @@ impl Bitmap {
             use_alpha: false,
             trim_white_space: false,
             was_trimmed: false,
+            version: 0,
         }
+    }
+
+    /// Increment the version counter to indicate the bitmap data has changed.
+    /// This is used by the WebGL2 texture cache to know when to re-upload textures.
+    pub fn mark_dirty(&mut self) {
+        self.version = self.version.wrapping_add(1);
     }
 }
 
@@ -238,6 +247,7 @@ fn decode_bitmap_1bit(
         use_alpha: false,
         trim_white_space: false,
         was_trimmed: false,
+        version: 0,
     })
 }
 
@@ -299,6 +309,7 @@ fn decode_bitmap_2bit(
         use_alpha: false,
         trim_white_space: false,
         was_trimmed: false,
+        version: 0,
     })
 }
 
@@ -356,6 +367,7 @@ fn decode_bitmap_4bit(
         use_alpha: false,
         trim_white_space: false,
         was_trimmed: false,
+        version: 0,
     })
 }
 
@@ -422,6 +434,7 @@ fn decode_bitmap_16bit(
         use_alpha: false,
         trim_white_space: false,
         was_trimmed: false,
+        version: 0,
     })
 }
 
@@ -512,6 +525,7 @@ fn decode_generic_bitmap(
             use_alpha: false,
             trim_white_space: false,
             was_trimmed: false,
+            version: 0,
         });
     }
 }
@@ -705,6 +719,7 @@ pub fn decompress_bitmap(
                     use_alpha: info.use_alpha,
                     trim_white_space: info.trim_white_space,
                     was_trimmed: false,
+                    version: 0,
                 })
             } else {
                 // D4+ format: each scanline has channels laid out as A R G B sequentially
@@ -750,6 +765,7 @@ pub fn decompress_bitmap(
                     use_alpha: info.use_alpha,
                     trim_white_space: info.trim_white_space,
                     was_trimmed: false,
+                    version: 0,
                 })
             }
         }
@@ -951,5 +967,6 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo) -> Result<Bitmap, Stri
         use_alpha: info.use_alpha,
         trim_white_space: info.trim_white_space,
         was_trimmed: false,
+        version: 0,
     })
 }

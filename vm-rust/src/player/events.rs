@@ -145,6 +145,8 @@ pub async fn player_invoke_event_to_instances(
                 }
             }
             Err(err) => {
+                // Dump bytecode execution history before the error
+                crate::player::bytecode::handler_manager::dump_execution_history_on_error(&err.message);
                 // Log the error to console
                 web_sys::console::error_1(
                     &format!("⚠ Error in handler '{}': {}", handler_name, err.message).into()
@@ -388,6 +390,22 @@ pub async fn player_dispatch_event_beginsprite(
     handler_name: &String,
     args: &Vec<DatumRef>
 ) -> Result<Vec<(ScoreRef, u32)>, ScriptError> {
+    // Prevent re-entrant beginSprite dispatch (can happen when go() is called during frame update)
+    let skip = reserve_player_mut(|player| {
+        if player.is_in_beginsprite {
+            web_sys::console::warn_1(&format!(
+                "Blocking re-entrant beginSprite dispatch"
+            ).into());
+            return true;
+        }
+        player.is_in_beginsprite = true;
+        false
+    });
+
+    if skip {
+        return Ok(Vec::new());
+    }
+
     let (mut sprite_instances, mut frame_instances, all_channels) =
         reserve_player_mut(|player| {
             let mut sprite_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
@@ -510,6 +528,12 @@ pub async fn player_dispatch_event_beginsprite(
             });
         }
     }
+
+    // Reset the re-entrancy guard
+    reserve_player_mut(|player| {
+        player.is_in_beginsprite = false;
+    });
+
     Ok(all_channels)
 }
 
@@ -519,6 +543,23 @@ pub async fn dispatch_event_endsprite(sprite_nums: Vec<u32>) {
 }
 
 pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums: Vec<u32>) {
+    // Prevent re-entrant endSprite dispatch (can happen when go() is called during frame update)
+    let skip = reserve_player_mut(|player| {
+        if player.is_in_endsprite {
+            web_sys::console::warn_1(&format!(
+                "Blocking re-entrant endSprite dispatch for {} sprites",
+                sprite_nums.len()
+            ).into());
+            return true;
+        }
+        player.is_in_endsprite = true;
+        false
+    });
+
+    if skip {
+        return;
+    }
+
     let (sprite_tuple, frame_tuple) =
         reserve_player_mut(|player| {
             let mut sprite_tuple = Vec::new();
@@ -591,6 +632,11 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
             }
         }
     }
+
+    // Reset the re-entrancy guard
+    reserve_player_mut(|player| {
+        player.is_in_endsprite = false;
+    });
 }
 
 pub async fn dispatch_event_to_all_behaviors(
@@ -746,10 +792,15 @@ pub async fn dispatch_system_event_to_timeouts(
     for target_ref in timeout_targets {
         let result = player_call_datum_handler(&target_ref, handler_name, args).await;
         if let Err(err) = result {
-            // Log error but continue with other timeouts
-            web_sys::console::error_1(
-                &format!("⚠ Timeout system event {} error: {}", handler_name, err.message
-            ).into());
+            // HandlerNotFound is expected when a script doesn't have the event handler
+            // (e.g., timeout target script doesn't have prepareFrame or exitFrame).
+            // This is normal Director behavior - just silently skip.
+            if err.code != ScriptErrorCode::HandlerNotFound {
+                // Log actual errors but continue with other timeouts
+                web_sys::console::error_1(
+                    &format!("⚠ Timeout system event {} error: {}", handler_name, err.message
+                ).into());
+            }
         }
     }
 }

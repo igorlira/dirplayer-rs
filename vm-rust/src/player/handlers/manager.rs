@@ -345,7 +345,7 @@ impl BuiltInHandlerManager {
 
     async fn call(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let receiver_ref = &args[1];
-        let (handler_name, args, instance_ids) = reserve_player_mut(|player| {
+        let (handler_name, args, instance_ids, list_count) = reserve_player_mut(|player| {
             let handler_name = player.get_datum(&args[0]);
             let receiver_clone = player.get_datum(receiver_ref).clone();
             let args = args[2..].to_vec();
@@ -356,31 +356,42 @@ impl BuiltInHandlerManager {
             }
             let handler_name = handler_name.string_value()?;
 
-            let instance_ids = match receiver_clone {
+            let (instance_ids, list_count) = match receiver_clone {
                 Datum::PropList(prop_list, ..) => {
                     let mut instance_ids = vec![];
+                    let count = prop_list.len();
                     for (_, value_ref) in prop_list {
                         instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
                     }
-                    Ok(Some(instance_ids))
+                    (Ok(Some(instance_ids)), count)
                 }
                 Datum::List(_, list, _) => {
                     let mut instance_ids = vec![];
+                    let count = list.len();
                     for value_ref in list {
                         instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
                     }
-                    Ok(Some(instance_ids))
+                    (Ok(Some(instance_ids)), count)
                 }
-                _ => Ok(None),
-            }?;
+                _ => (Ok(None), 0),
+            };
 
-            Ok((handler_name, args, instance_ids))
+            Ok((handler_name, args, instance_ids?, list_count))
         })?;
 
         if instance_ids.is_none() {
             return player_call_datum_handler(&receiver_ref, &handler_name, &args).await;
         }
         let instance_refs = instance_ids.unwrap();
+
+        // Debug logging for deconstruct calls
+        #[cfg(target_arch = "wasm32")]
+        if handler_name == "deconstruct" {
+            web_sys::console::log_1(&format!(
+                "call(#deconstruct, list): {} items in list, {} instance refs resolved",
+                list_count, instance_refs.len()
+            ).into());
+        }
 
         let mut result = player_alloc_datum(Datum::Null);
         for instance_ref in instance_refs {
@@ -392,6 +403,22 @@ impl BuiltInHandlerManager {
                 )
             })?;
             if let Some(handler) = handler {
+                // Debug logging for deconstruct
+                #[cfg(target_arch = "wasm32")]
+                if handler_name == "deconstruct" {
+                    let script_info = reserve_player_ref(|player| {
+                        if let Some(entry) = player.allocator.script_instances.get(&instance_ref.id()) {
+                            format!("{:?}", entry.script_instance.script)
+                        } else {
+                            "unknown".to_string()
+                        }
+                    });
+                    web_sys::console::log_1(&format!(
+                        "  -> calling deconstruct on script: {} (instance_id={})",
+                        script_info, instance_ref.id()
+                    ).into());
+                }
+
                 let scope = player_call_script_handler(Some(instance_ref), handler, &args).await?;
                 result = scope.return_value;
             }

@@ -35,7 +35,7 @@ use super::{
 pub type CastLibNumber = u32;
 pub type CastMemberNumber = u32;
 #[repr(u8)]
-#[derive(PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastLibState {
     None,
     Loading,
@@ -95,7 +95,7 @@ impl CastLib {
             self.load_from_dir_file(cached_file, &file_name, bitmap_manager);
         } else {
             log_i(
-                format_args!("Loading cast {}", self.file_name)
+                format_args!("Loading cast {} into castLib {} ('{}')", self.file_name, self.number, self.name)
                     .to_string()
                     .as_str(),
             );
@@ -234,7 +234,28 @@ impl CastLib {
             self.set_name(get_basename_no_extension(load_file_name));
         }
         if let Some(cast_def) = file.casts.first() {
+            log_i(
+                format_args!(
+                    "Applying cast def to castLib {} ('{}'): {} members",
+                    self.number,
+                    self.name,
+                    cast_def.members.len()
+                )
+                .to_string()
+                .as_str(),
+            );
             self.apply_cast_def(file, cast_def, bitmap_manager);
+        } else {
+            log_i(
+                format_args!(
+                    "No cast def found in file {} for castLib {} ('{}')",
+                    load_file_name,
+                    self.number,
+                    self.name
+                )
+                .to_string()
+                .as_str(),
+            );
         }
     }
 
@@ -247,6 +268,7 @@ impl CastLib {
         self.lctx = cast_def.lctx.clone();
         self.capital_x = cast_def.capital_x;
         self.dir_version = cast_def.dir_version;
+        self.state = CastLibState::Loaded;
         for (id, member_def) in &cast_def.members {
             self.insert_member(
                 *id,
@@ -454,10 +476,24 @@ pub async fn player_cast_lib_set_prop(
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
 
     let cast_manager = &mut player.movie.cast_manager;
-    let cast_lib = cast_manager.get_cast_mut(cast_lib as u32);
-    cast_lib.set_prop(&prop_name, value, &player.allocator)?;
+    let cast_lib_obj = cast_manager.get_cast_mut(cast_lib as u32);
+
     if prop_name == "fileName" {
-        cast_lib
+        log_i(
+            format_args!(
+                "Setting fileName of castLib {} ('{}') to '{}'",
+                cast_lib,
+                cast_lib_obj.name,
+                value.string_value().unwrap_or_default()
+            )
+            .to_string()
+            .as_str(),
+        );
+    }
+
+    cast_lib_obj.set_prop(&prop_name, value, &player.allocator)?;
+    if prop_name == "fileName" {
+        cast_lib_obj
             .preload(
                 &mut player.net_manager,
                 &mut player.bitmap_manager,

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use async_std::channel::Receiver;
+use async_std::{channel::Receiver, task::spawn_local};
 use chrono::Local;
 use log::{warn, debug};
 use manual_future::ManualFuture;
@@ -22,7 +22,6 @@ use super::{
     events::{
         player_dispatch_callback_event, player_dispatch_event_to_sprite,
         player_dispatch_targeted_event, player_wait_available,
-        player_dispatch_event_to_sprite_targeted, player_invoke_frame_and_movie_scripts,
     },
     font::player_load_system_font,
     keyboard_events::{player_key_down, player_key_up},
@@ -352,16 +351,18 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             });
 
             if let Some(sprite_num) = sprite_num {
-                player_dispatch_event_to_sprite_targeted(
+                // Use non-blocking dispatch to avoid deadlock when breakpoints are hit
+                player_dispatch_event_to_sprite(
                     &"mouseDown".to_string(),
                     &vec![],
                     sprite_num,
-                ).await;
+                );
             } else {
-                player_invoke_frame_and_movie_scripts(
+                // Use non-blocking dispatch to avoid deadlock when breakpoints are hit
+                player_dispatch_global_event(
                     &"mouseDown".to_string(),
                     &vec![]
-                ).await;
+                );
             }
 
             // Execute cast member script if it exists
@@ -418,7 +419,10 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             });
 
             if let Some((receiver, handler, args)) = cast_member_script_call {
-                player_call_script_handler(receiver, handler, &args).await?;
+                // Spawn the handler call to avoid blocking the command loop on breakpoints
+                spawn_local(async move {
+                    let _ = player_call_script_handler(receiver, handler, &args).await;
+                });
             }
 
             return Ok(DatumRef::Void);
@@ -453,13 +457,14 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             };
             
             // Get the sprite number from result
+            // Use non-blocking dispatch to avoid deadlock when breakpoints are hit
             if let Some((_, _, sprite_num)) = result.as_ref() {
                 if *sprite_num > 0 {
-                    player_dispatch_event_to_sprite_targeted(
+                    player_dispatch_event_to_sprite(
                         &event_name.to_string(),
                         &vec![],
                         *sprite_num as u16,
-                    ).await;
+                    );
                 }
             }
 
@@ -541,9 +546,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
 
             if let Some((receiver, handler, args)) = cast_member_script_call {
                 debug!("Calling player_call_script_handler...");
-                
-                player_call_script_handler(receiver, handler, &args).await?;
-                debug!("✓ Handler executed successfully");
+
+                // Spawn the handler call to avoid blocking the command loop on breakpoints
+                spawn_local(async move {
+                    let _ = player_call_script_handler(receiver, handler, &args).await;
+                    debug!("✓ Handler executed successfully");
+                });
             }
 
             reserve_player_mut(|player| {

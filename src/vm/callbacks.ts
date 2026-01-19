@@ -89,6 +89,7 @@ export function initVmCallbacks() {
       store.dispatch(scriptInstanceSnapshot({ scriptInstanceId, datum: scriptInstance }));
     },
     onChannelChanged: (channelNumber: number, channelData: ScoreSpriteSnapshot) => {
+      console.log('onChannelChanged', channelNumber, channelData, Object.keys(channelData));
       store.dispatch(channelChanged({ channelNumber, channelData }))
     },
     onChannelDisplayNameChanged: (channelNumber: number, displayName: string) => {

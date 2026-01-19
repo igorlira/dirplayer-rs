@@ -316,6 +316,7 @@ pub async fn player_load_system_font(path: &str) {
                 use_alpha: false,
                 trim_white_space: false,
                 was_trimmed: false,
+                version: 0,
             };
 
             reserve_player_mut(|player| {

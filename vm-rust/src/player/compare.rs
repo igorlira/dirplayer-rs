@@ -146,7 +146,7 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
         // Int comparisons
         (Datum::Int(left), Datum::Int(right)) => Ok(*left > *right),
         (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) > *right),
-        (Datum::Int(left), Datum::Void) => Ok(*left > 0),
+        (Datum::Int(_), Datum::Void) => Ok(false),
         (Datum::Int(left), Datum::String(right)) => {
             if let Ok(right_number) = right.parse::<i32>() {
                 Ok(*left > right_number)
@@ -154,12 +154,11 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
                 Ok(right.is_empty())
             }
         }
-        
+
         // Float comparisons
         (Datum::Float(left), Datum::Int(right)) => Ok(*left > (*right as f64)),
         (Datum::Float(left), Datum::Float(right)) => Ok(*left > *right),
-        (Datum::Float(left), Datum::Void) => Ok(*left > 0.0),
-        
+
         // Void comparisons - Void is never > any number
         (Datum::Void, Datum::Int(_)) => Ok(false),
         (Datum::Void, Datum::Float(_)) => Ok(false),
@@ -190,7 +189,7 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         // Int comparisons
         (Datum::Int(left), Datum::Int(right)) => Ok(*left < *right),
         (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) < *right),
-        (Datum::Int(left), Datum::Void) => Ok(*left < 0),
+        (Datum::Int(_), Datum::Void) => Ok(false),
         (Datum::Int(left), Datum::String(right)) => {
             if let Ok(right_number) = right.parse::<i32>() {
                 Ok(*left < right_number)
@@ -198,16 +197,11 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
                 Ok(!right.is_empty())
             }
         }
-        
+
         // Float comparisons
         (Datum::Float(left), Datum::Int(right)) => Ok(*left < (*right as f64)),
         (Datum::Float(left), Datum::Float(right)) => Ok(*left < *right),
-        (Datum::Float(left), Datum::Void) => Ok(*left < 0.0),
-        
-        // Void comparisons - Void is always < any number
-        (Datum::Void, Datum::Int(_)) => Ok(true),
-        (Datum::Void, Datum::Float(_)) => Ok(true),
-        
+
         // Point comparisons
         (Datum::Point(left), Datum::Point(right)) => {
             let left_x = allocator.get_datum(&left[0]).int_value()?;

@@ -209,6 +209,58 @@ impl ScriptInstanceDatumHandlers {
         handler_name: &String,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        // Debug: Log when define is called with buffer/sprite details
+        #[cfg(target_arch = "wasm32")]
+        if handler_name == "define" {
+            reserve_player_ref(|player| {
+                let script_name = if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(datum) {
+                    let instance = player.allocator.get_script_instance(instance_ref);
+                    if let Some(script) = player.movie.cast_manager.get_script_by_ref(&instance.script) {
+                        script.name.clone()
+                    } else {
+                        "?".to_string()
+                    }
+                } else {
+                    "?".to_string()
+                };
+
+                // Look for buffer and sprite in the props
+                let mut buffer_info = String::new();
+                let mut sprite_info = String::new();
+                let mut id_info = String::new();
+
+                for arg in args.iter() {
+                    if let Datum::PropList(props, ..) = player.get_datum(arg) {
+                        for (k, v) in props.iter() {
+                            let key = player.get_datum(k).string_value().unwrap_or_default();
+                            if key == "buffer" {
+                                let val = player.get_datum(v);
+                                buffer_info = match val {
+                                    Datum::CastMember(m) => format!("member({}:{})", m.cast_lib, m.cast_member),
+                                    _ => val.type_str().to_string()
+                                };
+                            } else if key == "sprite" {
+                                let val = player.get_datum(v);
+                                sprite_info = match val {
+                                    Datum::SpriteRef(s) => format!("sprite({})", s),
+                                    _ => val.type_str().to_string()
+                                };
+                            } else if key == "id" {
+                                id_info = player.get_datum(v).string_value().unwrap_or_default();
+                            }
+                        }
+                    }
+                }
+
+                if !buffer_info.is_empty() || !sprite_info.is_empty() {
+                    web_sys::console::log_1(&format!(
+                        "DEBUG: {}.define() id={} buffer={} sprite={}",
+                        script_name, id_info, buffer_info, sprite_info
+                    ).into());
+                }
+            });
+        }
+
         let (instance_id, handler_ref) = reserve_player_ref(|player| {
             let handler_ref = ScriptInstanceUtils::get_handler(handler_name, datum, player);
             let datum = player.get_datum(datum);
@@ -415,10 +467,51 @@ impl ScriptInstanceDatumHandlers {
             "getAt" => Self::get_at(datum, args),
             "count" => Self::count(datum, args),
             "handlers" => Self::handlers(datum, args),
+            "forget" => Self::forget(datum, args),
             _ => Err(ScriptError::new_code(
                 ScriptErrorCode::HandlerNotFound,
                 format!("No handler {handler_name} for script instance datum"),
             )),
         }
+    }
+
+    /// Director's forget() method removes the script instance from the actorList.
+    /// This is commonly used with script-based timeouts (like _TIMER_) that are stored in actorList.
+    fn forget(datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            // Get the actorList
+            let actor_list_ref = player.globals.get("actorList").cloned();
+
+            if let Some(actor_list_ref) = actor_list_ref {
+                let actor_list = player.get_datum(&actor_list_ref).clone();
+                if let Datum::List(dtype, items, sorted) = actor_list {
+                    // Get the instance ID we're looking for
+                    let target_id = match player.get_datum(datum) {
+                        Datum::ScriptInstanceRef(ref instance_ref) => Some(**instance_ref),
+                        _ => None,
+                    };
+
+                    if let Some(target_id) = target_id {
+                        // Find and remove the instance from the list
+                        let new_items: Vec<DatumRef> = items.iter()
+                            .filter(|item| {
+                                match player.get_datum(item) {
+                                    Datum::ScriptInstanceRef(ref item_ref) => **item_ref != target_id,
+                                    _ => true, // Keep non-script-instance items
+                                }
+                            })
+                            .cloned()
+                            .collect();
+
+                        // Update the actorList with the filtered list
+                        let new_list = Datum::List(dtype, new_items, sorted);
+                        let new_list_ref = player.alloc_datum(new_list);
+                        player.globals.insert("actorList".to_string(), new_list_ref);
+                    }
+                }
+            }
+
+            Ok(DatumRef::Void)
+        })
     }
 }

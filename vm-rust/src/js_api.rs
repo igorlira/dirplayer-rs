@@ -381,9 +381,17 @@ impl JsApi {
 
     pub fn dispatch_channel_changed(channel: i16) {
         let selected_channel = RENDERER_LOCK.with(|x| {
-            x.borrow()
-                .as_ref()
-                .and_then(|y| y.debug_selected_channel_num)
+            let borrowed = x.borrow();
+            let dynamic = borrowed.as_ref();
+            // Check Canvas2D renderer first, then WebGL2
+            dynamic
+                .and_then(|d| d.as_canvas2d())
+                .and_then(|canvas2d| canvas2d.debug_selected_channel_num)
+                .or_else(|| {
+                    dynamic
+                        .and_then(|d| d.as_webgl2())
+                        .and_then(|webgl2| webgl2.debug_selected_channel_num)
+                })
         });
 
         if selected_channel == Some(channel) {
@@ -661,6 +669,10 @@ impl JsApi {
 
         let member_ref = &channel.sprite.member.as_ref();
         if member_ref.is_none() || !member_ref.unwrap().is_valid() {
+            web_sys::console::log_1(&format!(
+                "get_channel_snapshot: ch{} member_ref is None or invalid, puppet={}",
+                channel_num, channel.sprite.puppet
+            ).into());
             return result;
         }
         let member_ref = member_ref.unwrap();

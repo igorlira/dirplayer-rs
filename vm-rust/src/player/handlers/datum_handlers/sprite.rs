@@ -1,7 +1,8 @@
 use crate::director::lingo::datum::Datum;
 
 use crate::player::{
-    player_call_script_handler, player_handle_scope_return, reserve_player_mut, reserve_player_ref,
+    player_call_script_handler, player_call_global_handler, player_handle_scope_return,
+    reserve_player_mut, reserve_player_ref,
     script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
     score::get_concrete_sprite_rect,
 };
@@ -29,27 +30,21 @@ impl SpriteDatumUtils {
 }
 
 impl SpriteDatumHandlers {
+    /// Returns true if the handler should be called via the async path.
+    /// This returns true for:
+    /// 1. Handlers found on the sprite's attached script instances
+    /// 2. Any handler that isn't a built-in sync handler (to allow fallback to global handlers)
     pub fn has_async_handler(datum: &DatumRef, handler_name: &String) -> Result<bool, ScriptError> {
-        return reserve_player_ref(|player| {
-            let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-            let sprite = player.movie.score.get_sprite(sprite_num);
-            if sprite.is_none() {
-                return Ok(false);
-            }
-            let sprite = sprite.unwrap();
-            let instances = &sprite.script_instance_list;
-            for instance in instances {
-                let handler = ScriptInstanceUtils::get_script_instance_handler(
-                    handler_name,
-                    instance,
-                    player,
-                )?;
-                if handler.is_some() {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        });
+        // First check if it's a built-in sync handler
+        let is_sync_handler = matches!(handler_name.as_str(), "intersects" | "getProp");
+        if is_sync_handler {
+            return Ok(false);
+        }
+
+        // For all other handlers, use the async path which will:
+        // 1. Try sprite's attached scripts
+        // 2. Fall back to global handlers
+        Ok(true)
     }
 
     pub fn call(
@@ -173,6 +168,7 @@ impl SpriteDatumHandlers {
         handler_name: &String,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        // First, try the sprite's attached script instances
         let instance_refs =
             reserve_player_ref(|player| SpriteDatumUtils::get_script_instance_ids(&datum, player))?;
         for instance_ref in instance_refs {
@@ -190,8 +186,10 @@ impl SpriteDatumHandlers {
                 return Ok(result_scope.return_value);
             }
         }
-        Err(ScriptError::new(format!(
-            "No async handler {handler_name} for sprite"
-        )))
+
+        // No handler found on sprite's scripts - fall back to global handlers
+        // This allows game scripts to define handlers like "setcursor" that can be
+        // called on sprites even if not attached directly to the sprite
+        player_call_global_handler(handler_name, args).await
     }
 }

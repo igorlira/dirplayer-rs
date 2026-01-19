@@ -26,7 +26,12 @@ impl BitmapManager {
         bitmap_ref
     }
 
-    pub fn replace_bitmap(&mut self, bitmap_ref: BitmapRef, bitmap: Bitmap) {
+    pub fn replace_bitmap(&mut self, bitmap_ref: BitmapRef, mut bitmap: Bitmap) {
+        // Increment version to indicate the bitmap has changed
+        // This allows texture caches to know when to re-upload
+        if let Some(old_bitmap) = self.bitmaps.get(&bitmap_ref) {
+            bitmap.version = old_bitmap.version.wrapping_add(1);
+        }
         self.bitmaps.insert(bitmap_ref, bitmap);
     }
 
@@ -37,6 +42,13 @@ impl BitmapManager {
 
     #[allow(dead_code)]
     pub fn get_bitmap_mut(&mut self, bitmap_ref: BitmapRef) -> Option<&mut Bitmap> {
-        self.bitmaps.get_mut(&bitmap_ref)
+        // Increment version when giving mutable access, as the bitmap may be modified
+        // This ensures texture caches know to re-upload the texture
+        if let Some(bitmap) = self.bitmaps.get_mut(&bitmap_ref) {
+            bitmap.version = bitmap.version.wrapping_add(1);
+            Some(bitmap)
+        } else {
+            None
+        }
     }
 }

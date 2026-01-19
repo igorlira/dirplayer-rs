@@ -1,8 +1,14 @@
 use async_std::{channel::Sender, task::spawn_local};
 use fxhash::FxHashMap;
-use log::warn;
 use wasm_bindgen::{closure::Closure, JsCast};
-use web_sys::{ErrorEvent, Event, MessageEvent, WebSocket};
+use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
+
+// Use console::warn_1 directly for debugging since log level is set to Error
+macro_rules! multiuser_log {
+    ($($arg:tt)*) => {
+        web_sys::console::warn_1(&format!($($arg)*).into());
+    };
+}
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
@@ -116,24 +122,56 @@ impl MultiuserXtraManager {
                     let _handler_obj_ref = handler_obj_ref.clone();
                 }
                 // userNameString, passwordString, serverIDString, portNumber, movieIDString {, mode, encryptionKey
-                let (host, port) = reserve_player_ref(|player| {
+                let (username, password, host, port, movie_id) = reserve_player_ref(|player| {
+                    let username = player.get_datum(args.get(0).unwrap()).string_value().unwrap_or_default();
+                    let password = player.get_datum(args.get(1).unwrap()).string_value().unwrap_or_default();
                     let host = player.get_datum(args.get(2).unwrap()).string_value()?;
                     let port = player.get_datum(args.get(3).unwrap()).int_value()?;
+                    let movie_id = player.get_datum(args.get(4).unwrap()).string_value().unwrap_or_default();
 
-                    Ok((host, port))
+                    Ok((username, password, host, port, movie_id))
                 })?;
+
                 let ws_url = format!("ws://{}:{}", host, port);
-                let socket = WebSocket::new(&ws_url).unwrap();
+                multiuser_log!("Multiuser: Connecting to WebSocket URL: {} (user={}, movie={})", ws_url, username, movie_id);
+
+                let socket = match WebSocket::new(&ws_url) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        multiuser_log!("Multiuser: Failed to create WebSocket: {:?}", e);
+                        // Dispatch error message to handler
+                        instance.dispatch_message(MultiuserMessage {
+                            error_code: -1,
+                            recipients: vec![],
+                            sender_id: "System".to_string(),
+                            subject: "ConnectToNetServer".to_string(),
+                            content: Datum::String(format!("Failed to create WebSocket: {:?}", e)),
+                            time_stamp: 0,
+                        });
+                        return Ok(DatumRef::Void);
+                    }
+                };
                 socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
+                // Log initial socket state
+                multiuser_log!("Multiuser: WebSocket created, readyState={}", socket.ready_state());
+
                 let socket_clone = socket.clone();
+                let ws_url_clone = ws_url.clone();
                 let onmessage_callback = Closure::<dyn FnMut(_)>::new(move |e: MessageEvent| {
-                    // e.data().dyn_into::<js_sys::JsString>()
-                    let data = e.data().dyn_into::<js_sys::ArrayBuffer>().unwrap();
-                    let array = js_sys::Uint8Array::new(&data);
-                    let vec = array.to_vec();
-                    let string = String::from_utf8_lossy(&vec);
-                    warn!("WebSocket message: {:?}", string);
+                    // Handle both ArrayBuffer and String messages
+                    let data = e.data();
+                    let message_str = if let Ok(array_buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
+                        let array = js_sys::Uint8Array::new(&array_buffer);
+                        let vec = array.to_vec();
+                        String::from_utf8_lossy(&vec).to_string()
+                    } else if let Ok(js_string) = data.dyn_into::<js_sys::JsString>() {
+                        js_string.as_string().unwrap_or_default()
+                    } else {
+                        multiuser_log!("Multiuser: Received unknown message type");
+                        return;
+                    };
+                    multiuser_log!("Multiuser: WebSocket message received: {:?}", message_str);
 
                     let mut multiusr_manager =
                         unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
@@ -143,16 +181,51 @@ impl MultiuserXtraManager {
                         recipients: vec!["*".to_string()],
                         sender_id: "System".to_string(),
                         subject: "String".to_string(),
-                        content: Datum::String(string.to_string()),
+                        content: Datum::String(message_str),
                         time_stamp: 0, // TODO timestamp
                     });
                 });
-                let onerror_callback = Closure::<dyn FnMut(_)>::new(move |e: ErrorEvent| {
-                    // e.data().dyn_into::<js_sys::JsString>()
-                    warn!("WebSocket error: {:?}", e);
+
+                let onerror_callback = Closure::<dyn FnMut(_)>::new(move |_e: Event| {
+                    // Note: WebSocket error events typically don't provide detailed error info.
+                    // The ErrorEvent's message/filename/etc. fields are often undefined for WebSocket errors.
+                    // We just log a generic error message.
+                    multiuser_log!("Multiuser: WebSocket error occurred (connection failed or aborted)");
+
+                    let mut multiusr_manager =
+                        unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
+                    if let Some(instance) = multiusr_manager.instances.get_mut(&instance_id) {
+                        instance.dispatch_message(MultiuserMessage {
+                            error_code: -1,
+                            recipients: vec![],
+                            sender_id: "System".to_string(),
+                            subject: "ConnectToNetServer".to_string(),
+                            content: Datum::String("WebSocket connection error".to_string()),
+                            time_stamp: 0,
+                        });
+                    }
                 });
-                let onopen_callback = Closure::<dyn FnMut(_)>::new(move |e: Event| {
-                    warn!("WebSocket opened");
+
+                let onclose_callback = Closure::<dyn FnMut(_)>::new(move |e: CloseEvent| {
+                    multiuser_log!("Multiuser: WebSocket closed - code: {}, reason: '{}', wasClean: {}",
+                        e.code(), e.reason(), e.was_clean());
+
+                    let mut multiusr_manager =
+                        unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
+                    if let Some(instance) = multiusr_manager.instances.get_mut(&instance_id) {
+                        instance.dispatch_message(MultiuserMessage {
+                            error_code: e.code() as i32,
+                            recipients: vec![],
+                            sender_id: "System".to_string(),
+                            subject: "DisconnectFromServer".to_string(),
+                            content: Datum::String(e.reason()),
+                            time_stamp: 0,
+                        });
+                    }
+                });
+
+                let onopen_callback = Closure::<dyn FnMut(_)>::new(move |_e: Event| {
+                    multiuser_log!("Multiuser: WebSocket connected to {}", ws_url_clone);
                     let mut multiusr_manager =
                         unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                     let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
@@ -165,24 +238,33 @@ impl MultiuserXtraManager {
                         time_stamp: 0, // TODO timestamp
                     });
                 });
+
                 socket.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
                 socket.set_onerror(Some(onerror_callback.as_ref().unchecked_ref()));
+                socket.set_onclose(Some(onclose_callback.as_ref().unchecked_ref()));
                 socket.set_onopen(Some(onopen_callback.as_ref().unchecked_ref()));
 
                 let (tx, rx) = async_std::channel::unbounded();
                 instance.socket_tx = Some(tx);
                 spawn_local(async move {
                     while let Ok(message) = rx.recv().await {
-                        warn!("Sending message: {:?}", message);
-                        socket_clone
-                            .send_with_u8_array(&message.as_bytes())
-                            .unwrap();
+                        // Check if WebSocket is open (readyState == 1) before sending
+                        // readyState: 0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED
+                        if socket_clone.ready_state() != 1 {
+                            multiuser_log!("Multiuser: Cannot send message, WebSocket not open (state={})", socket_clone.ready_state());
+                            continue;
+                        }
+                        multiuser_log!("Multiuser: Sending message: {:?}", message);
+                        if let Err(e) = socket_clone.send_with_u8_array(&message.as_bytes()) {
+                            multiuser_log!("Multiuser: Failed to send message: {:?}", e);
+                        }
                     }
                 });
 
-                // Forget the callback to keep it alive
+                // Forget the callbacks to keep them alive
                 onmessage_callback.forget();
                 onerror_callback.forget();
+                onclose_callback.forget();
                 onopen_callback.forget();
 
                 Ok(DatumRef::Void)
@@ -238,7 +320,7 @@ impl MultiuserXtraManager {
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_ref(|player| {
                     let msg_string = player.get_datum(args.get(2).unwrap()).string_value()?;
-                    warn!("sendNetMessage: {:?}", msg_string);
+                    multiuser_log!("sendNetMessage: {:?}", msg_string);
                     if let Some(tx) = &instance.socket_tx {
                         tx.try_send(msg_string).unwrap();
                         Ok(DatumRef::Void)

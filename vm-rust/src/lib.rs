@@ -2,6 +2,7 @@ pub mod io;
 pub mod js_api;
 pub mod player;
 pub mod rendering;
+pub mod rendering_gpu;
 pub mod utils;
 
 use async_std::task::spawn_local;
@@ -227,6 +228,25 @@ pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
 #[wasm_bindgen]
 pub fn eval_command(command: String) {
     player_dispatch(PlayerVMCommand::EvalLingoCommand(command));
+}
+
+/// Check if WebGL2 is supported in the browser
+#[wasm_bindgen]
+pub fn is_webgl2_supported() -> bool {
+    rendering_gpu::is_webgl2_supported()
+}
+
+/// Get the current renderer backend name
+#[wasm_bindgen]
+pub fn get_renderer_backend() -> String {
+    use rendering_gpu::Renderer;
+    rendering::with_renderer_mut(|renderer_lock| {
+        if let Some(renderer) = renderer_lock {
+            renderer.backend_name().to_string()
+        } else {
+            "none".to_string()
+        }
+    })
 }
 
 #[wasm_bindgen(start)]

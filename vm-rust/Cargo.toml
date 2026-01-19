@@ -73,6 +73,7 @@ features = [
   'CssStyleDeclaration',
   'BinaryType',
   'Blob',
+  'CloseEvent',
   'ErrorEvent',
   'FileReader',
   'MessageEvent',
@@ -95,6 +96,17 @@ features = [
   'HtmlAudioElement',
   'OfflineAudioContext',
   'AudioContextState',
+  # WebGL2 features for GPU-accelerated rendering
+  'WebGl2RenderingContext',
+  'WebGlProgram',
+  'WebGlShader',
+  'WebGlBuffer',
+  'WebGlTexture',
+  'WebGlFramebuffer',
+  'WebGlRenderbuffer',
+  'WebGlUniformLocation',
+  'WebGlVertexArrayObject',
+  'WebGlActiveInfo',
 ]
 
 [dependencies.flate2]

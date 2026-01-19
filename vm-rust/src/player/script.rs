@@ -400,7 +400,16 @@ pub async fn player_set_obj_prop(
         Datum::ScriptInstanceRef(script_instance_ref) => reserve_player_mut(|player| {
             script_set_prop(player, &script_instance_ref, &prop_name, value_ref, false)
         }),
-        Datum::SpriteRef(sprite_id) => sprite_set_prop(sprite_id, prop_name, value_clone),
+        Datum::SpriteRef(sprite_id) => {
+            // Debug: Log all property sets for sprite 70
+            if sprite_id == 70 {
+                web_sys::console::log_1(&format!(
+                    "player_set_obj_prop: sprite({}).{} = {}",
+                    sprite_id, prop_name, value_clone.type_str()
+                ).into());
+            }
+            sprite_set_prop(sprite_id, prop_name, value_clone)
+        }
         Datum::CastMember(member_ref) => {
             // TODO should we really pass a clone of the value here?
             CastMemberRefHandlers::set_prop(&member_ref, prop_name, value_clone)
@@ -460,6 +469,16 @@ pub async fn player_set_obj_prop(
         Datum::SoundChannel(_) => reserve_player_mut(|player| {
             SoundChannelDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
+        Datum::Void | Datum::Null => {
+            // In Director, setting a property on void/nothing is a no-op (silently ignored)
+            // This commonly happens when scripts reference sprites/objects that have been erased
+            // or during cleanup when handlers are still being called on partially-destroyed objects
+            //
+            // Note: The game may have code paths that read uninitialized properties (pLocX, pLocY, etc.)
+            // which return Void, and then try to do operations like `obj.loc = obj.loc + point(x,y)`
+            // where obj is Void. This is normal Director behavior - it just silently does nothing.
+            Ok(())
+        }
         _ => reserve_player_ref(|player| {
             Err(ScriptError::new(
                 format!(

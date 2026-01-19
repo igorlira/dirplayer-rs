@@ -194,7 +194,6 @@ fn read_casts(
         if cast_list.is_some() {
             let cast_list = cast_list.unwrap();
             for cast_entry in &cast_list.entries {
-                // info!("Cast: {} id: {}", &cast_entry.name, &cast_entry.id);
                 let cast = get_cast_chunk_for_cast(
                     reader,
                     chunk_container,
@@ -202,6 +201,15 @@ fn read_casts(
                     key_table,
                     &cast_entry.id,
                 );
+                if cast.is_none() && cast_entry.file_path.is_empty() {
+                    // Cast has no CAS* chunk AND no file_path - this is unusual
+                    // It should either be internal (has CAS*) or external (has file_path)
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::warn_1(&format!(
+                        "Cast '{}' (id={}) has no CAS* chunk and no file_path - data may be missing",
+                        &cast_entry.name, &cast_entry.id
+                    ).into());
+                }
                 if let Some(cast) = cast {
                     // TODO cast.populate(castEntry.name, castEntry.id, castEntry.minMember);
                     // info!("Cast {} member count: {}", cast_entry.name, cast.member_ids.len());

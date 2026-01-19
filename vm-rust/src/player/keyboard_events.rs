@@ -36,6 +36,7 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
             if let Some(sprite) = sprite {
                 let instance_list = sprite.script_instance_list.clone();
                 let member_ref = sprite.member.clone();
+                let member_ref_clone = member_ref.clone();
                 let member =
                     member_ref.and_then(|x| player.movie.cast_manager.find_mut_member_by_ref(&x));
                 if let Some(member) = member {
@@ -50,10 +51,25 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
                                     player.keyboard_focus_sprite = next_focus_sprite_id;
                                 } else if key.len() == 1 {
                                     field_member.text = format!("{}{}", field_member.text, key);
+                                    // Debug: Log text update
+                                    #[cfg(target_arch = "wasm32")]
+                                    web_sys::console::log_1(&format!(
+                                        "DEBUG: Field text updated to: '{}'",
+                                        field_member.text
+                                    ).into());
                                 }
                             }
                         }
                         _ => {}
+                    }
+                } else {
+                    // Debug: Log when member is not found
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(ref mref) = member_ref_clone {
+                        web_sys::console::warn_1(&format!(
+                            "DEBUG: Keyboard input - member not found for sprite {} (cast={}, num={})",
+                            sprite_id, mref.cast_lib, mref.cast_member
+                        ).into());
                     }
                 }
                 Some(instance_list)

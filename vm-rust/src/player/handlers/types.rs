@@ -48,13 +48,30 @@ impl TypeUtils {
                 "void"
             }]),
             Datum::ColorRef(..) => Ok(vec!["color"]),
-            Datum::TimeoutRef(..) => Ok(vec!["timeout"]), // TODO verify this
+            Datum::TimeoutRef(..) => Ok(vec!["timeout"]),
+            Datum::TimeoutFactory => Ok(vec!["timeout"]),
+            Datum::TimeoutInstance { .. } => Ok(vec!["timeout"]),
             Datum::BitmapRef(..) => Ok(vec!["image"]),
             Datum::Rect(..) => Ok(vec!["rect"]),
             Datum::Point(..) => Ok(vec!["point"]),
             Datum::SpriteRef(..) => Ok(vec!["sprite"]),
             Datum::PaletteRef(..) => Ok(vec!["palette"]),
             Datum::Vector(..) => Ok(vec!["vector"]),
+            Datum::StringChunk(..) => Ok(vec!["string"]),
+            Datum::CastLib(..) => Ok(vec!["castlib"]),
+            Datum::Stage => Ok(vec!["stage"]),
+            Datum::SoundChannel(..) => Ok(vec!["sound"]),
+            Datum::SoundRef(..) => Ok(vec!["sound"]),
+            Datum::CursorRef(..) => Ok(vec!["cursor"]),
+            Datum::Xtra(..) => Ok(vec!["xtra"]),
+            Datum::XtraInstance(..) => Ok(vec!["instance"]),
+            Datum::Matte(..) => Ok(vec!["image"]),
+            Datum::PlayerRef => Ok(vec!["player"]),
+            Datum::MovieRef => Ok(vec!["movie"]),
+            Datum::XmlRef(..) => Ok(vec!["xml"]),
+            Datum::DateRef(..) => Ok(vec!["date"]),
+            Datum::MathRef(..) => Ok(vec!["math"]),
+            Datum::VarRef(..) => Ok(vec!["void"]), // VarRef should be dereferenced before checking ilk
 
             _ => Err(ScriptError::new(format!(
                 "Getting ilk for unknown type: {}",

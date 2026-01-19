@@ -85,6 +85,7 @@ impl GetSetBytecodeHandler {
         } else {
             script_get_static_prop(player, &script_ref, &prop_name)?
         };
+
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.push(result);
         return Ok(HandlerExecutionResult::Advance);
@@ -246,6 +247,13 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap()
                     };
                     let sprite_num = player.get_datum(&datum_ref).int_value()?;
+                    // Debug: Log bytecode set for sprite 70
+                    if sprite_num == 70 {
+                        web_sys::console::log_1(&format!(
+                            "kOpSet(0x06): sprite {}.{} = {}",
+                            sprite_num, prop_name, value.type_str()
+                        ).into());
+                    }
                     sprite_set_prop(sprite_num as i16, prop_name, value)?;
                     Ok(HandlerExecutionResult::Advance)
                 }

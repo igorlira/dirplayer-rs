@@ -199,6 +199,12 @@ impl CastMemberRefHandlers {
                 Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
                 _ => return Err(ScriptError::new("Cannot erase non-cast-member".to_string())),
             };
+            // Debug: Log when a cast member is being erased
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&format!(
+                "DEBUG: Erasing cast member: cast={}, num={}",
+                cast_member_ref.cast_lib, cast_member_ref.cast_member
+            ).into());
             player
                 .movie
                 .cast_manager
@@ -354,12 +360,23 @@ impl CastMemberRefHandlers {
         let member_type = reserve_player_ref(|player| {
             let cast_member = player.movie.cast_manager.find_member_by_ref(member_ref);
             match cast_member {
-                Some(cast_member) => Ok(cast_member.member_type.member_type_id()),
-                None => Err(ScriptError::new(format!(
-                    "Setting prop of invalid castMember reference"
-                ))),
+                Some(cast_member) => Ok(Some(cast_member.member_type.member_type_id())),
+                None => {
+                    // Silently ignore setting props on erased members
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::warn_1(&format!(
+                        "Ignoring set prop {} on erased member {} of castLib {}",
+                        prop, member_ref.cast_member, member_ref.cast_lib
+                    ).into());
+                    Ok(None)
+                }
             }
         })?;
+
+        let member_type = match member_type {
+            Some(t) => t,
+            None => return Ok(()), // Member was erased, silently ignore
+        };
 
         match member_type {
             CastMemberTypeId::Field => FieldMemberHandlers::set_prop(member_ref, prop, value),
@@ -463,7 +480,8 @@ impl CastMemberRefHandlers {
         let is_invalid = cast_member_ref.cast_lib < 0 || cast_member_ref.cast_member < 0;
         if is_invalid {
             return Err(ScriptError::new(format!(
-                "Setting prop of invalid castMember reference"
+                "Setting prop {} of invalid castMember reference (member {} of castLib {})",
+                prop, cast_member_ref.cast_member, cast_member_ref.cast_lib
             )));
         }
         let exists = reserve_player_ref(|player| {
@@ -477,7 +495,7 @@ impl CastMemberRefHandlers {
             match prop.as_str() {
                 "name" => borrow_member_mut(
                     cast_member_ref,
-                    |player| value.string_value(),
+                    |_player| value.string_value(),
                     |cast_member, value| {
                         cast_member.name = value?;
                         Ok(())
@@ -502,9 +520,15 @@ impl CastMemberRefHandlers {
                 _ => Self::set_member_type_prop(cast_member_ref, prop, value),
             }
         } else {
-            Err(ScriptError::new(format!(
-                "Setting prop of invalid castMember reference"
-            )))
+            // Silently ignore setting props on non-existent members
+            // This can happen when a script erases a member but still holds a reference
+            // Director silently ignores this case
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::warn_1(&format!(
+                "Ignoring set prop {} on erased member {} of castLib {}",
+                prop, cast_member_ref.cast_member, cast_member_ref.cast_lib
+            ).into());
+            Ok(())
         };
         if result.is_ok() {
             JsApi::dispatch_cast_member_changed(cast_member_ref.to_owned());

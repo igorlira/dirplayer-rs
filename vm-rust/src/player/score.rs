@@ -393,9 +393,7 @@ impl Score {
                     }
                 };
                 let sprite: &mut Sprite = score.get_sprite_mut(sprite_num as i16);
-                if sprite.visible {
-                    sprite.reset();
-                }
+                sprite.reset();
             });
         }
 
@@ -1427,6 +1425,12 @@ impl Score {
                 }
             }
 
+            // Puppeted sprites should NOT have their properties overwritten by score data.
+            // They are under script control.
+            if sprite.puppet {
+                continue;
+            }
+
             let keyframes = self.keyframes_cache.get(&sprite_num);
 
             // Check if we have keyframes that cover this frame
@@ -2191,7 +2195,14 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
-                sprite.loc_h = value?;
+                let val = value?;
+                // Debug: Log locH changes for puppeted sprites
+                if sprite.puppet && sprite.number == 70 {
+                    web_sys::console::log_1(&format!(
+                        "sprite_set_prop: ch{} locH {} -> {}", sprite.number, sprite.loc_h, val
+                    ).into());
+                }
+                sprite.loc_h = val;
                 Ok(())
             },
         ),
@@ -2199,18 +2210,25 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
-                sprite.loc_v = value?;
+                let val = value?;
+                sprite.loc_v = val;
                 Ok(())
             },
         ),
-        "locZ" => borrow_sprite_mut(
-            sprite_id,
-            |player| value.int_value(),
-            |sprite, value| {
-                sprite.loc_z = value?;
-                Ok(())
-            },
-        ),
+        "locZ" => {
+            // Handle Void as a no-op (Director behavior when setting locZ = VOID)
+            if matches!(value, Datum::Void) {
+                return Ok(());
+            }
+            borrow_sprite_mut(
+                sprite_id,
+                |player| value.int_value(),
+                |sprite, value| {
+                    sprite.loc_z = value?;
+                    Ok(())
+                },
+            )
+        }
         "width" => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
@@ -2446,29 +2464,66 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "loc" => borrow_sprite_mut(
-            sprite_id,
-            |_| value.clone(),  // Pass the value through so we can use it in the sprite closure
-            |sprite, value| -> Result<(), ScriptError> {
-                match value {
-                    Datum::Point(arr) => {
-                        reserve_player_mut(|player| {
-                            let x = player.get_datum(&arr[0]).int_value()?;
-                            let y = player.get_datum(&arr[1]).int_value()?;
-                            sprite.loc_h = x;
-                            sprite.loc_v = y;
-                            Ok(())
-                        })
-                    }
-                    Datum::Void => Ok(()), // no-op
-                    _ => Err(ScriptError::new(format!(
+        "loc" => {
+            // Extract x,y values BEFORE borrowing sprite to avoid nested reserve_player_mut
+            let (x, y) = match &value {
+                Datum::Point(arr) => {
+                    reserve_player_ref(|player| {
+                        let x = player.get_datum(&arr[0]).int_value();
+                        let y = player.get_datum(&arr[1]).int_value();
+                        (x, y)
+                    })
+                }
+                Datum::Void => return Ok(()), // no-op
+                _ => {
+                    return Err(ScriptError::new(format!(
                         "loc must be a Point (received {})",
                         value.type_str()
-                    ))),
+                    )))
                 }
-            },
-        ),
-        "rect" => reserve_player_mut(|player| {
+            };
+            // Now borrow sprite and set the values
+            borrow_sprite_mut(
+                sprite_id,
+                |_| (x, y),
+                |sprite, (x, y)| {
+                    let x_val = x?;
+                    let y_val = y?;
+                    // Debug: Log loc changes for puppeted sprites
+                    if sprite.puppet && sprite.number == 70 {
+                        web_sys::console::log_1(&format!(
+                            "sprite_set_prop: ch{} loc ({},{}) -> ({},{})",
+                            sprite.number, sprite.loc_h, sprite.loc_v, x_val, y_val
+                        ).into());
+                    }
+                    sprite.loc_h = x_val;
+                    sprite.loc_v = y_val;
+                    Ok(())
+                },
+            )
+        }
+        "rect" => {
+            // Extract rect values BEFORE borrowing sprite to avoid nested reserve_player_mut
+            let (left, top, right, bottom) = match &value {
+                Datum::Rect(arr) => {
+                    reserve_player_ref(|player| {
+                        let left = player.get_datum(&arr[0]).int_value();
+                        let top = player.get_datum(&arr[1]).int_value();
+                        let right = player.get_datum(&arr[2]).int_value();
+                        let bottom = player.get_datum(&arr[3]).int_value();
+                        (left, top, right, bottom)
+                    })
+                }
+                _ => {
+                    return Err(ScriptError::new("rect must be a rect".to_string()));
+                }
+            };
+            // Unwrap the Results early so we can use them in the closure
+            let left = left?;
+            let top = top?;
+            let right = right?;
+            let bottom = bottom?;
+            // Now borrow sprite and set the values
             borrow_sprite_mut(
                 sprite_id,
                 |player| {
@@ -2492,24 +2547,14 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     reg_point
                 },
                 |sprite, reg_point| {
-                    match value {
-                        Datum::Rect(ref arr) => {
-                            let left = player.get_datum(&arr[0]).int_value()?;
-                            let top = player.get_datum(&arr[1]).int_value()?;
-                            let right = player.get_datum(&arr[2]).int_value()?;
-                            let bottom = player.get_datum(&arr[3]).int_value()?;
-
-                            sprite.loc_h = left + reg_point.0 as i32;
-                            sprite.loc_v = top + reg_point.1 as i32;
-                            sprite.width = right - left;
-                            sprite.height = bottom - top;
-                            Ok(())
-                        }
-                        _ => Err(ScriptError::new("rect must be a rect".to_string())),
-                    }
+                    sprite.loc_h = left + reg_point.0 as i32;
+                    sprite.loc_v = top + reg_point.1 as i32;
+                    sprite.width = right - left;
+                    sprite.height = bottom - top;
+                    Ok(())
                 },
             )
-        }),
+        }
         "scriptInstanceList" => {
             let ref_list = value.to_list()?;
             let instance_refs = borrow_sprite_mut(

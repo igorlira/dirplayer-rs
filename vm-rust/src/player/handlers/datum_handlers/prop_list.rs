@@ -91,11 +91,7 @@ impl PropListUtils {
         if key_index >= 0 {
             return Ok(prop_list[key_index as usize].1.clone());
         }
-        // Try built-in properties, but return VOID if not found instead of error
-        match Self::get_built_in_prop(prop_list, key) {
-            Ok(datum) => Ok(player.alloc_datum(datum)),
-            Err(_) => Ok(DatumRef::Void), // Return VOID for non-existent properties
-        }
+        return Ok(player.alloc_datum(Self::get_built_in_prop(prop_list, key)?));
     }
 
     pub fn get_built_in_prop(
@@ -277,49 +273,20 @@ impl PropListDatumHandlers {
                         let adjusted_index = if index == 0 { 0 } else { index - 1 };
 
                         let list_datum = player.get_datum(&list_ref);
-                        match list_datum {
-                            Datum::List(_, list, _) => {
-                                // Calculate how many VOID values we need
-                                let current_len = list.len();
-                                let voids_needed = if adjusted_index >= current_len {
-                                    adjusted_index - current_len + 1
-                                } else {
-                                    0
-                                };
-                                
-                                // Allocate all VOID values first
-                                let void_refs: Vec<DatumRef> = (0..voids_needed)
-                                    .map(|_| player.alloc_datum(Datum::Void))
-                                    .collect();
-                                
-                                // Now get mutable reference and extend the list
+                        if let Datum::List(_, list, _) = list_datum {
+                            if adjusted_index < list.len() {
                                 let (_, list_vec, _) =
                                     player.get_datum_mut(&list_ref).to_list_mut()?;
-                                list_vec.extend(void_refs);
-                                
-                                // Set the value
                                 list_vec[adjusted_index] = value_ref.clone();
                                 Ok(DatumRef::Void)
+                            } else {
+                                Err(ScriptError::new(format!("Index out of bounds: {}", index)))
                             }
-                            Datum::PropList(..) => {
-                                // Property is a PropList, set the property in that PropList
-                                let formatted_key = format_datum(index_ref, &player);
-                                PropListUtils::set_prop(
-                                    &list_ref,
-                                    index_ref,
-                                    value_ref,
-                                    player,
-                                    false,
-                                    formatted_key,
-                                )?;
-                                Ok(DatumRef::Void)
-                            }
-                            _ => {
-                                Err(ScriptError::new(format!(
-                                    "Property is not a list or propList, it's: {}",
-                                    list_datum.type_str()
-                                )))
-                            }
+                        } else {
+                            Err(ScriptError::new(format!(
+                                "Property is not a list, it's: {}",
+                                list_datum.type_str()
+                            )))
                         }
                     })
                 } else if args.len() == 2 {
@@ -517,10 +484,6 @@ impl PropListDatumHandlers {
     pub fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let base_prop_ref = reserve_player_mut(|player| {
             let key = player.get_datum(&args[0]);
-            // Director returns VOID when looking up VOID key in a prop list
-            if matches!(key, Datum::Void) {
-                return Ok(DatumRef::Void);
-            }
             let prop_list = player.get_datum(datum).to_map()?;
             let key_index = PropListUtils::get_key_index(prop_list, key, &player.allocator)?;
             if key_index >= 0 {
@@ -734,30 +697,33 @@ impl PropListDatumHandlers {
     pub fn delete_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let prop_name = player.get_datum(&args[0]);
-            
-            if prop_name.is_void() {
-                return Ok(player.alloc_datum(datum_bool(false)));
-            }
-            
-            if !prop_name.is_string() && !prop_name.is_symbol() && !prop_name.is_int() {
-                return Err(ScriptError::new(format!(
-                    "deleteProp: Prop name must be a string, int or symbol (is {})",
-                    prop_name.type_str()
-                )));
-            }
-            
-            // Always do key-based lookup first (works for String, Symbol, AND Int keys)
-            let prop_list = player.get_datum(datum).to_map()?;
-            let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
-            
-            if index >= 0 {
-                // Found by key - delete it
+            if prop_name.is_string() || prop_name.is_symbol() {
+                // let prop_name = prop_name.string_value()?;
+                let prop_list = player.get_datum(datum).to_map()?;
+                let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
+                if index >= 0 {
+                    let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+                    prop_list.remove(index as usize);
+                    Ok(player.alloc_datum(datum_bool(true)))
+                } else {
+                    Ok(player.alloc_datum(datum_bool(false)))
+                }
+            } else if prop_name.is_int() {
+                let position = player.get_datum(&args[0]).int_value()?;
                 let prop_list = player.get_datum_mut(datum).to_map_mut()?;
-                prop_list.remove(index as usize);
-                Ok(player.alloc_datum(datum_bool(true)))
-            } else {
-                // Not found by key
+                if position >= 1 && position <= prop_list.len() as i32 {
+                    prop_list.remove((position - 1) as usize);
+                    Ok(player.alloc_datum(datum_bool(true)))
+                } else {
+                    Ok(player.alloc_datum(datum_bool(false)))
+                }
+            } else if prop_name.is_void() {
                 Ok(player.alloc_datum(datum_bool(false)))
+            } else {
+                Err(ScriptError::new(format!(
+                    "Prop name must be a string, int or symbol (is {})",
+                    prop_name.type_str()
+                )))
             }
         })
     }

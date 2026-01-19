@@ -184,9 +184,5 @@ fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocator) 
             allocator.alloc_datum(Datum::Rect(arr)).unwrap()
         }
         StaticDatum::Void => DatumRef::Void,
-        _ => {
-            web_sys::console::log_1(&format!("⚠️ Unhandled StaticDatum type, using Void").into());
-            DatumRef::Void
-        }
     }
 }

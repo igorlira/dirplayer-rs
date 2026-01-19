@@ -691,27 +691,25 @@ impl MovieHandlers {
         })?;
 
         if should_yield {
-            // Synchronous render
+            // Synchronous render - only works with Canvas2D backend
             reserve_player_mut(|player| {
-                crate::rendering::with_canvas_renderer_mut(|renderer_opt| {
-                    if let Some(renderer) = renderer_opt.as_mut() {
-                        crate::rendering::render_stage_to_bitmap(
-                            player,
-                            &mut renderer.bitmap,
-                            renderer.debug_selected_channel_num,
-                        );
+                crate::rendering::with_canvas2d_renderer_mut(|renderer| {
+                    crate::rendering::render_stage_to_bitmap(
+                        player,
+                        &mut renderer.bitmap,
+                        renderer.debug_selected_channel_num,
+                    );
 
-                        use wasm_bindgen::Clamped;
-                        let bitmap = &renderer.bitmap;
-                        if let Ok(image_data) =
-                            web_sys::ImageData::new_with_u8_clamped_array_and_sh(
-                                Clamped(&bitmap.data[..]),
-                                bitmap.width.into(),
-                                bitmap.height.into(),
-                            )
-                        {
-                            let _ = renderer.ctx2d.put_image_data(&image_data, 0.0, 0.0);
-                        }
+                    use wasm_bindgen::Clamped;
+                    let bitmap = &renderer.bitmap;
+                    if let Ok(image_data) =
+                        web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+                            Clamped(&bitmap.data[..]),
+                            bitmap.width.into(),
+                            bitmap.height.into(),
+                        )
+                    {
+                        let _ = renderer.ctx2d.put_image_data(&image_data, 0.0, 0.0);
                     }
                 });
             });
