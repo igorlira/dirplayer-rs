@@ -74,6 +74,8 @@ impl BitmapMemberHandlers {
                 let bitmap_ref = value.to_bitmap_ref()?;
                 reserve_player_mut(|player| {
                     let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
+                    let new_width = bitmap.width;
+                    let new_height = bitmap.height;
                     let clone = bitmap.clone();
 
                     let member_image_ref = {
@@ -88,6 +90,17 @@ impl BitmapMemberHandlers {
                     player
                         .bitmap_manager
                         .replace_bitmap(member_image_ref, clone);
+
+                    // Update the member's info.width and info.height to match the new bitmap
+                    let cast_member = player
+                        .movie
+                        .cast_manager
+                        .find_mut_member_by_ref(member_ref)
+                        .unwrap();
+                    let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                    bitmap_member.info.width = new_width as u16;
+                    bitmap_member.info.height = new_height as u16;
+
                     Ok(())
                 })
             }
