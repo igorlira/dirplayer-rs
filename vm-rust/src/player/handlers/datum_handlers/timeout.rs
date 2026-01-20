@@ -17,10 +17,28 @@ impl TimeoutDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
             "forget" => Self::forget(datum, args),
+            "setAt" => Self::set_at(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for timeout"
             ))),
         }
+    }
+
+    fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // TimeoutInstance needs to support setAt for #ancestor to work with Object Manager
+        // We silently ignore ancestor setting since timeouts don't use ancestor chains
+        reserve_player_ref(|player| {
+            let key = player.get_datum(&args[0]).string_value()?;
+            match key.as_str() {
+                "ancestor" => {
+                    // Silently accept but ignore - timeouts don't use ancestor chains
+                    Ok(DatumRef::Void)
+                }
+                _ => Err(ScriptError::new(format!(
+                    "Cannot setAt property {} on timeout", key
+                ))),
+            }
+        })
     }
 
     pub fn has_async_handler(name: &String) -> bool {
@@ -37,6 +55,7 @@ impl TimeoutDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
             "new" => Self::new(datum, args).await,
+            "forget" => Self::forget_async(datum).await,
             _ => Err(ScriptError::new(format!(
                 "No async handler {handler_name} for timeout"
             ))),
@@ -96,42 +115,57 @@ impl TimeoutDatumHandlers {
         })?;
 
         // Check if this timeout name corresponds to a script in the cast
-        let script_ref = reserve_player_ref(|player| {
-            player
-                .movie
-                .cast_manager
-                .find_member_ref_by_name(&timeout_name)
-        });
+        // This is only supported in Director 10+ (dir_version >= 1000)
+        // In Director 8/9 (scriptExecutionStyle 9), timeout() always creates a standard timeout
+        let dir_version = reserve_player_ref(|player| player.movie.dir_version);
 
-        if let Some(script_ref) = script_ref {
-            // Verify it's actually a script member
-            let is_script = reserve_player_ref(|player| {
+        if dir_version >= 1000 {
+            let script_ref = reserve_player_ref(|player| {
                 player
                     .movie
                     .cast_manager
-                    .get_script_by_ref(&script_ref)
-                    .is_some()
+                    .find_member_ref_by_name(&timeout_name)
             });
 
-            if is_script {
-                // This is a script-based timeout (like _TIMER_)
-                // Pass ALL arguments to the script's new() handler
-                use crate::player::handlers::datum_handlers::script::ScriptDatumHandlers;
-                let script_datum = reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::ScriptRef(script_ref)))
-                })?;
+            if let Some(script_ref) = script_ref {
+                // Verify it's actually a script member
+                let is_script = reserve_player_ref(|player| {
+                    player
+                        .movie
+                        .cast_manager
+                        .get_script_by_ref(&script_ref)
+                        .is_some()
+                });
 
-                // IMPORTANT: Pass the original args directly to the script's new() handler
-                // The script's new() expects: new(me, _iTimeOut, _hTargetHandler, _oTargetObject, ...)
-                let script_instance = ScriptDatumHandlers::new(&script_datum, args).await?;
+                if is_script {
+                    // This is a script-based timeout (like _TIMER_)
+                    // Pass ALL arguments to the script's new() handler
+                    use crate::player::handlers::datum_handlers::script::ScriptDatumHandlers;
+                    let script_datum = reserve_player_mut(|player| {
+                        Ok(player.alloc_datum(Datum::ScriptRef(script_ref)))
+                    })?;
 
-                // The script's new() handler will:
-                // 1. Set all properties (iStartTime, iTimeOut, etc.)
-                // 2. Call (the actorList).add(me)
-                // 3. Return me
+                    // IMPORTANT: Pass the original args directly to the script's new() handler
+                    // The script's new() expects: new(me, _iTimeOut, _hTargetHandler, _oTargetObject, ...)
+                    let script_instance = ScriptDatumHandlers::new(&script_datum, args).await?;
 
-                // So we should return the script instance that was returned from new()
-                return Ok(script_instance);
+                    // The script's new() handler will:
+                    // 1. Set all properties (iStartTime, iTimeOut, etc.)
+                    // 2. Call (the actorList).add(me)
+                    // 3. Return me
+
+                    // Wrap the script instance in a TimeoutInstance so that timeout operations
+                    // like forget() work correctly
+                    return reserve_player_mut(|player| {
+                        Ok(player.alloc_datum(Datum::TimeoutInstance {
+                            name: timeout_name,
+                            duration: 0, // Script-based timeouts manage their own duration
+                            callback: DatumRef::Void,
+                            target: DatumRef::Void,
+                            script_instance: Some(script_instance),
+                        }))
+                    });
+                }
             }
         }
 
@@ -170,7 +204,57 @@ impl TimeoutDatumHandlers {
                 duration: timeout_period,
                 callback: args[handler_arg].clone(),
                 target: target_ref,
+                script_instance: None,
             }))
+        })
+    }
+
+    pub fn has_forget_async_handler(datum: &DatumRef) -> bool {
+        reserve_player_ref(|player| {
+            let timeout_datum = player.get_datum(datum);
+            match timeout_datum {
+                Datum::TimeoutInstance { script_instance: Some(_), .. } => true,
+                _ => false,
+            }
+        })
+    }
+
+    pub async fn forget_async(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
+        // Check if this is a script-based timeout
+        let script_instance_ref = reserve_player_ref(|player| {
+            let timeout_datum = player.get_datum(datum);
+            match timeout_datum {
+                Datum::TimeoutInstance { script_instance: Some(ref si), .. } => Some(si.clone()),
+                _ => None,
+            }
+        });
+
+        if let Some(script_instance_ref) = script_instance_ref {
+            // Call the script's destroy() handler to remove it from actorList
+            use super::script_instance::ScriptInstanceDatumHandlers;
+            if ScriptInstanceDatumHandlers::has_async_handler(&script_instance_ref, &"destroy".to_string())? {
+                let _ = ScriptInstanceDatumHandlers::call_async(
+                    &script_instance_ref,
+                    &"destroy".to_string(),
+                    &vec![],
+                ).await;
+            }
+        }
+
+        // Also forget from the timeout manager (for non-script timeouts or as cleanup)
+        reserve_player_mut(|player| {
+            let timeout_name = {
+                let timeout_ref = player.get_datum(datum);
+                match timeout_ref {
+                    Datum::TimeoutRef(timeout_name) => Some(timeout_name.to_owned()),
+                    Datum::TimeoutInstance { name, .. } => Some(name.to_owned()),
+                    _ => None,
+                }
+            };
+            if let Some(name) = timeout_name {
+                player.timeout_manager.forget_timeout(&name);
+            }
+            Ok(DatumRef::Void)
         })
     }
 
