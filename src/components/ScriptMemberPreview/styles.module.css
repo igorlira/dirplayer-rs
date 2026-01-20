@@ -283,7 +283,8 @@
 
 /* End Handler */
 .endHandler {
-  padding: 6px 12px 6px 76px;
+  padding: 6px 12px;
+  padding-left: 34px;
   color: #569cd6;
   background-color: #252526;
 }
