@@ -1,34 +1,315 @@
-.handlerName {
-  composes: bodyMonospace from global;
-}
-
-.bytecodeLine {
-  composes: bodyMonospace from global;
-}
-
-.bytecodeLineHighlighted, .handlerNameHighlighted {
-  composes: bytecodeLine from global;
-  background-color: #ffff00;
-}
-
-.bytecodeLineBackground, .handlerNameBackground {
-  background-color: #f0f0f0;
-}
+/* Script Member Preview - IDE-style theme */
 
 .scriptContainer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* View Mode Toggle - Tab style */
+.viewModeToggle {
+  display: flex;
+  background-color: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  padding: 0;
+  margin: 0;
+}
+
+.viewModeButton {
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  color: #969696;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  position: relative;
+  transition: color 0.15s ease;
+}
+
+.viewModeButton:hover {
+  color: #d4d4d4;
+  background: #2d2d2d;
+}
+
+.viewModeButtonActive {
+  color: #ffffff;
+  background: #1e1e1e;
+}
+
+.viewModeButtonActive::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #007acc;
+}
+
+/* Handler Header - Collapsible section */
+.handlerContainer {
+  border-bottom: 1px solid #2d2d2d;
+}
+
+.handlerHeader {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  background-color: #252526;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.1s ease;
+  border: none;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+.handlerHeader:hover {
+  background-color: #2a2a2a;
+}
+
+.handlerName {
+  composes: handlerHeader;
+}
+
+.expandIcon {
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #858585;
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.expandIconExpanded {
+  transform: rotate(90deg);
+}
+
+.handlerSignature {
+  color: #dcdcaa;
   flex: 1;
 }
 
-.breakpointColumn {
-  width: 30px;
-
-  &.hasBreakpoint {
-    background-color: #ff0000;
-  }
+.handlerKeyword {
+  color: #569cd6;
+  margin-right: 4px;
 }
 
-.bytecodeLine {
+.handlerArgs {
+  color: #9cdcfe;
+}
+
+.handlerNameHighlighted {
+  background-color: #264f78 !important;
+}
+
+.handlerNameBackground {
+  background-color: #2d4f4f !important;
+}
+
+/* Code Body */
+.codeBody {
+  background-color: #1e1e1e;
+}
+
+/* Line Container - Shared by bytecode and lingo */
+.lineContainer {
   display: flex;
-  flex-direction: row;
-  justify-content: stretch;
+  min-height: 20px;
+  position: relative;
+}
+
+.lineContainer:hover {
+  background-color: #2a2a2a;
+}
+
+/* Gutter - Line numbers and breakpoints */
+.gutter {
+  display: flex;
+  flex-shrink: 0;
+  width: 76px;
+  background-color: #1e1e1e;
+}
+
+.breakpointArea {
+  width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+}
+
+.breakpointArea::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: transparent;
+  transition: background-color 0.1s ease;
+}
+
+.breakpointArea:hover::before {
+  background-color: rgba(255, 100, 100, 0.4);
+}
+
+.hasBreakpoint .breakpointArea::before,
+.lineContainer.hasBreakpoint .breakpointArea::before {
+  background-color: #f14c4c;
+}
+
+.breakpointColumn {
+  width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.breakpointColumn::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: transparent;
+  transition: background-color 0.1s ease;
+}
+
+.breakpointColumn:hover::before {
+  background-color: rgba(241, 76, 76, 0.4);
+}
+
+.breakpointColumn.hasBreakpoint::before {
+  background-color: #f14c4c;
+}
+
+.breakpointDisabled {
+  cursor: default;
+}
+
+.breakpointDisabled::before {
+  display: none;
+}
+
+.lineNumber {
+  width: 40px;
+  padding-right: 16px;
+  text-align: right;
+  color: #6e7681;
+  font-size: 12px;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* Code Content */
+.codeContent {
+  flex: 1;
+  padding: 0 16px 0 8px;
+  white-space: pre;
+  display: flex;
+  align-items: center;
+}
+
+/* Bytecode Line */
+.bytecodeLine {
+  composes: lineContainer;
+}
+
+.bytecodeText {
+  color: #ce9178;
+}
+
+.bytecodeOffset {
+  color: #6a9955;
+  margin-right: 12px;
+  min-width: 32px;
+}
+
+.bytecodeOpcode {
+  color: #569cd6;
+  margin-right: 8px;
+}
+
+.bytecodeOperand {
+  color: #b5cea8;
+}
+
+/* Lingo Line */
+.lingoLine {
+  composes: lineContainer;
+}
+
+.lingoLineText {
+  color: #d4d4d4;
+  flex: 1;
+  white-space: pre;
+  padding-right: 16px;
+  line-height: 20px;
+}
+
+/* Highlighting */
+.bytecodeLineHighlighted,
+.lingoLineHighlighted {
+  background-color: #264f78 !important;
+}
+
+.bytecodeLineHighlighted .bytecodeText,
+.lingoLineHighlighted .lingoLineText {
+  color: #ffffff;
+}
+
+.bytecodeLineBackground,
+.lingoLineBackground {
+  background-color: #2d4f4f;
+}
+
+/* End Handler */
+.endHandler {
+  padding: 6px 12px 6px 76px;
+  color: #569cd6;
+  background-color: #252526;
+}
+
+/* Empty State */
+.noLingo {
+  padding: 16px 24px;
+  color: #6e7681;
+  font-style: italic;
+}
+
+/* Scrollbar styling */
+.scriptContainer::-webkit-scrollbar {
+  width: 14px;
+}
+
+.scriptContainer::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+
+.scriptContainer::-webkit-scrollbar-thumb {
+  background-color: #424242;
+  border: 3px solid #1e1e1e;
+  border-radius: 7px;
+}
+
+.scriptContainer::-webkit-scrollbar-thumb:hover {
+  background-color: #4f4f4f;
 }
