@@ -183,6 +183,15 @@ export interface IScoreChannelInitData {
 export interface ScoreSpriteSnapshot {
   displayName: string
   memberRef: ICastMemberRef
+  scriptInstanceList: number[]
+  width: number
+  height: number
+  locH: number
+  locV: number
+  color: string
+  bgColor: string
+  ink: number
+  blend: number
 }
 
 export interface ScoreSnapshot {
