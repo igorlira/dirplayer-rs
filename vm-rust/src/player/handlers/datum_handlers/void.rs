@@ -54,11 +54,10 @@ impl VoidDatumHandlers {
                 // Return void for attributes on void
                 Ok(player.alloc_datum(Datum::Void))
             }
-            _ => {
-                // Instead of throwing an error, return void for any unknown property
-                // This matches Lingo behavior where void.anything returns void
-                Ok(player.alloc_datum(Datum::Void))
-            }
+            _ => Err(ScriptError::new(format!(
+                "Cannot get property '{}' on VOID - a variable or property that should contain an object is uninitialized",
+                prop
+            ))),
         }
     }
 }

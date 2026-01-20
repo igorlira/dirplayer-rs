@@ -307,6 +307,16 @@ pub async fn player_execute_bytecode<'a>(
         let script = unsafe { &*ctx.script_ptr };
         let bytecode = &handler.bytecode_array[scope.bytecode_index];
 
+        // Always record to lightweight execution history (minimal overhead - just copying integers)
+        record_execution(
+            num::ToPrimitive::to_u16(&bytecode.opcode).unwrap_or(0),
+            bytecode.pos as u32,
+            bytecode.obj as i32,
+            handler.name_id as u32,
+            script.member_ref.cast_lib as u32,
+            script.member_ref.cast_member,
+        );
+
         let should_trace = player.movie.trace_script;
 
         // Always record to lightweight execution history (minimal overhead - just copying integers)

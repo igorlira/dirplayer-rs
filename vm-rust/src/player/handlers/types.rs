@@ -974,25 +974,58 @@ impl TypeHandlers {
 
     pub fn color(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            if args.len() != 3 && args.len() != 4 {
-                return Err(ScriptError::new(
-                    "color() expects 3 numeric arguments".to_string(),
-                ));
+            match args.len() {
+                1 => {
+                    // color(paletteIndex) - single argument is palette index
+                    let index = player.get_datum(&args[0]).int_value()? as u8;
+                    Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
+                }
+                2 => {
+                    // color(#rgb, "RRGGBB") or color(#paletteIndex, index)
+                    let first = player.get_datum(&args[0]);
+                    if let Datum::Symbol(sym) = first {
+                        match sym.to_lowercase().as_str() {
+                            "rgb" => {
+                                let hex_str = player.get_datum(&args[1]).string_value()?.replace("#", "");
+                                let r = u8::from_str_radix(&hex_str[0..2], 16).unwrap_or(0);
+                                let g = u8::from_str_radix(&hex_str[2..4], 16).unwrap_or(0);
+                                let b = u8::from_str_radix(&hex_str[4..6], 16).unwrap_or(0);
+                                Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
+                            }
+                            "paletteindex" => {
+                                let index = player.get_datum(&args[1]).int_value()? as u8;
+                                Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
+                            }
+                            _ => Err(ScriptError::new(format!(
+                                "color(): unknown color type symbol #{}",
+                                sym
+                            ))),
+                        }
+                    } else {
+                        Err(ScriptError::new(
+                            "color() with 2 arguments expects first argument to be a symbol".to_string(),
+                        ))
+                    }
+                }
+                3 => {
+                    // color(r, g, b)
+                    let r = player.get_datum(&args[0]).int_value()? as u8;
+                    let g = player.get_datum(&args[1]).int_value()? as u8;
+                    let b = player.get_datum(&args[2]).int_value()? as u8;
+                    Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
+                }
+                4 => {
+                    // color(#rgb, r, g, b) - first argument is symbol, skip it
+                    let r = player.get_datum(&args[1]).int_value()? as u8;
+                    let g = player.get_datum(&args[2]).int_value()? as u8;
+                    let b = player.get_datum(&args[3]).int_value()? as u8;
+                    Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
+                }
+                _ => Err(ScriptError::new(format!(
+                    "color() expects 1, 2, 3, or 4 arguments, got {}",
+                    args.len()
+                ))),
             }
-
-            let start = if args.len() == 4 {
-                // First argument is symbol (#rgb), skip it
-                1
-            } else {
-                0
-            };
-
-            let r = player.get_datum(&args[start]).int_value()? as u8;
-            let g = player.get_datum(&args[start + 1]).int_value()? as u8;
-            let b = player.get_datum(&args[start + 2]).int_value()? as u8;
-
-            let color_ref = player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b)));
-            Ok(color_ref)
         })
     }
 
@@ -1063,9 +1096,6 @@ impl TypeHandlers {
         match datum_type {
             DatumType::PropList => {
                 PropListDatumHandlers::get_a_prop(datum_ref, &vec![args.get(1).unwrap().clone()])
-            }
-            DatumType::Void => {
-                Ok(DatumRef::Void)
             }
             DatumType::ScriptInstanceRef => {
                 ScriptInstanceDatumHandlers::get_a_prop(datum_ref, &vec![args.get(1).unwrap().clone()])

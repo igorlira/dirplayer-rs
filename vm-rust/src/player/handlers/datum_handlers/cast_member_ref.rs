@@ -363,7 +363,6 @@ impl CastMemberRefHandlers {
                 Some(cast_member) => Ok(Some(cast_member.member_type.member_type_id())),
                 None => {
                     // Silently ignore setting props on erased members
-                    #[cfg(target_arch = "wasm32")]
                     web_sys::console::warn_1(&format!(
                         "Ignoring set prop {} on erased member {} of castLib {}",
                         prop, member_ref.cast_member, member_ref.cast_lib
@@ -523,7 +522,6 @@ impl CastMemberRefHandlers {
             // Silently ignore setting props on non-existent members
             // This can happen when a script erases a member but still holds a reference
             // Director silently ignores this case
-            #[cfg(target_arch = "wasm32")]
             web_sys::console::warn_1(&format!(
                 "Ignoring set prop {} on erased member {} of castLib {}",
                 prop, cast_member_ref.cast_member, cast_member_ref.cast_lib

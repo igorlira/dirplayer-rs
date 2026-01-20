@@ -172,8 +172,8 @@ impl ScriptInstanceUtils {
         };
         match key.as_str() {
             "ancestor" => {
-                let value = player.get_datum(value).to_owned();
-                match value {
+                let value_datum = player.get_datum(value).to_owned();
+                match value_datum {
                     Datum::Void => {
                         // FIXME: Setting ancestor to void seems to be a no-op.
                         Ok(())
@@ -184,9 +184,14 @@ impl ScriptInstanceUtils {
                         script_instance.ancestor = Some(ancestor_instance_id);
                         Ok(())
                     }
-                    _ => Err(ScriptError::new(
-                        "Cannot set ancestor to non-script instance".to_string(),
-                    )),
+                    // For non-ScriptInstanceRef ancestors (like TimeoutInstance),
+                    // store in properties map so method calls can be delegated
+                    _ => {
+                        let script_instance =
+                            player.allocator.get_script_instance_mut(&self_instance_id);
+                        script_instance.properties.insert("ancestor".to_string(), value.clone());
+                        Ok(())
+                    }
                 }
             }
             _ => Err(ScriptError::new(format!(
@@ -197,10 +202,71 @@ impl ScriptInstanceUtils {
 }
 
 impl ScriptInstanceDatumHandlers {
+    /// Find a non-ScriptInstance ancestor (like TimeoutInstance) in the properties
+    fn find_non_script_ancestor(datum: &DatumRef, player: &DirPlayer) -> Option<DatumRef> {
+        let instance_ref = match player.get_datum(datum) {
+            Datum::ScriptInstanceRef(ref r) => r.clone(),
+            _ => return None,
+        };
+
+        // Walk the ancestor chain looking for non-ScriptInstance ancestors in properties
+        let mut current_instance_ref = Some(instance_ref);
+        let mut depth = 0;
+        while let Some(ref inst_ref) = current_instance_ref {
+            depth += 1;
+            if depth > 100 {
+                break;
+            }
+
+            let instance = player.allocator.get_script_instance(inst_ref);
+
+            // Check if this instance has a non-ScriptInstance ancestor in properties
+            if let Some(ancestor_prop_ref) = instance.properties.get("ancestor") {
+                let ancestor_datum = player.get_datum(ancestor_prop_ref);
+                match ancestor_datum {
+                    // If ancestor is not a ScriptInstanceRef, return it for delegation
+                    Datum::ScriptInstanceRef(ref next_ref) => {
+                        current_instance_ref = Some(next_ref.clone());
+                        continue;
+                    }
+                    Datum::Void | Datum::Int(0) => {
+                        // No ancestor - continue to struct field
+                    }
+                    _ => {
+                        // Non-ScriptInstance ancestor (e.g., TimeoutInstance)
+                        return Some(ancestor_prop_ref.clone());
+                    }
+                }
+            }
+
+            // Check the struct field for ScriptInstance ancestors
+            if let Some(ref ancestor_ref) = instance.ancestor {
+                current_instance_ref = Some(ancestor_ref.clone());
+            } else {
+                break;
+            }
+        }
+
+        None
+    }
+
     pub fn has_async_handler(datum: &DatumRef, name: &String) -> Result<bool, ScriptError> {
         return reserve_player_ref(|player| {
             let handler_ref = ScriptInstanceUtils::get_handler(name, &datum, player)?;
-            Ok(handler_ref.is_some())
+            if handler_ref.is_some() {
+                return Ok(true);
+            }
+            // Check if there's a non-ScriptInstance ancestor that might handle this
+            if let Some(ancestor_ref) = Self::find_non_script_ancestor(datum, player) {
+                let ancestor_datum = player.get_datum(&ancestor_ref);
+                // For TimeoutInstance, check if the method is a timeout method
+                if let Datum::TimeoutInstance { .. } = ancestor_datum {
+                    if name == "forget" || name == "new" {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
         });
     }
 
@@ -277,6 +343,51 @@ impl ScriptInstanceDatumHandlers {
             player_handle_scope_return(&result_scope);
             Ok(result_scope.return_value)
         } else {
+            // No handler found in script - check for special handlers first
+
+            // getPropertyDescriptionList returns empty prop list if not implemented
+            if handler_name == "getPropertyDescriptionList" {
+                return reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::PropList(vec![], false)))
+                });
+            }
+
+            // Director system events should be silently ignored if not implemented
+            match handler_name.as_str() {
+                "exitFrame" | "enterFrame" | "prepareFrame" | "idle" | "stepFrame" |
+                "mouseDown" | "mouseUp" | "mouseEnter" | "mouseLeave" | "mouseWithin" |
+                "keyDown" | "keyUp" | "beginSprite" | "endSprite" | "prepareMovie" |
+                "startMovie" | "stopMovie" | "activate" | "deactivate" => {
+                    return Ok(DatumRef::Void);
+                }
+                _ => {}
+            }
+
+            // Check for non-ScriptInstance ancestor to delegate to
+            let (ancestor_ref, ancestor_type) = reserve_player_ref(|player| {
+                if let Some(ancestor) = Self::find_non_script_ancestor(datum, player) {
+                    let datum_type = player.get_datum(&ancestor).type_enum();
+                    (Some(ancestor), Some(datum_type))
+                } else {
+                    (None, None)
+                }
+            });
+            if let (Some(ancestor_ref), Some(ancestor_type)) = (ancestor_ref, ancestor_type) {
+                // Delegate to the appropriate handler based on ancestor type
+                use crate::director::lingo::datum::DatumType;
+                use super::timeout::TimeoutDatumHandlers;
+
+                match ancestor_type {
+                    DatumType::TimeoutRef | DatumType::TimeoutInstance | DatumType::TimeoutFactory => {
+                        // For timeouts, use the sync call handler which handles forget
+                        // We avoid call_async to prevent async recursion issues
+                        return TimeoutDatumHandlers::call(&ancestor_ref, handler_name, args);
+                    }
+                    _ => {
+                        // Other datum types not yet supported for delegation
+                    }
+                }
+            }
             Err(ScriptError::new(format!(
                 "No async handler {handler_name} for script instance datum"
             )))
@@ -467,11 +578,63 @@ impl ScriptInstanceDatumHandlers {
             "getAt" => Self::get_at(datum, args),
             "count" => Self::count(datum, args),
             "handlers" => Self::handlers(datum, args),
-            "forget" => Self::forget(datum, args),
-            _ => Err(ScriptError::new_code(
-                ScriptErrorCode::HandlerNotFound,
-                format!("No handler {handler_name} for script instance datum"),
-            )),
+            // getPropertyDescriptionList returns empty prop list if not implemented
+            "getPropertyDescriptionList" => {
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::PropList(vec![], false)))
+                })
+            }
+            // Director system events that should be silently ignored if not implemented
+            "exitFrame" | "enterFrame" | "prepareFrame" | "idle" | "stepFrame" |
+            "mouseDown" | "mouseUp" | "mouseEnter" | "mouseLeave" | "mouseWithin" |
+            "keyDown" | "keyUp" | "beginSprite" | "endSprite" | "prepareMovie" |
+            "startMovie" | "stopMovie" | "activate" | "deactivate" |
+            // forget is called on wrapper objects that may not have it - silently ignore
+            "forget" => {
+                Ok(DatumRef::Void)
+            }
+            _ => {
+                // Check for non-ScriptInstance ancestor to delegate to (e.g., TimeoutInstance)
+                let (ancestor_ref, ancestor_type, script_name) = reserve_player_ref(|player| {
+                    let script_name = if let Datum::ScriptInstanceRef(ref inst_ref) = player.get_datum(datum) {
+                        let instance = player.allocator.get_script_instance(inst_ref);
+                        player.movie.cast_manager.get_script_by_ref(&instance.script)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    } else {
+                        "not-script-instance".to_string()
+                    };
+
+                    if let Some(ancestor) = Self::find_non_script_ancestor(datum, player) {
+                        let datum_type = player.get_datum(&ancestor).type_enum();
+                        (Some(ancestor), Some(datum_type), script_name)
+                    } else {
+                        (None, None, script_name)
+                    }
+                });
+
+                if let (Some(ancestor_ref), Some(ancestor_type)) = (ancestor_ref, ancestor_type) {
+                    use crate::director::lingo::datum::DatumType;
+                    use super::timeout::TimeoutDatumHandlers;
+
+                    match ancestor_type {
+                        DatumType::TimeoutRef | DatumType::TimeoutInstance | DatumType::TimeoutFactory => {
+                            return TimeoutDatumHandlers::call(&ancestor_ref, handler_name, args);
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Log once when we hit this error for debugging
+                static LOGGED_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    crate::console_warn!("ScriptInstance call error: handler={}, script={}", handler_name, script_name);
+                }
+                Err(ScriptError::new_code(
+                    ScriptErrorCode::HandlerNotFound,
+                    format!("No handler {handler_name} for script instance datum"),
+                ))
+            }
         }
     }
 
