@@ -23,6 +23,7 @@ use super::datum_handlers::{
     player_call_datum_handler,
     prop_list::{PropListDatumHandlers, PropListUtils},
     rect::RectUtils,
+    script_instance::ScriptInstanceDatumHandlers,
     sound_channel::SoundStatus,
 };
 
@@ -47,13 +48,30 @@ impl TypeUtils {
                 "void"
             }]),
             Datum::ColorRef(..) => Ok(vec!["color"]),
-            Datum::TimeoutRef(..) => Ok(vec!["timeout"]), // TODO verify this
+            Datum::TimeoutRef(..) => Ok(vec!["timeout"]),
+            Datum::TimeoutFactory => Ok(vec!["timeout"]),
+            Datum::TimeoutInstance { .. } => Ok(vec!["timeout"]),
             Datum::BitmapRef(..) => Ok(vec!["image"]),
             Datum::Rect(..) => Ok(vec!["rect"]),
             Datum::Point(..) => Ok(vec!["point"]),
             Datum::SpriteRef(..) => Ok(vec!["sprite"]),
             Datum::PaletteRef(..) => Ok(vec!["palette"]),
             Datum::Vector(..) => Ok(vec!["vector"]),
+            Datum::StringChunk(..) => Ok(vec!["string"]),
+            Datum::CastLib(..) => Ok(vec!["castlib"]),
+            Datum::Stage => Ok(vec!["stage"]),
+            Datum::SoundChannel(..) => Ok(vec!["sound"]),
+            Datum::SoundRef(..) => Ok(vec!["sound"]),
+            Datum::CursorRef(..) => Ok(vec!["cursor"]),
+            Datum::Xtra(..) => Ok(vec!["xtra"]),
+            Datum::XtraInstance(..) => Ok(vec!["instance"]),
+            Datum::Matte(..) => Ok(vec!["image"]),
+            Datum::PlayerRef => Ok(vec!["player"]),
+            Datum::MovieRef => Ok(vec!["movie"]),
+            Datum::XmlRef(..) => Ok(vec!["xml"]),
+            Datum::DateRef(..) => Ok(vec!["date"]),
+            Datum::MathRef(..) => Ok(vec!["math"]),
+            Datum::VarRef(..) => Ok(vec!["void"]), // VarRef should be dereferenced before checking ilk
 
             _ => Err(ScriptError::new(format!(
                 "Getting ilk for unknown type: {}",
@@ -956,25 +974,58 @@ impl TypeHandlers {
 
     pub fn color(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            if args.len() != 3 && args.len() != 4 {
-                return Err(ScriptError::new(
-                    "color() expects 3 numeric arguments".to_string(),
-                ));
+            match args.len() {
+                1 => {
+                    // color(paletteIndex) - single argument is palette index
+                    let index = player.get_datum(&args[0]).int_value()? as u8;
+                    Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
+                }
+                2 => {
+                    // color(#rgb, "RRGGBB") or color(#paletteIndex, index)
+                    let first = player.get_datum(&args[0]);
+                    if let Datum::Symbol(sym) = first {
+                        match sym.to_lowercase().as_str() {
+                            "rgb" => {
+                                let hex_str = player.get_datum(&args[1]).string_value()?.replace("#", "");
+                                let r = u8::from_str_radix(&hex_str[0..2], 16).unwrap_or(0);
+                                let g = u8::from_str_radix(&hex_str[2..4], 16).unwrap_or(0);
+                                let b = u8::from_str_radix(&hex_str[4..6], 16).unwrap_or(0);
+                                Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
+                            }
+                            "paletteindex" => {
+                                let index = player.get_datum(&args[1]).int_value()? as u8;
+                                Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
+                            }
+                            _ => Err(ScriptError::new(format!(
+                                "color(): unknown color type symbol #{}",
+                                sym
+                            ))),
+                        }
+                    } else {
+                        Err(ScriptError::new(
+                            "color() with 2 arguments expects first argument to be a symbol".to_string(),
+                        ))
+                    }
+                }
+                3 => {
+                    // color(r, g, b)
+                    let r = player.get_datum(&args[0]).int_value()? as u8;
+                    let g = player.get_datum(&args[1]).int_value()? as u8;
+                    let b = player.get_datum(&args[2]).int_value()? as u8;
+                    Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
+                }
+                4 => {
+                    // color(#rgb, r, g, b) - first argument is symbol, skip it
+                    let r = player.get_datum(&args[1]).int_value()? as u8;
+                    let g = player.get_datum(&args[2]).int_value()? as u8;
+                    let b = player.get_datum(&args[3]).int_value()? as u8;
+                    Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
+                }
+                _ => Err(ScriptError::new(format!(
+                    "color() expects 1, 2, 3, or 4 arguments, got {}",
+                    args.len()
+                ))),
             }
-
-            let start = if args.len() == 4 {
-                // First argument is symbol (#rgb), skip it
-                1
-            } else {
-                0
-            };
-
-            let r = player.get_datum(&args[start]).int_value()? as u8;
-            let g = player.get_datum(&args[start + 1]).int_value()? as u8;
-            let b = player.get_datum(&args[start + 2]).int_value()? as u8;
-
-            let color_ref = player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b)));
-            Ok(color_ref)
         })
     }
 
@@ -1026,14 +1077,27 @@ impl TypeHandlers {
 
     pub fn get_a_prop(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let datum_ref = args.get(0).unwrap();
-        let datum_type = reserve_player_mut(|player| player.get_datum(&args[0]).type_enum());
+        let (datum_type, datum_debug) = reserve_player_mut(|player| {
+            let datum = player.get_datum(&args[0]);
+            let debug_str = match datum {
+                Datum::Symbol(s) => format!("#{}", s),
+                Datum::String(s) => format!("\"{}\"", s),
+                Datum::Int(i) => format!("{}", i),
+                _ => format!("{:?}", datum.type_enum()),
+            };
+            (datum.type_enum(), debug_str)
+        });
         match datum_type {
             DatumType::PropList => {
                 PropListDatumHandlers::get_a_prop(datum_ref, &vec![args.get(1).unwrap().clone()])
             }
+            DatumType::ScriptInstanceRef => {
+                ScriptInstanceDatumHandlers::get_a_prop(datum_ref, &vec![args.get(1).unwrap().clone()])
+            }
             _ => Err(ScriptError::new(format!(
-                "Cannot getaProp prop of type: {}",
-                datum_type.type_str()
+                "Cannot getaProp prop of type: {} (value: {})",
+                datum_type.type_str(),
+                datum_debug
             ))),
         }
     }
