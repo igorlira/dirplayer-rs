@@ -89,6 +89,29 @@ pub fn get_keyboard_key_map_js_to_sw() -> &'static HashMap<u16, u16> {
     })
 }
 
+/// Director character codes for special keys.
+/// In Lingo, numToChar(28-31) return control characters that represent arrow keys.
+pub fn get_director_special_char_to_keycode_map() -> &'static HashMap<char, u16> {
+    static MAP: OnceLock<HashMap<char, u16>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        HashMap::from_iter([
+            // Director arrow key character codes (used with numToChar)
+            ('\x1C', 123), // ASCII 28 = Left Arrow -> SW keycode 123
+            ('\x1D', 124), // ASCII 29 = Right Arrow -> SW keycode 124
+            ('\x1E', 126), // ASCII 30 = Up Arrow -> SW keycode 126
+            ('\x1F', 125), // ASCII 31 = Down Arrow -> SW keycode 125
+            // Enter/Return
+            ('\r', 36),    // ASCII 13 = Return -> SW keycode 36
+            ('\n', 36),    // Newline also maps to Return
+            // Tab and other control characters
+            ('\t', 48),    // ASCII 9 = Tab -> SW keycode 48
+            ('\x08', 51),  // ASCII 8 = Backspace -> SW keycode 51
+            ('\x1B', 53),  // ASCII 27 = Escape -> SW keycode 53
+            (' ', 49),     // Space -> SW keycode 49
+        ])
+    })
+}
+
 pub fn get_char_to_keycode_map() -> &'static HashMap<char, u16> {
     static MAP: OnceLock<HashMap<char, u16>> = OnceLock::new();
     MAP.get_or_init(|| {
