@@ -22,8 +22,145 @@ use super::{
 };
 
 thread_local! {
-    pub static EXPRESSION_TRACKER: std::cell::RefCell<StackExpressionTracker> = 
+    pub static EXPRESSION_TRACKER: std::cell::RefCell<StackExpressionTracker> =
         std::cell::RefCell::new(StackExpressionTracker::new());
+}
+
+/// Lightweight execution history entry - stores only minimal data
+/// Strings are generated lazily only when dumping on error
+#[derive(Clone, Copy)]
+struct ExecutionHistoryEntry {
+    opcode: u16,
+    bytecode_pos: u32,
+    operand: i32,
+    handler_name_id: u32,
+    script_cast_lib: u32,
+    script_cast_member: i32,
+}
+
+/// Ring buffer for execution history with minimal memory footprint
+const EXECUTION_HISTORY_SIZE: usize = 100;
+
+thread_local! {
+    static EXECUTION_HISTORY: std::cell::RefCell<ExecutionHistory> =
+        std::cell::RefCell::new(ExecutionHistory::new());
+}
+
+struct ExecutionHistory {
+    entries: [ExecutionHistoryEntry; EXECUTION_HISTORY_SIZE],
+    write_index: usize,
+    count: usize,
+}
+
+impl ExecutionHistory {
+    const fn new() -> Self {
+        Self {
+            entries: [ExecutionHistoryEntry {
+                opcode: 0,
+                bytecode_pos: 0,
+                operand: 0,
+                handler_name_id: 0,
+                script_cast_lib: 0,
+                script_cast_member: 0,
+            }; EXECUTION_HISTORY_SIZE],
+            write_index: 0,
+            count: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, entry: ExecutionHistoryEntry) {
+        self.entries[self.write_index] = entry;
+        self.write_index = (self.write_index + 1) % EXECUTION_HISTORY_SIZE;
+        if self.count < EXECUTION_HISTORY_SIZE {
+            self.count += 1;
+        }
+    }
+
+    fn iter_recent(&self) -> impl Iterator<Item = &ExecutionHistoryEntry> {
+        let start = if self.count < EXECUTION_HISTORY_SIZE {
+            0
+        } else {
+            self.write_index
+        };
+
+        (0..self.count).map(move |i| {
+            let idx = (start + i) % EXECUTION_HISTORY_SIZE;
+            &self.entries[idx]
+        })
+    }
+}
+
+/// Records a bytecode execution to the history (lightweight - no string allocation)
+#[inline(always)]
+fn record_execution(
+    opcode_u16: u16,
+    bytecode_pos: u32,
+    operand: i32,
+    handler_name_id: u32,
+    script_cast_lib: u32,
+    script_cast_member: i32,
+) {
+    EXECUTION_HISTORY.with(|history| {
+        history.borrow_mut().push(ExecutionHistoryEntry {
+            opcode: opcode_u16,
+            bytecode_pos,
+            operand,
+            handler_name_id,
+            script_cast_lib,
+            script_cast_member,
+        });
+    });
+}
+
+/// Dumps the execution history when an error occurs
+/// This is the only place where strings are generated - on demand
+pub fn dump_execution_history_on_error(error_message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use web_sys::console;
+
+        console::group_collapsed_1(&format!("📜 Bytecode execution history (last {} ops before error)", EXECUTION_HISTORY_SIZE).into());
+        console::error_1(&format!("Error: {}", error_message).into());
+
+        EXECUTION_HISTORY.with(|history| {
+            let history = history.borrow();
+            let player = unsafe { PLAYER_OPT.as_ref() };
+
+            for (i, entry) in history.iter_recent().enumerate() {
+                // Convert opcode back to name using num_traits
+                let opcode: OpCode = num::FromPrimitive::from_u16(entry.opcode).unwrap_or(OpCode::Invalid);
+                let op_name = get_opcode_name(opcode);
+
+                // Try to get handler name from lctx if player is available
+                let handler_name = if let Some(player) = player {
+                    player.movie.cast_manager
+                        .get_cast(entry.script_cast_lib)
+                        .ok()
+                        .and_then(|cast| cast.lctx.as_ref())
+                        .and_then(|lctx| lctx.names.get(entry.handler_name_id as usize))
+                        .map(|s| s.as_str())
+                        .unwrap_or("?")
+                } else {
+                    "?"
+                };
+
+                let msg = format!(
+                    "{:3}. [{:4}] {:20} {:6} ({}@{}:{})",
+                    i + 1,
+                    entry.bytecode_pos,
+                    op_name,
+                    entry.operand,
+                    handler_name,
+                    entry.script_cast_lib,
+                    entry.script_cast_member
+                );
+                console::log_1(&msg.into());
+            }
+        });
+
+        console::group_end();
+    }
 }
 
 fn trace_output(message: &str, trace_log_file: &str) {
@@ -168,6 +305,16 @@ pub async fn player_execute_bytecode<'a>(
         let handler = unsafe { &*ctx.handler_def_ptr };
         let script = unsafe { &*ctx.script_ptr };
         let bytecode = &handler.bytecode_array[scope.bytecode_index];
+
+        // Always record to lightweight execution history (minimal overhead - just copying integers)
+        record_execution(
+            num::ToPrimitive::to_u16(&bytecode.opcode).unwrap_or(0),
+            bytecode.pos as u32,
+            bytecode.obj as i32,
+            handler.name_id as u32,
+            script.member_ref.cast_lib as u32,
+            script.member_ref.cast_member,
+        );
 
         let should_trace = player.movie.trace_script;
         let bytecode_text = if should_trace {

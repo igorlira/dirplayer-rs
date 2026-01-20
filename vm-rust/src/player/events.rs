@@ -145,6 +145,8 @@ pub async fn player_invoke_event_to_instances(
                 }
             }
             Err(err) => {
+                // Dump bytecode execution history before the error
+                crate::player::bytecode::handler_manager::dump_execution_history_on_error(&err.message);
                 // Log the error to console
                 web_sys::console::error_1(
                     &format!("⚠ Error in handler '{}': {}", handler_name, err.message).into()
@@ -622,10 +624,15 @@ pub async fn dispatch_system_event_to_timeouts(
     for target_ref in timeout_targets {
         let result = player_call_datum_handler(&target_ref, handler_name, args).await;
         if let Err(err) = result {
-            // Log error but continue with other timeouts
-            web_sys::console::error_1(
-                &format!("⚠ Timeout system event {} error: {}", handler_name, err.message
-            ).into());
+            // HandlerNotFound is expected when a script doesn't have the event handler
+            // (e.g., timeout target script doesn't have prepareFrame or exitFrame).
+            // This is normal Director behavior - just silently skip.
+            if err.code != ScriptErrorCode::HandlerNotFound {
+                // Log actual errors but continue with other timeouts
+                web_sys::console::error_1(
+                    &format!("⚠ Timeout system event {} error: {}", handler_name, err.message
+                ).into());
+            }
         }
     }
 }
