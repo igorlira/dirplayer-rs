@@ -726,25 +726,45 @@ impl PropListDatumHandlers {
                 return Ok(player.alloc_datum(datum_bool(false)));
             }
             
-            if !prop_name.is_string() && !prop_name.is_symbol() && !prop_name.is_int() {
-                return Err(ScriptError::new(format!(
+            if prop_name.is_string() || prop_name.is_symbol() {
+                // Key-based lookup for strings and symbols
+                let prop_list = player.get_datum(datum).to_map()?;
+                let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
+                
+                if index >= 0 {
+                    let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+                    prop_list.remove(index as usize);
+                    Ok(player.alloc_datum(datum_bool(true)))
+                } else {
+                    Ok(player.alloc_datum(datum_bool(false)))
+                }
+            } else if prop_name.is_int() {
+                // For ints: try key lookup first, then fall back to positional
+                let prop_list = player.get_datum(datum).to_map()?;
+                let key_index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
+                
+                if key_index >= 0 {
+                    // Found as key - delete by key
+                    let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+                    prop_list.remove(key_index as usize);
+                    Ok(player.alloc_datum(datum_bool(true)))
+                } else {
+                    // Not found as key - try positional (1-based)
+                    let position = prop_name.int_value()?;
+                    let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+                    
+                    if position >= 1 && position <= prop_list.len() as i32 {
+                        prop_list.remove((position - 1) as usize);
+                        Ok(player.alloc_datum(datum_bool(true)))
+                    } else {
+                        Ok(player.alloc_datum(datum_bool(false)))
+                    }
+                }
+            } else {
+                Err(ScriptError::new(format!(
                     "deleteProp: Prop name must be a string, int or symbol (is {})",
                     prop_name.type_str()
-                )));
-            }
-            
-            // Always do key-based lookup first (works for String, Symbol, AND Int keys)
-            let prop_list = player.get_datum(datum).to_map()?;
-            let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
-            
-            if index >= 0 {
-                // Found by key - delete it
-                let prop_list = player.get_datum_mut(datum).to_map_mut()?;
-                prop_list.remove(index as usize);
-                Ok(player.alloc_datum(datum_bool(true)))
-            } else {
-                // Not found by key
-                Ok(player.alloc_datum(datum_bool(false)))
+                )))
             }
         })
     }
