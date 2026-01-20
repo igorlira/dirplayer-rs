@@ -47,7 +47,14 @@ impl BuiltInHandlerManager {
                 Datum::PropList(prop_list, ..) => {
                     Ok(player.alloc_datum(Datum::Int(prop_list.len() as i32)))
                 }
-                _ => Err(ScriptError::new(format!("Cannot get count of non-list"))),
+                // Director treats count(VOID) as 0 - this allows "repeat with i in VOID" to not iterate
+                Datum::Void => Ok(player.alloc_datum(Datum::Int(0))),
+                _ => {
+                    Err(ScriptError::new(format!(
+                        "Cannot get count of non-list (type: {})",
+                        obj.type_str()
+                    )))
+                }
             }
         })
     }
@@ -338,7 +345,7 @@ impl BuiltInHandlerManager {
 
     async fn call(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let receiver_ref = &args[1];
-        let (handler_name, args, instance_ids) = reserve_player_mut(|player| {
+        let (handler_name, args, instance_ids, list_count) = reserve_player_mut(|player| {
             let handler_name = player.get_datum(&args[0]);
             let receiver_clone = player.get_datum(receiver_ref).clone();
             let args = args[2..].to_vec();
@@ -349,25 +356,27 @@ impl BuiltInHandlerManager {
             }
             let handler_name = handler_name.string_value()?;
 
-            let instance_ids = match receiver_clone {
+            let (instance_ids, list_count) = match receiver_clone {
                 Datum::PropList(prop_list, ..) => {
                     let mut instance_ids = vec![];
+                    let count = prop_list.len();
                     for (_, value_ref) in prop_list {
                         instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
                     }
-                    Ok(Some(instance_ids))
+                    (Ok(Some(instance_ids)), count)
                 }
                 Datum::List(_, list, _) => {
                     let mut instance_ids = vec![];
+                    let count = list.len();
                     for value_ref in list {
                         instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
                     }
-                    Ok(Some(instance_ids))
+                    (Ok(Some(instance_ids)), count)
                 }
-                _ => Ok(None),
-            }?;
+                _ => (Ok(None), 0),
+            };
 
-            Ok((handler_name, args, instance_ids))
+            Ok((handler_name, args, instance_ids?, list_count))
         })?;
 
         if instance_ids.is_none() {
@@ -818,14 +827,19 @@ impl BuiltInHandlerManager {
                     let ch = key_str
                         .chars()
                         .next()
-                        .unwrap()
-                        .to_lowercase()
-                        .next()
                         .unwrap();
-                    let mapped_code = *keyboard_map::get_char_to_keycode_map()
-                        .get(&ch)
-                        .unwrap_or(&0);
-                    mapped_code
+
+                    // First check for special Director characters (arrow keys, etc.)
+                    // These are control characters like ASCII 28-31 for arrow keys
+                    if let Some(&code) = keyboard_map::get_director_special_char_to_keycode_map().get(&ch) {
+                        code
+                    } else {
+                        // Regular character - lowercase and look up
+                        let ch_lower = ch.to_lowercase().next().unwrap();
+                        *keyboard_map::get_char_to_keycode_map()
+                            .get(&ch_lower)
+                            .unwrap_or(&0)
+                    }
                 } else {
                     // Try to parse as number string (like "123")
                     if let Ok(code) = key_str.parse::<i32>() {
