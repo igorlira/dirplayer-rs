@@ -146,6 +146,8 @@ pub enum Datum {
         duration: i32,
         callback: DatumRef,
         target: DatumRef,
+        /// For script-based timeouts (like _TIMER_), this holds the script instance
+        script_instance: Option<DatumRef>,
     },
     ColorRef(ColorRef),
     BitmapRef(BitmapRef),
