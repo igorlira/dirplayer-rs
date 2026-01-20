@@ -28,6 +28,7 @@ use player::PlayerDatumHandlers;
 use self::date::DateDatumHandlers;
 use self::math::MathDatumHandlers;
 use self::vector::VectorDatumHandlers;
+use self::void::VoidDatumHandlers;
 use self::xml::XmlDatumHandlers;
 use self::{
     bitmap::BitmapDatumHandlers, list_handlers::ListDatumHandlers, point::PointDatumHandlers,
@@ -155,6 +156,28 @@ pub async fn player_call_datum_handler(
         DatumType::SoundChannel => reserve_player_mut(|player| {
             SoundChannelDatumHandlers::call(player, obj_ref, handler_name, args)
         }),
+        DatumType::Void => {
+            // Try VoidDatumHandlers first for specific methods that should return VOID gracefully
+            match VoidDatumHandlers::call(obj_ref.clone(), handler_name, args) {
+                Ok(result) => Ok(result),
+                Err(_) => {
+                    let args_formatted = reserve_player_ref(|player| {
+                        args.iter()
+                            .map(|arg| format_datum(arg, &player))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    });
+                    Err(ScriptError::new_code(
+                        ScriptErrorCode::HandlerNotFound,
+                        format!(
+                            "Cannot call {}({}) on VOID - a variable or property that should contain an object is uninitialized or returned VOID",
+                            handler_name,
+                            args_formatted
+                        ),
+                    ))
+                }
+            }
+        }
         _ => reserve_player_ref(|player| {
             let formatted_datum = format_datum(obj_ref, &player);
             Err(ScriptError::new_code(

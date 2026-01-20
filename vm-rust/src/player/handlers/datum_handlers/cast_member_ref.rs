@@ -297,12 +297,12 @@ impl CastMemberRefHandlers {
                 if prop == "text" {
                     let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
                         .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-                    
+
                     if let CastMemberType::Script(script_data) = &cast_member.member_type {
                         // Scripts in Director typically don't have editable text
                         // This member might be misclassified
                         web_sys::console::log_1(&format!("⚠️ Trying to get .text from Script member #{}", cast_member.number).into());
-                        
+
                         // Return empty string for now, but this suggests the member type is wrong
                         Ok(Datum::String("".to_string()))
                     } else {
@@ -310,6 +310,33 @@ impl CastMemberRefHandlers {
                     }
                 } else {
                     Err(ScriptError::new(format!("Script members don't support property {}", prop)))
+                }
+            }
+            CastMemberTypeId::Shape => {
+                let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+
+                if let CastMemberType::Shape(shape_member) = &cast_member.member_type {
+                    match prop.as_str() {
+                        "rect" => {
+                            // Shape members have width/height in shape_info
+                            let width = shape_member.shape_info.width as i32;
+                            let height = shape_member.shape_info.height as i32;
+                            Ok(Datum::Rect([
+                                player.alloc_datum(Datum::Int(0)),
+                                player.alloc_datum(Datum::Int(0)),
+                                player.alloc_datum(Datum::Int(width)),
+                                player.alloc_datum(Datum::Int(height)),
+                            ]))
+                        }
+                        "width" => Ok(Datum::Int(shape_member.shape_info.width as i32)),
+                        "height" => Ok(Datum::Int(shape_member.shape_info.height as i32)),
+                        _ => Err(ScriptError::new(format!(
+                            "Shape members don't support property {}", prop
+                        ))),
+                    }
+                } else {
+                    Err(ScriptError::new("Expected shape member".to_string()))
                 }
             }
             _ => Err(ScriptError::new(format!(
@@ -327,12 +354,22 @@ impl CastMemberRefHandlers {
         let member_type = reserve_player_ref(|player| {
             let cast_member = player.movie.cast_manager.find_member_by_ref(member_ref);
             match cast_member {
-                Some(cast_member) => Ok(cast_member.member_type.member_type_id()),
-                None => Err(ScriptError::new(format!(
-                    "Setting prop of invalid castMember reference"
-                ))),
+                Some(cast_member) => Ok(Some(cast_member.member_type.member_type_id())),
+                None => {
+                    // Silently ignore setting props on erased members
+                    web_sys::console::warn_1(&format!(
+                        "Ignoring set prop {} on erased member {} of castLib {}",
+                        prop, member_ref.cast_member, member_ref.cast_lib
+                    ).into());
+                    Ok(None)
+                }
             }
         })?;
+
+        let member_type = match member_type {
+            Some(t) => t,
+            None => return Ok(()), // Member was erased, silently ignore
+        };
 
         match member_type {
             CastMemberTypeId::Field => FieldMemberHandlers::set_prop(member_ref, prop, value),
@@ -436,7 +473,8 @@ impl CastMemberRefHandlers {
         let is_invalid = cast_member_ref.cast_lib < 0 || cast_member_ref.cast_member < 0;
         if is_invalid {
             return Err(ScriptError::new(format!(
-                "Setting prop of invalid castMember reference"
+                "Setting prop {} of invalid castMember reference (member {} of castLib {})",
+                prop, cast_member_ref.cast_member, cast_member_ref.cast_lib
             )));
         }
         let exists = reserve_player_ref(|player| {
@@ -450,7 +488,7 @@ impl CastMemberRefHandlers {
             match prop.as_str() {
                 "name" => borrow_member_mut(
                     cast_member_ref,
-                    |player| value.string_value(),
+                    |_player| value.string_value(),
                     |cast_member, value| {
                         cast_member.name = value?;
                         Ok(())
@@ -475,9 +513,14 @@ impl CastMemberRefHandlers {
                 _ => Self::set_member_type_prop(cast_member_ref, prop, value),
             }
         } else {
-            Err(ScriptError::new(format!(
-                "Setting prop of invalid castMember reference"
-            )))
+            // Silently ignore setting props on non-existent members
+            // This can happen when a script erases a member but still holds a reference
+            // Director silently ignores this case
+            web_sys::console::warn_1(&format!(
+                "Ignoring set prop {} on erased member {} of castLib {}",
+                prop, cast_member_ref.cast_member, cast_member_ref.cast_lib
+            ).into());
+            Ok(())
         };
         if result.is_ok() {
             JsApi::dispatch_cast_member_changed(cast_member_ref.to_owned());

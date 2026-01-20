@@ -50,7 +50,7 @@ impl VoidDatumHandlers {
                 Ok(player.alloc_datum(Datum::Void))
             }
             _ => Err(ScriptError::new(format!(
-                "Cannot get Void property {}",
+                "Cannot get property '{}' on VOID - a variable or property that should contain an object is uninitialized",
                 prop
             ))),
         }
