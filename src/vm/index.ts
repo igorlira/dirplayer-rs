@@ -139,11 +139,19 @@ export interface IHandlerSnapshot {
   name: string
   args: string[],
   bytecode: IBytecodeSnapshot[],
+  lingo?: ILingoLine[],
+  bytecodeToLine?: Record<number, number>,
 }
 
 export interface IBytecodeSnapshot {
   pos: number
   text: string
+}
+
+export interface ILingoLine {
+  text: string
+  indent: number
+  bytecodeIndices: number[]
 }
 
 export interface IUnknownMemberSnapshot {

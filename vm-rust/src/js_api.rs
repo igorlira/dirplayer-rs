@@ -9,7 +9,7 @@ use crate::{
         chunks::{script::ScriptChunk, ChunkContainer, score::ScoreFrameChannelData},
         enums::ScriptType,
         file::{DirectorFile, get_variable_multiplier},
-        lingo::{datum::Datum, script::ScriptContext},
+        lingo::{datum::Datum, decompiler, script::ScriptContext},
         utils::fourcc_to_string,
     },
     player::{
@@ -743,6 +743,38 @@ impl JsApi {
             handler_map.str_set("name", &name.to_js_value());
             handler_map.str_set("args", &args_array);
             handler_map.str_set("bytecode", &bytecode_array);
+
+            // Decompile handler to Lingo source
+            let decompiled = decompiler::decompile_handler(handler, chunk, lctx, dir_version, multiplier);
+
+            // Add lingo lines
+            let lingo_array = js_sys::Array::new();
+            for line in &decompiled.lines {
+                let line_map = js_sys::Map::new();
+                line_map.str_set("text", &line.text.to_js_value());
+                line_map.str_set("indent", &JsValue::from(line.indent));
+
+                let indices_array = js_sys::Array::new();
+                for &idx in &line.bytecode_indices {
+                    indices_array.push(&JsValue::from(idx as u32));
+                }
+                line_map.str_set("bytecodeIndices", &indices_array);
+
+                lingo_array.push(&line_map.to_js_object());
+            }
+            handler_map.str_set("lingo", &lingo_array);
+
+            // Add bytecode to line mapping
+            let mapping_obj = js_sys::Object::new();
+            for (&bc_idx, &line_idx) in &decompiled.bytecode_to_line {
+                js_sys::Reflect::set(
+                    &mapping_obj,
+                    &JsValue::from(bc_idx as u32),
+                    &JsValue::from(line_idx as u32),
+                ).ok();
+            }
+            handler_map.str_set("bytecodeToLine", &mapping_obj);
+
             handlers_array.push(&handler_map.to_js_object());
         }
         member_map.str_set("handlers", &handlers_array);
