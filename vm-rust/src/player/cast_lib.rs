@@ -417,7 +417,7 @@ impl CastLib {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CastMemberRef {
     pub cast_lib: i32,
     pub cast_member: i32,
