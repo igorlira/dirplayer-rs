@@ -1065,6 +1065,12 @@ impl TypeHandlers {
             return Err(ScriptError::new("Add requires 2 arguments".to_string()));
         }
         let left_type = reserve_player_ref(|player| player.get_datum(&args[0]).type_enum());
+
+        if left_type == DatumType::Void {
+            // Operations on void return void
+            return Ok(DatumRef::Void);
+        }
+
         match left_type {
             DatumType::List => {
                 ListDatumHandlers::add(args.get(0).unwrap(), &vec![args.get(1).unwrap().clone()])
@@ -1304,13 +1310,36 @@ impl TypeHandlers {
     }
 
     pub async fn call_ancestor(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let (ref_list, handler_name, args) = reserve_player_mut(|player| {
+        // callAncestor(#handler, me, arg1, arg2, ...)
+        //
+        // In Director, callAncestor:
+        // 1. Finds the ancestor of the 'me' argument (args[1])
+        // 2. Looks up the handler in the ancestor's SCRIPT
+        // 3. Executes the handler with 'me' still being the ORIGINAL instance
+        //
+        // The key insight: when inside an ancestor's handler (due to callAncestor),
+        // a nested callAncestor should use the CURRENT SCOPE's receiver to determine
+        // which ancestor to call next, NOT args[1] (which is still the original me).
+        //
+        // Example: if A has ancestor B, B has ancestor C:
+        // - A::start calls callAncestor(#start, me, ...)
+        //   -> current receiver is A, ancestor is B
+        //   -> B::start runs with receiver=A (so 'me' properties come from A)
+        // - Inside B::start, callAncestor(#start, me, ...) is called
+        //   -> current receiver is A, but we need B's ancestor (C)
+        //   -> We look at the scope's script_ref to find B, then get B's ancestor
+        let (ancestor_list, original_me_list, handler_name, call_args) = reserve_player_mut(|player| {
             let handler_name = player.get_datum(&args[0]).string_value()?;
+
+            // Get the current scope's script_ref to determine which script we're currently in
+            let current_scope_ref = player.current_scope_ref();
+            let current_script_ref = player.scopes.get(current_scope_ref)
+                .map(|scope| scope.script_ref.clone());
 
             let list_or_script_instance = player.get_datum(&args[1]);
             let instance_list = match list_or_script_instance {
                 Datum::List(_, list, _) => list.to_owned(),
-                Datum::ScriptInstanceRef(s) => {
+                Datum::ScriptInstanceRef(_) => {
                     vec![args[1].clone()]
                 }
                 _ => {
@@ -1320,19 +1349,106 @@ impl TypeHandlers {
                 }
             };
 
-            let mut ref_list = vec![];
+            let mut ancestor_list = vec![];
+            let mut original_me_list = vec![];
             for instance_ref in instance_list {
-                let instance_ref = player.get_datum(&instance_ref).to_script_instance_ref()?;
-                let instance = player.allocator.get_script_instance(instance_ref);
-                let ancestor = instance.ancestor.as_ref().unwrap();
-                ref_list.push(player.alloc_datum(Datum::ScriptInstanceRef(ancestor.clone())));
+                let original_me_ref = player.get_datum(&instance_ref).to_script_instance_ref()?;
+                original_me_list.push(original_me_ref.clone());
+
+                // Determine which instance's ancestor to use:
+                //
+                // The key insight: we need to find the instance in the ancestor chain
+                // whose SCRIPT matches the current scope's script_ref. That tells us
+                // "which level" of the ancestor chain we're currently executing in.
+                // Then we get THAT instance's ancestor.
+                //
+                // Example: A (script=A) -> B (script=B) -> C (script=C)
+                // When A::start calls callAncestor(#start, me, ...):
+                //   - current_script_ref = A's script
+                //   - We find A in chain, get A's ancestor = B
+                // When B::start calls callAncestor(#start, me, ...):
+                //   - current_script_ref = B's script (because that's what we're executing)
+                //   - We find B in chain, get B's ancestor = C
+                let ancestor_source = if let Some(ref script_ref) = current_script_ref {
+                    // Walk the ancestor chain to find which instance has the script
+                    // we're currently executing
+                    let mut walk_ref = original_me_ref.clone();
+                    let mut found = false;
+                    for _ in 0..100 { // Safety limit
+                        let walk_instance = player.allocator.get_script_instance(&walk_ref);
+                        if walk_instance.script == *script_ref {
+                            found = true;
+                            break;
+                        }
+                        if let Some(ref next_ancestor) = walk_instance.ancestor {
+                            walk_ref = next_ancestor.clone();
+                        } else {
+                            break;
+                        }
+                    }
+                    if found {
+                        walk_ref
+                    } else {
+                        // Fallback: use original_me
+                        original_me_ref.clone()
+                    }
+                } else {
+                    // No script_ref, use original_me
+                    original_me_ref.clone()
+                };
+
+                let instance = player.allocator.get_script_instance(&ancestor_source);
+                let ancestor = instance.ancestor.as_ref().ok_or_else(|| {
+                    ScriptError::new("Instance has no ancestor".to_string())
+                })?;
+                ancestor_list.push(ancestor.clone());
             }
-            let args = args[2..].to_vec();
-            Ok((ref_list, handler_name, args))
+            // Include the original 'me' (args[1]) in the call args
+            // so the handler receives the original instance as its first argument
+            let call_args = args[1..].to_vec();
+            Ok((ancestor_list, original_me_list, handler_name, call_args))
         })?;
+
         let mut result = DatumRef::Void;
-        for ref_item in ref_list {
-            result = player_call_datum_handler(&ref_item, &handler_name.to_string(), &args).await?;
+        for (ancestor_ref, original_me_ref) in ancestor_list.into_iter().zip(original_me_list.into_iter()) {
+            // Walk up the ancestor chain to find a script that has the handler.
+            // For example, if A->B->C and B doesn't have the handler but C does,
+            // we should call C's handler.
+            let handler_and_instance = reserve_player_ref(|player| {
+                let mut walk_ref = ancestor_ref.clone();
+                for _ in 0..100 { // Safety limit
+                    let walk_instance = player.allocator.get_script_instance(&walk_ref);
+                    let script = player.movie.cast_manager.get_script_by_ref(&walk_instance.script);
+                    if let Some(script) = script {
+                        if let Some(handler_ref) = script.get_own_handler_ref(&handler_name) {
+                            return Some((handler_ref, walk_ref.clone()));
+                        }
+                    }
+                    // Handler not found in this script, try the next ancestor
+                    if let Some(ref next_ancestor) = walk_instance.ancestor {
+                        walk_ref = next_ancestor.clone();
+                    } else {
+                        // No more ancestors
+                        break;
+                    }
+                }
+                None
+            });
+
+            if let Some((handler_ref, _handler_instance_ref)) = handler_and_instance {
+                // Call with the ORIGINAL me as receiver (for property access),
+                // but use the handler we found in the ancestor chain.
+                // use_raw_arg_list=true so args are used as-is
+                // (the original 'me' is already in call_args as the first element)
+                let scope_result = crate::player::player_call_script_handler_raw_args(
+                    Some(original_me_ref.clone()),  // receiver = original me, for property access
+                    handler_ref,                    // handler from ancestor's script
+                    &call_args,
+                    true,  // use_raw_arg_list = true: don't prepend receiver to args
+                ).await?;
+                crate::player::player_handle_scope_return(&scope_result);
+                result = scope_result.return_value;
+            }
         }
         Ok(result)
     }
