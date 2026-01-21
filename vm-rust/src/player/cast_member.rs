@@ -1293,15 +1293,16 @@ impl CastMember {
                 })
             }
             MemberType::FilmLoop => {
-                let score_chunk = member_def.children[0].as_ref().unwrap().as_score().unwrap();
-                let film_loop_info = chunk.specific_data.film_loop_info().unwrap();
-                let mut score = Score::empty();
-                score.load_from_score_chunk(score_chunk);
-                CastMemberType::FilmLoop(FilmLoopMember {
-                    info: film_loop_info.clone(),
-                    score_chunk: score_chunk.clone(),
-                    score,
-                })
+                // let score_chunk = member_def.children[0].as_ref().unwrap().as_score().unwrap();
+                // let film_loop_info = chunk.specific_data.film_loop_info().unwrap();
+                // let mut score = Score::empty();
+                // score.load_from_score_chunk(score_chunk);
+                // CastMemberType::FilmLoop(FilmLoopMember {
+                //     info: film_loop_info.clone(),
+                //     score_chunk: score_chunk.clone(),
+                //     score,
+                // })
+                CastMemberType::Unknown
             }
             MemberType::Sound => {
                 // Log children
