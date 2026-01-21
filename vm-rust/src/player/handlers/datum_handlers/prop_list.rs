@@ -508,6 +508,10 @@ impl PropListDatumHandlers {
     pub fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let base_prop_ref = reserve_player_mut(|player| {
             let key = player.get_datum(&args[0]);
+            // Director returns VOID when looking up VOID key in a prop list
+            if matches!(key, Datum::Void) {
+                return Ok(DatumRef::Void);
+            }
             let prop_list = player.get_datum(datum).to_map()?;
             let key_index = PropListUtils::get_key_index(prop_list, key, &player.allocator)?;
             if key_index >= 0 {
