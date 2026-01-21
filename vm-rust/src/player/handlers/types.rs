@@ -753,10 +753,15 @@ impl TypeHandlers {
                 let first_arg = player.get_datum(&args[0]);
                 if first_arg.is_string() {
                     let hex_str = first_arg.string_value()?.replace("#", "");
-                    let r = u8::from_str_radix(&hex_str[0..2], 16).unwrap();
-                    let g = u8::from_str_radix(&hex_str[2..4], 16).unwrap();
-                    let b = u8::from_str_radix(&hex_str[4..6], 16).unwrap();
-                    Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
+                    if hex_str.len() != 6 {
+                        log::warn!("Invalid hex color string: {}", hex_str);
+                        Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(0, 0, 0))))
+                    } else {
+                        let r = u8::from_str_radix(&hex_str[0..2], 16).unwrap();
+                        let g = u8::from_str_radix(&hex_str[2..4], 16).unwrap();
+                        let b = u8::from_str_radix(&hex_str[4..6], 16).unwrap();
+                        Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
+                    }
                 } else {
                     Err(ScriptError::new(
                         "Invalid number of arguments for rgb".to_string(),
