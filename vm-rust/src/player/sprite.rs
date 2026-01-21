@@ -1,7 +1,7 @@
 use super::{cast_lib::CastMemberRef, script_ref::ScriptInstanceRef};
 
 #[allow(dead_code)]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ColorRef {
     Rgb(u8, u8, u8),
     PaletteIndex(u8),
