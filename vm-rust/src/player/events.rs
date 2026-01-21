@@ -531,26 +531,38 @@ pub async fn dispatch_event_to_all_behaviors(
     // Skip event dispatch if we're initializing behavior properties
     let skip = reserve_player_mut(|player| {
         if player.is_initializing_behavior_props {
-            web_sys::console::warn_1(&format!(
-                "Blocking event '{}' during property initialization", 
+            warn!(
+                "Blocking event '{}' during property initialization",
                 handler_name
-            ).into());
+            );
+            return true;
         }
-        player.is_initializing_behavior_props
+        // Prevent re-entrant event dispatch (this can cause infinite loops)
+        if player.is_dispatching_events {
+            warn!(
+                "Blocking re-entrant event dispatch for '{}'",
+                handler_name
+            );
+            return true;
+        }
+        player.is_dispatching_events = true;
+        false
     });
-    
+
     if skip {
         return;
     }
     let (sprite_behaviors, frame_behaviors) = reserve_player_mut(|player| {
         let mut sprites = Vec::new();
         let mut frames = Vec::new();
+
+        // Collect stage sprites
         let active_channel_numbers: HashSet<u32> = player.movie.score.sprite_spans
             .iter()
             .filter(|span| Score::is_span_in_frame(span, player.movie.current_frame))
             .map(|span| span.channel_number as u32)
             .collect();
-        for channel in player.movie.score.channels.iter() {            
+        for channel in player.movie.score.channels.iter() {
             if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered ||
                 !active_channel_numbers.contains(&(channel.number as u32)) {
                 continue;
@@ -599,6 +611,11 @@ pub async fn dispatch_event_to_all_behaviors(
     if let Err(err) = player_invoke_frame_and_movie_scripts(handler_name, args).await {
         reserve_player_mut(|player| player.on_script_error(&err));
     }
+
+    // Reset the flag after dispatching
+    reserve_player_mut(|player| {
+        player.is_dispatching_events = false;
+    });
 }
 
 pub async fn player_wait_available() {
