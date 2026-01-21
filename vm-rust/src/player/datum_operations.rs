@@ -2,12 +2,10 @@ use std::cmp::min;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{datum_formatting::format_datum, datum_ref::DatumRef},
+    player::{datum_formatting::{format_datum, datum_to_string_for_concat}, datum_ref::DatumRef},
 };
 
 use super::{sprite::ColorRef, DirPlayer, ScriptError};
-
-use crate::player::datum_formatting::datum_to_string_for_concat;
 
 pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<Datum, ScriptError> {
     match (&left, &right) {
@@ -856,48 +854,9 @@ pub fn concat_datums(
     left: Datum,
     right: Datum,
     player: &mut DirPlayer,
-) -> Result<Datum, ScriptError> {
-    let left_str = datum_to_concat_string(&left, player);
-    let right_str = datum_to_concat_string(&right, player);
+) -> Result<Datum, ScriptError> {   
+    let left_str = datum_to_string_for_concat(&left, player);
+    let right_str = datum_to_string_for_concat(&right, player);
     
     Ok(Datum::String(format!("{}{}", left_str, right_str)))
-}
-
-fn datum_to_concat_string(datum: &Datum, player: &DirPlayer) -> String {
-    match datum {
-        Datum::String(s) => s.clone(),
-        
-        Datum::Int(i) => i.to_string(),
-        
-        Datum::Symbol(s) => s.clone(),
-        
-        // Void/Null show as <Void> when concatenated
-        Datum::Void => "<Void>".to_string(),
-        Datum::Null => "<Void>".to_string(),
-        
-        Datum::List(_, list, _) => {
-            let items: Vec<String> = list
-                .iter()
-                .map(|r| datum_to_concat_string(player.get_datum(r), player))
-                .collect();
-            format!("[{}]", items.join(", "))
-        },
-        
-        Datum::PropList(prop_list, _) => {
-            let items: Vec<String> = prop_list
-                .iter()
-                .map(|(key, value_ref)| {
-                    let value_str = datum_to_concat_string(player.get_datum(value_ref), player);
-                    format!("[#{}:{}]", key, value_str)
-                })
-                .collect();
-            items.join(", ")
-        },
-
-        // For other complex types, use the formatting system
-        _ => {
-            use crate::player::datum_formatting::format_concrete_datum;
-            format_concrete_datum(datum, player)
-        }
-    }
 }
