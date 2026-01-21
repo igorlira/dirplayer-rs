@@ -1,11 +1,33 @@
 import classNames from "classnames";
-import { ICastMemberIdentifier, ILingoLine, IScriptMemberSnapshot, MemberSnapshot } from "../../vm";
+import { ICastMemberIdentifier, ILingoLine, ILingoSpan, IScriptMemberSnapshot, LingoTokenType, MemberSnapshot } from "../../vm";
 import styles from "./styles.module.css";
 import { useAppSelector } from "../../store/hooks";
 import { selectBreakpoints } from "../../store/vmSlice";
 import { toggle_breakpoint } from "vm-rust";
 import { useState } from "react";
 import { ICastMemberRef } from "dirplayer-js-api";
+
+// Map token types to CSS classes
+const tokenTypeToClass: Record<LingoTokenType, string> = {
+  keyword: styles.tokenKeyword,
+  identifier: styles.tokenIdentifier,
+  number: styles.tokenNumber,
+  string: styles.tokenString,
+  symbol: styles.tokenSymbol,
+  operator: styles.tokenOperator,
+  comment: styles.tokenComment,
+  builtin: styles.tokenBuiltin,
+  punctuation: styles.tokenPunctuation,
+  whitespace: styles.tokenWhitespace,
+};
+
+function LingoSpan({ span }: { span: ILingoSpan }) {
+  return (
+    <span className={tokenTypeToClass[span.type] || ''}>
+      {span.text}
+    </span>
+  );
+}
 
 interface IScriptMemberPreviewProps {
   memberId: ICastMemberIdentifier,
@@ -98,7 +120,9 @@ function LingoLine({
         className={styles.lingoLineText}
         style={{ paddingLeft: `${8 + line.indent * 16}px` }}
       >
-        {line.text}
+        {line.spans && line.spans.length > 0
+          ? line.spans.map((span, i) => <LingoSpan key={i} span={span} />)
+          : line.text}
       </span>
     </div>
   );
