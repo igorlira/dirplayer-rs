@@ -203,6 +203,8 @@ pub struct DirPlayer {
     pub math_objects: HashMap<u32, MathObject>,
     pub enable_stream_status_handler: bool,
     pub is_in_frame_update: bool,
+    pub is_dispatching_events: bool, // Prevents re-entrant event dispatch
+    pub is_in_send_all_sprites: bool, // Prevents re-entrant sendAllSprites calls
     pub system_start_time: chrono::DateTime<chrono::Local>, // For ticks & milliSeconds (system uptime)
     pub handler_stack_depth: usize,
     pub in_frame_script: bool,
@@ -300,6 +302,8 @@ impl DirPlayer {
             click_on_sprite: 0,
             enable_stream_status_handler: false,
             is_in_frame_update: false,
+            is_dispatching_events: false,
+            is_in_send_all_sprites: false,
             system_start_time: now - chrono::Duration::days(8), // Simulated system start
             handler_stack_depth: 0,
             in_frame_script: false,
