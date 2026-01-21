@@ -596,7 +596,9 @@ pub async fn dispatch_event_to_all_behaviors(
         }
     }
     // Dispatch event to frame/movie scripts
-    let _ = player_invoke_frame_and_movie_scripts(handler_name, args).await;
+    if let Err(err) = player_invoke_frame_and_movie_scripts(handler_name, args).await {
+        reserve_player_mut(|player| player.on_script_error(&err));
+    }
 }
 
 pub async fn player_wait_available() {
