@@ -10,7 +10,7 @@ use crate::{
     console_warn,
     director::lingo::datum::{Datum, TimeoutRef},
     js_api::JsApi,
-    player::{eval::eval_lingo_command, PLAYER_OPT},
+    player::PLAYER_OPT,
     utils::{log_i, ToHexString},
 };
 
@@ -18,7 +18,7 @@ use super::{
     allocator::ScriptInstanceAllocatorTrait,
     cast_lib::CastMemberRef,
     cast_member::CastMemberType,
-    datum_ref::{DatumId, DatumRef},
+    datum_ref::DatumRef,
     events::{
         player_dispatch_callback_event, player_dispatch_event_to_sprite,
         player_dispatch_targeted_event, player_wait_available,
@@ -29,25 +29,16 @@ use super::{
     player_alloc_datum, player_call_script_handler, player_dispatch_global_event,
     player_is_playing, reserve_player_mut, reserve_player_ref,
     score::{concrete_sprite_hit_test, get_sprite_at},
-    script::ScriptInstanceId,
     script_ref::ScriptInstanceRef,
     PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX,
 };
 
 #[allow(dead_code)]
 pub enum PlayerVMCommand {
-    DispatchEvent(String, Vec<DatumRef>),
-    Play,
-    Stop,
-    Reset,
     LoadMovieFromFile(String),
     SetExternalParams(HashMap<String, String>),
     SetBasePath(String),
     SetSystemFontPath(String),
-    AddBreakpoint(String, String, usize),
-    RemoveBreakpoint(String, String, usize),
-    ToggleBreakpoint(String, String, usize),
-    ResumeBreakpoint,
     SetStageSize(u32, u32),
     TimeoutTriggered(TimeoutRef),
     PrintMemberBitmapHex(CastMemberRef),
@@ -56,63 +47,30 @@ pub enum PlayerVMCommand {
     MouseMove((i32, i32)),
     KeyDown(String, u16),
     KeyUp(String, u16),
-    RequestDatum(DatumId),
-    RequestScriptInstanceSnapshot(ScriptInstanceId),
-    SubscribeToMember(CastMemberRef),
-    UnsubscribeFromMember(CastMemberRef),
     TriggerAlertHook,
-    EvalLingoCommand(String),
 }
 
 pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
     match command {
-        PlayerVMCommand::DispatchEvent(name, _) => format!("DispatchEvent({})", name),
-        PlayerVMCommand::Play => "Play".to_string(),
-        PlayerVMCommand::Stop => "Stop".to_string(),
-        PlayerVMCommand::Reset => "Reset".to_string(),
         PlayerVMCommand::LoadMovieFromFile(path) => format!("LoadMovieFromFile({})", path),
         PlayerVMCommand::SetExternalParams(params) => {
             format!("SetExternalParams({:?})", params.keys().collect::<Vec<_>>())
         }
         PlayerVMCommand::SetBasePath(path) => format!("SetBasePath({})", path),
         PlayerVMCommand::SetSystemFontPath(path) => format!("SetSystemFontPath({})", path),
-        PlayerVMCommand::AddBreakpoint(script_name, handler_name, bytecode_index) => format!(
-            "AddBreakpoint({}, {}, {})",
-            script_name, handler_name, bytecode_index
-        ),
-        PlayerVMCommand::RemoveBreakpoint(script_name, handler_name, bytecode_index) => format!(
-            "RemoveBreakpoint({}, {}, {})",
-            script_name, handler_name, bytecode_index
-        ),
-        PlayerVMCommand::ToggleBreakpoint(script_name, handler_name, bytecode_index) => format!(
-            "ToggleBreakpoint({}, {}, {})",
-            script_name, handler_name, bytecode_index
-        ),
-        PlayerVMCommand::ResumeBreakpoint => "ResumeBreakpoint".to_string(),
         PlayerVMCommand::SetStageSize(width, height) => {
             format!("SetStageSize({}, {})", width, height)
         }
         PlayerVMCommand::TimeoutTriggered(timeout_ref) => {
             format!("TimeoutTriggered({})", timeout_ref)
         }
-        PlayerVMCommand::PrintMemberBitmapHex(..) => format!("PrintMemberBitmapHex(..)"),
+        PlayerVMCommand::PrintMemberBitmapHex(..) => "PrintMemberBitmapHex(..)".to_string(),
         PlayerVMCommand::MouseDown((x, y)) => format!("MouseDown({}, {})", x, y),
         PlayerVMCommand::MouseUp((x, y)) => format!("MouseUp({}, {})", x, y),
         PlayerVMCommand::MouseMove((x, y)) => format!("MouseMove({}, {})", x, y),
         PlayerVMCommand::KeyDown(key, ..) => format!("KeyDown({})", key),
         PlayerVMCommand::KeyUp(key, ..) => format!("KeyUp({})", key),
-        PlayerVMCommand::RequestDatum(datum_ref) => format!("RequestDatum({})", datum_ref),
-        PlayerVMCommand::RequestScriptInstanceSnapshot(script_instance_id) => {
-            format!("RequestScriptInstanceSnapshot({})", script_instance_id)
-        }
-        PlayerVMCommand::SubscribeToMember(member_ref) => {
-            format!("SubscribeToMember({:?})", member_ref)
-        }
-        PlayerVMCommand::UnsubscribeFromMember(member_ref) => {
-            format!("UnsubscribeFromMember({:?})", member_ref)
-        }
         PlayerVMCommand::TriggerAlertHook => "TriggerAlertHook".to_string(),
-        PlayerVMCommand::EvalLingoCommand(cmd) => format!("EvalLingoCommand({})", cmd),
     }
 }
 
@@ -184,57 +142,9 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             console_warn!("Loading system font: {}", path);
             player_load_system_font(&path).await;
         }
-        PlayerVMCommand::Play => {
-            reserve_player_mut(|player| {
-                player.play();
-            });
-        }
-        PlayerVMCommand::Stop => {
-            reserve_player_mut(|player| {
-                player.stop();
-            });
-        }
-        PlayerVMCommand::Reset => {
-            reserve_player_mut(|player| {
-                player.reset();
-            });
-        }
         PlayerVMCommand::LoadMovieFromFile(file_path) => {
             let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
             player.load_movie_from_file(&file_path).await;
-        }
-        PlayerVMCommand::DispatchEvent(handler_name, args) => {
-            player_dispatch_global_event(&handler_name, &args);
-        }
-        PlayerVMCommand::AddBreakpoint(script_name, handler_name, bytecode_index) => {
-            reserve_player_mut(|player| {
-                player
-                    .breakpoint_manager
-                    .add_breakpoint(script_name, handler_name, bytecode_index);
-            });
-        }
-        PlayerVMCommand::RemoveBreakpoint(script_name, handler_name, bytecode_index) => {
-            reserve_player_mut(|player| {
-                player.breakpoint_manager.remove_breakpoint(
-                    script_name,
-                    handler_name,
-                    bytecode_index,
-                );
-            });
-        }
-        PlayerVMCommand::ToggleBreakpoint(script_name, handler_name, bytecode_index) => {
-            reserve_player_mut(|player| {
-                player.breakpoint_manager.toggle_breakpoint(
-                    script_name,
-                    handler_name,
-                    bytecode_index,
-                );
-            });
-        }
-        PlayerVMCommand::ResumeBreakpoint => {
-            reserve_player_mut(|player| {
-                player.resume_breakpoint();
-            });
         }
         PlayerVMCommand::SetStageSize(width, height) => {
             reserve_player_mut(|player| {
@@ -595,43 +505,6 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         PlayerVMCommand::KeyUp(key, code) => {
             return player_key_up(key, code).await;
         }
-        PlayerVMCommand::RequestDatum(datum_id) => {
-            reserve_player_ref(|player| {
-                if let Some(datum_ref) = player.allocator.get_datum_ref(datum_id) {
-                    JsApi::dispatch_datum_snapshot(&datum_ref, player);
-                }
-            });
-        }
-        PlayerVMCommand::RequestScriptInstanceSnapshot(script_instance_id) => {
-            reserve_player_ref(|player| {
-                JsApi::dispatch_script_instance_snapshot(
-                    if script_instance_id > 0 {
-                        Some(
-                            player
-                                .allocator
-                                .get_script_instance_ref(script_instance_id)
-                                .unwrap(),
-                        )
-                    } else {
-                        None
-                    },
-                    player,
-                );
-            });
-        }
-        PlayerVMCommand::SubscribeToMember(member_ref) => {
-            reserve_player_mut(|player| {
-                if !player.subscribed_member_refs.contains(&member_ref) {
-                    player.subscribed_member_refs.push(member_ref.clone());
-                }
-            });
-            JsApi::dispatch_cast_member_changed(member_ref);
-        }
-        PlayerVMCommand::UnsubscribeFromMember(member_ref) => {
-            reserve_player_mut(|player| {
-                player.subscribed_member_refs.retain(|x| x != &member_ref);
-            });
-        }
         PlayerVMCommand::TriggerAlertHook => {
             let call_params = reserve_player_mut(|player| {
                 let arg_list = vec![
@@ -701,11 +574,6 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if let Some((receiver, handler, args)) = call_params {
                 player_call_script_handler(receiver, handler, &args).await?;
             }
-        }
-        PlayerVMCommand::EvalLingoCommand(command) => {
-            JsApi::dispatch_debug_message(&command);
-            let result = eval_lingo_command(command).await?;
-            return Ok(result);
         }
     }
     Ok(DatumRef::Void)
