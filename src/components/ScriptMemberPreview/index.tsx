@@ -35,6 +35,7 @@ interface IScriptMemberPreviewProps {
   highlightedBytecodeIndex?: number;
   highlightedHandlerName?: string;
   backgroundScopes: [string, number, ICastMemberRef][];
+  theme?: 'light' | 'dark';
 }
 
 type ViewMode = 'assembly' | 'lingo';
@@ -142,6 +143,7 @@ export default function ScriptMemberPreview({
   highlightedBytecodeIndex,
   highlightedHandlerName,
   backgroundScopes,
+  theme = 'light',
 }: IScriptMemberPreviewProps) {
   const breakpoints = useAppSelector((state) => selectBreakpoints(state.vm));
   const [expandedHandlerNames, setExpandedHandlerNames] = useState<string[]>(
@@ -160,7 +162,7 @@ export default function ScriptMemberPreview({
   };
 
   return (
-    <div className={styles.scriptContainer}>
+    <div className={classNames(styles.scriptContainer, theme === 'light' && styles.light)}>
       <div className={styles.viewModeToggle}>
         <button
           className={classNames(
