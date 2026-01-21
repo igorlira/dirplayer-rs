@@ -501,6 +501,28 @@ impl Bitmap {
         }
     }
 
+    /// Clears a rectangular region with fully transparent pixels (alpha = 0).
+    /// Used for filmloop rendering where we need transparency instead of a solid background.
+    pub fn clear_rect_transparent(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) {
+        // Only works for 32-bit bitmaps
+        if self.bit_depth != 32 {
+            return;
+        }
+        for y in y1..y2 {
+            for x in x1..x2 {
+                if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                    continue;
+                }
+                let index = (y as usize * self.width as usize + x as usize) * 4;
+                // Set RGBA to (0, 0, 0, 0) - fully transparent black
+                self.data[index] = 0;
+                self.data[index + 1] = 0;
+                self.data[index + 2] = 0;
+                self.data[index + 3] = 0; // Alpha = 0 (transparent)
+            }
+        }
+    }
+
     pub fn fill_relative_rect(
         &mut self,
         left: i32,
@@ -1048,6 +1070,14 @@ impl Bitmap {
 
                 // Indexed bitmap (1-8 bit) ink 0
                 if ink == 0 && is_indexed {
+                    // Check matte mask for trimWhiteSpace transparency
+                    // mask: true = opaque (draw), false = transparent (skip)
+                    if let Some(mask) = mask_image {
+                        if !mask.get_bit(sx, sy) {
+                            continue; // Edge-connected background pixel - skip
+                        }
+                    }
+
                     let color_ref = src.get_pixel_color_ref(sx, sy);
 
                     let (sr, sg, sb) = resolve_color_ref(
@@ -1066,6 +1096,29 @@ impl Bitmap {
                     let ColorRef::PaletteIndex(i) = src.get_pixel_color_ref(sx, sy) else {
                         unreachable!("indexed bitmap returned non-index color");
                     };
+
+                    // For 1-bit bitmaps: use strict index-based transparency only
+                    // Index 0 (bit=0) = background → transparent
+                    // Index 255 (bit=1) = foreground → render with foreColor
+                    // This is important when foreColor and bgColor resolve to the same RGB
+                    // (e.g., both white) - we still want foreground pixels to render.
+                    if src.original_bit_depth == 1 {
+                        if i == 0 {
+                            continue; // Background bit → transparent
+                        }
+                        // Foreground bit → render with foreColor
+                        let src_color = fg_color_resolved;
+                        let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+
+                        let blended = if alpha >= 0.999 {
+                            src_color
+                        } else {
+                            blend_color_alpha(dst_color, src_color, alpha)
+                        };
+
+                        self.set_pixel(dst_x, dst_y, blended, palettes);
+                        continue;
+                    }
 
                     let transparent_index = if src.original_bit_depth <= 4 {
                         0 // Director rule for ≤4-bit
@@ -1103,7 +1156,16 @@ impl Bitmap {
                     // If alpha channel disabled → fully opaque
                     let src_alpha = 1.0;
 
-                    let src_color = (r, g, b);
+                    // For monochrome-style bitmaps (black content on white bg) with ink 36,
+                    // the foreground pixels should be tinted with the sprite's foreColor.
+                    // This allows white foreColor to make black numbers appear white.
+                    // Check if pixel is "foreground" (index 255 or black color)
+                    let src_color = if i == 255 || (r, g, b) == (0, 0, 0) {
+                        fg_color_resolved // Tint foreground with sprite's foreColor
+                    } else {
+                        (r, g, b) // Keep original color for other pixels
+                    };
+
                     let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
@@ -1116,10 +1178,52 @@ impl Bitmap {
                     continue;
                 }
 
+                // 16-bit bitmap ink 36 color-key transparency
+                // 16-bit is stored as 32-bit RGB, so compare RGB values directly
+                if ink == 36 && src.original_bit_depth == 16 {
+                    let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
+
+                    // Skip pixel if it matches the sprite's bgColor
+                    if (r, g, b) == bg_color_resolved {
+                        continue; // transparent - RGB matches background color
+                    }
+
+                    let src_color = (r, g, b);
+                    let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+
+                    let blended = if alpha >= 0.999 {
+                        src_color
+                    } else {
+                        blend_color_alpha(dst_color, src_color, alpha)
+                    };
+
+                    self.set_pixel(dst_x, dst_y, blended, palettes);
+                    continue;
+                }
+
                 if let Some(mask) = mask_image {
                     if !mask.get_bit(sx, sy) {
                         continue;
                     }
+                }
+
+                // 16-bit bitmap ink 0 (copy with matte for trimWhiteSpace)
+                // Uses matte mask created from edge-connected white pixels
+                if ink == 0 && src.original_bit_depth == 16 {
+                    // Matte mask check already done above via mask_image
+                    let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
+
+                    let src_color = (r, g, b);
+                    let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+
+                    let blended = if alpha >= 0.999 {
+                        src_color
+                    } else {
+                        blend_color_alpha(dst_color, src_color, alpha)
+                    };
+
+                    self.set_pixel(dst_x, dst_y, blended, palettes);
+                    continue;
                 }
 
                 // Indexed bitmap (1-8 bit) ink 8
@@ -1159,6 +1263,12 @@ impl Bitmap {
                 // Sample source pixel
                 let (sr, sg, sb, mut sa) =
                     src.get_pixel_color_with_alpha(palettes, sx, sy);
+
+                // Skip fully transparent pixels from RGBA bitmaps (e.g., filmloop compositing)
+                // This ensures transparent areas don't overwrite destination with black
+                if src.original_bit_depth == 32 && src.use_alpha && sa == 0 {
+                    continue;
+                }
 
                 let mut src_color = (sr, sg, sb);
 
