@@ -13,6 +13,11 @@ impl VoidDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
+            "addAt" | "add" | "append" => {
+                // Calling addAt/add/append on void should just return void
+                // In Director, operations on void typically no-op and return void
+                Ok(DatumRef::Void)
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for void"
             ))),
