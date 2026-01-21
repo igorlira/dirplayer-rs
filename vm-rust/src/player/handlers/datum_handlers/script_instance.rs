@@ -134,6 +134,21 @@ impl ScriptInstanceUtils {
                         .flatten()
                         .map(|handler| (Some(script_instance_ref.clone()), handler))
                     }
+                    Datum::SpriteRef(sprite_num) => {
+                        // When the first arg is a sprite, look for the handler in the sprite's behaviors
+                        let channel = player.movie.score.get_channel(*sprite_num);
+                        // Search through the sprite's behavior instances for a handler
+                        for instance_ref in &channel.sprite.script_instance_list {
+                            if let Ok(Some(handler)) = ScriptInstanceUtils::get_script_instance_handler(
+                                handler_name,
+                                instance_ref,
+                                player,
+                            ) {
+                                return Some((Some(instance_ref.clone()), handler));
+                            }
+                        }
+                        None
+                    }
                     _ => None,
                 })
                 .flatten();
