@@ -13,6 +13,7 @@ use crate::director::lingo::script::ScriptContext;
 use super::ast::*;
 use super::enums::*;
 use super::code_writer::CodeWriter;
+use super::tokenizer::{tokenize_line, Span};
 
 /// Represents a decompiled line of Lingo code
 #[derive(Clone, Debug)]
@@ -20,6 +21,7 @@ pub struct DecompiledLine {
     pub text: String,
     pub bytecode_indices: Vec<usize>,
     pub indent: u32,
+    pub spans: Vec<Span>,
 }
 
 /// Result of decompiling a handler
@@ -1383,10 +1385,14 @@ impl<'a> DecompilerState<'a> {
                 let mut sorted_indices = stmt_indices;
                 sorted_indices.sort_unstable();
 
+                // Tokenize the line for syntax highlighting
+                let spans = tokenize_line(&text);
+
                 lines.push(DecompiledLine {
                     text,
                     bytecode_indices: sorted_indices.clone(),
                     indent,
+                    spans,
                 });
 
                 // Map each bytecode index to this line
@@ -1400,10 +1406,14 @@ impl<'a> DecompilerState<'a> {
                 let indent = line.chars().take_while(|c| *c == ' ').count() as u32 / 2;
                 let text = line.trim().to_string();
 
+                // Tokenize the line for syntax highlighting
+                let spans = tokenize_line(&text);
+
                 lines.push(DecompiledLine {
                     text,
                     bytecode_indices: vec![],
                     indent,
+                    spans,
                 });
             }
         }

@@ -760,6 +760,16 @@ impl JsApi {
                 }
                 line_map.str_set("bytecodeIndices", &indices_array);
 
+                // Add syntax highlighting spans
+                let spans_array = js_sys::Array::new();
+                for span in &line.spans {
+                    let span_map = js_sys::Map::new();
+                    span_map.str_set("text", &span.text.to_js_value());
+                    span_map.str_set("type", &JsValue::from_str(span.token_type.as_str()));
+                    spans_array.push(&span_map.to_js_object());
+                }
+                line_map.str_set("spans", &spans_array);
+
                 lingo_array.push(&line_map.to_js_object());
             }
             handler_map.str_set("lingo", &lingo_array);

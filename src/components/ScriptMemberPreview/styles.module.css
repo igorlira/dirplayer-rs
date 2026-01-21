@@ -314,3 +314,46 @@
 .scriptContainer::-webkit-scrollbar-thumb:hover {
   background-color: #4f4f4f;
 }
+
+/* Syntax Highlighting Tokens */
+.tokenKeyword {
+  color: #569cd6;
+  font-weight: 500;
+}
+
+.tokenIdentifier {
+  color: #9cdcfe;
+}
+
+.tokenNumber {
+  color: #b5cea8;
+}
+
+.tokenString {
+  color: #ce9178;
+}
+
+.tokenSymbol {
+  color: #4ec9b0;
+}
+
+.tokenOperator {
+  color: #d4d4d4;
+}
+
+.tokenComment {
+  color: #6a9955;
+  font-style: italic;
+}
+
+.tokenBuiltin {
+  color: #dcdcaa;
+}
+
+.tokenPunctuation {
+  color: #d4d4d4;
+}
+
+.tokenWhitespace {
+  /* Whitespace doesn't need special styling */
+}
