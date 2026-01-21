@@ -434,6 +434,13 @@ impl MovieHandlers {
             // Collect receivers from stage score
             let mut receivers = player.movie.score.get_active_script_instance_list();
 
+            // Also collect receivers from filmloop scores
+            let active_filmloops = player.get_active_filmloop_scores();
+            for (_, filmloop_score) in active_filmloops {
+                let filmloop_receivers = filmloop_score.get_active_script_instance_list();
+                receivers.extend(filmloop_receivers);
+            }
+
             Ok((message.clone(), remaining_args.clone(), receivers))
         })?;
         
