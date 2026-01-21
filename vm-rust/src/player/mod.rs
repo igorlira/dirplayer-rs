@@ -1735,7 +1735,9 @@ pub async fn run_frame_loop() {
                 if has_frame_changed_in_go && go_direction == 1 { // backwards
                     dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
                 } else {
-                    player_invoke_frame_and_movie_scripts(&"exitFrame".to_string(), &vec![]).await;
+                    if let Err(err) = player_invoke_frame_and_movie_scripts(&"exitFrame".to_string(), &vec![]).await {
+                        reserve_player_mut(|player| player.on_script_error(&err));
+                    }
                 }
 
                 player_wait_available().await;
