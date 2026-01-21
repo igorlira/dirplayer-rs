@@ -35,9 +35,13 @@ the_short_date       = { ^"the" ~ ^"short" ~ ^"date" }
 the_abbrev_date      = { ^"the" ~ (^"abbreviated" | ^"abbrev" | ^"abbr") ~ ^"date" }
 the_multi_word_prop  = { the_long_time | the_short_time | the_abbrev_time | the_long_date | the_short_date | the_abbrev_date }
 
+// Property name after "the" - can include some reserved keywords like "rect", "point", etc.
+// that are valid property names but also reserved for other constructs
+the_prop_name  =  { ident }
+
 // Regular single-word properties
 the_prop       =  { the_multi_word_prop | (^"the" ~ lang_ident) }
-the_prop_of    =  { ^"the" ~ lang_ident ~ ^"of" ~ (castlib_of_expr | sprite_of_expr | prop_of_expr | expr) }
+the_prop_of    =  { ^"the" ~ the_prop_name ~ ^"of" ~ (castlib_of_expr | sprite_of_expr | prop_of_expr | expr) }
 
 // Special handling for "X of castLib Y" and "X of sprite Y" 
 // These must come BEFORE prop_of_expr to match first
@@ -82,7 +86,7 @@ sprite_ref = { ^"sprite" ~ term_arg }
 
 // Chunk expressions for "char 1 of myStr", etc.
 chunk_type = { ^"char" | ^"word" | ^"line" | ^"item" }
-chunk_expr = { chunk_type ~ expr ~ ^"of" ~ (the_prop_of | lang_ident | chunk_expr) }
+chunk_expr = { chunk_type ~ expr ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | lang_ident) }
 
 parens_expr = _{ "(" ~ expr ~ ")" }
 parens_list = { "(" ~ expr ~ ("," ~ expr)+ ~ ")" }

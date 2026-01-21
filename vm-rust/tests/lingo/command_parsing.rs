@@ -381,12 +381,24 @@ fn test_put_display_the_property() {
 fn test_put_display_the_mouseLoc() {
     let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, "put the mouseLoc".to_string());
     assert!(result.is_ok());
-    
+
     let ast = result.unwrap();
     assert_eq!(
         ast,
         LingoExpr::PutDisplay(Box::new(LingoExpr::Identifier("the mouseLoc".to_string())))
     );
+}
+
+#[test]
+fn test_put_display_sprite_with_the_property() {
+    // Test: put the rect of sprite the currentSpriteNum
+    // This tests that "sprite the currentSpriteNum" can be parsed where
+    // "the currentSpriteNum" is a property expression used as the sprite number
+    let result = parse_lingo_expr_ast_runtime(
+        Rule::command_eval_expr,
+        "put the rect of sprite the currentSpriteNum".to_string()
+    );
+    assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
 }
 
 // ==============================================================================
