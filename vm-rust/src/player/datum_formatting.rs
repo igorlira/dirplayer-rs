@@ -170,7 +170,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
 pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
     match datum {
         Datum::String(s) => s.clone(),
-               
+        
         Datum::Symbol(s) => s.clone(),
         
         // Void/Null become empty string in concatenation
@@ -186,7 +186,8 @@ pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
                 .iter()
                 .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
                 .collect();
-            format!("[{}]", elements.join(", "))
+            let result = format!("[{}]", elements.join(", "));
+            result
         },
         
         Datum::PropList(entries, _) => {
