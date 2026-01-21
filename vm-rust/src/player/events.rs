@@ -164,6 +164,23 @@ pub async fn player_invoke_event_to_instances(
     Ok(handled)
 }
 
+pub async fn player_invoke_targeted_event(
+    handler_name: &String,
+    args: &Vec<DatumRef>,
+    instance_refs: Option<&Vec<ScriptInstanceRef>>,
+) -> Result<DatumRef, ScriptError> {
+    let handled = match instance_refs {
+        Some(instance_refs) => {
+            player_invoke_event_to_instances(handler_name, args, instance_refs).await?
+        }
+        None => false,
+    };
+    if !handled {
+        player_invoke_static_event(handler_name, args).await?;
+    }
+    Ok(DatumRef::Void)
+}
+
 pub async fn player_invoke_frame_and_movie_scripts(
     handler_name: &String,
     args: &Vec<DatumRef>,
@@ -175,7 +192,6 @@ pub async fn player_invoke_frame_and_movie_scripts(
             .get_script_in_frame(player.movie.current_frame);
         let movie_scripts = player.movie.cast_manager.get_movie_scripts();
         let movie_scripts = movie_scripts.as_ref().unwrap();
-
         let mut active_static_scripts: Vec<CastMemberRef> = vec![];
         
         // Frame script first
@@ -226,23 +242,6 @@ pub async fn player_invoke_frame_and_movie_scripts(
         if !result.passed {
             break;
         }
-    }
-    Ok(DatumRef::Void)
-}
-
-pub async fn player_invoke_targeted_event(
-    handler_name: &String,
-    args: &Vec<DatumRef>,
-    instance_refs: Option<&Vec<ScriptInstanceRef>>,
-) -> Result<DatumRef, ScriptError> {
-    let handled = match instance_refs {
-        Some(instance_refs) => {
-            player_invoke_event_to_instances(handler_name, args, instance_refs).await?
-        }
-        None => false,
-    };
-    if !handled {
-        player_invoke_static_event(handler_name, args).await?;
     }
     Ok(DatumRef::Void)
 }
@@ -390,12 +389,14 @@ pub async fn player_dispatch_event_beginsprite(
     handler_name: &String,
     args: &Vec<DatumRef>
 ) -> Result<Vec<(ScoreRef, u32)>, ScriptError> {
-    let (mut sprite_instances, mut frame_instances, all_channels) = 
+    // Include ScoreRef to track which score context each sprite belongs to
+    let (mut sprite_instances, mut frame_instances, all_channels) =
         reserve_player_mut(|player| {
-            let mut sprite_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
+            let mut sprite_instances: Vec<(ScoreRef, usize, ScriptInstanceRef)> = Vec::new();
             let mut frame_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
             let mut all_channels = Vec::new();
-            
+
+            // Collect stage sprites
             let active_channel_numbers: HashSet<u32> = player.movie.score.sprite_spans
                 .iter()
                 .filter(|span| Score::is_span_in_frame(span, player.movie.current_frame))
@@ -426,14 +427,66 @@ pub async fn player_dispatch_event_beginsprite(
                         instances.into_iter().map(|inst| (channel.number, inst))
                     );
                 } else {
-                    // Sprite behaviors (channel > 0)
+                    // Sprite behaviors (channel > 0) - include ScoreRef::Stage
                     sprite_instances.extend(
-                        instances.into_iter().map(|inst| (channel.number, inst))
+                        instances.into_iter().map(|inst| (ScoreRef::Stage, channel.number, inst))
                     );
                 }
-                
+
                 all_channels.push((ScoreRef::Stage, channel.number as u32));
             }
+
+            // Collect filmloop sprites
+            let active_filmloops = player.get_active_filmloop_scores();
+            for (member_ref, filmloop_score) in active_filmloops {
+                // Get the filmloop's current frame
+                let filmloop_current_frame = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
+                    Some(member) => {
+                        if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
+                            film_loop.current_frame
+                        } else {
+                            continue; // Not a filmloop, skip
+                        }
+                    }
+                    None => continue, // Member not found, skip
+                };
+
+                let active_filmloop_channels: HashSet<u32> = filmloop_score.sprite_spans
+                    .iter()
+                    .filter(|span| Score::is_span_in_frame(span, filmloop_current_frame))
+                    .map(|span| span.channel_number as u32)
+                    .collect();
+
+                let filtered_filmloop_channels: Vec<_> = filmloop_score.channels.iter()
+                    .filter(|channel| !channel.sprite.script_instance_list.is_empty())
+                    .filter(|channel| channel.sprite.entered)
+                    .filter(|channel| active_filmloop_channels.contains(&(channel.number as u32)))
+                    .filter(|channel| {
+                        channel.sprite.script_instance_list.iter().all(|script_ref| {
+                            player
+                                .allocator
+                                .script_instances
+                                .get(&script_ref.id())
+                                .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
+                        })
+                    })
+                    .collect();
+
+                for channel in filtered_filmloop_channels {
+                    let instances = channel.sprite.script_instance_list.clone();
+
+                    // Filmloop sprites go into sprite_instances (they don't have frame behaviors)
+                    // Include ScoreRef::FilmLoop so we can set the correct context when dispatching
+                    if channel.number > 0 {
+                        let score_ref = ScoreRef::FilmLoop(member_ref.clone());
+                        sprite_instances.extend(
+                            instances.into_iter().map(|inst| (score_ref.clone(), channel.number, inst))
+                        );
+                        all_channels.push((ScoreRef::FilmLoop(member_ref.clone()), channel.number as u32));
+                    }
+                }
+            }
+
             (sprite_instances, frame_instances, all_channels)
         });
     
@@ -450,7 +503,13 @@ pub async fn player_dispatch_event_beginsprite(
     }
     
     // Dispatch to sprite behaviors (number > 0)
-    for (sprite_number, behavior) in sprite_instances {
+    // Set the score context before invoking each event so sprite property access works correctly
+    for (score_ref, sprite_number, behavior) in sprite_instances {
+        // Set the score context for this sprite's behavior
+        reserve_player_mut(|player| {
+            player.current_score_context = score_ref.clone();
+        });
+
         let receivers = vec![behavior.clone()];
         if let Err(err) = player_invoke_targeted_event(handler_name, args, Some(receivers).as_ref()).await {
             web_sys::console::error_1(
@@ -460,17 +519,44 @@ pub async fn player_dispatch_event_beginsprite(
                 player.on_script_error(&err);
             });
         }
+
+        // Reset the score context to Stage after each invocation
+        reserve_player_mut(|player| {
+            player.current_score_context = ScoreRef::Stage;
+        });
     }
     Ok(all_channels)
 }
 
 pub async fn dispatch_event_endsprite(sprite_nums: Vec<u32>) {
+    // Legacy function - calls the new implementation with stage score
+    dispatch_event_endsprite_for_score(ScoreRef::Stage, sprite_nums).await;
+}
+
+pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums: Vec<u32>) {
     let (sprite_tuple, frame_tuple) =
         reserve_player_mut(|player| {
             let mut sprite_tuple = Vec::new();
             let mut frame_tuple = Vec::new();
 
-            for channel in player.movie.score.channels.iter() {
+            // Get the appropriate score based on score_ref
+            let score = match &score_ref {
+                ScoreRef::Stage => &player.movie.score,
+                ScoreRef::FilmLoop(member_ref) => {
+                    match player.movie.cast_manager.find_member_by_ref(member_ref) {
+                        Some(member) => {
+                            if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
+                                &film_loop.score
+                            } else {
+                                return (sprite_tuple, frame_tuple); // Not a filmloop, return empty
+                            }
+                        }
+                        None => return (sprite_tuple, frame_tuple), // Member not found, return empty
+                    }
+                }
+            };
+
+            for channel in score.channels.iter() {
                 // Skip if channel is not active in current frame (for sprite channels)
                 if !sprite_nums.contains(&(channel.number as u32)) {
                     continue;
@@ -503,6 +589,11 @@ pub async fn dispatch_event_endsprite(sprite_nums: Vec<u32>) {
         let _ = player_invoke_frame_and_movie_scripts(&"endSprite".to_string(), &vec![]).await;
     }
 
+    // Set the score context for this dispatch
+    reserve_player_mut(|player| {
+        player.current_score_context = score_ref.clone();
+    });
+
     // Dispatch to sprite behaviors (number > 0)
     for (sprite_num, behaviors) in sprite_tuple {
         for behavior in behaviors {
@@ -520,6 +611,11 @@ pub async fn dispatch_event_endsprite(sprite_nums: Vec<u32>) {
             }
         }
     }
+
+    // Reset the score context to Stage
+    reserve_player_mut(|player| {
+        player.current_score_context = ScoreRef::Stage;
+    });
 }
 
 pub async fn dispatch_event_to_all_behaviors(
@@ -552,8 +648,9 @@ pub async fn dispatch_event_to_all_behaviors(
     if skip {
         return;
     }
+    // Include ScoreRef to track which score context each sprite belongs to
     let (sprite_behaviors, frame_behaviors) = reserve_player_mut(|player| {
-        let mut sprites = Vec::new();
+        let mut sprites: Vec<(ScoreRef, usize, Vec<ScriptInstanceRef>)> = Vec::new();
         let mut frames = Vec::new();
 
         // Collect stage sprites
@@ -569,15 +666,55 @@ pub async fn dispatch_event_to_all_behaviors(
             }
             let behaviors = channel.sprite.script_instance_list.clone();
             if channel.number > 0 {
-                sprites.push((channel.number, behaviors));  // Store tuple with channel number
+                sprites.push((ScoreRef::Stage, channel.number, behaviors));
             } else if channel.number == 0 {
                 frames.push((channel.number, behaviors));  // Store tuple with channel number
-            } 
+            }
         }
+
+        // Collect filmloop sprites
+        let active_filmloops = player.get_active_filmloop_scores();
+        for (member_ref, filmloop_score) in active_filmloops {
+            // Get the filmloop's current frame
+            let filmloop_current_frame = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
+                Some(member) => {
+                    if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
+                        film_loop.current_frame
+                    } else {
+                        continue; // Not a filmloop, skip
+                    }
+                }
+                None => continue, // Member not found, skip
+            };
+
+            let active_filmloop_channels: HashSet<u32> = filmloop_score.sprite_spans
+                .iter()
+                .filter(|span| Score::is_span_in_frame(span, filmloop_current_frame))
+                .map(|span| span.channel_number as u32)
+                .collect();
+
+            for channel in filmloop_score.channels.iter() {
+                if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered ||
+                    !active_filmloop_channels.contains(&(channel.number as u32)) {
+                    continue;
+                }
+                let behaviors = channel.sprite.script_instance_list.clone();
+                if channel.number > 0 {
+                    sprites.push((ScoreRef::FilmLoop(member_ref.clone()), channel.number, behaviors));
+                }
+            }
+        }
+
         (sprites, frames)
     });
     // Dispatch to sprite behaviors first (channel order)
-    for (sprite_number, behaviors) in sprite_behaviors {
+    // Set the score context before invoking each event so sprite property access works correctly
+    for (score_ref, sprite_number, behaviors) in sprite_behaviors {
+        // Set the score context for this sprite's behaviors
+        reserve_player_mut(|player| {
+            player.current_score_context = score_ref.clone();
+        });
+
         for behavior in behaviors {
             let (script_name, instance_id, scope_count) = reserve_player_ref(|player| {
                 let script_instance = player.allocator.get_script_instance(&behavior);
@@ -588,7 +725,7 @@ pub async fn dispatch_event_to_all_behaviors(
                 (name, script_instance.instance_id, player.scope_count)
             });
             debug!(
-                "Invoking '{}' on sprite {} behavior '{}' (instance #{}) scope_count {}", 
+                "Invoking '{}' on sprite {} behavior '{}' (instance #{}) scope_count {}",
                 handler_name,
                 sprite_number,
                 ascii_safe(&script_name.to_string()),
@@ -606,6 +743,11 @@ pub async fn dispatch_event_to_all_behaviors(
                 });
             }
         }
+
+        // Reset the score context to Stage after processing this sprite's behaviors
+        reserve_player_mut(|player| {
+            player.current_score_context = ScoreRef::Stage;
+        });
     }
     // Dispatch event to frame/movie scripts
     if let Err(err) = player_invoke_frame_and_movie_scripts(handler_name, args).await {
