@@ -1353,30 +1353,28 @@ impl<'a> DecompilerState<'a> {
         // If we have statement bytecode indices, use them
         // Otherwise fall back to sequential assignment
         if !self.statement_bytecode_indices.is_empty() && !output_lines.is_empty() {
-            // For each statement, we have bytecode indices
-            // Map them to output lines proportionally
+            // Match statements to output lines, skipping closing keywords (end if, end repeat, etc.)
+            // which don't correspond to any statement but appear in the output.
             let statements_count = self.statement_bytecode_indices.len();
-
-            // Simple approach: assign each statement's indices to corresponding output lines
-            // Since statement count may not match output line count (due to multi-line statements),
-            // we try to match them as best as possible
-            let lines_per_statement = if statements_count > 0 {
-                (output_lines.len() as f64 / statements_count as f64).max(1.0)
-            } else {
-                1.0
-            };
+            let mut statement_index = 0;
 
             for (line_idx, line) in output_lines.iter().enumerate() {
                 let indent = line.chars().take_while(|c| *c == ' ').count() as u32 / 2;
                 let text = line.trim().to_string();
 
-                // Determine which statement this line belongs to
-                let target_statement = ((line_idx as f64) / lines_per_statement).floor() as usize;
-                let stmt_indices = if target_statement < statements_count {
-                    self.statement_bytecode_indices[target_statement].clone()
-                } else if statements_count > 0 {
-                    // Use last statement's indices for extra lines
-                    self.statement_bytecode_indices[statements_count - 1].clone()
+                // Check if this is a closing keyword line (no executable bytecodes)
+                let is_closing_line = text == "end if" || text == "end repeat" ||
+                                      text == "end tell" || text == "end case" ||
+                                      text == "else";
+
+                let stmt_indices = if is_closing_line {
+                    // Closing lines have no executable bytecodes
+                    vec![]
+                } else if statement_index < statements_count {
+                    // Assign next statement's bytecodes to this line
+                    let indices = self.statement_bytecode_indices[statement_index].clone();
+                    statement_index += 1;
+                    indices
                 } else {
                     vec![]
                 };
