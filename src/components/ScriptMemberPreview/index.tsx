@@ -216,8 +216,8 @@ export default function ScriptMemberPreview({
 
                 {viewMode === 'lingo' && handler.lingo &&
                   handler.lingo.map((line, lineIndex) => {
-                    // Check if any bytecode in this line has a breakpoint
-                    const hasBreakpoint = line.bytecodeIndices.some(bcIdx =>
+                    // Find if any bytecode in this line has a breakpoint, and which one
+                    const breakpointBytecodeIndex = line.bytecodeIndices.find(bcIdx =>
                       breakpoints.some(
                         (bp) =>
                           bp.script_name === snapshot.name &&
@@ -225,18 +225,17 @@ export default function ScriptMemberPreview({
                           bp.bytecode_index === bcIdx
                       )
                     );
+                    const hasBreakpoint = breakpointBytecodeIndex !== undefined;
 
-                    // Check if any bytecode in this line is in background scope
-                    const isInBackground = line.bytecodeIndices.some(bcIdx =>
-                      backgroundScopes.some(([name, idx, scriptMemRef]) =>
-                        name === handler.name &&
-                        idx === bcIdx &&
-                        memberId.castNumber === scriptMemRef[0] &&
-                        memberId.memberNumber === scriptMemRef[1]
-                      )
-                    );
+                    // Check if this line is in background scope using bytecodeToLine for consistency
+                    const isInBackground = !!(handler.bytecodeToLine && backgroundScopes.some(([name, idx, scriptMemRef]) =>
+                      name === handler.name &&
+                      handler.bytecodeToLine![idx] === lineIndex &&
+                      memberId.castNumber === scriptMemRef[0] &&
+                      memberId.memberNumber === scriptMemRef[1]
+                    ));
 
-                    // Use first bytecode index for setting breakpoint
+                    // Use first bytecode index for setting breakpoint, but toggle existing one if present
                     const primaryBytecodeIndex = line.bytecodeIndices[0];
                     const canSetBreakpoint = primaryBytecodeIndex !== undefined;
 
@@ -250,7 +249,11 @@ export default function ScriptMemberPreview({
                         hasBreakpoint={hasBreakpoint}
                         canSetBreakpoint={canSetBreakpoint}
                         onBreakpointClick={() => {
-                          if (canSetBreakpoint) {
+                          if (hasBreakpoint && breakpointBytecodeIndex !== undefined) {
+                            // Toggle existing breakpoint (removes it)
+                            toggle_breakpoint(snapshot.name, handler.name, breakpointBytecodeIndex);
+                          } else if (canSetBreakpoint) {
+                            // Add new breakpoint at first instruction
                             toggle_breakpoint(snapshot.name, handler.name, primaryBytecodeIndex);
                           }
                         }}
