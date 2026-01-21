@@ -55,8 +55,8 @@ pub fn set_system_font_path(path: String) {
 }
 
 #[wasm_bindgen]
-pub async fn load_movie_file(path: String) {
-    player_dispatch(PlayerVMCommand::LoadMovieFromFile(path));
+pub async fn load_movie_file(path: String, autoplay: bool) {
+    player_dispatch(PlayerVMCommand::LoadMovieFromFile(path, autoplay));
 }
 
 // Player control commands bypass the command queue to allow stopping/resetting

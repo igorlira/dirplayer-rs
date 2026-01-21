@@ -35,7 +35,7 @@ use super::{
 
 #[allow(dead_code)]
 pub enum PlayerVMCommand {
-    LoadMovieFromFile(String),
+    LoadMovieFromFile(String, bool),
     SetExternalParams(HashMap<String, String>),
     SetBasePath(String),
     SetSystemFontPath(String),
@@ -52,7 +52,7 @@ pub enum PlayerVMCommand {
 
 pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
     match command {
-        PlayerVMCommand::LoadMovieFromFile(path) => format!("LoadMovieFromFile({})", path),
+        PlayerVMCommand::LoadMovieFromFile(path, autoplay) => format!("LoadMovieFromFile({}, {})", path, autoplay),
         PlayerVMCommand::SetExternalParams(params) => {
             format!("SetExternalParams({:?})", params.keys().collect::<Vec<_>>())
         }
@@ -142,9 +142,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             console_warn!("Loading system font: {}", path);
             player_load_system_font(&path).await;
         }
-        PlayerVMCommand::LoadMovieFromFile(file_path) => {
+        PlayerVMCommand::LoadMovieFromFile(file_path, autoplay) => {
             let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
             player.load_movie_from_file(&file_path).await;
+            if autoplay {
+                player.play();
+            }
         }
         PlayerVMCommand::SetStageSize(width, height) => {
             reserve_player_mut(|player| {
