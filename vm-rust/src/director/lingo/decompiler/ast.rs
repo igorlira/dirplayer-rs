@@ -888,7 +888,7 @@ fn get_precedence(opcode: OpCode) -> u32 {
 }
 
 fn write_call(code: &mut CodeWriter, name: &str, args: &Rc<AstNode>, dot: bool, sum: bool) {
-    // Check if this is a special no-parens call
+    // Check if this is a special no-parens command (statement-style)
     let no_parens = matches!(name.to_lowercase().as_str(),
         "go" | "play" | "playaccelerator" | "pause" | "stop" | "halt" | "pass" | "continue" |
         "alert" | "beep" | "updatestage" | "puppetsprite" | "puppetsound" | "puppetpalette" |
@@ -897,9 +897,18 @@ fn write_call(code: &mut CodeWriter, name: &str, args: &Rc<AstNode>, dot: bool, 
     );
 
     if let AstNode::Literal(arg_list) = args.as_ref() {
+        let is_statement = arg_list.datum_type == DatumType::ArgListNoRet;
+
         if arg_list.list_value.is_empty() {
-            code.write(name);
-        } else if no_parens && arg_list.datum_type == DatumType::ArgListNoRet {
+            // Empty argument list - only omit parens for no-parens statement commands
+            if no_parens && is_statement {
+                code.write(name);
+            } else {
+                code.write(name);
+                code.write("()");
+            }
+        } else if no_parens && is_statement {
+            // No-parens statement with arguments: "return x" instead of "return(x)"
             code.write(name);
             code.write(" ");
             for (i, arg) in arg_list.list_value.iter().enumerate() {
@@ -907,6 +916,7 @@ fn write_call(code: &mut CodeWriter, name: &str, args: &Rc<AstNode>, dot: bool, 
                 arg.write_script(code, dot, sum);
             }
         } else {
+            // Normal function call with parentheses
             code.write(name);
             code.write("(");
             for (i, arg) in arg_list.list_value.iter().enumerate() {
