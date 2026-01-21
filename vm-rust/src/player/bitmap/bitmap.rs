@@ -179,7 +179,9 @@ fn get_num_channels(bit_depth: u8) -> Result<u8, String> {
 
 fn get_alignment_width(bit_depth: u8) -> Result<u16, String> {
     match bit_depth {
-        1 | 4 | 32 => Ok(4),
+        // 1-bit: rows aligned to 16-bit (word) boundaries = 16 pixels per row minimum
+        1 => Ok(16),
+        4 | 32 => Ok(4),
         2 | 8 => Ok(2),
         16 => Ok(1),  // 16-bit aligns like 8-bit (1 byte per pixel)
         _ => Err("Invalid bit depth".to_string()),
@@ -227,7 +229,7 @@ fn decode_bitmap_1bit(
 
     Ok(Bitmap {
         bit_depth: 8,
-        original_bit_depth: 8,
+        original_bit_depth: 1, // Keep original 1-bit depth for proper Director rendering semantics
         width,
         height,
         data: result,
@@ -560,6 +562,15 @@ pub fn decompress_bitmap(
 
     let expected_len = if info.bit_depth == 32 && version >= 400 {
         info.width as usize * scan_height as usize * num_channels as usize
+    } else if info.bit_depth == 1 {
+        // For 1-bit: scan_width is in pixels, each row is scan_width/8 bytes
+        (scan_width as usize / 8) * scan_height as usize
+    } else if info.bit_depth == 2 {
+        // For 2-bit: scan_width is in pixels, each row is scan_width/4 bytes
+        (scan_width as usize / 4) * scan_height as usize
+    } else if info.bit_depth == 4 {
+        // For 4-bit: scan_width is in pixels, each row is scan_width/2 bytes
+        (scan_width as usize / 2) * scan_height as usize
     } else {
         scan_width as usize * scan_height as usize * num_channels as usize
     };
