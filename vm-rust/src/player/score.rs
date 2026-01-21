@@ -2761,7 +2761,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
 
             let src_bitmap = sprite_bitmap.unwrap();
 
-            // Always use original registration point
+            // Original registration point from bitmap member
             let reg_x = bitmap_member.reg_point.0;
             let reg_y = bitmap_member.reg_point.1;
 
@@ -2782,6 +2782,23 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     // For tweened sprites, width/height are already correct
                     sprite_width = sprite.width;
                     sprite_height = sprite.height;
+                    // Scale registration point proportionally to sprite scaling
+                    if bitmap_member.info.width > 0 && bitmap_member.info.height > 0 {
+                        let scale_x = sprite.width as f64 / bitmap_member.info.width as f64;
+                        let scale_y = sprite.height as f64 / bitmap_member.info.height as f64;
+                        let scaled_reg_x = (reg_x as f64 * scale_x).round() as i32;
+                        let scaled_reg_y = (reg_y as f64 * scale_y).round() as i32;
+                        draw_x = sprite.loc_h - scaled_reg_x;
+                        draw_y = sprite.loc_v - scaled_reg_y;
+
+                        // Handle flip adjustments with scaled reg point
+                        if sprite.flip_h && scaled_reg_x != (sprite_width / 2) {
+                            draw_x = sprite.loc_h - (sprite_width - scaled_reg_x);
+                        }
+                        if sprite.flip_v && scaled_reg_y != (sprite_height / 2) {
+                            draw_y = sprite.loc_v - (sprite_height - scaled_reg_y);
+                        }
+                    }
                 } else {
                     // For non-tweened sprites, handle wrong score data
                     if (bitmap_member.info.width as i32
@@ -2799,12 +2816,30 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                         sprite_width = bitmap_member.info.width as i32;
                         sprite_height = bitmap_member.info.height as i32;
                     } else {
-                        if sprite.flip_h && reg_x != (sprite.width / 2) as i16 {
-                            draw_x = sprite.loc_h - (sprite.width - reg_x as i32);
-                        }
+                        // Scale registration point proportionally to sprite scaling
+                        if bitmap_member.info.width > 0 && bitmap_member.info.height > 0 {
+                            let scale_x = sprite.width as f64 / bitmap_member.info.width as f64;
+                            let scale_y = sprite.height as f64 / bitmap_member.info.height as f64;
+                            let scaled_reg_x = (reg_x as f64 * scale_x).round() as i32;
+                            let scaled_reg_y = (reg_y as f64 * scale_y).round() as i32;
+                            draw_x = sprite.loc_h - scaled_reg_x;
+                            draw_y = sprite.loc_v - scaled_reg_y;
 
-                        if sprite.flip_v && reg_y != (sprite.height / 2) as i16 {
-                            draw_y = sprite.loc_v - (sprite.height - reg_y as i32);
+                            // Handle flip adjustments with scaled reg point
+                            if sprite.flip_h && scaled_reg_x != (sprite.width / 2) {
+                                draw_x = sprite.loc_h - (sprite.width - scaled_reg_x);
+                            }
+                            if sprite.flip_v && scaled_reg_y != (sprite.height / 2) {
+                                draw_y = sprite.loc_v - (sprite.height - scaled_reg_y);
+                            }
+                        } else {
+                            if sprite.flip_h && reg_x != (sprite.width / 2) as i16 {
+                                draw_x = sprite.loc_h - (sprite.width - reg_x as i32);
+                            }
+
+                            if sprite.flip_v && reg_y != (sprite.height / 2) as i16 {
+                                draw_y = sprite.loc_v - (sprite.height - reg_y as i32);
+                            }
                         }
 
                         sprite_width = sprite.width;
