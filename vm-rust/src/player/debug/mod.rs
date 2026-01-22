@@ -2,7 +2,7 @@ use manual_future::ManualFutureCompleter;
 
 use crate::js_api::JsApi;
 
-use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef};
+use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef, ScriptError};
 
 /// Represents the current step debugging mode
 #[derive(Clone, PartialEq, Debug)]
@@ -40,6 +40,7 @@ pub struct BreakpointContext {
     pub handler_ref: ScriptHandlerRef,
     pub bytecode_index: usize,
     pub completer: ManualFutureCompleter<()>,
+    pub error: Option<ScriptError>,
 }
 
 pub struct BreakpointManager {

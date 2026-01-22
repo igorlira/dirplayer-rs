@@ -163,6 +163,18 @@ pub fn step_into_line(skip_bytecode_indices: Vec<usize>) {
 }
 
 #[wasm_bindgen]
+pub fn set_break_on_error(enabled: bool) {
+    reserve_player_mut(|player| {
+        player.break_on_error = enabled;
+    });
+}
+
+#[wasm_bindgen]
+pub fn get_break_on_error() -> bool {
+    reserve_player_ref(|player| player.break_on_error)
+}
+
+#[wasm_bindgen]
 pub fn set_stage_size(width: u32, height: u32) {
     player_dispatch(PlayerVMCommand::SetStageSize(width, height));
 }
