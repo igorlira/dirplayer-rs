@@ -288,12 +288,6 @@ fn compute_filmloop_initial_rect_with_members(
 /// This is needed because filmloop Score.channels are not populated with sprite data
 /// like the main stage score. Instead, we read sprite info directly from channel_initialization_data.
 ///
-/// ScummVM uses proportional scaling for filmloop sprite coordinates:
-///   relX = (src._startPoint.x - _initialRect.left) * widgetRect.width() / _initialRect.width()
-///   relY = (src._startPoint.y - _initialRect.top) * widgetRect.height() / _initialRect.height()
-///
-/// For now we use 1:1 scaling (bitmap size equals initial_rect size), so we just translate.
-///
 /// Director behavior: Film loop frames use the PARENT sprite's ink semantics,
 /// not their own stored ink values. The parent_ink, parent_color, and parent_bg_color
 /// are the properties of the sprite displaying the film loop on the stage.
@@ -400,7 +394,6 @@ fn render_filmloop_from_channel_data(
         }
     };
 
-    // ScummVM-style coordinate transformation
     // Since our bitmap is sized to match initial_rect dimensions (1:1 scaling),
     // we just need to translate by subtracting initial_rect origin.
     // If we later support non-1:1 scaling, we'd use:
@@ -439,7 +432,6 @@ fn render_filmloop_from_channel_data(
         }
         let member = member.unwrap();
 
-        // ScummVM-style coordinate transformation:
         // Translate sprite position relative to initial_rect origin, then scale to dest_rect
         //
         // For channels with path keyframes, interpolate between keyframes
@@ -1207,7 +1199,7 @@ pub fn render_score_to_bitmap_with_offset(
                 }
             }
             CastMemberType::FilmLoop(film_loop) => {
-                // ---- 1. Snapshot sprite data (ENDS immutable borrow) ----
+                // ---- 1. Snapshot sprite data ----
                 // The filmloop's rect is stored in info as:
                 // - reg_point = (left, top) coordinates of the rect
                 // - width = right coordinate
@@ -1244,12 +1236,12 @@ pub fn render_score_to_bitmap_with_offset(
                         sprite.bg_color.clone(),
                         sprite.rotation,
                         rect, // logical rect
-                        info_initial_rect, // Use the info-based rect for filmloop dimensions
+                        info_initial_rect,
                         film_loop.current_frame,
                         film_loop.info.width as i32,
                         film_loop.info.height as i32,
                     )
-                }; // <-- sprite borrow ends HERE
+                };
 
                 // ---- 2. Create filmloop bitmap using INITIAL_RECT dimensions ----
                 // The filmloop is rendered at its natural size (initial_rect).
@@ -1315,24 +1307,6 @@ pub fn render_score_to_bitmap_with_offset(
                     opaque_count, if total_pixels > 0 { opaque_count * 100 / total_pixels } else { 0 },
                     transparent_count, if total_pixels > 0 { transparent_count * 100 / total_pixels } else { 0 }
                 );
-
-                // Sample some specific pixels to see their RGBA values
-                let sample_positions = [(0, 0), (10, 10), (width as i32 / 2, height as i32 / 2), (width as i32 - 1, height as i32 - 1)];
-                for (x, y) in sample_positions {
-                    if x >= 0 && y >= 0 && x < width as i32 && y < height as i32 {
-                        let idx = (y as usize * filmloop_bitmap.width as usize + x as usize) * 4;
-                        if idx + 3 < filmloop_bitmap.data.len() {
-                            let r = filmloop_bitmap.data[idx];
-                            let g = filmloop_bitmap.data[idx + 1];
-                            let b = filmloop_bitmap.data[idx + 2];
-                            let a = filmloop_bitmap.data[idx + 3];
-                            debug!(
-                                "    FILMLOOP sample ({},{}) RGBA=({},{},{},{})",
-                                x, y, r, g, b, a
-                            );
-                        }
-                    }
-                }
 
                 let params = CopyPixelsParams {
                     blend,

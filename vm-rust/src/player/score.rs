@@ -42,7 +42,7 @@ use super::{
     script::{script_get_prop_opt, script_set_prop},
     script_ref::ScriptInstanceRef,
     sprite::{ColorRef, CursorRef, Sprite},
-    DirPlayer, ScriptError,
+    DirPlayer, ScriptError, PLAYER_OPT,
 };
 
 #[derive(Clone, Debug)]
@@ -104,6 +104,53 @@ pub struct Score {
 
 fn get_sprite_rect(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
     let sprite = player.movie.score.get_sprite(sprite_id);
+    let sprite = match sprite {
+        Some(sprite) => sprite,
+        None => return (0, 0, 0, 0),
+    };
+    let rect = get_concrete_sprite_rect(player, sprite);
+    return (rect.left, rect.top, rect.right, rect.bottom);
+}
+
+/// Get a sprite from the appropriate score based on the current_score_context.
+/// When running filmloop behaviors, this returns sprites from the filmloop's score.
+/// Otherwise, returns sprites from the main stage.
+pub fn get_sprite_in_context<'a>(player: &'a DirPlayer, sprite_id: i16) -> Option<&'a Sprite> {
+    match &player.current_score_context {
+        ScoreRef::Stage => player.movie.score.get_sprite(sprite_id),
+        ScoreRef::FilmLoop(member_ref) => {
+            player.movie.cast_manager.find_member_by_ref(member_ref)
+                .and_then(|member| {
+                    if let CastMemberType::FilmLoop(film_loop) = &member.member_type {
+                        film_loop.score.get_sprite(sprite_id)
+                    } else {
+                        None
+                    }
+                })
+        }
+    }
+}
+
+/// Get a mutable reference to a sprite from the appropriate score based on current_score_context.
+/// Note: For filmloop sprites, this returns None and the caller should handle the fallback.
+/// This is due to Rust's borrow checker limitations with the cast_manager lookup.
+pub fn get_sprite_in_context_mut<'a>(player: &'a mut DirPlayer, sprite_id: i16) -> Option<&'a mut Sprite> {
+    match &player.current_score_context {
+        ScoreRef::Stage => Some(player.movie.score.get_sprite_mut(sprite_id)),
+        ScoreRef::FilmLoop(_member_ref) => {
+            // For filmloop context, we return None here.
+            // The caller (borrow_sprite_mut) will fall back to the main stage sprite,
+            // which is correct because filmloop sprites are rendered copies and
+            // modifications should typically go to the source sprite or be handled specially.
+            // The read-only get_sprite_in_context is the important fix for the original bug.
+            None
+        }
+    }
+}
+
+/// Get sprite rect using current score context
+fn get_sprite_rect_in_context(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
+    let sprite = get_sprite_in_context(player, sprite_id);
     let sprite = match sprite {
         Some(sprite) => sprite,
         None => return (0, 0, 0, 0),
@@ -393,7 +440,9 @@ impl Score {
                     }
                 };
                 let sprite: &mut Sprite = score.get_sprite_mut(sprite_num as i16);
-                sprite.reset();
+                if sprite.visible {
+                    sprite.reset();
+                }
             });
         }
 
@@ -473,10 +522,17 @@ impl Score {
                     cast_member: data.cast_member as i32,
                 };
 
-                // Set member directly on the sprite instead of using sprite_set_prop,
-                // because sprite_set_prop always writes to main stage score,
-                // but we need to set it on this score's sprite (may be filmloop).
-                sprite.member = Some(member.clone());
+                // For Stage sprites, use sprite_set_prop which handles intrinsic size
+                // initialization and other side effects. For FilmLoop sprites, set
+                // member directly since sprite_set_prop always writes to main stage score.
+                match &score_ref {
+                    ScoreRef::Stage => {
+                        let _ = sprite_set_prop(sprite_num, "member", Datum::CastMember(member.clone()));
+                    }
+                    ScoreRef::FilmLoop(_) => {
+                        sprite.member = Some(member.clone());
+                    }
+                }
                 sprite.loc_h = data.pos_x as i32;
                 sprite.loc_v = data.pos_y as i32;
                 sprite.width = data.width as i32;
@@ -616,18 +672,33 @@ impl Score {
         }
 
         // handle score Sound 1 + Sound 2 in Effects Channels
-        let first_appearances: HashMap<u16, u32> = self.sound_channel_data.iter().fold(
-            HashMap::new(),
-            |mut map, (frame_idx, ch_idx, _data)| {
-                map.entry(*ch_idx).or_insert(*frame_idx);
-                map
-            },
-        );
+        // Build a map of (frame_index, channel_index) -> cast_member for quick lookup
+        let sound_by_frame_channel: HashMap<(u32, u16), u8> = self.sound_channel_data.iter()
+            .map(|(frame_idx, ch_idx, data)| ((*frame_idx, *ch_idx), data.cast_member))
+            .collect();
 
         for (frame_index, channel_index, sound_data) in self.sound_channel_data.iter() {
-            if *frame_index + 1 == frame_num
-                && first_appearances.get(channel_index) == Some(frame_index)
-            {
+            if *frame_index + 1 == frame_num {
+                // Check if this is the start of a new sound span
+                // A sound triggers when:
+                // 1. It's the first frame (frame_index == 0), OR
+                // 2. The previous frame had no sound on this channel, OR
+                // 3. The previous frame had a different cast_member on this channel
+                let prev_frame_sound = if *frame_index > 0 {
+                    sound_by_frame_channel.get(&(*frame_index - 1, *channel_index))
+                } else {
+                    None
+                };
+
+                let is_new_sound_span = match prev_frame_sound {
+                    None => true, // No sound on previous frame
+                    Some(&prev_cast_member) => prev_cast_member != sound_data.cast_member, // Different sound
+                };
+
+                if !is_new_sound_span {
+                    // This is a continuation of the same sound, skip
+                    continue;
+                }
                 // Check if we've already triggered this sound on this frame
                 if let Some(&triggered_frame) = self.sound_channel_triggered.get(channel_index) {
                     if triggered_frame == frame_num {
@@ -1406,14 +1477,6 @@ impl Score {
             .map(|span| span.channel_number)
             .collect();
 
-        // Build a map of frame_channel_data for this frame for direct position fallback
-        let frame_data_map: std::collections::HashMap<u32, &crate::director::chunks::score::ScoreFrameChannelData> = self
-            .channel_initialization_data
-            .iter()
-            .filter(|(frame_idx, _, _)| *frame_idx + 1 == frame)
-            .map(|(_, channel_idx, data)| (get_channel_number_from_index(*channel_idx as u32), data))
-            .collect();
-
         for channel in self.channels.iter_mut() {
             let sprite = &mut channel.sprite;
             let sprite_num = sprite.number as u16;
@@ -1425,46 +1488,7 @@ impl Score {
                 }
             }
 
-            // Puppeted sprites should NOT have their properties overwritten by score data.
-            // They are under script control.
-            if sprite.puppet {
-                continue;
-            }
-
-            let keyframes = self.keyframes_cache.get(&sprite_num);
-
-            // Check if we have keyframes that cover this frame
-            let has_active_path_keyframes = keyframes
-                .and_then(|kf| kf.path.as_ref())
-                .map(|path| path.is_active_at_frame(frame))
-                .unwrap_or(false);
-
-            // If no active path keyframes, apply position directly from frame_channel_data
-            if !has_active_path_keyframes {
-                if let Some(data) = frame_data_map.get(&(sprite_num as u32)) {
-                    // Only apply if there's actual position data (pos_x/pos_y non-zero or this is a keyframe)
-                    // Tweening frames have cast_member=0 but still have valid position data
-                    if data.pos_x != 0 || data.pos_y != 0 || data.cast_member != 0 {
-                        // For tweening frames (cast_member=0), only apply pos_y if it's non-zero.
-                        // A zero pos_y in a tweening frame means "keep the current value", not "set to 0".
-                        let new_loc_h = if data.cast_member == 0 && data.pos_x == 0 {
-                            sprite.loc_h
-                        } else {
-                            data.pos_x as i32
-                        };
-                        let new_loc_v = if data.cast_member == 0 && data.pos_y == 0 {
-                            sprite.loc_v
-                        } else {
-                            data.pos_y as i32
-                        };
-
-                        sprite.loc_h = new_loc_h;
-                        sprite.loc_v = new_loc_v;
-                    }
-                }
-            }
-
-            let Some(keyframes) = keyframes else {
+            let Some(keyframes) = self.keyframes_cache.get(&sprite_num) else {
                 continue;
             };
 
@@ -2003,13 +2027,15 @@ pub fn sprite_get_prop(
     sprite_id: i16,
     prop_name: &str,
 ) -> Result<Datum, ScriptError> {
-    let sprite = player.movie.score.get_sprite(sprite_id);
+    // Use context-aware sprite lookup to support filmloop behaviors
+    let sprite = get_sprite_in_context(player, sprite_id);
     match prop_name {
         "ilk" => Ok(Datum::Symbol("sprite".to_string())),
         "spriteNum" | "spriteNumber" => Ok(Datum::Int(
             sprite.map_or(sprite_id as i32, |x| x.number as i32),
         )),
         "loc" => reserve_player_mut(|player| {
+            let sprite = get_sprite_in_context(player, sprite_id);
             let (x, y) = sprite.map_or((0, 0), |sprite| (sprite.loc_h, sprite.loc_v));
             let x_ref = player.alloc_datum(Datum::Int(x));
             let y_ref = player.alloc_datum(Datum::Int(y));
@@ -2020,23 +2046,23 @@ pub fn sprite_get_prop(
         "blend" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.blend) as i32)),
         "ink" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.ink) as i32)),
         "left" => {
-            let rect = get_sprite_rect(player, sprite_id);
+            let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.0 as i32))
         }
         "top" => {
-            let rect = get_sprite_rect(player, sprite_id);
+            let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.1 as i32))
         }
         "right" => {
-            let rect = get_sprite_rect(player, sprite_id);
+            let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.2 as i32))
         }
         "bottom" => {
-            let rect = get_sprite_rect(player, sprite_id);
+            let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.3 as i32))
         }
         "rect" => {
-            let rect = get_sprite_rect(player, sprite_id);
+            let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Rect([
                 player.alloc_datum(Datum::Int(rect.0)),
                 player.alloc_datum(Datum::Int(rect.1)),
@@ -2168,7 +2194,19 @@ where
 {
     reserve_player_mut(|player| {
         let arg = player_f(player);
-        let sprite = player.movie.score.get_sprite_mut(sprite_id);
+        // Check if we're in a filmloop context
+        let in_filmloop_context = !matches!(player.current_score_context, ScoreRef::Stage);
+
+        // For filmloop sprites, modifications go to the main stage sprite at the same channel
+        // This is because filmloop sprites are rendered copies
+        // Note: Read access via get_sprite_in_context correctly returns filmloop sprites
+        let sprite = if in_filmloop_context {
+            // In filmloop context, but modifications still go to main stage
+            // (The filmloop sprite data is read-only rendered state)
+            player.movie.score.get_sprite_mut(sprite_id)
+        } else {
+            player.movie.score.get_sprite_mut(sprite_id)
+        };
         f(sprite, arg)
     })
 }
@@ -2375,29 +2413,35 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 };
 
                 // Extract intrinsic size ONLY for Bitmap / Shape
-                let intrinsic_size = mem_ref
+                // Also check if the member is a film loop
+                let (intrinsic_size, is_film_loop) = mem_ref
                     .as_ref()
                     .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))
-                    .and_then(|m| match &m.member_type {
-                        CastMemberType::Bitmap(bitmap) => {
-                            Some((bitmap.info.width as i32, bitmap.info.height as i32))
-                        }
-                        CastMemberType::Shape(shape) => {
-                            Some((shape.shape_info.width as i32, shape.shape_info.height as i32))
-                        }
-                        _ => None,
-                    });
+                    .map(|m| {
+                        let size = match &m.member_type {
+                            CastMemberType::Bitmap(bitmap) => {
+                                Some((bitmap.info.width as i32, bitmap.info.height as i32))
+                            }
+                            CastMemberType::Shape(shape) => {
+                                Some((shape.shape_info.width as i32, shape.shape_info.height as i32))
+                            }
+                            _ => None,
+                        };
+                        let is_film_loop = matches!(&m.member_type, CastMemberType::FilmLoop(_));
+                        (size, is_film_loop)
+                    })
+                    .unwrap_or((None, false));
 
-                Ok((mem_ref, intrinsic_size))
+                Ok((mem_ref, intrinsic_size, is_film_loop))
             },
             |sprite, value| {
-                let (mem_ref, intrinsic_size) = value?;
+                let (mem_ref, intrinsic_size, is_film_loop) = value?;
 
                 // Detect whether the member actually changed
                 let member_changed = sprite.member != mem_ref;
 
                 // Assign the new member
-                sprite.member = mem_ref;
+                sprite.member = mem_ref.clone();
 
                 // Initialize size ONLY if:
                 //  - member actually changed
@@ -2408,6 +2452,26 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                             sprite.height = h;
                             sprite.base_width = w;
                             sprite.base_height = h;
+                        }
+                    }
+                }
+
+                // If the new member is a film loop, reset its frame and sound triggers
+                // This ensures sounds play when a new sprite starts using the film loop
+                if is_film_loop && member_changed {
+                    if let Some(ref r) = mem_ref {
+                        // We need to do this outside borrow_sprite_mut since we need mutable access to cast_manager
+                        // Store the member ref to reset later
+                        unsafe {
+                            if let Some(player) = PLAYER_OPT.as_mut() {
+                                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(r) {
+                                    if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                        film_loop.current_frame = 1;
+                                        film_loop.score.sound_channel_triggered.clear();
+                                        film_loop.score.last_sound_clear_frame = None;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2464,66 +2528,29 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "loc" => {
-            // Extract x,y values BEFORE borrowing sprite to avoid nested reserve_player_mut
-            let (x, y) = match &value {
-                Datum::Point(arr) => {
-                    reserve_player_ref(|player| {
-                        let x = player.get_datum(&arr[0]).int_value();
-                        let y = player.get_datum(&arr[1]).int_value();
-                        (x, y)
-                    })
-                }
-                Datum::Void => return Ok(()), // no-op
-                _ => {
-                    return Err(ScriptError::new(format!(
+        "loc" => borrow_sprite_mut(
+            sprite_id,
+            |_| value.clone(),  // Pass the value through so we can use it in the sprite closure
+            |sprite, value| -> Result<(), ScriptError> {
+                match value {
+                    Datum::Point(arr) => {
+                        reserve_player_mut(|player| {
+                            let x = player.get_datum(&arr[0]).int_value()?;
+                            let y = player.get_datum(&arr[1]).int_value()?;
+                            sprite.loc_h = x;
+                            sprite.loc_v = y;
+                            Ok(())
+                        })
+                    }
+                    Datum::Void => Ok(()), // no-op
+                    _ => Err(ScriptError::new(format!(
                         "loc must be a Point (received {})",
                         value.type_str()
-                    )))
+                    ))),
                 }
-            };
-            // Now borrow sprite and set the values
-            borrow_sprite_mut(
-                sprite_id,
-                |_| (x, y),
-                |sprite, (x, y)| {
-                    let x_val = x?;
-                    let y_val = y?;
-                    // Debug: Log loc changes for puppeted sprites
-                    if sprite.puppet && sprite.number == 70 {
-                        web_sys::console::log_1(&format!(
-                            "sprite_set_prop: ch{} loc ({},{}) -> ({},{})",
-                            sprite.number, sprite.loc_h, sprite.loc_v, x_val, y_val
-                        ).into());
-                    }
-                    sprite.loc_h = x_val;
-                    sprite.loc_v = y_val;
-                    Ok(())
-                },
-            )
-        }
-        "rect" => {
-            // Extract rect values BEFORE borrowing sprite to avoid nested reserve_player_mut
-            let (left, top, right, bottom) = match &value {
-                Datum::Rect(arr) => {
-                    reserve_player_ref(|player| {
-                        let left = player.get_datum(&arr[0]).int_value();
-                        let top = player.get_datum(&arr[1]).int_value();
-                        let right = player.get_datum(&arr[2]).int_value();
-                        let bottom = player.get_datum(&arr[3]).int_value();
-                        (left, top, right, bottom)
-                    })
-                }
-                _ => {
-                    return Err(ScriptError::new("rect must be a rect".to_string()));
-                }
-            };
-            // Unwrap the Results early so we can use them in the closure
-            let left = left?;
-            let top = top?;
-            let right = right?;
-            let bottom = bottom?;
-            // Now borrow sprite and set the values
+            },
+        ),
+        "rect" => reserve_player_mut(|player| {
             borrow_sprite_mut(
                 sprite_id,
                 |player| {
@@ -2547,14 +2574,24 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     reg_point
                 },
                 |sprite, reg_point| {
-                    sprite.loc_h = left + reg_point.0 as i32;
-                    sprite.loc_v = top + reg_point.1 as i32;
-                    sprite.width = right - left;
-                    sprite.height = bottom - top;
-                    Ok(())
+                    match value {
+                        Datum::Rect(ref arr) => {
+                            let left = player.get_datum(&arr[0]).int_value()?;
+                            let top = player.get_datum(&arr[1]).int_value()?;
+                            let right = player.get_datum(&arr[2]).int_value()?;
+                            let bottom = player.get_datum(&arr[3]).int_value()?;
+
+                            sprite.loc_h = left + reg_point.0 as i32;
+                            sprite.loc_v = top + reg_point.1 as i32;
+                            sprite.width = right - left;
+                            sprite.height = bottom - top;
+                            Ok(())
+                        }
+                        _ => Err(ScriptError::new("rect must be a rect".to_string())),
+                    }
                 },
             )
-        }
+        }),
         "scriptInstanceList" => {
             let ref_list = value.to_list()?;
             let instance_refs = borrow_sprite_mut(
@@ -2738,7 +2775,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
 
             let src_bitmap = sprite_bitmap.unwrap();
 
-            // Always use original registration point
+            // Original registration point from bitmap member
             let reg_x = bitmap_member.reg_point.0;
             let reg_y = bitmap_member.reg_point.1;
 
@@ -2759,6 +2796,23 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     // For tweened sprites, width/height are already correct
                     sprite_width = sprite.width;
                     sprite_height = sprite.height;
+                    // Scale registration point proportionally to sprite scaling
+                    if bitmap_member.info.width > 0 && bitmap_member.info.height > 0 {
+                        let scale_x = sprite.width as f64 / bitmap_member.info.width as f64;
+                        let scale_y = sprite.height as f64 / bitmap_member.info.height as f64;
+                        let scaled_reg_x = (reg_x as f64 * scale_x).round() as i32;
+                        let scaled_reg_y = (reg_y as f64 * scale_y).round() as i32;
+                        draw_x = sprite.loc_h - scaled_reg_x;
+                        draw_y = sprite.loc_v - scaled_reg_y;
+
+                        // Handle flip adjustments with scaled reg point
+                        if sprite.flip_h && scaled_reg_x != (sprite_width / 2) {
+                            draw_x = sprite.loc_h - (sprite_width - scaled_reg_x);
+                        }
+                        if sprite.flip_v && scaled_reg_y != (sprite_height / 2) {
+                            draw_y = sprite.loc_v - (sprite_height - scaled_reg_y);
+                        }
+                    }
                 } else {
                     // For non-tweened sprites, handle wrong score data
                     if (bitmap_member.info.width as i32
@@ -2776,12 +2830,30 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                         sprite_width = bitmap_member.info.width as i32;
                         sprite_height = bitmap_member.info.height as i32;
                     } else {
-                        if sprite.flip_h && reg_x != (sprite.width / 2) as i16 {
-                            draw_x = sprite.loc_h - (sprite.width - reg_x as i32);
-                        }
+                        // Scale registration point proportionally to sprite scaling
+                        if bitmap_member.info.width > 0 && bitmap_member.info.height > 0 {
+                            let scale_x = sprite.width as f64 / bitmap_member.info.width as f64;
+                            let scale_y = sprite.height as f64 / bitmap_member.info.height as f64;
+                            let scaled_reg_x = (reg_x as f64 * scale_x).round() as i32;
+                            let scaled_reg_y = (reg_y as f64 * scale_y).round() as i32;
+                            draw_x = sprite.loc_h - scaled_reg_x;
+                            draw_y = sprite.loc_v - scaled_reg_y;
 
-                        if sprite.flip_v && reg_y != (sprite.height / 2) as i16 {
-                            draw_y = sprite.loc_v - (sprite.height - reg_y as i32);
+                            // Handle flip adjustments with scaled reg point
+                            if sprite.flip_h && scaled_reg_x != (sprite.width / 2) {
+                                draw_x = sprite.loc_h - (sprite.width - scaled_reg_x);
+                            }
+                            if sprite.flip_v && scaled_reg_y != (sprite.height / 2) {
+                                draw_y = sprite.loc_v - (sprite.height - scaled_reg_y);
+                            }
+                        } else {
+                            if sprite.flip_h && reg_x != (sprite.width / 2) as i16 {
+                                draw_x = sprite.loc_h - (sprite.width - reg_x as i32);
+                            }
+
+                            if sprite.flip_v && reg_y != (sprite.height / 2) as i16 {
+                                draw_y = sprite.loc_v - (sprite.height - reg_y as i32);
+                            }
                         }
 
                         sprite_width = sprite.width;
@@ -2948,11 +3020,9 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             dst_rect
         }
 
-        CastMemberType::Shape(_shape_member) => {
-            // Use sprite dimensions for shapes.
-            // In Director, blank placeholder shapes have 1x1 dimensions in the score data,
-            // while the member may have larger dimensions (the "default" shape size).
-            // Using sprite dimensions ensures blank shapes render at 1x1 and are invisible.
+        CastMemberType::Shape(shape_member) => {
+            let reg_x = shape_member.shape_info.reg_point.0;
+            let reg_y = shape_member.shape_info.reg_point.1;
             IntRect::from(
                 sprite.loc_h,
                 sprite.loc_v,

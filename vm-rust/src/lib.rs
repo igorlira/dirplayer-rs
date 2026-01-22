@@ -20,7 +20,8 @@ use player::{
     cast_lib::{cast_member_ref, CastMemberRef},
     commands::{player_dispatch, PlayerVMCommand},
     datum_ref::DatumId,
-    init_player, reserve_player_ref, PLAYER_OPT,
+    eval::eval_lingo_command,
+    init_player, reserve_player_mut, reserve_player_ref, PLAYER_OPT,
 };
 
 #[wasm_bindgen]
@@ -59,51 +60,72 @@ pub async fn load_movie_file(path: String) {
     player_dispatch(PlayerVMCommand::LoadMovieFromFile(path));
 }
 
+// Player control commands bypass the command queue to allow stopping/resetting
+// while a breakpoint is active.
+
 #[wasm_bindgen]
 pub fn play() {
-    player_dispatch(PlayerVMCommand::Play);
+    reserve_player_mut(|player| {
+        player.play();
+    });
 }
 
 #[wasm_bindgen]
 pub fn stop() {
-    player_dispatch(PlayerVMCommand::Stop);
+    reserve_player_mut(|player| {
+        player.stop();
+    });
 }
 
 #[wasm_bindgen]
 pub fn reset() {
-    player_dispatch(PlayerVMCommand::Reset);
+    reserve_player_mut(|player| {
+        player.reset();
+    });
 }
+
+// Debug commands bypass the command queue to avoid deadlocks when a breakpoint
+// is hit during command processing. These operations are safe to call directly
+// because they only modify player state synchronously.
 
 #[wasm_bindgen]
 pub fn add_breakpoint(script_name: String, handler_name: String, bytecode_index: usize) {
-    player_dispatch(PlayerVMCommand::AddBreakpoint(
-        script_name,
-        handler_name,
-        bytecode_index,
-    ))
+    reserve_player_mut(|player| {
+        player.breakpoint_manager.add_breakpoint(
+            script_name,
+            handler_name,
+            bytecode_index,
+        );
+    });
 }
 
 #[wasm_bindgen]
 pub fn remove_breakpoint(script_name: String, handler_name: String, bytecode_index: usize) {
-    player_dispatch(PlayerVMCommand::RemoveBreakpoint(
-        script_name,
-        handler_name,
-        bytecode_index,
-    ))
+    reserve_player_mut(|player| {
+        player.breakpoint_manager.remove_breakpoint(
+            script_name,
+            handler_name,
+            bytecode_index,
+        );
+    });
 }
 
 #[wasm_bindgen]
 pub fn toggle_breakpoint(script_name: String, handler_name: String, bytecode_index: usize) {
-    player_dispatch(PlayerVMCommand::ToggleBreakpoint(
-        script_name,
-        handler_name,
-        bytecode_index,
-    ))
+    reserve_player_mut(|player| {
+        player.breakpoint_manager.toggle_breakpoint(
+            script_name,
+            handler_name,
+            bytecode_index,
+        );
+    });
 }
 
 #[wasm_bindgen]
 pub fn resume_breakpoint() {
-    player_dispatch(PlayerVMCommand::ResumeBreakpoint);
+    reserve_player_mut(|player| {
+        player.resume_breakpoint();
+    });
 }
 
 #[wasm_bindgen]
@@ -158,32 +180,54 @@ pub fn key_up(key: String, code: u16) {
     player_dispatch(PlayerVMCommand::KeyUp(key, code));
 }
 
+// Inspector commands bypass the command queue to allow inspecting state
+// while a breakpoint is active.
+
 #[wasm_bindgen]
 pub fn request_datum(datum_id: u32) {
-    player_dispatch(PlayerVMCommand::RequestDatum(datum_id as DatumId));
+    reserve_player_ref(|player| {
+        if let Some(datum_ref) = player.allocator.get_datum_ref(datum_id as DatumId) {
+            JsApi::dispatch_datum_snapshot(&datum_ref, player);
+        }
+    });
 }
 
 #[wasm_bindgen]
-pub fn request_script_instance_snapshot(script_instance_ref: u32) {
-    player_dispatch(PlayerVMCommand::RequestScriptInstanceSnapshot(
-        script_instance_ref,
-    ));
+pub fn request_script_instance_snapshot(script_instance_id: u32) {
+    reserve_player_ref(|player| {
+        JsApi::dispatch_script_instance_snapshot(
+            if script_instance_id > 0 {
+                Some(
+                    player
+                        .allocator
+                        .get_script_instance_ref(script_instance_id)
+                        .unwrap(),
+                )
+            } else {
+                None
+            },
+            player,
+        );
+    });
 }
 
 #[wasm_bindgen]
 pub fn subscribe_to_member(cast_lib: i32, cast_member: i32) {
-    player_dispatch(PlayerVMCommand::SubscribeToMember(cast_member_ref(
-        cast_lib,
-        cast_member,
-    )));
+    let member_ref = cast_member_ref(cast_lib, cast_member);
+    reserve_player_mut(|player| {
+        if !player.subscribed_member_refs.contains(&member_ref) {
+            player.subscribed_member_refs.push(member_ref.clone());
+        }
+    });
+    JsApi::dispatch_cast_member_changed(member_ref);
 }
 
 #[wasm_bindgen]
 pub fn unsubscribe_from_member(cast_lib: i32, cast_member: i32) {
-    player_dispatch(PlayerVMCommand::UnsubscribeFromMember(cast_member_ref(
-        cast_lib,
-        cast_member,
-    )));
+    let member_ref = cast_member_ref(cast_lib, cast_member);
+    reserve_player_mut(|player| {
+        player.subscribed_member_refs.retain(|x| x != &member_ref);
+    });
 }
 
 #[wasm_bindgen]
@@ -225,9 +269,20 @@ pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
     });
 }
 
+// Eval command bypasses the command queue to allow evaluating expressions
+// while a breakpoint is active (e.g., inspecting variables in the debugger).
+
 #[wasm_bindgen]
 pub fn eval_command(command: String) {
-    player_dispatch(PlayerVMCommand::EvalLingoCommand(command));
+    spawn_local(async move {
+        JsApi::dispatch_debug_message(&command);
+        let result = eval_lingo_command(command).await;
+        if let Err(err) = result {
+            reserve_player_ref(|player| {
+                JsApi::dispatch_script_error(player, &err);
+            });
+        }
+    });
 }
 
 /// Check if WebGL2 is supported in the browser

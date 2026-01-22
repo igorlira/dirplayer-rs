@@ -205,8 +205,6 @@ pub struct DirPlayer {
     pub is_in_frame_update: bool,
     pub is_dispatching_events: bool, // Prevents re-entrant event dispatch
     pub is_in_send_all_sprites: bool, // Prevents re-entrant sendAllSprites calls
-    pub is_in_endsprite: bool, // Prevents re-entrant endSprite dispatch
-    pub is_in_beginsprite: bool, // Prevents re-entrant beginSprite dispatch
     pub system_start_time: chrono::DateTime<chrono::Local>, // For ticks & milliSeconds (system uptime)
     pub handler_stack_depth: usize,
     pub in_frame_script: bool,
@@ -220,6 +218,10 @@ pub struct DirPlayer {
     pub is_getting_property_descriptions: bool,
     pub is_initializing_behavior_props: bool,
     pub last_initialized_frame: Option<u32>,
+    /// Current score context for sprite property access.
+    /// When a filmloop sprite's behavior runs, this is set to the filmloop's ScoreRef
+    /// so that sprite(n) accesses the filmloop's sprites, not the main stage.
+    pub current_score_context: ScoreRef,
 }
 
 impl DirPlayer {
@@ -306,8 +308,6 @@ impl DirPlayer {
             is_in_frame_update: false,
             is_dispatching_events: false,
             is_in_send_all_sprites: false,
-            is_in_endsprite: false,
-            is_in_beginsprite: false,
             system_start_time: now - chrono::Duration::days(8), // Simulated system start
             handler_stack_depth: 0,
             in_frame_script: false,
@@ -321,6 +321,7 @@ impl DirPlayer {
             is_getting_property_descriptions: false,
             is_initializing_behavior_props: false,
             last_initialized_frame: None,
+            current_score_context: ScoreRef::Stage,
         };
 
         result.reset();
@@ -362,12 +363,6 @@ impl DirPlayer {
             .await;
 
         self.bg_color = self.movie.stage_color_ref.clone();
-
-        // Debug: log stage color
-        web_sys::console::log_1(&format!(
-            "STAGE COLOR: dir_version={} stage_color_ref={:?} stage_color_rgb={:?}",
-            self.movie.dir_version, self.movie.stage_color_ref, self.movie.stage_color
-        ).into());
 
         // Load all fonts from cast members into the font manager
         log::debug!("Loading fonts from cast members...");
@@ -411,78 +406,6 @@ impl DirPlayer {
         self.is_playing = true;
         self.is_script_paused = false;
 
-        // Verify keyframes_cache state when Play is pressed
-        web_sys::console::log_1(&format!(
-            "▶️ PLAY pressed - Verifying keyframes_cache state"
-        ).into());
-
-        // Log main score keyframes
-        let main_keyframe_channels: Vec<u16> = self.movie.score.keyframes_cache.keys().cloned().collect();
-        web_sys::console::log_1(&format!(
-            "📊 Main Score keyframes_cache: {} channels with keyframes: {:?}",
-            main_keyframe_channels.len(),
-            main_keyframe_channels
-        ).into());
-
-        for (channel, keyframes) in &self.movie.score.keyframes_cache {
-            let mut props = Vec::new();
-            if keyframes.blend.is_some() { props.push("blend"); }
-            if keyframes.rotation.is_some() { props.push("rotation"); }
-            if keyframes.skew.is_some() { props.push("skew"); }
-            if keyframes.path.is_some() { props.push("path"); }
-            if keyframes.size.is_some() { props.push("size"); }
-            if keyframes.fore_color.is_some() { props.push("fore_color"); }
-            if keyframes.back_color.is_some() { props.push("back_color"); }
-            if !props.is_empty() {
-                web_sys::console::log_1(&format!(
-                    "  Channel {}: [{}]",
-                    channel,
-                    props.join(", ")
-                ).into());
-            }
-        }
-
-        // Log filmloop keyframes
-        let mut filmloop_count = 0;
-        for cast_lib in &self.movie.cast_manager.casts {
-            for member in cast_lib.members.values() {
-                if let CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                    filmloop_count += 1;
-                    let fl_keyframe_channels: Vec<u16> = film_loop.score.keyframes_cache.keys().cloned().collect();
-                    web_sys::console::log_1(&format!(
-                        "🎬 FilmLoop '{}' (member {}) keyframes_cache: {} channels with keyframes: {:?}",
-                        member.name,
-                        member.number,
-                        fl_keyframe_channels.len(),
-                        fl_keyframe_channels
-                    ).into());
-
-                    for (channel, keyframes) in &film_loop.score.keyframes_cache {
-                        let mut props = Vec::new();
-                        if keyframes.blend.is_some() { props.push("blend"); }
-                        if keyframes.rotation.is_some() { props.push("rotation"); }
-                        if keyframes.skew.is_some() { props.push("skew"); }
-                        if keyframes.path.is_some() { props.push("path"); }
-                        if keyframes.size.is_some() { props.push("size"); }
-                        if keyframes.fore_color.is_some() { props.push("fore_color"); }
-                        if keyframes.back_color.is_some() { props.push("back_color"); }
-                        if !props.is_empty() {
-                            web_sys::console::log_1(&format!(
-                                "    Channel {}: [{}]",
-                                channel,
-                                props.join(", ")
-                            ).into());
-                        }
-                    }
-                }
-            }
-        }
-
-        web_sys::console::log_1(&format!(
-            "✅ Total: Main score + {} filmloops verified",
-            filmloop_count
-        ).into());
-
         async_std::task::spawn_local(async move {
             // Relay prepareMovie to timeout targets
             dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
@@ -496,26 +419,10 @@ impl DirPlayer {
             player_wait_available().await;
             
             // Initialize sprites for the current frame
+            // begin_all_sprites handles both main score and film loops (with duplicate prevention)
             reserve_player_mut(|player| {
                 player.movie.frame_script_instance = None;
                 player.begin_all_sprites();
-
-                // Initialize filmloop scores for the first time
-                for channel in &player.movie.score.channels {
-                    if let Some(member_ref) = &channel.sprite.member {
-                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
-                            if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                                let current_frame = film_loop.current_frame;
-                                film_loop.score.begin_sprites(
-                                    ScoreRef::FilmLoop(member_ref.clone()), 
-                                    current_frame
-                                );
-                                film_loop.score.apply_tween_modifiers(current_frame);
-                            }
-                        }
-                    }
-                }
-
                 player.movie.score.apply_tween_modifiers(player.movie.current_frame);
             });
 
@@ -700,6 +607,11 @@ impl DirPlayer {
             }
         }
         
+        // Track which film loop members we've already processed to avoid calling
+        // begin_sprites multiple times for the same film loop (when multiple channels
+        // use the same film loop member)
+        let mut processed_film_loops: std::collections::HashSet<CastMemberRef> = std::collections::HashSet::new();
+
         for channel in self.movie.score.channels.iter() {
             let member_ref = channel.sprite.member.as_ref();
             let member_type = member_ref
@@ -709,6 +621,13 @@ impl DirPlayer {
             match member_type {
                 Some(CastMemberTypeId::FilmLoop) => {
                     let member_ref_clone = member_ref.unwrap().clone();
+
+                    // Skip if we've already processed this film loop member
+                    if processed_film_loops.contains(&member_ref_clone) {
+                        continue;
+                    }
+                    processed_film_loops.insert(member_ref_clone.clone());
+
                     let film_loop = self
                         .movie
                         .cast_manager
@@ -720,6 +639,7 @@ impl DirPlayer {
                     // Use filmloop's own current_frame instead of movie's current_frame
                     let current_frame = film_loop.current_frame;
                     film_loop.score.begin_sprites(ScoreRef::FilmLoop(member_ref_clone), current_frame);
+                    film_loop.score.apply_tween_modifiers(current_frame);
                 }
                 _ => {}
             }
@@ -2152,9 +2072,6 @@ pub async fn run_frame_loop() {
                     )
                 });
 
-            // Track if go() already handled sprites - we'll use this to skip sprite init later
-            let go_handled_sprites = has_frame_changed_in_go;
-
             player_wait_available().await;
 
             // Relay exitFrame to timeout targets
@@ -2166,14 +2083,14 @@ pub async fn run_frame_loop() {
                 if has_frame_changed_in_go && go_direction == 1 { // backwards
                     dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
                 } else {
-                    player_invoke_frame_and_movie_scripts(&"exitFrame".to_string(), &vec![]).await;
+                    if let Err(err) = player_invoke_frame_and_movie_scripts(&"exitFrame".to_string(), &vec![]).await {
+                        reserve_player_mut(|player| player.on_script_error(&err));
+                    }
                 }
 
                 player_wait_available().await;
 
                 if has_frame_changed_in_go {
-                    // go() already handled end_all_sprites(), begin_all_sprites(), etc.
-                    // Just reset flags and advance frame
                     reserve_player_mut(|player| {
                         player.has_frame_changed_in_go = false;
 
@@ -2181,39 +2098,31 @@ pub async fn run_frame_loop() {
                             player.go_direction = 0;
                         }
                     });
-
-                    // Skip end_all_sprites since go() already called it
-                    (is_playing, is_script_paused) = reserve_player_mut(|player| {
-                        player.advance_frame();
-
-                        player.has_player_frame_changed = false;
-                        (player.is_playing, player.is_script_paused)
-                    });
-                } else {
-                    let ended_sprite_nums = reserve_player_mut_async(|player| {
-                        Box::pin(async move {
-                            player.end_all_sprites().await
-                        })
-                    }).await;
-                    player_wait_available().await;
-                    reserve_player_mut(|player| {
-                        for (score_source, sprite_num) in ended_sprite_nums.iter() {
-                            // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
-                            if let Some(sprite) =
-                                get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
-                            {
-                                sprite.exited = true;
-                            }
-                        }
-                    });
-
-                    (is_playing, is_script_paused) = reserve_player_mut(|player| {
-                        player.advance_frame();
-
-                        player.has_player_frame_changed = false;
-                        (player.is_playing, player.is_script_paused)
-                    });
                 }
+
+                let ended_sprite_nums = reserve_player_mut_async(|player| {
+                    Box::pin(async move {
+                        player.end_all_sprites().await
+                    })
+                }).await;
+                player_wait_available().await;
+                reserve_player_mut(|player| {
+                    for (score_source, sprite_num) in ended_sprite_nums.iter() {
+                        // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
+                        if let Some(sprite) =
+                            get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
+                        {
+                            sprite.exited = true;
+                        }
+                    }
+                });
+
+                (is_playing, is_script_paused) = reserve_player_mut(|player| {
+                    player.advance_frame();
+
+                    player.has_player_frame_changed = false;
+                    (player.is_playing, player.is_script_paused)
+                });
             } else {
                 player_wait_available().await;
 
@@ -2258,108 +2167,105 @@ pub async fn run_frame_loop() {
 
             player_wait_available().await;
 
-            // Only do sprite initialization if go() didn't already handle it
-            if !go_handled_sprites {
+            reserve_player_mut(|player| {
+                player.movie.frame_script_instance = None;
+                player.begin_all_sprites();
+
+                player.movie.score.apply_tween_modifiers(player.movie.current_frame);
+            });
+
+            player_wait_available().await;
+
+            let changed_filmloops = reserve_player_mut_async(|player| {
+                Box::pin(async move {
+                    player.update_filmloop_frames().await
+                })
+            }).await;
+
+            if !changed_filmloops.is_empty() {
                 reserve_player_mut(|player| {
-                    player.movie.frame_script_instance = None;
-                    player.begin_all_sprites();
-
-                    player.movie.score.apply_tween_modifiers(player.movie.current_frame);
-                });
-
-                player_wait_available().await;
-
-                let changed_filmloops = reserve_player_mut_async(|player| {
-                    Box::pin(async move {
-                        player.update_filmloop_frames().await
-                    })
-                }).await;
-
-                if !changed_filmloops.is_empty() {
-                    reserve_player_mut(|player| {
-                        for (member_ref, _, new_frame) in changed_filmloops {
-                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                                if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                                    film_loop.score.apply_tween_modifiers(new_frame);
-                                }
-                            }
-                        }
-                    });
-                }
-
-                player_wait_available().await;
-
-                // Collect behaviors that need initialization
-                let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
-                    player
-                        .movie
-                        .score
-                        .channels
-                        .iter()
-                        .flat_map(|ch| {
-                            let sprite_num = ch.sprite.number as u32;
-                            ch.sprite.script_instance_list
-                                .iter()
-                                .filter(|behavior_ref| {
-                                    // ONLY initialize behaviors that haven't had beginSprite called
-                                    // This means they're NEW this frame
-                                    if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
-                                        !entry.script_instance.begin_sprite_called
-                                    } else {
-                                        false
-                                    }
-                                })
-                                .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
-                        })
-                        .collect()
-                });
-
-                // Initialize behavior default properties
-                for (behavior_ref, sprite_num) in behaviors_to_init {
-                    if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
-                        web_sys::console::warn_1(
-                            &format!("Failed to initialize behavior defaults: {}", err.message).into()
-                        );
-                    }
-                }
-
-                player_wait_available().await;
-
-                reserve_player_mut(|player| {
-                    player.is_in_frame_update = true;
-                });
-
-                let begin_sprite_nums = player_dispatch_event_beginsprite(
-                    &"beginSprite".to_string(),
-                    &vec![]
-                ).await;
-
-                player_wait_available().await;
-
-                reserve_player_mut(|player| {
-                    for sprite_list in begin_sprite_nums.iter() {
-                        for (score_source, sprite_num) in sprite_list.iter() {
-                            if let Some(sprite) = get_score_sprite_mut(
-                                &mut player.movie,
-                                score_source,
-                                *sprite_num as i16,
-                            ) {
-                                for script_ref in &sprite.script_instance_list {
-                                    if let Some(entry) =
-                                        player.allocator.script_instances.get_mut(&script_ref.id())
-                                    {
-                                        entry.script_instance.begin_sprite_called = true;
-                                    }
-                                }
+                    for (member_ref, _, new_frame) in changed_filmloops {
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                film_loop.score.apply_tween_modifiers(new_frame);
                             }
                         }
                     }
-                });
-
-                reserve_player_mut(|player| {
-                    player.is_in_frame_update = false;
                 });
             }
+
+            player_wait_available().await;
+
+            // Collect behaviors that need initialization
+            let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
+                player
+                    .movie
+                    .score
+                    .channels
+                    .iter()
+                    .flat_map(|ch| {
+                        let sprite_num = ch.sprite.number as u32;
+                        ch.sprite.script_instance_list
+                            .iter()
+                            .filter(|behavior_ref| {
+                                // ONLY initialize behaviors that haven't had beginSprite called
+                                // This means they're NEW this frame
+                                if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
+                                    !entry.script_instance.begin_sprite_called
+                                } else {
+                                    false
+                                }
+                            })
+                            .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
+                    })
+                    .collect()
+            });
+            
+            // Initialize behavior default properties
+            for (behavior_ref, sprite_num) in behaviors_to_init {
+                if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
+                    web_sys::console::warn_1(
+                        &format!("Failed to initialize behavior defaults: {}", err.message).into()
+                    );
+                }
+            }
+
+            player_wait_available().await;
+
+            reserve_player_mut(|player| {
+                player.is_in_frame_update = true;
+            });
+
+            let begin_sprite_nums = player_dispatch_event_beginsprite(
+                &"beginSprite".to_string(),
+                &vec![]
+            ).await;
+
+            player_wait_available().await;
+
+            reserve_player_mut(|player| {
+                for sprite_list in begin_sprite_nums.iter() {
+                    for (score_source, sprite_num) in sprite_list.iter() {
+                        if let Some(sprite) = get_score_sprite_mut(
+                            &mut player.movie,
+                            score_source,
+                            *sprite_num as i16,
+                        ) {
+                            for script_ref in &sprite.script_instance_list {
+                                if let Some(entry) =
+                                    player.allocator.script_instances.get_mut(&script_ref.id())
+                                {
+                                    entry.script_instance.begin_sprite_called = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            reserve_player_mut(|player| {
+                player.is_in_frame_update = false;
+            });
 
             // Update last frame time
             last_frame_time = now;

@@ -810,7 +810,7 @@ pub struct ScoreChunk {
     pub frame_intervals: Vec<(FrameIntervalPrimary, Option<FrameIntervalSecondary>)>,
     pub frame_data: ScoreFrameData,
     /// Sprite detail offsets for D6+ behavior attachment
-    /// Key is spriteListIdx, value is the sprite detail info with behaviors
+    /// Key is sprite_list_idx, value is the sprite detail info with behaviors
     pub sprite_details: std::collections::HashMap<u32, SpriteDetailInfo>,
 }
 
@@ -921,7 +921,6 @@ impl ScoreChunk {
 
     /// Parse sprite detail offsets from Entry[0] (D6+)
     ///
-    /// Based on ScummVM's loadFrames():
     /// - Bytes 0-3: framesStreamSize
     /// - Bytes 4-7: version
     /// - Bytes 8-11: listStart (position of sprite detail info)
@@ -941,14 +940,14 @@ impl ScoreChunk {
 
         // Log entry count for diagnosis
         debug!(
-            "🔎 parse_sprite_details: {} entries, entry0 size: {}",
+            "parse_sprite_details: {} entries, entry0 size: {}",
             entries.len(),
             if entries.is_empty() { 0 } else { entries[0].len() }
         );
 
         // Entry[0] contains the frames stream with sprite detail offsets embedded
         if entries.is_empty() || entries[0].len() < 12 {
-            debug!("   → Entry[0] missing or too small");
+            debug!("   Entry[0] missing or too small");
             return details;
         }
 
@@ -973,19 +972,19 @@ impl ScoreChunk {
         };
 
         debug!(
-            "   → framesStreamSize={} version={} listStart={}",
+            "   framesStreamSize={} version={} listStart={}",
             frames_stream_size, version, list_start
         );
 
         // listStart of 0 means no sprite details present
         if list_start == 0 {
-            debug!("   → listStart=0, no sprite details");
+            debug!("   listStart=0, no sprite details");
             return details;
         }
 
         // Validate listStart - it should be within entry0 bounds
         // Note: listStart is an ABSOLUTE position in the stream. It can point anywhere
-        // within Entry[0], including inside the frame data region. ScummVM does the same.
+        // within Entry[0], including inside the frame data region.
         if list_start >= entry0_len {
             return details;
         }
@@ -1035,8 +1034,7 @@ impl ScoreChunk {
             frames_stream_size, version, list_start, num_entries, list_size, max_data_len, frame_data_offset
         );
 
-        // Read all offsets and convert to absolute positions (like ScummVM does)
-        // ScummVM: _spriteDetailOffsets[i] = _frameDataOffset + off
+        // Read all offsets and convert to absolute positions
         let mut absolute_offsets: Vec<usize> = Vec::with_capacity(num_entries);
         for i in 0..num_entries {
             match reader.read_u32() {
@@ -1071,13 +1069,11 @@ impl ScoreChunk {
             );
         }
 
-        // Now parse sprite details using the ScummVM mapping:
-        // For a sprite with spriteListIdx = N:
+        // For a sprite with sprite_list_idx = N:
         //   - Behaviors are at getSpriteDetailsStream(N + 1), i.e., absolute_offsets[N + 1]
         //
-        // So we iterate through spriteListIdx values (0, 1, 2, ...) and look up behaviors
-        // at index spriteListIdx + 1
-
+        // So we iterate through sprite_list_idx values (0, 1, 2, ...) and look up behaviors
+        // at index sprite_list_idx + 1
         let mut behavior_count = 0;
         for sprite_list_idx in 0..num_entries.saturating_sub(1) {
             // Behavior stream is at index sprite_list_idx + 1
@@ -1114,7 +1110,7 @@ impl ScoreChunk {
 
             let mut info = SpriteDetailInfo::default();
 
-            // BehaviorElement format (from ScummVM spriteinfo.h):
+            // BehaviorElement format
             //   castLib (u16), member (u16), initializerIndex (u32)
             while behavior_reader.pos + 8 <= behavior_size {
                 let cast_lib = match behavior_reader.read_u16() {
@@ -1157,7 +1153,7 @@ impl ScoreChunk {
                         })
                         .collect();
                     debug!(
-                        "   spriteListIdx {}: {} behaviors [{}] (stream at {}..{})",
+                        "   sprite_list_idx {}: {} behaviors [{}] (stream at {}..{})",
                         sprite_list_idx, info.behaviors.len(),
                         behavior_strs.join(", "),
                         behavior_start, behavior_end
@@ -1189,7 +1185,16 @@ impl ScoreChunk {
         let mut results = vec![];
         let mut i = 2; // Start at 2, skip entries 0 and 1
 
-        debug!("🔍 Starting to analyze {} entries", entries.len());
+        debug!("Starting to analyze {} entries", entries.len());
+
+        // Log all entry sizes for debugging filmloop behavior issues
+        if entries.len() > 2 && entries.len() < 50 {
+            let sizes: Vec<usize> = entries.iter().map(|e| e.len()).collect();
+            debug!(
+                "analyze_behavior_attachment_entries: {} entries, sizes: {:?}",
+                entries.len(), sizes
+            );
+        }
 
         // Log all entry sizes for debugging filmloop behavior issues
         if entries.len() > 2 && entries.len() < 50 {
@@ -1225,7 +1230,7 @@ impl ScoreChunk {
                         let is_main_movie_digit_channel = i > 3500 && primary.channel_index >= 55 && primary.channel_index <= 100;
                         if is_main_movie_digit_channel {
                             debug!(
-                                "🎯 Primary entry {}: channel={} frames={}-{}",
+                                "Primary entry {}: channel={} frames={}-{}",
                                 i, primary.channel_index, primary.start_frame, primary.end_frame
                             );
 
@@ -1353,7 +1358,7 @@ impl ScoreChunk {
 
                         // Log behaviors found
                         debug!(
-                            "📊 Channel {} has {} behaviors",
+                            "Channel {} has {} behaviors",
                             primary.channel_index, secondaries.len()
                         );
                         for sec in &secondaries {

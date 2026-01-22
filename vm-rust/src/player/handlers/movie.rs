@@ -413,9 +413,9 @@ impl MovieHandlers {
         // Check for re-entrant sendAllSprites call
         let skip = reserve_player_mut(|player| {
             if player.is_in_send_all_sprites {
-                web_sys::console::warn_1(&format!(
+                warn!(
                     "Blocking re-entrant sendAllSprites call to prevent infinite recursion"
-                ).into());
+                );
                 return true;
             }
             player.is_in_send_all_sprites = true;

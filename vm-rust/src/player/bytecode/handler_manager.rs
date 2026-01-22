@@ -318,23 +318,31 @@ pub async fn player_execute_bytecode<'a>(
         );
 
         let should_trace = player.movie.trace_script;
-
-        // Always record to lightweight execution history (minimal overhead - just copying integers)
-        record_execution(
-            num::ToPrimitive::to_u16(&bytecode.opcode).unwrap_or(0),
-            bytecode.pos as u32,
-            bytecode.obj as i32,
-            handler.name_id as u32,
-            script.member_ref.cast_lib as u32,
-            script.member_ref.cast_member,
-        );
-
-        // Only generate verbose trace text when tracing is enabled
         let bytecode_text = if should_trace {
-            // Full format for trace output
+            let cast = player.movie.cast_manager
+                .get_cast(script.member_ref.cast_lib as u32)
+                .unwrap();
+            let lctx = cast.lctx.as_ref().unwrap();
+            let multiplier = crate::director::file::get_variable_multiplier(
+                cast.capital_x,
+                cast.dir_version
+            );
+
+            // Generate annotation using expression tracker
+            let annotation = EXPRESSION_TRACKER.with(|tracker| {
+                let mut tracker = tracker.borrow_mut();
+                
+                // Get literals from script
+                let script = unsafe { &*ctx.script_ptr };
+                let literals = &script.chunk.literals;
+                
+                tracker.process_bytecode(bytecode, lctx, handler, multiplier, literals)
+            });
+
+            // Format like LASM
             let op_name = crate::director::lingo::constants::get_opcode_name(bytecode.opcode);
             let mut text = format!("[{:3}] {}", bytecode.pos, op_name);
-
+            
             // Add operand for some opcodes
             match bytecode.opcode {
                 OpCode::SetLocal | OpCode::GetLocal | OpCode::SetParam | OpCode::GetParam => {
@@ -345,7 +353,7 @@ pub async fn player_execute_bytecode<'a>(
                 }
                 _ => {}
             }
-
+            
             // Pad with dots
             let current_len = text.len();
             let target_len = 42;
@@ -353,7 +361,13 @@ pub async fn player_execute_bytecode<'a>(
                 text.push(' ');
                 text.push_str(&".".repeat(target_len - current_len));
             }
-
+           
+            // Add annotation
+            if !annotation.is_empty() {
+                text.push(' ');
+                text.push_str(&annotation);
+            }
+            
             text
         } else {
             String::new()
@@ -368,7 +382,7 @@ pub async fn player_execute_bytecode<'a>(
             let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
             player.movie.trace_log_file.clone()
         };
-
+        
         let msg = format!("--> {}", bytecode_text);
         trace_output(&msg, &trace_file);
     }

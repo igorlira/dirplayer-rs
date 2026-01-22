@@ -310,10 +310,10 @@ impl From<&[u8]> for BitmapInfo {
 
         // Read flags byte
         if let Ok(flags) = reader.read_u8() {
-            // ScummVM: kFlagCenterRegPointD4 = 0x01 (bit 0) for D4
-            // ScummVM: kFlagCenterRegPoint = 0x20 (bit 5) for D6+
+            // 0x01 (bit 0) for D4
+            // 0x20 (bit 5) for D6+
             center_reg_point = (flags & 0x20) != 0;   // Bit 5: centerRegPoint (D6+ format)
-            use_alpha = (flags & 0x10) != 0;           // Bit 4
+            use_alpha = (flags & 0x10) != 0;          // Bit 4
             trim_white_space = (flags & 0x80) == 0;   // Bit 7 (inverted!)
         }
 

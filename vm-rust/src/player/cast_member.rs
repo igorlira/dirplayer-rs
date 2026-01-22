@@ -203,7 +203,6 @@ pub struct FilmLoopMember {
     pub current_frame: u32,
     /// The bounding rectangle encompassing all sprites in the filmloop.
     /// Used to translate sprite coordinates when rendering.
-    /// Similar to ScummVM's _initialRect.
     pub initial_rect: super::geometry::IntRect,
 }
 
@@ -568,7 +567,6 @@ impl CastMember {
 
     /// Compute the initial bounding rectangle for a filmloop by finding the
     /// bounding box of all sprites across all frames.
-    /// This is similar to ScummVM's _initialRect calculation.
     ///
     /// The coordinate system for filmloop sprites is relative to this initial_rect.
     /// When rendering, sprite positions are translated by subtracting initial_rect.left/top.
@@ -598,7 +596,6 @@ impl CastMember {
 
             // The sprite's position (pos_x, pos_y) is its loc (registration point location).
             // In Director, loc is where the reg point is placed.
-            // ScummVM subtracts the cast member's registration offset to get top-left.
             // Since we don't have access to cast members here, we assume CENTER registration
             // which is the default for bitmaps. This means:
             //   sprite_left = pos_x - width/2
@@ -1328,6 +1325,14 @@ impl CastMember {
                     )
                 };
 
+                debug!(
+                        "BitmapMember created → name: {} palette_id {} useAlpha {} trimWhiteSpace {}",
+                        chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                        bitmap_info.palette_id,
+                        bitmap_info.use_alpha,
+                        bitmap_info.trim_white_space
+                    );
+
                 CastMemberType::Bitmap(BitmapMember {
                     image_ref: new_bitmap_ref,
                     reg_point: (bitmap_info.reg_x, bitmap_info.reg_y),
@@ -1375,7 +1380,6 @@ impl CastMember {
                 score.load_from_score_chunk(score_chunk);
 
                 // Compute initial_rect by finding the bounding box of all sprites
-                // Similar to ScummVM's _initialRect calculation
                 let initial_rect = Self::compute_filmloop_initial_rect(
                     &score_chunk.frame_data.frame_channel_data,
                     film_loop_info.reg_point,

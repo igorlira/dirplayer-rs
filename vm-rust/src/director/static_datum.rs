@@ -184,5 +184,19 @@ fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocator) 
             allocator.alloc_datum(Datum::Rect(arr)).unwrap()
         }
         StaticDatum::Void => DatumRef::Void,
+        _ => {
+            web_sys::console::log_1(&format!("⚠️ Unhandled StaticDatum type, using Void").into());
+            DatumRef::Void
+        }
+        StaticDatum::IntRect(left, top, right, bottom) => {
+            let arr = [
+                allocator.alloc_datum(Datum::Int(*left)).unwrap(),
+                allocator.alloc_datum(Datum::Int(*top)).unwrap(),
+                allocator.alloc_datum(Datum::Int(*right)).unwrap(),
+                allocator.alloc_datum(Datum::Int(*bottom)).unwrap(),
+            ];
+            allocator.alloc_datum(Datum::Rect(arr)).unwrap()
+        }
+        StaticDatum::Void => DatumRef::Void,
     }
 }

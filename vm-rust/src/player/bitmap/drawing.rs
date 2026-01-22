@@ -155,15 +155,24 @@ fn blend_pixel(
             }
         }
         // 33 = Add Pin (Director-style additive, pinned to 255)
-        // Ignores bitmap alpha completely
+        // bg_color pixels are transparent
+        // Standard additive: add source RGB to destination
         33 => {
-            let alpha = blend_alpha; // ONLY use blend %, not src_alpha
+            if src == bg_color {
+                dst
+            } else {
+                // Standard additive: add source to destination
+                let r = ((dst.0 as u32 + src.0 as u32).min(255)) as u8;
+                let g = ((dst.1 as u32 + src.1 as u32).min(255)) as u8;
+                let b = ((dst.2 as u32 + src.2 as u32).min(255)) as u8;
 
-            let r = (dst.0 as f32 + src.0 as f32 * alpha).min(255.0);
-            let g = (dst.1 as f32 + src.1 as f32 * alpha).min(255.0);
-            let b = (dst.2 as f32 + src.2 as f32 * alpha).min(255.0);
-
-            (r as u8, g as u8, b as u8)
+                // Apply blend factor
+                if blend_alpha >= 0.999 {
+                    (r, g, b)
+                } else {
+                    blend_color_alpha(dst, (r, g, b), blend_alpha)
+                }
+            }
         }
         // 36 = Background Transparent
         // If the source equals the bg_color, skip; otherwise blend normally.
@@ -1165,6 +1174,7 @@ impl Bitmap {
                     } else {
                         (r, g, b) // Keep original color for other pixels
                     };
+
                     let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
@@ -1200,9 +1210,12 @@ impl Bitmap {
                     continue;
                 }
 
-                if let Some(mask) = mask_image {
-                    if !mask.get_bit(sx, sy) {
-                        continue;
+                // Skip mask check for ink 33 - it handles transparency via bgColor check
+                if ink != 33 {
+                    if let Some(mask) = mask_image {
+                        if !mask.get_bit(sx, sy) {
+                            continue;
+                        }
                     }
                 }
 
