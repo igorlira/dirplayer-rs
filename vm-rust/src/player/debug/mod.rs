@@ -4,6 +4,29 @@ use crate::js_api::JsApi;
 
 use super::{cast_lib::CastMemberRef, script::ScriptHandlerRef};
 
+/// Represents the current step debugging mode
+#[derive(Clone, PartialEq, Debug)]
+pub enum StepMode {
+    /// No step debugging active - normal execution
+    None,
+    /// Step Into: Stop at the next bytecode instruction (enters function calls)
+    Into,
+    /// Step Into Line: Stop at the next line (enters function calls)
+    IntoLine { skip_bytecode_indices: Vec<usize> },
+    /// Step Over: Stop at the next bytecode in the current scope (skips function calls)
+    Over,
+    /// Step Over Line: Stop at the next line (not in skip_bytecode_indices) in the current scope
+    OverLine { skip_bytecode_indices: Vec<usize> },
+    /// Step Out: Stop when returning from the current scope
+    Out,
+}
+
+impl Default for StepMode {
+    fn default() -> Self {
+        StepMode::None
+    }
+}
+
 #[derive(Clone)]
 pub struct Breakpoint {
     pub script_name: String,
