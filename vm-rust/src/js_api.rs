@@ -80,6 +80,7 @@ pub struct OnScriptErrorCallbackData {
     pub message: String,
     pub script_member_ref: Option<JsBridgeMemberRef>,
     pub handler_name: Option<String>,
+    pub is_paused: bool,
 }
 
 impl Into<js_sys::Map> for OnScriptErrorCallbackData {
@@ -96,6 +97,7 @@ impl Into<js_sys::Map> for OnScriptErrorCallbackData {
         } else {
             map.str_set("handler_name", &JsValue::NULL);
         }
+        map.str_set("is_paused", &JsValue::from_bool(self.is_paused));
         map
     }
 }
@@ -846,6 +848,10 @@ impl JsApi {
     }
 
     pub fn dispatch_script_error(player: &DirPlayer, err: &ScriptError) {
+        let is_paused = player.current_breakpoint.as_ref()
+            .map(|bp| bp.error.is_some())
+            .unwrap_or(false);
+
         let data: js_sys::Map =
             if let Some(current_scope) = player.scopes.get(player.current_scope_ref()) {
                 let cast_lib = player
@@ -865,6 +871,7 @@ impl JsApi {
                     message: err.message.to_owned(),
                     script_member_ref: Some(current_scope.script_ref.to_js()),
                     handler_name: Some(current_handler_name.to_owned()),
+                    is_paused,
                 }
                 .into()
             } else {
@@ -872,6 +879,7 @@ impl JsApi {
                     message: err.message.to_owned(),
                     script_member_ref: None,
                     handler_name: None,
+                    is_paused,
                 }
                 .into()
             };
