@@ -1,8 +1,9 @@
 import classNames from "classnames";
 import { ICastMemberIdentifier, ILingoLine, ILingoSpan, IScriptMemberSnapshot, LingoTokenType, MemberSnapshot } from "../../vm";
 import styles from "./styles.module.css";
-import { useAppSelector } from "../../store/hooks";
+import { useAppDispatch, useAppSelector } from "../../store/hooks";
 import { selectBreakpoints } from "../../store/vmSlice";
+import { selectScriptViewMode, scriptViewModeChanged, TScriptViewMode } from "../../store/uiSlice";
 import { toggle_breakpoint } from "vm-rust";
 import { useState } from "react";
 import { ICastMemberRef } from "dirplayer-js-api";
@@ -37,8 +38,6 @@ interface IScriptMemberPreviewProps {
   backgroundScopes: [string, number, ICastMemberRef][];
   theme?: 'light' | 'dark';
 }
-
-type ViewMode = 'assembly' | 'lingo';
 
 type BytecodeLineProps = {
   lineNumber: number;
@@ -145,11 +144,12 @@ export default function ScriptMemberPreview({
   backgroundScopes,
   theme = 'light',
 }: IScriptMemberPreviewProps) {
+  const dispatch = useAppDispatch();
   const breakpoints = useAppSelector((state) => selectBreakpoints(state.vm));
+  const viewMode = useAppSelector((state) => selectScriptViewMode(state.ui));
   const [expandedHandlerNames, setExpandedHandlerNames] = useState<string[]>(
     []
   );
-  const [viewMode, setViewMode] = useState<ViewMode>('lingo');
 
   const onToggleHandler = (handlerName: string) => {
     if (expandedHandlerNames.includes(handlerName)) {
@@ -159,6 +159,10 @@ export default function ScriptMemberPreview({
     } else {
       setExpandedHandlerNames([...expandedHandlerNames, handlerName]);
     }
+  };
+
+  const setViewMode = (mode: TScriptViewMode) => {
+    dispatch(scriptViewModeChanged(mode));
   };
 
   return (

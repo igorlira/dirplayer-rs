@@ -96,7 +96,7 @@ use self::{
     cast_lib::CastMemberRef,
     cast_manager::CastManager,
     commands::{run_command_loop, PlayerVMCommand},
-    debug::{Breakpoint, BreakpointContext, BreakpointManager},
+    debug::{Breakpoint, BreakpointContext, BreakpointManager, StepMode},
     events::{
         player_dispatch_global_event, player_invoke_global_event, player_unwrap_result,
         player_wait_available, run_event_loop, PlayerVMEvent,
@@ -166,6 +166,8 @@ pub struct DirPlayer {
     pub bytecode_handler_manager: StaticBytecodeHandlerManager,
     pub breakpoint_manager: BreakpointManager,
     pub current_breakpoint: Option<BreakpointContext>,
+    pub step_mode: StepMode,
+    pub step_scope_depth: u32,
     pub stage_size: (u32, u32),
     pub bitmap_manager: bitmap::manager::BitmapManager,
     pub cursor: CursorRef,
@@ -272,6 +274,8 @@ impl DirPlayer {
             bytecode_handler_manager: StaticBytecodeHandlerManager {},
             breakpoint_manager: BreakpointManager::new(),
             current_breakpoint: None,
+            step_mode: StepMode::None,
+            step_scope_depth: 0,
             stage_size: (100, 100),
             bitmap_manager: bitmap::manager::BitmapManager::new(),
             cursor: CursorRef::System(0),
@@ -732,6 +736,57 @@ impl DirPlayer {
     }
 
     pub fn resume_breakpoint(&mut self) {
+        self.step_mode = StepMode::None;
+        let breakpoint = self.current_breakpoint.take();
+
+        if let Some(breakpoint) = breakpoint {
+            spawn_local(breakpoint.completer.complete(()));
+        }
+    }
+
+    pub fn step_into(&mut self) {
+        self.step_mode = StepMode::Into;
+        self.step_scope_depth = self.scope_count;
+        let breakpoint = self.current_breakpoint.take();
+
+        if let Some(breakpoint) = breakpoint {
+            spawn_local(breakpoint.completer.complete(()));
+        }
+    }
+
+    pub fn step_over(&mut self) {
+        self.step_mode = StepMode::Over;
+        self.step_scope_depth = self.scope_count;
+        let breakpoint = self.current_breakpoint.take();
+
+        if let Some(breakpoint) = breakpoint {
+            spawn_local(breakpoint.completer.complete(()));
+        }
+    }
+
+    pub fn step_out(&mut self) {
+        self.step_mode = StepMode::Out;
+        self.step_scope_depth = self.scope_count;
+        let breakpoint = self.current_breakpoint.take();
+
+        if let Some(breakpoint) = breakpoint {
+            spawn_local(breakpoint.completer.complete(()));
+        }
+    }
+
+    pub fn step_over_line(&mut self, skip_bytecode_indices: Vec<usize>) {
+        self.step_mode = StepMode::OverLine { skip_bytecode_indices };
+        self.step_scope_depth = self.scope_count;
+        let breakpoint = self.current_breakpoint.take();
+
+        if let Some(breakpoint) = breakpoint {
+            spawn_local(breakpoint.completer.complete(()));
+        }
+    }
+
+    pub fn step_into_line(&mut self, skip_bytecode_indices: Vec<usize>) {
+        self.step_mode = StepMode::IntoLine { skip_bytecode_indices };
+        self.step_scope_depth = self.scope_count;
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
@@ -1778,6 +1833,7 @@ pub async fn player_call_script_handler_raw_args(
         let bytecode_index =
             reserve_player_ref(|player| player.scopes.get(scope_ref).unwrap().bytecode_index);
         // let profile_token = start_profiling(get_opcode_name(&bytecode.opcode));
+        // Check for explicit breakpoints first
         if let Some(breakpoint) = reserve_player_ref(|player| {
             player
                 .breakpoint_manager
@@ -1788,6 +1844,41 @@ pub async fn player_call_script_handler_raw_args(
                 )
                 .cloned()
         }) {
+            player_trigger_breakpoint(
+                breakpoint,
+                script_member_ref.to_owned(),
+                handler_ref.to_owned(),
+                bytecode_index,
+            )
+            .await;
+        }
+
+        // Check for step mode conditions (step into/over/out)
+        let should_step_break = reserve_player_ref(|player| {
+            match &player.step_mode {
+                StepMode::None => false,
+                StepMode::Into => true, // Always stop on step into
+                StepMode::IntoLine { skip_bytecode_indices } => {
+                    // Stop if bytecode index is not in skip list (follows into function calls)
+                    !skip_bytecode_indices.contains(&bytecode_index)
+                }
+                StepMode::Over => player.scope_count <= player.step_scope_depth, // Stop at same or higher scope
+                StepMode::OverLine { skip_bytecode_indices } => {
+                    // Stop if at same or higher scope AND bytecode index is not in skip list
+                    player.scope_count <= player.step_scope_depth
+                        && !skip_bytecode_indices.contains(&bytecode_index)
+                }
+                StepMode::Out => player.scope_count < player.step_scope_depth, // Stop when returned to higher scope
+            }
+        });
+
+        if should_step_break {
+            // Create a synthetic breakpoint for the step
+            let breakpoint = Breakpoint {
+                script_name: unsafe { (&*script_ptr).name.clone() },
+                handler_name: handler_name.clone(),
+                bytecode_index,
+            };
             player_trigger_breakpoint(
                 breakpoint,
                 script_member_ref.to_owned(),

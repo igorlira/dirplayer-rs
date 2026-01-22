@@ -1,7 +1,8 @@
 .iconButton {
   width: 32px;
   height: 32px;
-  background-color: #ccc;
+  border: 1px solid #ccc;
+  color: #778;
   border-radius: 5px;
   cursor: pointer;
   text-align: center;

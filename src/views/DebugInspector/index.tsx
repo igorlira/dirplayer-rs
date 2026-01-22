@@ -1,20 +1,26 @@
 import { useEffect, useState } from "react";
 import { useAppDispatch, useAppSelector } from "../../store/hooks";
-import { selectGlobals, selectScopes } from "../../store/vmSlice";
+import { selectGlobals, selectScopes, scopeListChanged } from "../../store/vmSlice";
 import styles from "./styles.module.css";
-import IconButton from "../../components/IconButton";
-import { faPlay, faWarning } from "@fortawesome/free-solid-svg-icons";
+import IconButton, { ReactIconButton } from "../../components/IconButton";
+import { faWarning } from "@fortawesome/free-solid-svg-icons";
 import {
   resume_breakpoint,
   request_datum,
   request_script_instance_snapshot,
   trigger_alert_hook,
+  step_into,
+  step_over,
+  step_out,
+  step_over_line,
+  step_into_line,
 } from "vm-rust";
 import ListView from "../../components/ListView";
-import { onMemberSelected } from "../../store/uiSlice";
-import { DatumRef, ScriptInstanceId } from "../../vm";
+import { onMemberSelected, selectScriptViewMode } from "../../store/uiSlice";
+import { DatumRef, IScriptMemberSnapshot, ScriptInstanceId } from "../../vm";
 import { Layout, TabNode } from "flexlayout-react";
 import { debugLayoutModel } from "./layout";
+import { VscDebugStepOver, VscDebugStepInto, VscDebugStepOut, VscDebugContinue } from "react-icons/vsc";
 
 interface DebugInspectorProps {}
 
@@ -150,16 +156,163 @@ function DatumDebugTable({ datums, depth }: DatumDebugTableProps) {
 }
 
 function DebugControls() {
+  const dispatch = useAppDispatch();
+  const scopes = useAppSelector((state) => selectScopes(state.vm));
+  const castSnapshots = useAppSelector((state) => state.vm.castSnapshots);
+  const viewMode = useAppSelector((state) => selectScriptViewMode(state.ui));
+  const isPaused = scopes.length > 0;
+
+  const handleStepOver = () => {
+    if (!isPaused) return;
+
+    // In assembly mode, use instruction-level step over
+    if (viewMode === 'assembly') {
+      step_over();
+      return;
+    }
+
+    // In lingo mode, find the bytecode indices for the current line and skip them
+    const currentScope = scopes[scopes.length - 1];
+    if (!currentScope) {
+      step_over();
+      return;
+    }
+
+    const [castLib, memberNum] = currentScope.script_member_ref;
+    const castSnapshot = castSnapshots[castLib];
+    const memberRecord = castSnapshot?.members?.[memberNum];
+    const memberSnapshot = memberRecord?.snapshot as IScriptMemberSnapshot | undefined;
+
+    if (!memberSnapshot || memberSnapshot.type !== 'script') {
+      step_over();
+      return;
+    }
+
+    const handler = memberSnapshot.script.handlers.find(
+      (h) => h.name === currentScope.handler_name
+    );
+
+    if (!handler?.lingo || !handler.bytecodeToLine) {
+      step_over();
+      return;
+    }
+
+    // Find which lingo line the current bytecode is on
+    const currentLineIndex = handler.bytecodeToLine[currentScope.bytecode_index];
+    if (currentLineIndex === undefined) {
+      step_over();
+      return;
+    }
+
+    // Get all bytecode indices for this line
+    const currentLine = handler.lingo[currentLineIndex];
+    if (!currentLine) {
+      step_over();
+      return;
+    }
+
+    // Call step_over_line with the bytecode indices to skip (as Uint32Array for WASM)
+    step_over_line(new Uint32Array(currentLine.bytecodeIndices));
+  };
+
+  const handleStepInto = () => {
+    if (!isPaused) return;
+
+    // In assembly mode, use instruction-level step into
+    if (viewMode === 'assembly') {
+      step_into();
+      return;
+    }
+
+    // In lingo mode, find the bytecode indices for the current line and skip them
+    const currentScope = scopes[scopes.length - 1];
+    if (!currentScope) {
+      step_into();
+      return;
+    }
+
+    const [castLib, memberNum] = currentScope.script_member_ref;
+    const castSnapshot = castSnapshots[castLib];
+    const memberRecord = castSnapshot?.members?.[memberNum];
+    const memberSnapshot = memberRecord?.snapshot as IScriptMemberSnapshot | undefined;
+
+    if (!memberSnapshot || memberSnapshot.type !== 'script') {
+      step_into();
+      return;
+    }
+
+    const handler = memberSnapshot.script.handlers.find(
+      (h) => h.name === currentScope.handler_name
+    );
+
+    if (!handler?.lingo || !handler.bytecodeToLine) {
+      step_into();
+      return;
+    }
+
+    // Find which lingo line the current bytecode is on
+    const currentLineIndex = handler.bytecodeToLine[currentScope.bytecode_index];
+    if (currentLineIndex === undefined) {
+      step_into();
+      return;
+    }
+
+    // Get all bytecode indices for this line
+    const currentLine = handler.lingo[currentLineIndex];
+    if (!currentLine) {
+      step_into();
+      return;
+    }
+
+    // Call step_into_line with the bytecode indices to skip (as Uint32Array for WASM)
+    step_into_line(new Uint32Array(currentLine.bytecodeIndices));
+  };
+
   return (
     <div className={styles.buttonContainer}>
-      <IconButton
-        icon={faPlay}
+      <ReactIconButton
+        icon={VscDebugContinue}
+        title="Resume"
+        disabled={!isPaused}
         onClick={() => {
+          // Clear the scope list when resuming to avoid showing stale stack trace
+          dispatch(scopeListChanged([]));
           resume_breakpoint();
+        }}
+      />
+      <ReactIconButton
+        icon={VscDebugStepInto}
+        title="Step Into"
+        disabled={!isPaused}
+        onClick={() => {
+          // Clear the scope list when resuming to avoid showing stale stack trace
+          dispatch(scopeListChanged([]));
+          handleStepInto();
+        }}
+      />
+      <ReactIconButton
+        icon={VscDebugStepOver}
+        title="Step Over"
+        disabled={!isPaused}
+        onClick={() => {
+          // Clear the scope list when resuming to avoid showing stale stack trace
+          dispatch(scopeListChanged([]));
+          handleStepOver();
+        }}
+      />
+      <ReactIconButton
+        icon={VscDebugStepOut}
+        title="Step Out"
+        disabled={!isPaused}
+        onClick={() => {
+          // Clear the scope list when resuming to avoid showing stale stack trace
+          dispatch(scopeListChanged([]));
+          step_out();
         }}
       />
       <IconButton
         icon={faWarning}
+        title="Trigger Alert Hook"
         onClick={() => {
           trigger_alert_hook();
         }}

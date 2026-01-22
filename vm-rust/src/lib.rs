@@ -128,6 +128,41 @@ pub fn resume_breakpoint() {
 }
 
 #[wasm_bindgen]
+pub fn step_into() {
+    reserve_player_mut(|player| {
+        player.step_into();
+    });
+}
+
+#[wasm_bindgen]
+pub fn step_over() {
+    reserve_player_mut(|player| {
+        player.step_over();
+    });
+}
+
+#[wasm_bindgen]
+pub fn step_out() {
+    reserve_player_mut(|player| {
+        player.step_out();
+    });
+}
+
+#[wasm_bindgen]
+pub fn step_over_line(skip_bytecode_indices: Vec<usize>) {
+    reserve_player_mut(|player| {
+        player.step_over_line(skip_bytecode_indices);
+    });
+}
+
+#[wasm_bindgen]
+pub fn step_into_line(skip_bytecode_indices: Vec<usize>) {
+    reserve_player_mut(|player| {
+        player.step_into_line(skip_bytecode_indices);
+    });
+}
+
+#[wasm_bindgen]
 pub fn set_stage_size(width: u32, height: u32) {
     player_dispatch(PlayerVMCommand::SetStageSize(width, height));
 }

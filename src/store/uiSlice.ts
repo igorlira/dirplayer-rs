@@ -29,12 +29,15 @@ export type TSelectedObjectScoreBehavior = {
 
 export type TSelectedObject = TSelectedObjectSprite | TSelectedObjectMember | TSelectedObjectScoreBehavior | TSelectedObjectScoreSpan
 
+export type TScriptViewMode = 'lingo' | 'assembly';
+
 interface UISliceState {
   selectedObject?: TSelectedObject
+  scriptViewMode: TScriptViewMode
 }
 
 const initialState: UISliceState = {
-
+  scriptViewMode: 'lingo'
 }
 
 const uiSlice = createSlice({
@@ -77,11 +80,18 @@ const uiSlice = createSlice({
         }
       }
     },
+    scriptViewModeChanged(state, action: PayloadAction<TScriptViewMode>) {
+      return {
+        ...state,
+        scriptViewMode: action.payload
+      }
+    },
   },
 })
 
 export const selectSelectedMemberRef = (state: UISliceState) => state.selectedObject?.type === 'member' ? state.selectedObject.memberRef : undefined
+export const selectScriptViewMode = (state: UISliceState) => state.scriptViewMode
 
 // Action creators are generated for each case reducer function
-export const { onMemberSelected, channelSelected, scoreBehaviorSelected, scoreSpanSelected } = uiSlice.actions
+export const { onMemberSelected, channelSelected, scoreBehaviorSelected, scoreSpanSelected, scriptViewModeChanged } = uiSlice.actions
 export default uiSlice.reducer
