@@ -30,7 +30,7 @@ const observer = new MutationObserver((mutations) => {
 });
 
 replaceDirPlayerElements();
-observer.observe(document.body, { childList: true, subtree: true });
+observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
 
 // === EMBED / OBJECT HANDLERS ===
 function checkDirEmbed(element: HTMLEmbedElement) {
@@ -78,7 +78,10 @@ function renderWhenReady(
 }
 
 function replaceDirEmbed(element: HTMLEmbedElement) {
-  const { width, height, src } = element;
+  let { width, height, src } = element;
+  if (!src) {
+    src = element.getAttribute('data-src') || '';
+  }
   const externalParams: Record<string, string> = {};
   for (let i = 1; i <= 30; i++) {
     const swValue = element.getAttribute(`sw${i}`);
@@ -89,7 +92,19 @@ function replaceDirEmbed(element: HTMLEmbedElement) {
   }
 
   const newElement = document.createElement('div');
-  element.replaceWith(newElement);
+  if (element.parentElement && element.parentElement.tagName === 'OBJECT') {
+    // If the EMBED is inside an OBJECT, replace the OBJECT instead
+    const objectElement = element.parentElement as HTMLObjectElement;
+    if (objectElement.width) {
+      width = objectElement.width;
+    }
+    if (objectElement.height) {
+      height = objectElement.height;
+    }
+    element.parentElement.replaceWith(newElement);
+  } else {
+    element.replaceWith(newElement);
+  }
   renderWhenReady(newElement, width, height, src, externalParams);
 }
 
