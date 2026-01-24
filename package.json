@@ -24,6 +24,7 @@
     "electron-is-dev": "^3.0.1",
     "flexlayout-react": "^0.8.17",
     "lodash": "^4.17.21",
+    "pako": "^2.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-json-tree": "^0.18.0",
@@ -55,6 +56,7 @@
     "start:proxy": "concurrently \"react-scripts start\" \"node ws-tcp-proxy-all.cjs\"",
     "build": "react-scripts build",
     "build-extension": "vite build -c vite.config.extension.js",
+    "build-polyfill": "vite build -c vite.config.polyfill.js",
     "build-vm": "cd vm-rust && wasm-pack build --target web",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
@@ -83,6 +85,7 @@
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.25",
+    "@types/pako": "^2.0.4",
     "@vitejs/plugin-react": "^2.1.0",
     "concurrently": "^9.2.1",
     "electron": "^38.3.0",

@@ -31,3 +31,4 @@ public/dcr*
 
 /dist-extension
 /dist-extension.zip
+/dist-polyfill
