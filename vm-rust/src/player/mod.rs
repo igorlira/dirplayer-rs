@@ -1152,6 +1152,8 @@ impl DirPlayer {
         warn!("[!!] play failed with error: {}", err.message);
         self.stop();
 
+        // Dispatch debug update with full call stack (scopes are preserved on error)
+        JsApi::dispatch_debug_update(self);
         JsApi::dispatch_script_error(self, &err);
     }
 

@@ -834,7 +834,6 @@ impl JsApi {
                 .into()
             };
 
-        Self::dispatch_debug_update(player);
         onScriptError(data.to_js_object());
     }
 
