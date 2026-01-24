@@ -22,13 +22,36 @@ Pre-built binaries can be found at https://github.com/igorlira/dirplayer-rs/rele
 
 ![./app-screenshot.png](./app-screenshot.png)
 
+## Polyfill
+
+DirPlayer can be embedded directly into any webpage as a standalone JavaScript polyfill. The polyfill is a single self-contained JS file that includes the WASM VM and all required assets.
+
+### Usage
+
+Automatic initialization:
+
+```html
+<script src="dirplayer-polyfill.js"></script>
+```
+
+Manual initialization:
+
+```html
+<script src="dirplayer-polyfill.js" data-manual-init></script>
+<script>
+  DirPlayer.init();
+</script>
+```
+
+The polyfill automatically detects and replaces `<embed>` and `<object>` elements that reference Shockwave `.dcr` files.
+
 ## Requirements
 - NodeJS
-- - [(LTS or newer)](https://nodejs.org/)
+  - [(LTS or newer)](https://nodejs.org/)
 - RustLang
-- - [(1.70.0 or newer)](https://www.rust-lang.org/)
+  - [(1.70.0 or newer)](https://www.rust-lang.org/)
 - wasm-pack
-- - https://github.com/rustwasm/wasm-pack/releases
+  - https://github.com/rustwasm/wasm-pack/releases
 
 ## Building
 > [!NOTE]  
@@ -66,6 +89,14 @@ Make sure to build the VM before building the standalone app. The build will be 
 
 ```bash
 npm run electron-pack
+```
+
+#### Building polyfill
+
+As above, ensure the VM is built before running this. The output will be a single file located at `./dist-polyfill/dirplayer-polyfill.js`.
+
+```bash
+npm run build-polyfill
 ```
 
 #### Running locally
