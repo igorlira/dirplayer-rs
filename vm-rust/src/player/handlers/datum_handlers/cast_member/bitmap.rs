@@ -57,6 +57,11 @@ impl BitmapMemberHandlers {
                     player.alloc_datum(Datum::Int(height))
                 ]))
             }
+            "depth" => Ok(Datum::Int(
+                bitmap
+                    .map(|x| x.bit_depth as i32)
+                    .unwrap_or(0),
+            )),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for bitmap",
                 prop
