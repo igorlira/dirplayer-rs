@@ -199,12 +199,6 @@ impl CastMemberRefHandlers {
                 Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
                 _ => return Err(ScriptError::new("Cannot erase non-cast-member".to_string())),
             };
-            // Debug: Log when a cast member is being erased
-            #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&format!(
-                "DEBUG: Erasing cast member: cast={}, num={}",
-                cast_member_ref.cast_lib, cast_member_ref.cast_member
-            ).into());
             player
                 .movie
                 .cast_manager

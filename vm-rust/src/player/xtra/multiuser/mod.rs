@@ -171,7 +171,7 @@ impl MultiuserXtraManager {
                         multiuser_log!("Multiuser: Received unknown message type");
                         return;
                     };
-                    multiuser_log!("Multiuser: WebSocket message received: {:?}", message_str);
+                    // multiuser_log!("Multiuser: WebSocket message received: {:?}", message_str);
 
                     let mut multiusr_manager =
                         unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
@@ -254,7 +254,7 @@ impl MultiuserXtraManager {
                             multiuser_log!("Multiuser: Cannot send message, WebSocket not open (state={})", socket_clone.ready_state());
                             continue;
                         }
-                        multiuser_log!("Multiuser: Sending message: {:?}", message);
+                        // multiuser_log!("Multiuser: Sending message: {:?}", message);
                         if let Err(e) = socket_clone.send_with_u8_array(&message.as_bytes()) {
                             multiuser_log!("Multiuser: Failed to send message: {:?}", e);
                         }
@@ -320,7 +320,7 @@ impl MultiuserXtraManager {
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_ref(|player| {
                     let msg_string = player.get_datum(args.get(2).unwrap()).string_value()?;
-                    multiuser_log!("sendNetMessage: {:?}", msg_string);
+                    // multiuser_log!("sendNetMessage: {:?}", msg_string);
                     if let Some(tx) = &instance.socket_tx {
                         tx.try_send(msg_string).unwrap();
                         Ok(DatumRef::Void)

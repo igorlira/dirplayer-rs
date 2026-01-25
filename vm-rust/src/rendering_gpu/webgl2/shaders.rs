@@ -22,6 +22,8 @@ pub enum InkMode {
     Mask,
     /// Ink 33: Add Pin - additive blending
     AddPin,
+    /// Ink 35: Sub Pin - subtractive blending
+    SubPin,
     /// Ink 36: Background Transparent - color key
     BackgroundTransparent,
     /// Ink 40: Lighten
@@ -38,6 +40,7 @@ impl InkMode {
             8 => InkMode::Matte,
             9 => InkMode::Mask,
             33 => InkMode::AddPin,
+            35 => InkMode::SubPin,
             36 => InkMode::BackgroundTransparent,
             40 => InkMode::Lighten,
             41 => InkMode::Darken,
@@ -62,6 +65,7 @@ pub struct ShaderProgram {
     pub u_tex_rect: Option<WebGlUniformLocation>,
     pub u_flip: Option<WebGlUniformLocation>,
     pub u_rotation: Option<WebGlUniformLocation>,
+    pub u_rotation_center: Option<WebGlUniformLocation>,
 }
 
 /// Manages shader programs for different ink modes
@@ -79,6 +83,7 @@ impl ShaderManager {
         programs.insert(InkMode::Copy, Self::compile_ink_copy(context)?);
         programs.insert(InkMode::BackgroundTransparent, Self::compile_ink_bg_transparent(context)?);
         programs.insert(InkMode::AddPin, Self::compile_ink_add_pin(context)?);
+        programs.insert(InkMode::SubPin, Self::compile_ink_sub_pin(context)?);
         programs.insert(InkMode::Darken, Self::compile_ink_darken(context)?);
         programs.insert(InkMode::NotGhost, Self::compile_ink_not_ghost(context)?);
         programs.insert(InkMode::Matte, Self::compile_ink_matte(context)?);
@@ -136,6 +141,7 @@ uniform vec4 u_sprite_rect;  // x, y, width, height
 uniform vec4 u_tex_rect;     // src tex coords
 uniform vec2 u_flip;         // flip x, flip y
 uniform float u_rotation;
+uniform vec2 u_rotation_center;  // sprite's loc (registration point)
 
 out vec2 v_texcoord;
 
@@ -146,9 +152,10 @@ void main() {
     // Scale and translate to sprite rect
     vec2 world_pos = u_sprite_rect.xy + pos * u_sprite_rect.zw;
 
-    // Apply rotation around sprite center
+    // Apply rotation around registration point (sprite's loc)
+    // Director rotates around the registration point, not the sprite center
     if (abs(u_rotation) > 0.001) {
-        vec2 center = u_sprite_rect.xy + u_sprite_rect.zw * 0.5;
+        vec2 center = u_rotation_center;
         world_pos -= center;
         float c = cos(u_rotation);
         float s = sin(u_rotation);
@@ -226,7 +233,8 @@ void main() {
     }
 
     /// Compile Ink 33 (Add Pin) shader
-    /// Director Add Pin: ignores bitmap alpha completely, uses only blend percentage
+    /// Director Add Pin: Color-key transparency + additive blending
+    /// Pixels matching bgColor are transparent, others are additively blended
     fn compile_ink_add_pin(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
         let frag_source = r#"#version 300 es
 precision highp float;
@@ -235,14 +243,19 @@ in vec2 v_texcoord;
 
 uniform sampler2D u_texture;
 uniform float u_blend;
+uniform vec4 u_bg_color;
 
 out vec4 fragColor;
 
 void main() {
     vec4 src = texture(u_texture, v_texcoord);
 
-    // Discard fully transparent pixels (from matte mask)
-    // This handles edge-connected background pixels
+    // Color-key transparency: discard pixels matching bgColor
+    // Use small threshold for floating point comparison
+    vec3 diff = abs(src.rgb - u_bg_color.rgb);
+    if (diff.r < 0.004 && diff.g < 0.004 && diff.b < 0.004) discard;
+
+    // Also discard fully transparent pixels (from embedded alpha)
     if (src.a < 0.01) discard;
 
     // Director Add Pin: ONLY uses blend %, ignores bitmap alpha
@@ -254,10 +267,46 @@ void main() {
         Self::compile_program(context, Self::vertex_shader_source(), frag_source)
     }
 
+    /// Compile Ink 35 (Sub Pin) shader
+    /// Director Sub Pin: Subtract source from destination, pin to 0 (black)
+    /// bgColor pixels are transparent
+    fn compile_ink_sub_pin(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
+        let frag_source = r#"#version 300 es
+precision highp float;
+
+in vec2 v_texcoord;
+
+uniform sampler2D u_texture;
+uniform float u_blend;
+uniform vec4 u_bg_color;
+
+out vec4 fragColor;
+
+void main() {
+    vec4 src = texture(u_texture, v_texcoord);
+
+    // Color-key transparency: discard pixels matching bgColor
+    // Use small threshold for floating point comparison
+    vec3 diff = abs(src.rgb - u_bg_color.rgb);
+    if (diff.r < 0.004 && diff.g < 0.004 && diff.b < 0.004) discard;
+
+    // Also discard fully transparent pixels (from embedded alpha)
+    if (src.a < 0.01) discard;
+
+    // Director Sub Pin: ONLY uses blend %, ignores bitmap alpha
+    // final = dst - src.rgb * blend (with GL_ONE_MINUS_SRC_COLOR, GL_ONE blend func)
+    // We output the value to subtract; the blend equation GL_FUNC_REVERSE_SUBTRACT does: dst - src
+    fragColor = vec4(src.rgb * u_blend, 1.0);
+}
+"#;
+
+        Self::compile_program(context, Self::vertex_shader_source(), frag_source)
+    }
+
     /// Compile Ink 41 (Darken) shader
-    /// Director Darken (multiply blend): result = src * dst
-    /// For shadow effects, dark pixels darken the destination, white pixels leave it unchanged.
-    /// Uses GL_DST_COLOR blend mode to achieve dst * src multiplication.
+    /// Director Darken: result = src * bgColor, then alpha-blended with destination
+    /// This multiplies the source color by the background color, creating a tinting/darkening effect.
+    /// Uses standard alpha blending (not GL_DST_COLOR multiply blend).
     fn compile_ink_darken(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
         let frag_source = r#"#version 300 es
 precision highp float;
@@ -266,6 +315,7 @@ in vec2 v_texcoord;
 
 uniform sampler2D u_texture;
 uniform float u_blend;
+uniform vec4 u_bg_color;
 
 out vec4 fragColor;
 
@@ -275,18 +325,14 @@ void main() {
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
 
-    // For multiply blend with GL_DST_COLOR, GL_ZERO:
-    // result = dst * src.rgb
-    // But we want to interpolate with blend%:
-    // result = dst * lerp(1.0, src.rgb, blend)
-    // = dst * (1.0 - blend + src.rgb * blend)
-    // = dst * (1.0 + blend * (src.rgb - 1.0))
-    //
-    // To achieve this with GL_DST_COLOR:
-    // output = (1.0 - blend) + src.rgb * blend = lerp(1.0, src.rgb, blend)
-    // Then blend equation: dst * output
-    vec3 multiply_factor = mix(vec3(1.0), src.rgb, u_blend);
-    fragColor = vec4(multiply_factor, 1.0);
+    // Director ink 41 (Darken): multiply source by bgColor
+    // result_color = src.rgb * bgColor.rgb
+    // Then alpha-blend with destination using standard blending
+    vec3 darkened = src.rgb * u_bg_color.rgb;
+
+    // Apply blend factor and source alpha
+    float alpha = src.a * u_blend;
+    fragColor = vec4(darkened, alpha);
 }
 "#;
 
@@ -294,7 +340,12 @@ void main() {
     }
 
     /// Compile Ink 7 (Not Ghost) shader
-    /// Not Ghost: Makes white pixels transparent (discards pixels matching bg_color)
+    /// Not Ghost: Opposite of background-transparent - NON-bgColor pixels are transparent.
+    /// From ScummVM: `*dst = (src == colorWhite) ? backColor : *dst`
+    /// - If src matches bgColor (white): output backColor
+    /// - If src does NOT match bgColor: leave dst unchanged (discard/transparent)
+    /// This makes foreground pixels (like a black door) transparent,
+    /// while background pixels either blend or are masked by matte.
     fn compile_ink_not_ghost(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
         let frag_source = r#"#version 300 es
 precision highp float;
@@ -311,13 +362,18 @@ out vec4 fragColor;
 void main() {
     vec4 src = texture(u_texture, v_texcoord);
 
-    // Not Ghost: discard pixels that match the background color (typically white)
+    // Discard fully transparent pixels (from matte mask)
+    if (src.a < 0.01) discard;
+
+    // Not Ghost: discard pixels that do NOT match bgColor
+    // (opposite of background-transparent which discards bgColor pixels)
     vec3 diff = abs(src.rgb - u_bg_color.rgb);
     float dist = max(max(diff.r, diff.g), diff.b);
-    if (dist < u_color_tolerance) discard;
+    if (dist >= u_color_tolerance) discard;  // Non-bgColor pixels are transparent
 
+    // Pixels matching bgColor: output backColor (which is u_bg_color)
     float alpha = src.a * u_blend;
-    fragColor = vec4(src.rgb, alpha);
+    fragColor = vec4(u_bg_color.rgb, alpha);
 }
 "#;
 
@@ -325,9 +381,9 @@ void main() {
     }
 
     /// Compile Ink 8 (Matte) shader
-    /// Matte: Uses alpha channel from texture (matte info baked in during texture upload)
-    ///
-    /// Standard alpha blending for normal content.
+    /// Matte: Uses alpha channel from texture (flood-fill matte baked in during texture upload)
+    /// Edge-connected background pixels have alpha=0, interior pixels stay opaque
+    /// This matches Canvas2D behavior where only edge-connected bgColor pixels are transparent
     fn compile_ink_matte(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
         let frag_source = r#"#version 300 es
 precision highp float;
@@ -342,8 +398,8 @@ out vec4 fragColor;
 void main() {
     vec4 src = texture(u_texture, v_texcoord);
 
-    // Matte: transparency comes from alpha channel (baked in from bitmap matte)
-    // Discard fully transparent pixels
+    // Matte: transparency comes from alpha channel (flood-fill matte baked in)
+    // Discard fully transparent pixels (edge-connected background)
     if (src.a < 0.01) discard;
 
     // Standard alpha blending
@@ -367,6 +423,8 @@ in vec2 v_texcoord;
 
 uniform sampler2D u_texture;
 uniform float u_blend;
+uniform vec4 u_bg_color;
+uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
@@ -375,6 +433,11 @@ void main() {
 
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
+
+    // Color-key transparency: discard if matches bg_color
+    vec3 diff = abs(src.rgb - u_bg_color.rgb);
+    float dist = max(max(diff.r, diff.g), diff.b);
+    if (dist < u_color_tolerance) discard;
 
     // Lighten: output color, actual MAX blending done via blend equation
     float alpha = src.a * u_blend;
@@ -422,6 +485,7 @@ void main() {
         let u_tex_rect = gl.get_uniform_location(&program, "u_tex_rect");
         let u_flip = gl.get_uniform_location(&program, "u_flip");
         let u_rotation = gl.get_uniform_location(&program, "u_rotation");
+        let u_rotation_center = gl.get_uniform_location(&program, "u_rotation_center");
 
         Ok(ShaderProgram {
             program,
@@ -437,6 +501,7 @@ void main() {
             u_tex_rect,
             u_flip,
             u_rotation,
+            u_rotation_center,
         })
     }
 }

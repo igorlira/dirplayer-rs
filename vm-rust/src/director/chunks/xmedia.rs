@@ -4,6 +4,9 @@ use log::{debug, warn};
 // Import the PFR vector renderer
 use super::pfr_renderer::render_pfr_font;
 
+// Import the XMED styled text parser
+pub use super::xmedia_styled_text::XmedStyledText;
+
 pub struct XMediaChunk {
     pub raw_data: Vec<u8>,
 }
@@ -45,13 +48,66 @@ impl XMediaChunk {
             return true;
         }
 
-        // Reject styled text XMedia chunks (start with "FFFF")
-        if self.raw_data.len() >= 4 && &self.raw_data[0..4] == b"FFFF" {
-            debug!("✗ This is styled text data (FFFF header), not a font");
+        false
+    }
+
+    pub fn is_styled_text(&self) -> bool {
+        if self.raw_data.len() < 12 {
+            web_sys::console::log_1(&format!("❌ XMED data too small ({} bytes)", self.raw_data.len()).into());
             return false;
         }
 
+        // Check for "FFFF" magic (styled text XMED format)
+        if &self.raw_data[0..4] == b"FFFF" {
+            debug!("✓ Found FFFF styled text header");
+            web_sys::console::log_1(&"✅ Found FFFF styled text header".into());
+            return true;
+        }
+
+        web_sys::console::log_1(&format!(
+            "❌ Not FFFF header: {:02X} {:02X} {:02X} {:02X}",
+            self.raw_data[0], self.raw_data[1], self.raw_data[2], self.raw_data[3]
+        ).into());
         false
+    }
+
+    pub fn parse_styled_text(&self) -> Option<XmedStyledText> {
+        if !self.is_styled_text() {
+            return None;
+        }
+
+        debug!("🔍 Parsing XMED styled text format...");
+        web_sys::console::log_1(&"🔍 Parsing XMED styled text format...".into());
+
+        match super::xmedia_styled_text::parse_xmed(&self.raw_data) {
+            Ok(styled_text) => {
+                debug!("  Text: {} chars", styled_text.text.len());
+                debug!("  Spans: {}", styled_text.styled_spans.len());
+                debug!("  Alignment: {:?}", styled_text.alignment);
+
+                web_sys::console::log_1(&format!(
+                    "✅ XMED parsed: text='{}' ({} chars), spans={}, alignment={:?}",
+                    styled_text.text, styled_text.text.len(), styled_text.styled_spans.len(), styled_text.alignment
+                ).into());
+
+                // Log each styled span
+                for (idx, span) in styled_text.styled_spans.iter().enumerate() {
+                    web_sys::console::log_1(&format!(
+                        "  Span {}: text='{}', font={:?}, size={:?}, bold={}, italic={}, underline={}",
+                        idx, span.text,
+                        span.style.font_face, span.style.font_size,
+                        span.style.bold, span.style.italic, span.style.underline
+                    ).into());
+                }
+
+                Some(styled_text)
+            }
+            Err(e) => {
+                warn!("Failed to parse XMED styled text: {}", e);
+                web_sys::console::log_1(&format!("❌ Failed to parse XMED: {}", e).into());
+                None
+            }
+        }
     }
 
     pub fn extract_font_name(&self) -> Option<String> {

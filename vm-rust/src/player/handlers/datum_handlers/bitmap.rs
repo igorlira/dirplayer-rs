@@ -289,27 +289,6 @@ impl BitmapDatumHandlers {
         reserve_player_mut(|player| {
             let dst_bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
 
-            // Debug: Log bitmap refs for copyPixels
-            #[cfg(target_arch = "wasm32")]
-            {
-                let src_datum = player.get_datum(&args[0]);
-                let src_ref_dbg = if let Datum::BitmapRef(r) = src_datum { *r } else { 0 };
-                let dest_rect_datum = player.get_datum(&args[1]);
-                let dest_rect_str = match dest_rect_datum {
-                    Datum::Rect(r) => {
-                        let x1 = player.get_datum(&r[0]).int_value().unwrap_or(0);
-                        let y1 = player.get_datum(&r[1]).int_value().unwrap_or(0);
-                        let x2 = player.get_datum(&r[2]).int_value().unwrap_or(0);
-                        let y2 = player.get_datum(&r[3]).int_value().unwrap_or(0);
-                        format!("rect({},{},{},{})", x1, y1, x2, y2)
-                    }
-                    _ => "quad".to_string()
-                };
-                web_sys::console::log_1(&format!(
-                    "copyPixels: dst_ref={} src_ref={} dest={}",
-                    dst_bitmap_ref, src_ref_dbg, dest_rect_str
-                ).into());
-            }
             let src_bitmap_ref = player.get_datum(&args[0]);
             let src_bitmap_ref = if src_bitmap_ref.is_void()
                 || (src_bitmap_ref.is_number() && src_bitmap_ref.int_value()? == 0)

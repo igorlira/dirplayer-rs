@@ -23,6 +23,7 @@ pub mod sound;
 pub mod text;
 pub mod thum;
 pub mod xmedia;
+pub mod xmedia_styled_text;
 
 use std::collections::HashMap;
 

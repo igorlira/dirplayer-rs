@@ -389,25 +389,9 @@ pub async fn player_dispatch_event_beginsprite(
     handler_name: &String,
     args: &Vec<DatumRef>
 ) -> Result<Vec<(ScoreRef, u32)>, ScriptError> {
-    // Prevent re-entrant beginSprite dispatch (can happen when go() is called during frame update)
-    let skip = reserve_player_mut(|player| {
-        if player.is_in_beginsprite {
-            web_sys::console::warn_1(&format!(
-                "Blocking re-entrant beginSprite dispatch"
-            ).into());
-            return true;
-        }
-        player.is_in_beginsprite = true;
-        false
-    });
-
-    if skip {
-        return Ok(Vec::new());
-    }
-
     let (mut sprite_instances, mut frame_instances, all_channels) =
         reserve_player_mut(|player| {
-            let mut sprite_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
+            let mut sprite_instances: Vec<(ScoreRef, usize, ScriptInstanceRef)> = Vec::new();
             let mut frame_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
             let mut all_channels = Vec::new();
 
@@ -536,11 +520,6 @@ pub async fn player_dispatch_event_beginsprite(
         }
     }
 
-    // Reset the re-entrancy guard
-    reserve_player_mut(|player| {
-        player.is_in_beginsprite = false;
-    });
-
     // Reset the score context to Stage after each invocation
     reserve_player_mut(|player| {
         player.current_score_context = ScoreRef::Stage;
@@ -555,23 +534,6 @@ pub async fn dispatch_event_endsprite(sprite_nums: Vec<u32>) {
 }
 
 pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums: Vec<u32>) {
-    // Prevent re-entrant endSprite dispatch (can happen when go() is called during frame update)
-    let skip = reserve_player_mut(|player| {
-        if player.is_in_endsprite {
-            web_sys::console::warn_1(&format!(
-                "Blocking re-entrant endSprite dispatch for {} sprites",
-                sprite_nums.len()
-            ).into());
-            return true;
-        }
-        player.is_in_endsprite = true;
-        false
-    });
-
-    if skip {
-        return;
-    }
-
     let (sprite_tuple, frame_tuple) =
         reserve_player_mut(|player| {
             let mut sprite_tuple = Vec::new();
@@ -649,10 +611,6 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
             }
         }
     }
-
-    // Reset the re-entrancy guard
-    reserve_player_mut(|player| {
-        player.is_in_endsprite = false;
 
     // Reset the score context to Stage
     reserve_player_mut(|player| {

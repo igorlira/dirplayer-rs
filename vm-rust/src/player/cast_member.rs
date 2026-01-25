@@ -54,6 +54,7 @@ pub struct FieldMember {
 #[derive(Clone)]
 pub struct TextMember {
     pub text: String,
+    pub html_source: String,  // Original HTML string when set via html property
     pub alignment: String,
     pub box_type: String,
     pub word_wrap: bool,
@@ -64,6 +65,7 @@ pub struct TextMember {
     pub fixed_line_space: u16,
     pub top_spacing: i16,
     pub width: u16,
+    pub height: u16,
     pub html_styled_spans: Vec<StyledSpan>,
 }
 
@@ -133,6 +135,7 @@ impl TextMember {
     pub fn new() -> TextMember {
         TextMember {
             text: "".to_string(),
+            html_source: String::new(),
             alignment: "left".to_string(),
             word_wrap: true,
             font: "Arial".to_string(),
@@ -143,6 +146,7 @@ impl TextMember {
             box_type: "adjust".to_string(),
             anti_alias: false,
             width: 100,
+            height: 20,
             html_styled_spans: Vec::new(),
         }
     }
@@ -969,17 +973,31 @@ impl CastMember {
         number: u32,
         chunk: &CastMemberChunk,
         bitmap_manager: &mut BitmapManager,
-    ) -> Option<CastMember> 
+    ) -> Option<CastMember>
     {
         for opt_child in &member_def.children {
             let Some(Chunk::XMedia(xm)) = opt_child else { continue };
 
+            web_sys::console::log_1(&format!("🔍 Checking XMedia child (member #{}, {} bytes)", number, xm.raw_data.len()).into());
+
             // 1) If SWF: return SWF
             if let Some(cm) = Self::try_parse_swf(xm.raw_data.to_vec(), number, chunk) {
+                web_sys::console::log_1(&"✅ Detected as SWF".into());
                 return Some(cm);
             }
 
-            // 2) Font logic
+            // 2) Check if styled text (XMED format)
+            if let Some(styled_text) = xm.parse_styled_text() {
+                web_sys::console::log_1(&"✅ Detected as XMED styled text".into());
+                return Some(Self::create_text_member_from_xmed(
+                    number,
+                    chunk,
+                    styled_text,
+                ));
+            }
+
+            // 3) Font logic
+            web_sys::console::log_1(&"➡️ Falling through to font parsing".into());
             return Some(Self::parse_xmedia_font(member_def, number, chunk, xm, bitmap_manager));
         }
         None
@@ -993,6 +1011,18 @@ impl CastMember {
         bitmap_manager: &mut BitmapManager,
     ) -> CastMember {
         let font_name = Self::resolve_font_name(chunk, member_def, number);
+
+        let hex_dump = xm.raw_data
+            .iter()
+            .map(|b| format!("{:02X}", b))
+            .collect::<Vec<String>>()
+            .join(" ");
+        web_sys::console::log_1(&format!(
+            "raw data (XMED, {} bytes):\n{}",
+            xm.raw_data.len(),
+            hex_dump
+        ).into());
+
         let preview_text = Self::extract_text_from_xmedia(&xm.raw_data)
             .filter(|s| s.len() > 3)
             .unwrap_or_default();
@@ -1029,6 +1059,70 @@ impl CastMember {
                 grid_rows: gr,
                 alignment: TextAlignment::Left,
             }),
+            color: ColorRef::PaletteIndex(255),
+            bg_color: ColorRef::PaletteIndex(0),
+        }
+    }
+
+    fn create_text_member_from_xmed(
+        number: u32,
+        chunk: &CastMemberChunk,
+        styled_text: crate::director::chunks::xmedia::XmedStyledText,
+    ) -> CastMember {
+        use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
+
+        debug!("Creating TextMember from XMED styled text (member #{})", number);
+        web_sys::console::log_1(&format!("📝 Creating TextMember #{} from XMED styled text", number).into());
+
+        let alignment_str = match styled_text.alignment {
+            TextAlignment::Left => "left",
+            TextAlignment::Center => "center",
+            TextAlignment::Right => "right",
+            TextAlignment::Justify => "justify",
+        };
+
+        // Extract font info from first styled span if available
+        let (font_name, font_size) = if !styled_text.styled_spans.is_empty() {
+            let first_style = &styled_text.styled_spans[0].style;
+            (
+                first_style.font_face.clone().unwrap_or_else(|| "Arial".to_string()),
+                first_style.font_size.unwrap_or(12) as u16,
+            )
+        } else {
+            ("Arial".to_string(), 12)
+        };
+
+        web_sys::console::log_1(&format!(
+            "  Text: '{}', alignment: {}, font: {}, size: {}, spans: {}, word_wrap: {}",
+            styled_text.text, alignment_str, font_name, font_size, styled_text.styled_spans.len(),
+            styled_text.word_wrap
+        ).into());
+
+        let text_member = TextMember {
+            text: styled_text.text.clone(),
+            html_source: String::new(),
+            alignment: alignment_str.to_string(),
+            box_type: "fixed".to_string(),
+            word_wrap: styled_text.word_wrap,
+            anti_alias: true,
+            font: font_name,
+            font_style: Vec::new(),
+            font_size,
+            fixed_line_space: styled_text.fixed_line_space,
+            top_spacing: 0,
+            width: 0,   // Not used - sprite dimensions are used for rendering
+            height: 0,  // Not used - sprite dimensions are used for rendering
+            html_styled_spans: styled_text.styled_spans,
+        };
+
+        CastMember {
+            number,
+            name: chunk
+                .member_info
+                .as_ref()
+                .map(|x| x.name.to_owned())
+                .unwrap_or_default(),
+            member_type: CastMemberType::Text(text_member),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
         }

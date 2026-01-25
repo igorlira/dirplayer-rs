@@ -41,7 +41,7 @@ use crate::{
 use crate::player::cast_manager::CastManager;
 use crate::player::font::BitmapFont;
 use crate::player::font::FontManager;
-use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
+use crate::player::handlers::datum_handlers::cast_member::font::{FontMemberHandlers, TextAlignment, StyledSpan, HtmlStyle};
 use crate::player::score_keyframes::SpritePathKeyframes;
 use crate::rendering_gpu::{DynamicRenderer, Renderer};
 
@@ -1162,13 +1162,68 @@ pub fn render_score_to_bitmap_with_offset(
             CastMemberType::Text(text_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
 
-                let font_opt = get_or_load_font(
+                // Extract font properties from first styled span if available
+                let (font_name, font_size, font_style) = if !text_member.html_styled_spans.is_empty() {
+                    let first_style = &text_member.html_styled_spans[0].style;
+                    let name = first_style.font_face.clone().unwrap_or_else(|| text_member.font.clone());
+                    let size = first_style.font_size.map(|s| s as u16).unwrap_or(text_member.font_size);
+                    // Convert bold/italic/underline to font_style: bit 0 = bold, bit 1 = italic, bit 2 = underline
+                    let style = (if first_style.bold { 1u8 } else { 0 })
+                        | (if first_style.italic { 2u8 } else { 0 })
+                        | (if first_style.underline { 4u8 } else { 0 });
+                    (name, size, Some(style))
+                } else {
+                    (text_member.font.clone(), text_member.font_size, None)
+                };
+
+                web_sys::console::log_1(&format!(
+                    "🔤 Text member font request: name='{}', size={}, style={:?}",
+                    font_name, font_size, font_style
+                ).into());
+
+                // Try to load font with specified style first
+                let mut font_opt = get_or_load_font(
                     &mut player.font_manager,
                     &player.movie.cast_manager,
-                    &text_member.font,
-                    Some(text_member.font_size),
-                    None,
+                    &font_name,
+                    Some(font_size),
+                    font_style,
                 );
+
+                // If not found with style, try without style
+                if font_opt.is_none() && font_style.is_some() {
+                    web_sys::console::log_1(&format!(
+                        "⚠️ Font not found with style, trying without style..."
+                    ).into());
+                    font_opt = get_or_load_font(
+                        &mut player.font_manager,
+                        &player.movie.cast_manager,
+                        &font_name,
+                        Some(font_size),
+                        None,
+                    );
+                }
+
+                // If still not found with size, try without size
+                if font_opt.is_none() {
+                    web_sys::console::log_1(&format!(
+                        "⚠️ Font not found with size, trying without size..."
+                    ).into());
+                    font_opt = get_or_load_font(
+                        &mut player.font_manager,
+                        &player.movie.cast_manager,
+                        &font_name,
+                        None,
+                        None,
+                    );
+                }
+
+                if let Some(ref font) = font_opt {
+                    web_sys::console::log_1(&format!(
+                        "✅ Using font: name='{}', size={}, style={}",
+                        font.font_name, font.font_size, font.font_style
+                    ).into());
+                }
 
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
@@ -1185,17 +1240,93 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                     };
 
-                    bitmap.draw_text(
-                        &text_member.text,
-                        &font,
-                        font_bitmap,
-                        sprite.loc_h,
-                        sprite.loc_v,
-                        params,
-                        &palettes,
-                        text_member.fixed_line_space,
-                        text_member.top_spacing,
-                    );
+                    // Use styled text rendering if html_styled_spans is populated
+                    if !text_member.html_styled_spans.is_empty() {
+                        // Parse alignment from text_member
+                        let alignment = match text_member.alignment.to_lowercase().as_str() {
+                            "center" | "#center" => TextAlignment::Center,
+                            "right" | "#right" => TextAlignment::Right,
+                            "justify" | "#justify" => TextAlignment::Justify,
+                            _ => TextAlignment::Left,
+                        };
+
+                        // Clone spans and ALWAYS apply text_member's current properties
+                        // The movie can set font, fontSize, fontStyle at runtime, so these
+                        // should override whatever was in the original styled spans
+                        let spans_with_defaults: Vec<StyledSpan> = text_member.html_styled_spans.iter().map(|span| {
+                            let mut style = span.style.clone();
+
+                            // ALWAYS use text_member's font if set (movie may have changed it)
+                            if !text_member.font.is_empty() {
+                                style.font_face = Some(text_member.font.clone());
+                            } else if style.font_face.as_ref().map_or(true, |f| f.is_empty()) {
+                                style.font_face = Some("Arial".to_string());
+                            }
+
+                            // ALWAYS use text_member's font_size if set (movie may have changed it)
+                            if text_member.font_size > 0 {
+                                style.font_size = Some(text_member.font_size as i32);
+                            } else if style.font_size.map_or(true, |s| s <= 0) {
+                                style.font_size = Some(12);
+                            }
+
+                            // Use sprite color if span doesn't have color
+                            if style.color.is_none() {
+                                style.color = match &sprite.color {
+                                    ColorRef::Rgb(r, g, b) => {
+                                        Some(((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32))
+                                    }
+                                    ColorRef::PaletteIndex(idx) => {
+                                        match *idx {
+                                            0 => Some(0xFFFFFF),
+                                            255 => Some(0x000000),
+                                            _ => Some(0x000000),
+                                        }
+                                    }
+                                };
+                            }
+
+                            // ALWAYS apply text_member's fontStyle (movie may have changed it)
+                            if !text_member.font_style.is_empty() {
+                                style.bold = text_member.font_style.iter().any(|s| s == "bold");
+                                style.italic = text_member.font_style.iter().any(|s| s == "italic");
+                                style.underline = text_member.font_style.iter().any(|s| s == "underline");
+                            }
+
+                            StyledSpan {
+                                text: span.text.clone(),
+                                style,
+                            }
+                        }).collect();
+
+                        // Use native browser text rendering for smooth, anti-aliased text
+                        if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
+                            bitmap,
+                            &spans_with_defaults,
+                            sprite.loc_h as i32,
+                            sprite.loc_v as i32 + text_member.top_spacing as i32,
+                            sprite.width as i32,
+                            sprite.height as i32,
+                            alignment,
+                            sprite.width as i32,
+                            text_member.word_wrap,
+                            None, // Color is now in the spans
+                        ) {
+                            console_warn!("Native text render error for Text member: {:?}", e);
+                        }
+                    } else {
+                        bitmap.draw_text(
+                            &text_member.text,
+                            &font,
+                            font_bitmap,
+                            sprite.loc_h,
+                            sprite.loc_v,
+                            params,
+                            &palettes,
+                            text_member.fixed_line_space,
+                            text_member.top_spacing,
+                        );
+                    }
                 }
             }
             CastMemberType::FilmLoop(film_loop) => {
@@ -1994,11 +2125,6 @@ fn try_create_webgl2_renderer(
     canvas_size: (u32, u32),
 ) -> Option<crate::rendering_gpu::webgl2::WebGL2Renderer> {
     use crate::rendering_gpu::webgl2::WebGL2Renderer;
-
-    // TEMPORARY: Force Canvas2D for debugging
-    // TODO: Remove this line to re-enable WebGL2
-    console::log_1(&"WebGL2 disabled for debugging, using Canvas2D".into());
-    return None;
 
     // Check if WebGL2 is supported
     if !crate::rendering_gpu::is_webgl2_supported() {

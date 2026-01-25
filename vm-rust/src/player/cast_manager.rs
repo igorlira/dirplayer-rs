@@ -34,6 +34,9 @@ pub struct CastManager {
     pub casts: Vec<CastLib>,
     pub movie_script_cache: RefCell<Option<Vec<Rc<Script>>>>,
     pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
+    /// Version counter incremented when palette cache is invalidated.
+    /// Used by renderers to know when to clear texture caches.
+    pub palette_version: RefCell<u32>,
 }
 
 const IS_WEB: bool = false;
@@ -50,6 +53,7 @@ impl CastManager {
             casts: Vec::new(),
             movie_script_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
+            palette_version: RefCell::new(0),
         }
     }
 
@@ -68,22 +72,6 @@ impl CastManager {
         for index in 0..dir.cast_entries.len() {
             let cast_entry = &dir.cast_entries[index];
             let cast_def = dir.casts.iter().find(|cast| cast.id == cast_entry.id);
-
-            // Debug: Log cast initialization
-            web_sys::console::log_1(&format!(
-                "Initializing cast {} ('{}'): id={}, has_cast_def={}, file_path='{}'",
-                index + 1,
-                cast_entry.name,
-                cast_entry.id,
-                cast_def.is_some(),
-                cast_entry.file_path
-            ).into());
-            if let Some(def) = cast_def {
-                web_sys::console::log_1(&format!(
-                    "  Cast def: {} members",
-                    def.members.len()
-                ).into());
-            }
 
             let mut cast = CastLib {
                 name: cast_entry.name.to_owned(),
@@ -129,7 +117,7 @@ impl CastManager {
     ) {
         for cast in self.casts.iter_mut() {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
-                web_sys::console::log_1(&format!("Cast {} ({}) - Preload Mode: {}", cast.number, cast.file_name, cast.preload_mode).into());
+                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode)));
                 match cast.preload_mode {
                     0 => {
                         // Preload: When Needed
@@ -190,6 +178,13 @@ impl CastManager {
 
     pub fn invalidate_palette_cache(&self) {
         self.palette_cache.replace(None);
+        // Increment version counter so renderers know to clear texture caches
+        *self.palette_version.borrow_mut() += 1;
+    }
+
+    /// Get the current palette version counter
+    pub fn palette_version(&self) -> u32 {
+        *self.palette_version.borrow()
     }
 
     pub fn palettes(&self) -> Rc<PaletteMap> {
@@ -323,18 +318,7 @@ impl CastManager {
         if member_ref.cast_lib > 0 {
             let cast = self.get_cast_or_null(member_ref.cast_lib as u32);
             if let Some(cast) = cast {
-                let result = cast.find_member_by_number(member_ref.cast_member as u32);
-                if result.is_none() {
-                    web_sys::console::log_1(&format!(
-                        "Cast member not found: member {} in castLib {} ('{}'), state: {:?}, members: {:?}",
-                        member_ref.cast_member,
-                        member_ref.cast_lib,
-                        cast.name,
-                        cast.state,
-                        cast.members.keys().collect::<Vec<_>>()
-                    ).into());
-                }
-                return result;
+                return cast.find_member_by_number(member_ref.cast_member as u32);
             }
             return None;
         }

@@ -401,13 +401,6 @@ pub async fn player_set_obj_prop(
             script_set_prop(player, &script_instance_ref, &prop_name, value_ref, false)
         }),
         Datum::SpriteRef(sprite_id) => {
-            // Debug: Log all property sets for sprite 70
-            if sprite_id == 70 {
-                web_sys::console::log_1(&format!(
-                    "player_set_obj_prop: sprite({}).{} = {}",
-                    sprite_id, prop_name, value_clone.type_str()
-                ).into());
-            }
             sprite_set_prop(sprite_id, prop_name, value_clone)
         }
         Datum::CastMember(member_ref) => {

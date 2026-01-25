@@ -124,6 +124,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
                     member_ref.cast_lib
                 )
             }
+            PaletteRef::Default => "#default".to_string(),
         },
         Datum::Xtra(name) => {
             format!("<Xtra \"{}\" _ _______>", name)

@@ -51,12 +51,6 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
                                     player.keyboard_focus_sprite = next_focus_sprite_id;
                                 } else if key.len() == 1 {
                                     field_member.text = format!("{}{}", field_member.text, key);
-                                    // Debug: Log text update
-                                    #[cfg(target_arch = "wasm32")]
-                                    web_sys::console::log_1(&format!(
-                                        "DEBUG: Field text updated to: '{}'",
-                                        field_member.text
-                                    ).into());
                                 }
                             }
                         }

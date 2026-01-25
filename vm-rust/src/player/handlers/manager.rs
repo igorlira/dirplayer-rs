@@ -384,15 +384,6 @@ impl BuiltInHandlerManager {
         }
         let instance_refs = instance_ids.unwrap();
 
-        // Debug logging for deconstruct calls
-        #[cfg(target_arch = "wasm32")]
-        if handler_name == "deconstruct" {
-            web_sys::console::log_1(&format!(
-                "call(#deconstruct, list): {} items in list, {} instance refs resolved",
-                list_count, instance_refs.len()
-            ).into());
-        }
-
         let mut result = player_alloc_datum(Datum::Null);
         for instance_ref in instance_refs {
             let handler = reserve_player_ref(|player| {
@@ -403,22 +394,6 @@ impl BuiltInHandlerManager {
                 )
             })?;
             if let Some(handler) = handler {
-                // Debug logging for deconstruct
-                #[cfg(target_arch = "wasm32")]
-                if handler_name == "deconstruct" {
-                    let script_info = reserve_player_ref(|player| {
-                        if let Some(entry) = player.allocator.script_instances.get(&instance_ref.id()) {
-                            format!("{:?}", entry.script_instance.script)
-                        } else {
-                            "unknown".to_string()
-                        }
-                    });
-                    web_sys::console::log_1(&format!(
-                        "  -> calling deconstruct on script: {} (instance_id={})",
-                        script_info, instance_ref.id()
-                    ).into());
-                }
-
                 let scope = player_call_script_handler(Some(instance_ref), handler, &args).await?;
                 result = scope.return_value;
             }

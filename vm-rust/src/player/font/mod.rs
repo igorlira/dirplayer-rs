@@ -413,6 +413,54 @@ pub fn bitmap_font_copy_char(
     )
 }
 
+/// Copy a character from a bitmap font to a destination bitmap with scaling
+/// The scale factor determines the output size relative to the font's native size
+pub fn bitmap_font_copy_char_scaled(
+    font: &BitmapFont,
+    font_bitmap: &Bitmap,
+    char_num: u8,
+    dest: &mut Bitmap,
+    dest_x: i32,
+    dest_y: i32,
+    dest_char_width: i32,
+    dest_char_height: i32,
+    palettes: &PaletteMap,
+    draw_params: &CopyPixelsParams,
+) {
+    // Skip if character is below the font's first character
+    if char_num < font.first_char_num {
+        return;
+    }
+    let char_index = (char_num - font.first_char_num) as usize;
+
+    // Calculate grid position
+    let char_x = (char_index % font.grid_columns as usize) as u16;
+    let char_y = (char_index / font.grid_columns as usize) as u16;
+
+    // Calculate source rectangle in the font bitmap (native size)
+    let src_x = (char_x * font.grid_cell_width + font.char_offset_x) as i32;
+    let src_y = (char_y * font.grid_cell_height + font.char_offset_y) as i32;
+
+    // Copy with scaling - dest rect is scaled, src rect is native font size
+    dest.copy_pixels_with_params(
+        palettes,
+        font_bitmap,
+        IntRect::from(
+            dest_x,
+            dest_y,
+            dest_x + dest_char_width,
+            dest_y + dest_char_height,
+        ),
+        IntRect::from(
+            src_x,
+            src_y,
+            src_x + font.char_width as i32,
+            src_y + font.char_height as i32,
+        ),
+        &draw_params,
+    )
+}
+
 pub fn measure_text(
     text: &str,
     font: &BitmapFont,

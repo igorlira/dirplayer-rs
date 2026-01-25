@@ -220,22 +220,6 @@ impl ListDatumHandlers {
                 .map(|x| x as i32);
             let result = position.unwrap_or(-1) + 1;
 
-            // Debug logging for sprite release tracking - only log FOUND cases
-            #[cfg(target_arch = "wasm32")]
-            {
-                if let Datum::Int(search_val) = find {
-                    if *search_val > 0 && *search_val < 150 && result > 0 {
-                        let list_contents: Vec<i32> = list_vec.iter()
-                            .filter_map(|x| player.get_datum(x).int_value().ok())
-                            .collect();
-                        web_sys::console::log_1(&format!(
-                            "getPos: FOUND {} at position {} in list of {} items (first 20: {:?})",
-                            search_val, result, list_vec.len(), &list_contents[..list_contents.len().min(20)]
-                        ).into());
-                    }
-                }
-            }
-
             Ok(player.alloc_datum(Datum::Int(result)))
         })
     }

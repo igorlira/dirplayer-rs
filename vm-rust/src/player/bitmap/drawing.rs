@@ -174,6 +174,26 @@ fn blend_pixel(
                 }
             }
         }
+        // 35 = Sub Pin (Director-style subtractive, pinned to 0)
+        // bg_color pixels are transparent
+        // Subtractive: subtract source RGB from destination
+        35 => {
+            if src == bg_color {
+                dst
+            } else {
+                // Subtractive: subtract source from destination
+                let r = (dst.0 as i32 - src.0 as i32).max(0) as u8;
+                let g = (dst.1 as i32 - src.1 as i32).max(0) as u8;
+                let b = (dst.2 as i32 - src.2 as i32).max(0) as u8;
+
+                // Apply blend factor
+                if blend_alpha >= 0.999 {
+                    (r, g, b)
+                } else {
+                    blend_color_alpha(dst, (r, g, b), blend_alpha)
+                }
+            }
+        }
         // 36 = Background Transparent
         // If the source equals the bg_color, skip; otherwise blend normally.
         36 => {
@@ -757,6 +777,8 @@ impl Bitmap {
         let ink = params.ink;
         let alpha = params.blend as f32 / 100.0;
         let mask_image = params.mask_image;
+        // Sprite foreColor/backColor palette indices are resolved against the bitmap's palette,
+        // so they work together correctly (e.g., index 248/255 in a custom 256-color palette).
         let bg_color_resolved = if src.original_bit_depth == 32 && !src.use_alpha && ink != 0 {
             match &params.bg_color {
                 ColorRef::Rgb(r, g, b) => (*r, *g, *b),

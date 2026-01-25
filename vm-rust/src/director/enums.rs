@@ -321,11 +321,26 @@ impl From<&[u8]> for BitmapInfo {
             if let Ok(val) = reader.read_u8() {
                 bit_depth = val;
             }
-            let _ = reader.read_i16(); // palette?
+            // Skip padding/unknown field - was commented as "palette?"
+            // The actual palette member number is in the next field
+            let _ = reader.read_i16();
             if let Ok(val) = reader.read_i16() {
-                palette_id = val - 1;
-            } // TODO why -1?
-        };
+                // Following ScummVM's interpretation of palette references:
+                // - val <= 0: builtin palette, subtract 1 to get enum value
+                //   (e.g., val=0 → -1=SystemMac, val=-2 → -3=GrayScale)
+                // - val > 0: custom palette, use as-is (1-indexed member number)
+                //   (e.g., val=1 → member #1, val=2 → member #2)
+                if val <= 0 {
+                    palette_id = val - 1;
+                } else {
+                    palette_id = val;
+                }
+            }
+        }
+        // Note: For older Director formats (D3 and earlier), the BitmapInfo may be
+        // shorter and not include bit_depth. In this case, bit_depth defaults to 1.
+        // The actual bit depth will be verified/corrected based on the bitmap data
+        // size during decompression if needed.
 
         // If centerRegPoint is enabled, calculate the centered registration point
         // The raw reg_x/reg_y values need to be converted to centered coordinates

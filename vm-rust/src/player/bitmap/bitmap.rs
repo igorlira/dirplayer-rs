@@ -31,9 +31,17 @@ use super::{
 pub enum PaletteRef {
     BuiltIn(BuiltInPalette),
     Member(CastMemberRef),
+    /// Use the movie's default palette (first available custom palette, or system palette if none)
+    /// This is used when palette_id=0 (meaning "use default" rather than a specific member)
+    Default,
 }
 
 impl PaletteRef {
+    /// Create a PaletteRef from a parsed palette_id value.
+    ///
+    /// Following ScummVM's interpretation:
+    /// - i < 0: builtin palette enum value (e.g., -1=SystemMac, -3=GrayScale)
+    /// - i > 0: custom palette member number (1-indexed, e.g., 1=member #1)
     pub fn from(i: i16, cast_lib: u32) -> Self {
         if i < 0 {
             match BuiltInPalette::from_i16(i) {
@@ -46,10 +54,15 @@ impl PaletteRef {
                     PaletteRef::BuiltIn(BuiltInPalette::SystemWin)
                 }
             }
+        } else if i == 0 {
+            // i == 0 shouldn't happen with the new parsing logic, but handle it gracefully
+            // by using the system default palette
+            PaletteRef::BuiltIn(get_system_default_palette())
         } else {
+            // Custom palette: i is already the 1-indexed member number
             PaletteRef::Member(CastMemberRef {
                 cast_lib: cast_lib as i32,
-                cast_member: i as i32 + 1,
+                cast_member: i as i32,
             })
         }
     }
@@ -107,7 +120,7 @@ impl BuiltInPalette {
 }
 
 pub fn get_system_default_palette() -> BuiltInPalette {
-    // TODO check if win or mac
+    // TODO: Properly detect platform from movie file format
     BuiltInPalette::SystemWin
 }
 
@@ -220,9 +233,11 @@ fn decode_bitmap_1bit(
     let mut result = vec![0; width as usize * height as usize];
     for y in 0..scan_height {
         for x in 0..scan_width {
-            let scan_index = (y * scan_width + x) as usize;
+            // Use usize arithmetic to avoid u16 overflow for large images
+            // e.g., y=152, scan_width=432 -> 152*432=65664 which overflows u16 (max 65535)
+            let scan_index = y as usize * scan_width as usize + x as usize;
             if x < width {
-                let pixel_index = (y * width + x) as usize;
+                let pixel_index = y as usize * width as usize + x as usize;
                 if scan_index >= scan_data.len() {
                     return Err(format!(
                         "decode_bitmap_1bit: scan_index {} >= scan_data.len() {}",
@@ -449,12 +464,12 @@ fn decode_generic_bitmap(
     data: &[u8],
 ) -> Result<Bitmap, String> {
     let bytes_per_pixel = bit_depth / 8;
-    if scan_width as usize * scan_height as usize * num_channels as usize * bytes_per_pixel as usize
-        != data.len()
-    {
+    let expected_size = scan_width as usize * scan_height as usize * num_channels as usize * bytes_per_pixel as usize;
+
+    if expected_size != data.len() {
         warn!(
             "decode_generic_bitmap: Expected {} bytes, got {}",
-            scan_width * scan_height * num_channels as u16 * bytes_per_pixel as u16,
+            expected_size,
             data.len()
         );
         let actual_bit_depth = bit_depth * num_channels;
@@ -590,7 +605,7 @@ pub fn decompress_bitmap(
     };
 
     let skip_compression = reader.length >= expected_len;
-    
+
     if skip_compression {
         result.extend_from_slice(&reader.data[..expected_len]);
     } else {
@@ -601,6 +616,7 @@ pub fn decompress_bitmap(
             };
 
             if control < 0x80 {
+                // Literal run: copy next (control + 1) bytes
                 let count = control + 1;
                 for _ in 0..count {
                     if result.len() >= expected_len {
@@ -611,7 +627,11 @@ pub fn decompress_bitmap(
                         Err(_) => break,
                     }
                 }
+            } else if control == 0x80 {
+                // No-op: skip this byte (PackBits standard)
+                continue;
             } else {
+                // Repeat run: repeat next byte (257 - control) times
                 let count = 257 - control;
                 let val = match reader.read_u8() {
                     Ok(v) => v,
@@ -859,18 +879,58 @@ pub fn resolve_color_ref(
                         }
                     }
                     BuiltInPalette::Web216 => WEB_216_PALETTE.get(*color_index as usize).copied(),
-                    _ => None,
+                    // Vga and SystemWinDir4 fall back to SystemWin palette
+                    BuiltInPalette::Vga | BuiltInPalette::SystemWinDir4 => {
+                        if original_bit_depth == 4 {
+                            WIN_16_PALETTE.get(*color_index as usize).copied()
+                        } else {
+                            SYSTEM_WIN_PALETTE.get(*color_index as usize).copied()
+                        }
+                    }
                 },
                 PaletteRef::Member(palette_ref) => {
-                    let palette_member = CastMemberRefHandlers::get_cast_slot_number(
+                    let slot_number = CastMemberRefHandlers::get_cast_slot_number(
                         palette_ref.cast_lib as u32,
                         palette_ref.cast_member as u32,
                     );
-                    let palette_member = palettes.get(palette_member as usize);
+                    let palette_member = palettes.get(slot_number as usize);
                     match palette_member {
-                        Some(member) => member.colors.get(*color_index as usize).copied(),
+                        Some(member) => {
+                            let result = member.colors.get(*color_index as usize).copied();
+                            if result.is_none() && *color_index > 0 {
+                                // Color index out of bounds - log warning (only once per unique index/palette combo)
+                                static LOGGED_OOB: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<(u32, u8)>>> = std::sync::OnceLock::new();
+                                let logged = LOGGED_OOB.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+                                if let Ok(mut set) = logged.lock() {
+                                    if set.insert((slot_number, *color_index)) {
+                                        web_sys::console::warn_1(
+                                            &format!(
+                                                "Color index {} out of bounds for palette member {} (has {} colors). Falling back to default.",
+                                                color_index, slot_number, member.colors.len()
+                                            ).into()
+                                        );
+                                    }
+                                }
+                            }
+                            result
+                        }
                         None => {
-                            // If a member is not found, use the system palette
+                            // Palette not found - log warning (only once per unique palette ref)
+                            // This helps diagnose palette loading issues
+                            static LOGGED_MISSING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> = std::sync::OnceLock::new();
+                            let logged = LOGGED_MISSING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+                            if let Ok(mut set) = logged.lock() {
+                                if set.insert(slot_number) {
+                                    web_sys::console::warn_1(
+                                        &format!(
+                                            "Palette member not found: castLib {} member {} (slot {}). Available palettes: {:?}. Falling back to SystemWin.",
+                                            palette_ref.cast_lib, palette_ref.cast_member, slot_number,
+                                            palettes.palettes.iter().map(|p| (p.number, p.member.colors.len())).collect::<Vec<_>>()
+                                        ).into()
+                                    );
+                                }
+                            }
+                            // Fall back to system palette
                             Some(resolve_color_ref(
                                 palettes,
                                 color_ref,
@@ -879,6 +939,17 @@ pub fn resolve_color_ref(
                             ))
                         }
                     }
+                }
+                PaletteRef::Default => {
+                    // palette_id=0 means "no specific palette set" - use system default palette
+                    // This matches Director behavior where bitmaps without explicit palettes
+                    // use the system palette (SystemWin on Windows, SystemMac on Mac)
+                    Some(resolve_color_ref(
+                        palettes,
+                        color_ref,
+                        &PaletteRef::BuiltIn(get_system_default_palette()),
+                        original_bit_depth,
+                    ))
                 }
             };
 

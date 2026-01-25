@@ -137,6 +137,7 @@ impl RectDatumHandlers {
         let bottom = Datum::to_f64(player, &rect_arr[3])?;
 
         match prop.as_str() {
+            "ilk" => Ok(Datum::Symbol("rect".to_string())),
             "width" => Ok(Datum::from_f64(right - left)),
             "height" => Ok(Datum::from_f64(bottom - top)),
             "left" => Ok(Datum::from_f64(left)),

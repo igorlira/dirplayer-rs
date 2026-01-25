@@ -29,4 +29,10 @@ impl PaletteMap {
             .find(|entry| entry.number == number as u32)
             .map(|entry| &entry.member)
     }
+
+    /// Get the first available custom palette in the movie.
+    /// Used when a bitmap has palette_id=0 (meaning "use default palette").
+    pub fn get_first(&self) -> Option<&PaletteMember> {
+        self.palettes.first().map(|entry| &entry.member)
+    }
 }

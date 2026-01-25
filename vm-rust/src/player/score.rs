@@ -568,7 +568,9 @@ impl Score {
                     };
                 }
 
-                reserve_player_ref(|player| {
+                // Get bitmap's palette for RGB<->index conversion
+                // Use the bitmap's actual palette instead of SYSTEM_WIN_PALETTE
+                let bitmap_palette: Option<Vec<(u8, u8, u8)>> = reserve_player_ref(|player| {
                     if let Some(member_ref) = &sprite.member {
                         if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
                             if let CastMemberType::Bitmap(bitmap_member) = &member.member_type {
@@ -577,10 +579,56 @@ impl Score {
 
                                 sprite.bitmap_size_owned_by_sprite =
                                     sprite.width != bw || sprite.height != bh;
+
+                                // Get the bitmap's palette colors
+                                let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref);
+                                if let Some(bitmap) = bitmap {
+                                    use crate::player::bitmap::bitmap::{PaletteRef, BuiltInPalette};
+                                    use crate::player::bitmap::palette::{
+                                        SYSTEM_MAC_PALETTE, GRAYSCALE_PALETTE, PASTELS_PALETTE,
+                                        VIVID_PALETTE, NTSC_PALETTE, METALLIC_PALETTE, WEB_216_PALETTE,
+                                        RAINBOW_PALETTE,
+                                    };
+                                    use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
+
+                                    match &bitmap.palette_ref {
+                                        PaletteRef::BuiltIn(builtin) => {
+                                            let palette: &[(u8, u8, u8)] = match builtin {
+                                                BuiltInPalette::SystemMac => &SYSTEM_MAC_PALETTE,
+                                                BuiltInPalette::SystemWin | BuiltInPalette::SystemWinDir4 | BuiltInPalette::Vga => &SYSTEM_WIN_PALETTE,
+                                                BuiltInPalette::GrayScale => &GRAYSCALE_PALETTE,
+                                                BuiltInPalette::Pastels => &PASTELS_PALETTE,
+                                                BuiltInPalette::Vivid => &VIVID_PALETTE,
+                                                BuiltInPalette::Ntsc => &NTSC_PALETTE,
+                                                BuiltInPalette::Metallic => &METALLIC_PALETTE,
+                                                BuiltInPalette::Web216 => &WEB_216_PALETTE,
+                                                BuiltInPalette::Rainbow => &RAINBOW_PALETTE,
+                                            };
+                                            return Some(palette.to_vec());
+                                        }
+                                        PaletteRef::Member(palette_member_ref) => {
+                                            let slot_number = CastMemberRefHandlers::get_cast_slot_number(
+                                                palette_member_ref.cast_lib as u32,
+                                                palette_member_ref.cast_member as u32,
+                                            );
+                                            let palettes = player.movie.cast_manager.palettes();
+                                            if let Some(palette_member) = palettes.get(slot_number as usize) {
+                                                return Some(palette_member.colors.clone());
+                                            }
+                                        }
+                                        PaletteRef::Default => {
+                                            // Use system default
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
+                    None
                 });
+
+                // Use bitmap's palette if available, otherwise fall back to SYSTEM_WIN_PALETTE
+                let palette_for_index: &[(u8, u8, u8)] = bitmap_palette.as_deref().unwrap_or(&SYSTEM_WIN_PALETTE);
 
                 match data.color_flag {
                     // fore + back are palette indexes
@@ -596,14 +644,14 @@ impl Score {
 
                     // foreColor is RGB, backColor is palette index
                     1 => {
-                        // Foreground (RGB → map to palette)
+                        // Foreground (RGB → map to palette using bitmap's palette)
                         sprite.color = ColorRef::Rgb(
                             data.fore_color,
                             data.fore_color_g,
                             data.fore_color_b,
                         );
                         sprite.fore_color =
-                            sprite.color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                            sprite.color.to_index(palette_for_index) as i32;
 
                         // Background (palette index)
                         sprite.back_color = data.back_color as i32;
@@ -616,35 +664,35 @@ impl Score {
                         sprite.fore_color = data.fore_color as i32;
                         sprite.color = ColorRef::PaletteIndex(data.fore_color);
 
-                        // Background (RGB → map to palette)
+                        // Background (RGB → map to palette using bitmap's palette)
                         sprite.bg_color = ColorRef::Rgb(
                             data.back_color,
                             data.back_color_g,
                             data.back_color_b,
                         );
                         sprite.back_color =
-                            sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                            sprite.bg_color.to_index(palette_for_index) as i32;
                     }
 
                     // both fore + back are RGB
                     3 => {
-                        // Foreground (RGB → map to palette)
+                        // Foreground (RGB → map to palette using bitmap's palette)
                         sprite.color = ColorRef::Rgb(
                             data.fore_color,
                             data.fore_color_g,
                             data.fore_color_b,
                         );
                         sprite.fore_color =
-                            sprite.color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                            sprite.color.to_index(palette_for_index) as i32;
 
-                        // Background (RGB → map to palette)
+                        // Background (RGB → map to palette using bitmap's palette)
                         sprite.bg_color = ColorRef::Rgb(
                             data.back_color,
                             data.back_color_g,
                             data.back_color_b,
                         );
                         sprite.back_color =
-                            sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                            sprite.bg_color.to_index(palette_for_index) as i32;
                     }
 
                     _ => {
@@ -1307,6 +1355,14 @@ impl Score {
             .collect();
 
         for (channel_num, data) in &sprites_to_init {
+            // Debug: Log channels 20-25 initialization (second loop)
+            if *channel_num >= 20 && *channel_num <= 25 {
+                web_sys::console::log_1(&format!(
+                    "[Score] Frame {} Ch {} SECOND INIT: cast_lib={} cast_member={}",
+                    frame_num, channel_num, data.cast_lib, data.cast_member
+                ).into());
+            }
+
             let sprite = self.get_sprite_mut(*channel_num);
             sprite.entered = true;
 
@@ -1364,7 +1420,8 @@ impl Score {
                 };
             }
 
-            reserve_player_ref(|player| {
+            // Get bitmap's palette for RGB<->index conversion
+            let bitmap_palette: Option<Vec<(u8, u8, u8)>> = reserve_player_ref(|player| {
                 if let Some(member_ref) = &sprite.member {
                     if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
                         if let CastMemberType::Bitmap(bitmap_member) = &member.member_type {
@@ -1373,10 +1430,56 @@ impl Score {
 
                             sprite.bitmap_size_owned_by_sprite =
                                 sprite.width != bw || sprite.height != bh;
+
+                            // Get the bitmap's palette colors
+                            let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref);
+                            if let Some(bitmap) = bitmap {
+                                use crate::player::bitmap::bitmap::{PaletteRef, BuiltInPalette};
+                                use crate::player::bitmap::palette::{
+                                    SYSTEM_MAC_PALETTE, GRAYSCALE_PALETTE, PASTELS_PALETTE,
+                                    VIVID_PALETTE, NTSC_PALETTE, METALLIC_PALETTE, WEB_216_PALETTE,
+                                    RAINBOW_PALETTE,
+                                };
+                                use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
+
+                                match &bitmap.palette_ref {
+                                    PaletteRef::BuiltIn(builtin) => {
+                                        let palette: &[(u8, u8, u8)] = match builtin {
+                                            BuiltInPalette::SystemMac => &SYSTEM_MAC_PALETTE,
+                                            BuiltInPalette::SystemWin | BuiltInPalette::SystemWinDir4 | BuiltInPalette::Vga => &SYSTEM_WIN_PALETTE,
+                                            BuiltInPalette::GrayScale => &GRAYSCALE_PALETTE,
+                                            BuiltInPalette::Pastels => &PASTELS_PALETTE,
+                                            BuiltInPalette::Vivid => &VIVID_PALETTE,
+                                            BuiltInPalette::Ntsc => &NTSC_PALETTE,
+                                            BuiltInPalette::Metallic => &METALLIC_PALETTE,
+                                            BuiltInPalette::Web216 => &WEB_216_PALETTE,
+                                            BuiltInPalette::Rainbow => &RAINBOW_PALETTE,
+                                        };
+                                        return Some(palette.to_vec());
+                                    }
+                                    PaletteRef::Member(palette_member_ref) => {
+                                        let slot_number = CastMemberRefHandlers::get_cast_slot_number(
+                                            palette_member_ref.cast_lib as u32,
+                                            palette_member_ref.cast_member as u32,
+                                        );
+                                        let palettes = player.movie.cast_manager.palettes();
+                                        if let Some(palette_member) = palettes.get(slot_number as usize) {
+                                            return Some(palette_member.colors.clone());
+                                        }
+                                    }
+                                    PaletteRef::Default => {
+                                        // Use system default
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+                None
             });
+
+            // Use bitmap's palette if available, otherwise fall back to SYSTEM_WIN_PALETTE
+            let palette_for_index: &[(u8, u8, u8)] = bitmap_palette.as_deref().unwrap_or(&SYSTEM_WIN_PALETTE);
 
             match data.color_flag {
                 // fore + back are palette indexes
@@ -1392,14 +1495,14 @@ impl Score {
 
                 // foreColor is RGB, backColor is palette index
                 1 => {
-                    // Foreground (RGB → map to palette)
+                    // Foreground (RGB → map to palette using bitmap's palette)
                     sprite.color = ColorRef::Rgb(
                         data.fore_color,
                         data.fore_color_g,
                         data.fore_color_b,
                     );
                     sprite.fore_color =
-                        sprite.color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                        sprite.color.to_index(palette_for_index) as i32;
 
                     // Background (palette index)
                     sprite.back_color = data.back_color as i32;
@@ -1412,35 +1515,35 @@ impl Score {
                     sprite.fore_color = data.fore_color as i32;
                     sprite.color = ColorRef::PaletteIndex(data.fore_color);
 
-                    // Background (RGB → map to palette)
+                    // Background (RGB → map to palette using bitmap's palette)
                     sprite.bg_color = ColorRef::Rgb(
                         data.back_color,
                         data.back_color_g,
                         data.back_color_b,
                     );
                     sprite.back_color =
-                        sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                        sprite.bg_color.to_index(palette_for_index) as i32;
                 }
 
                 // both fore + back are RGB
                 3 => {
-                    // Foreground (RGB → map to palette)
+                    // Foreground (RGB → map to palette using bitmap's palette)
                     sprite.color = ColorRef::Rgb(
                         data.fore_color,
                         data.fore_color_g,
                         data.fore_color_b,
                     );
                     sprite.fore_color =
-                        sprite.color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                        sprite.color.to_index(palette_for_index) as i32;
 
-                    // Background (RGB → map to palette)
+                    // Background (RGB → map to palette using bitmap's palette)
                     sprite.bg_color = ColorRef::Rgb(
                         data.back_color,
                         data.back_color_g,
                         data.back_color_b,
                     );
                     sprite.back_color =
-                        sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                        sprite.bg_color.to_index(palette_for_index) as i32;
                 }
 
                 _ => {
@@ -1744,6 +1847,7 @@ impl Score {
         self.channel_initialization_data = score_chunk.frame_data.frame_channel_data.clone();
         self.sound_channel_data = score_chunk.frame_data.sound_channel_data.clone();
         self.tempo_channel_data = score_chunk.frame_data.tempo_channel_data.clone();
+
         self.keyframes_cache = build_all_keyframes_cache(
             &score_chunk.frame_data.frame_channel_data,
             &score_chunk.frame_intervals
@@ -1991,6 +2095,8 @@ impl Score {
                     && x.sprite.visible
             })
             .sorted_by(|a, b| {
+                // Sort by loc_z ascending (lower values first, drawn first/behind)
+                // Sprites with higher loc_z are drawn later and appear on top
                 let res = a.sprite.loc_z.cmp(&b.sprite.loc_z);
                 if res == std::cmp::Ordering::Equal {
                     a.number.cmp(&b.number)
@@ -2097,6 +2203,9 @@ pub fn sprite_get_prop(
                 .collect();
             Ok(Datum::List(DatumType::List, instance_ids, false))
         }
+        "memberNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
+            x.member.as_ref().map_or(0, |y| y.cast_member)
+        }))),
         "castNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| {
                 CastMemberRefHandlers::get_cast_slot_number(y.cast_lib as u32, y.cast_member as u32)
@@ -2114,11 +2223,11 @@ pub fn sprite_get_prop(
         }
         "visible" => Ok(datum_bool(sprite.map_or(true, |sprite| sprite.visible))),
         "puppet" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.puppet))),
-        "foreColor" => Ok(Datum::Int(
-            sprite.map_or(255, |sprite| sprite.color.to_index(&SYSTEM_WIN_PALETTE)) as i32,
+        "foreColor" | "forecolor" => Ok(Datum::Int(
+            sprite.map_or(255, |sprite| sprite.fore_color) as i32,
         )),
-        "backColor" => Ok(Datum::Int(
-            sprite.map_or(0, |sprite| sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE)) as i32,
+        "backColor" | "backcolor" => Ok(Datum::Int(
+            sprite.map_or(0, |sprite| sprite.back_color) as i32,
         )),
         "cursor" => {
             let cursor_ref = sprite.and_then(|sprite| sprite.cursor_ref.clone());
@@ -2234,12 +2343,6 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |player| value.int_value(),
             |sprite, value| {
                 let val = value?;
-                // Debug: Log locH changes for puppeted sprites
-                if sprite.puppet && sprite.number == 70 {
-                    web_sys::console::log_1(&format!(
-                        "sprite_set_prop: ch{} locH {} -> {}", sprite.number, sprite.loc_h, val
-                    ).into());
-                }
                 sprite.loc_h = val;
                 Ok(())
             },
@@ -2349,7 +2452,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "backColor" => borrow_sprite_mut(
+        "backColor" | "backcolor" => borrow_sprite_mut(
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -2370,7 +2473,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "foreColor" => borrow_sprite_mut(
+        "foreColor" | "forecolor" => borrow_sprite_mut(
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -2485,8 +2588,17 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |player| value.int_value(),
             |sprite, value| {
                 let value = value?;
+                // Check if value looks like a slot number (cast_lib << 16 | cast_member)
+                // Director's castNum getter returns slot numbers, and some scripts
+                // incorrectly pass castNum to memberNum setter
+                let actual_member_num = if value > 65535 {
+                    // Value is a slot number, extract just the member part (lower 16 bits)
+                    (value as u32 & 0xFFFF) as i32
+                } else {
+                    value
+                };
                 let new_member_ref = match &sprite.member {
-                    Some(member_ref) => cast_member_ref(member_ref.cast_lib, value),
+                    Some(member_ref) => cast_member_ref(member_ref.cast_lib, actual_member_num),
                     None => CastMemberRefHandlers::member_ref_from_slot_number(value as u32),
                 };
                 sprite.member = Some(new_member_ref);
@@ -3023,19 +3135,23 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
         CastMemberType::Shape(shape_member) => {
             let reg_x = shape_member.shape_info.reg_point.0;
             let reg_y = shape_member.shape_info.reg_point.1;
+            // Apply registration point offset (same as bitmaps)
+            let draw_x = sprite.loc_h - reg_x as i32;
+            let draw_y = sprite.loc_v - reg_y as i32;
             IntRect::from(
-                sprite.loc_h,
-                sprite.loc_v,
-                sprite.width + sprite.loc_h,
-                sprite.height + sprite.loc_v,
+                draw_x,
+                draw_y,
+                sprite.width + draw_x,
+                sprite.height + draw_y,
             )
         }
         CastMemberType::Field(field_member) => {
             IntRect::from_size(sprite.loc_h, sprite.loc_v, field_member.width as i32, 12)
         } // TODO
-        CastMemberType::Text(text_member) => {
-            IntRect::from_size(sprite.loc_h, sprite.loc_v, text_member.width as i32, 12)
-        } // TODO
+        CastMemberType::Text(_text_member) => {
+            // Use sprite dimensions from score data
+            IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height)
+        }
         CastMemberType::FilmLoop(film_loop) => {
             // For filmloops, use info.reg_point to calculate dimensions.
             // The filmloop's rect is stored in info as:

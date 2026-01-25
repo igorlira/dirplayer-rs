@@ -652,12 +652,13 @@ impl JsApi {
         }
         let member = member.unwrap();
 
+        // Use safe_string to handle non-ASCII characters (e.g., Japanese)
         if !channel.name.is_empty() {
-            return Some(channel.name.clone());
+            return Some(safe_string(&channel.name));
         } else if !channel.sprite.name.is_empty() {
-            return Some(channel.sprite.name.clone());
+            return Some(safe_string(&channel.sprite.name));
         } else if !member.name.is_empty() {
-            return Some(member.name.clone());
+            return Some(safe_string(&member.name));
         } else {
             return None;
         }
@@ -1181,6 +1182,7 @@ impl ToJsValue for PaletteRef {
                 )
                 .as_str(),
             ),
+            PaletteRef::Default => safe_js_string("#default"),
         }
     }
 }

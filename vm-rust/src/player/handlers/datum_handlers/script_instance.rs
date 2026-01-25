@@ -275,58 +275,6 @@ impl ScriptInstanceDatumHandlers {
         handler_name: &String,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        // Debug: Log when define is called with buffer/sprite details
-        #[cfg(target_arch = "wasm32")]
-        if handler_name == "define" {
-            reserve_player_ref(|player| {
-                let script_name = if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(datum) {
-                    let instance = player.allocator.get_script_instance(instance_ref);
-                    if let Some(script) = player.movie.cast_manager.get_script_by_ref(&instance.script) {
-                        script.name.clone()
-                    } else {
-                        "?".to_string()
-                    }
-                } else {
-                    "?".to_string()
-                };
-
-                // Look for buffer and sprite in the props
-                let mut buffer_info = String::new();
-                let mut sprite_info = String::new();
-                let mut id_info = String::new();
-
-                for arg in args.iter() {
-                    if let Datum::PropList(props, ..) = player.get_datum(arg) {
-                        for (k, v) in props.iter() {
-                            let key = player.get_datum(k).string_value().unwrap_or_default();
-                            if key == "buffer" {
-                                let val = player.get_datum(v);
-                                buffer_info = match val {
-                                    Datum::CastMember(m) => format!("member({}:{})", m.cast_lib, m.cast_member),
-                                    _ => val.type_str().to_string()
-                                };
-                            } else if key == "sprite" {
-                                let val = player.get_datum(v);
-                                sprite_info = match val {
-                                    Datum::SpriteRef(s) => format!("sprite({})", s),
-                                    _ => val.type_str().to_string()
-                                };
-                            } else if key == "id" {
-                                id_info = player.get_datum(v).string_value().unwrap_or_default();
-                            }
-                        }
-                    }
-                }
-
-                if !buffer_info.is_empty() || !sprite_info.is_empty() {
-                    web_sys::console::log_1(&format!(
-                        "DEBUG: {}.define() id={} buffer={} sprite={}",
-                        script_name, id_info, buffer_info, sprite_info
-                    ).into());
-                }
-            });
-        }
-
         let (instance_id, handler_ref) = reserve_player_ref(|player| {
             let handler_ref = ScriptInstanceUtils::get_handler(handler_name, datum, player);
             let datum = player.get_datum(datum);

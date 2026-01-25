@@ -184,25 +184,50 @@ impl WebGL2Context {
 
     /// Set blend mode for additive blending (ink 33)
     pub fn set_blend_additive(&self) {
-        self.gl.blend_func(
-            WebGl2RenderingContext::ONE,
-            WebGl2RenderingContext::ONE,
+        // Ensure blend equation is FUNC_ADD (additive needs: dst + src)
+        self.gl.blend_equation(WebGl2RenderingContext::FUNC_ADD);
+        // Use separate blend for RGB and Alpha:
+        // - RGB: ONE, ONE (additive: result = src + dst)
+        // - Alpha: ZERO, ONE (preserve destination alpha)
+        // This prevents AddPin from modifying the alpha channel,
+        // which can cause issues when AddPin is drawn on top of
+        // semi-transparent sprites (like blend < 100).
+        self.gl.blend_func_separate(
+            WebGl2RenderingContext::ONE,           // srcRGB
+            WebGl2RenderingContext::ONE,           // dstRGB
+            WebGl2RenderingContext::ZERO,          // srcAlpha
+            WebGl2RenderingContext::ONE,           // dstAlpha
         );
     }
 
     /// Set blend mode for standard alpha blending (ink 0)
     pub fn set_blend_alpha(&self) {
-        self.gl.blend_func(
-            WebGl2RenderingContext::SRC_ALPHA,
-            WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+        // Always reset blend equation to FUNC_ADD in case a previous sprite
+        // used a different equation (Lighten uses MAX, SubPin uses REVERSE_SUBTRACT)
+        self.gl.blend_equation(WebGl2RenderingContext::FUNC_ADD);
+        // Use separate blend for RGB and Alpha:
+        // - RGB: SRC_ALPHA, ONE_MINUS_SRC_ALPHA (standard alpha blend)
+        // - Alpha: ZERO, ONE (preserve destination alpha = 1.0)
+        // In Director, the stage is always opaque. The blend value controls
+        // color mixing but the framebuffer alpha should stay at 1.0.
+        self.gl.blend_func_separate(
+            WebGl2RenderingContext::SRC_ALPHA,           // srcRGB
+            WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA, // dstRGB
+            WebGl2RenderingContext::ZERO,                // srcAlpha (ignore source alpha)
+            WebGl2RenderingContext::ONE,                 // dstAlpha (preserve dest alpha)
         );
     }
 
     /// Set blend mode for multiply (ink 41 - darken)
     pub fn set_blend_multiply(&self) {
-        self.gl.blend_func(
-            WebGl2RenderingContext::DST_COLOR,
-            WebGl2RenderingContext::ZERO,
+        // Ensure blend equation is FUNC_ADD for multiply blend
+        self.gl.blend_equation(WebGl2RenderingContext::FUNC_ADD);
+        // Preserve destination alpha (same fix as other blend modes)
+        self.gl.blend_func_separate(
+            WebGl2RenderingContext::DST_COLOR,  // srcRGB
+            WebGl2RenderingContext::ZERO,       // dstRGB
+            WebGl2RenderingContext::ZERO,       // srcAlpha
+            WebGl2RenderingContext::ONE,        // dstAlpha
         );
     }
 
@@ -210,13 +235,29 @@ impl WebGL2Context {
     /// Uses MAX blend equation to only show lighter pixels
     pub fn set_blend_lighten(&self) {
         self.gl.blend_equation(WebGl2RenderingContext::MAX);
-        self.gl.blend_func(
-            WebGl2RenderingContext::ONE,
-            WebGl2RenderingContext::ONE,
+        // Preserve destination alpha (same fix as AddPin)
+        self.gl.blend_func_separate(
+            WebGl2RenderingContext::ONE,           // srcRGB
+            WebGl2RenderingContext::ONE,           // dstRGB
+            WebGl2RenderingContext::ZERO,          // srcAlpha
+            WebGl2RenderingContext::ONE,           // dstAlpha
         );
     }
 
-    /// Reset blend equation to default (used after lighten)
+    /// Set blend mode for subtractive blending (ink 35 - Sub Pin)
+    /// Uses FUNC_REVERSE_SUBTRACT equation: result = dst - src
+    pub fn set_blend_subtractive(&self) {
+        self.gl.blend_equation(WebGl2RenderingContext::FUNC_REVERSE_SUBTRACT);
+        // Preserve destination alpha (same fix as AddPin)
+        self.gl.blend_func_separate(
+            WebGl2RenderingContext::ONE,           // srcRGB
+            WebGl2RenderingContext::ONE,           // dstRGB
+            WebGl2RenderingContext::ZERO,          // srcAlpha
+            WebGl2RenderingContext::ONE,           // dstAlpha
+        );
+    }
+
+    /// Reset blend equation to default (used after lighten/subtractive)
     pub fn reset_blend_equation(&self) {
         self.gl.blend_equation(WebGl2RenderingContext::FUNC_ADD);
     }

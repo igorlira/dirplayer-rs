@@ -177,6 +177,10 @@ pub struct RenderedTextCacheKey {
     pub member_ref: CastMemberRef,
     /// The actual text content (hash or truncated string for memory efficiency)
     pub text_hash: u64,
+    /// Hash of styled spans (if any) - 0 if no styled spans
+    pub styled_spans_hash: u64,
+    /// Hash of alignment and word_wrap settings
+    pub settings_hash: u64,
     /// Ink mode
     pub ink: i32,
     /// Blend value
@@ -205,7 +209,7 @@ impl RenderedTextCacheKey {
         width: u32,
         height: u32,
     ) -> Self {
-        Self::new_with_focus(member_ref, text, ink, blend, fg_color, bg_color, false, width, height)
+        Self::new_with_styled_spans(member_ref, text, None, ink, blend, fg_color, bg_color, false, width, height, "left", false)
     }
 
     /// Create a new cache key with focus state (for Field members with cursor)
@@ -220,6 +224,24 @@ impl RenderedTextCacheKey {
         width: u32,
         height: u32,
     ) -> Self {
+        Self::new_with_styled_spans(member_ref, text, None, ink, blend, fg_color, bg_color, has_focus, width, height, "left", false)
+    }
+
+    /// Create a new cache key with styled spans (for HTML-styled text)
+    pub fn new_with_styled_spans(
+        member_ref: CastMemberRef,
+        text: &str,
+        styled_spans: Option<&[crate::player::handlers::datum_handlers::cast_member::font::StyledSpan]>,
+        ink: i32,
+        blend: i32,
+        fg_color: ColorRef,
+        bg_color: ColorRef,
+        has_focus: bool,
+        width: u32,
+        height: u32,
+        alignment: &str,
+        word_wrap: bool,
+    ) -> Self {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -227,9 +249,36 @@ impl RenderedTextCacheKey {
         text.hash(&mut hasher);
         let text_hash = hasher.finish();
 
+        // Hash styled spans if present
+        let styled_spans_hash = if let Some(spans) = styled_spans {
+            let mut span_hasher = DefaultHasher::new();
+            for span in spans {
+                span.text.hash(&mut span_hasher);
+                // Hash style properties
+                span.style.font_face.hash(&mut span_hasher);
+                span.style.font_size.hash(&mut span_hasher);
+                span.style.color.hash(&mut span_hasher);
+                span.style.bg_color.hash(&mut span_hasher);
+                span.style.bold.hash(&mut span_hasher);
+                span.style.italic.hash(&mut span_hasher);
+                span.style.underline.hash(&mut span_hasher);
+            }
+            span_hasher.finish()
+        } else {
+            0
+        };
+
+        // Hash alignment and word_wrap settings
+        let mut settings_hasher = DefaultHasher::new();
+        alignment.hash(&mut settings_hasher);
+        word_wrap.hash(&mut settings_hasher);
+        let settings_hash = settings_hasher.finish();
+
         Self {
             member_ref,
             text_hash,
+            styled_spans_hash,
+            settings_hash,
             ink,
             blend,
             fg_color,
