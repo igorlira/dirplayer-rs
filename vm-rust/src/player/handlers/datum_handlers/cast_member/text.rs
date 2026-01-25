@@ -229,6 +229,217 @@ impl TextMemberHandlers {
                 // Line height is typically font height + fixed line space
                 Ok(Datum::Int(text_data.fixed_line_space as i32))
             }
+            // TextInfo (3D text / D6+ text member) properties
+            "displayFace" => {
+                if let Some(ref info) = text_data.info {
+                    let faces = info.display_face_list();
+                    let mut item_refs = Vec::new();
+                    for face in faces {
+                        item_refs.push(player.alloc_datum(Datum::Symbol(face.trim_start_matches('#').to_string())));
+                    }
+                    Ok(Datum::List(DatumType::List, item_refs, false))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "tunnelDepth" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Int(info.tunnel_depth as i32))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "bevelType" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Symbol(info.bevel_type_str().trim_start_matches('#').to_string()))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "bevelDepth" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Int(info.bevel_depth as i32))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "smoothness" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Int(info.smoothness as i32))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "displayMode" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Symbol(info.display_mode_str().trim_start_matches('#').to_string()))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "directionalPreset" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Symbol(info.directional_preset_str().trim_start_matches('#').to_string()))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "textureType" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Symbol(info.texture_type_str().trim_start_matches('#').to_string()))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "reflectivity" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Float(info.reflectivity as f64))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "directionalColor" => {
+                if let Some(ref info) = text_data.info {
+                    let (r, g, b) = info.directional_color_rgb();
+                    let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
+                    Ok(Datum::Int(rgb))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "ambientColor" => {
+                if let Some(ref info) = text_data.info {
+                    let (r, g, b) = info.ambient_color_rgb();
+                    let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
+                    Ok(Datum::Int(rgb))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "specularColor" => {
+                if let Some(ref info) = text_data.info {
+                    let (r, g, b) = info.specular_color_rgb();
+                    let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
+                    Ok(Datum::Int(rgb))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "cameraPosition" => {
+                if let Some(ref info) = text_data.info {
+                    // Return as a vector(x, y, z)
+                    let x_ref = player.alloc_datum(Datum::Float(info.camera_position_x as f64));
+                    let y_ref = player.alloc_datum(Datum::Float(info.camera_position_y as f64));
+                    let z_ref = player.alloc_datum(Datum::Float(info.camera_position_z as f64));
+                    Ok(Datum::List(DatumType::Vector, vec![x_ref, y_ref, z_ref], false))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "cameraRotation" => {
+                if let Some(ref info) = text_data.info {
+                    // Return as a vector(x, y, z)
+                    let x_ref = player.alloc_datum(Datum::Float(info.camera_rotation_x as f64));
+                    let y_ref = player.alloc_datum(Datum::Float(info.camera_rotation_y as f64));
+                    let z_ref = player.alloc_datum(Datum::Float(info.camera_rotation_z as f64));
+                    Ok(Datum::List(DatumType::Vector, vec![x_ref, y_ref, z_ref], false))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "textureMember" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::String(info.texture_member.clone()))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "editable" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(datum_bool(info.editable))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "autoTab" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(datum_bool(info.auto_tab))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "directToStage" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(datum_bool(info.direct_to_stage))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "preRender" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Symbol(info.pre_render_str().trim_start_matches('#').to_string()))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "saveBitmap" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(datum_bool(info.save_bitmap))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "kerning" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(datum_bool(info.kerning))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "kerningThreshold" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Int(info.kerning_threshold as i32))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "useHypertextStyles" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(datum_bool(info.use_hypertext_styles))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "antiAliasThreshold" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Int(info.anti_alias_threshold as i32))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "scrollTop" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(Datum::Int(info.scroll_top as i32))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "centerRegPoint" => {
+                if let Some(ref info) = text_data.info {
+                    Ok(datum_bool(info.center_reg_point))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
+            "regPoint" => {
+                if let Some(ref info) = text_data.info {
+                    let x_ref = player.alloc_datum(Datum::Int(info.reg_x));
+                    let y_ref = player.alloc_datum(Datum::Int(info.reg_y));
+                    Ok(Datum::List(DatumType::Point, vec![x_ref, y_ref], false))
+                } else {
+                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                }
+            }
             "image" => {
                 // Use the same rendering approach as sprite display
                 // Get dimensions - use styled spans if available for accurate measurement
@@ -395,6 +606,8 @@ impl TextMemberHandlers {
                         bold: text_data.font_style.iter().any(|s| s == "bold"),
                         italic: text_data.font_style.iter().any(|s| s == "italic"),
                         underline: text_data.font_style.iter().any(|s| s == "underline"),
+                        kerning: 0,      // Default: no kerning adjustment for non-XMED text
+                        char_spacing: 0, // Default: no extra spacing for non-XMED text
                     };
                     let spans = vec![StyledSpan {
                         text: text_data.text.clone(),
@@ -713,6 +926,407 @@ impl TextMemberHandlers {
                 |player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().fixed_line_space = value? as u16;
+                    Ok(())
+                },
+            ),
+            // TextInfo (3D text / D6+ text member) property setters
+            "tunnelDepth" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.tunnel_depth = value? as u16;
+                    }
+                    Ok(())
+                },
+            ),
+            "bevelDepth" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.bevel_depth = value? as u16;
+                    }
+                    Ok(())
+                },
+            ),
+            "smoothness" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.smoothness = value? as u32;
+                    }
+                    Ok(())
+                },
+            ),
+            "reflectivity" => borrow_member_mut(
+                member_ref,
+                |player| value.float_value().or_else(|_| value.int_value().map(|i| i as f64)),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.reflectivity = value? as u32;
+                    }
+                    Ok(())
+                },
+            ),
+            "bevelType" => borrow_member_mut(
+                member_ref,
+                |player| value.string_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let val = value?;
+                        info.bevel_type = match val.trim_start_matches('#') {
+                            "none" => 0,
+                            "miter" => 1,
+                            "round" => 2,
+                            _ => 0,
+                        };
+                    }
+                    Ok(())
+                },
+            ),
+            "displayMode" => borrow_member_mut(
+                member_ref,
+                |player| value.string_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let val = value?;
+                        info.display_mode = match val.trim_start_matches('#') {
+                            "normal" => 0,
+                            "mode3d" => 1,
+                            _ => 0,
+                        };
+                    }
+                    Ok(())
+                },
+            ),
+            "directionalPreset" => borrow_member_mut(
+                member_ref,
+                |player| value.string_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let val = value?;
+                        info.directional_preset = match val.trim_start_matches('#') {
+                            "none" => 0,
+                            "topLeft" => 1,
+                            "topCenter" => 2,
+                            "topRight" => 3,
+                            "middleLeft" => 4,
+                            "middleCenter" => 5,
+                            "middleRight" => 6,
+                            "bottomLeft" => 7,
+                            "bottomCenter" => 8,
+                            "bottomRight" => 9,
+                            _ => 0,
+                        };
+                    }
+                    Ok(())
+                },
+            ),
+            "textureType" => borrow_member_mut(
+                member_ref,
+                |player| value.string_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let val = value?;
+                        info.texture_type = match val.trim_start_matches('#') {
+                            "none" => 0,
+                            "default" => 1,
+                            "member" => 2,
+                            _ => 0,
+                        };
+                    }
+                    Ok(())
+                },
+            ),
+            "directionalColor" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let color_val = value?;
+                        // Convert RGB to format RR GG BB 00
+                        let r = ((color_val >> 16) & 0xFF) as u32;
+                        let g = ((color_val >> 8) & 0xFF) as u32;
+                        let b = (color_val & 0xFF) as u32;
+                        info.directional_color = (r << 24) | (g << 16) | (b << 8);
+                    }
+                    Ok(())
+                },
+            ),
+            "ambientColor" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let color_val = value?;
+                        let r = ((color_val >> 16) & 0xFF) as u32;
+                        let g = ((color_val >> 8) & 0xFF) as u32;
+                        let b = (color_val & 0xFF) as u32;
+                        info.ambient_color = (r << 24) | (g << 16) | (b << 8);
+                    }
+                    Ok(())
+                },
+            ),
+            "specularColor" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let color_val = value?;
+                        let r = ((color_val >> 16) & 0xFF) as u32;
+                        let g = ((color_val >> 8) & 0xFF) as u32;
+                        let b = (color_val & 0xFF) as u32;
+                        info.specular_color = (r << 24) | (g << 16) | (b << 8);
+                    }
+                    Ok(())
+                },
+            ),
+            "cameraPosition" => borrow_member_mut(
+                member_ref,
+                |player| {
+                    let list = value.to_list()?;
+                    if list.len() >= 3 {
+                        let x = player.get_datum(&list[0]).float_value()?;
+                        let y = player.get_datum(&list[1]).float_value()?;
+                        let z = player.get_datum(&list[2]).float_value()?;
+                        Ok((x, y, z))
+                    } else {
+                        Err(ScriptError::new("cameraPosition requires a vector with 3 elements".to_string()))
+                    }
+                },
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let (x, y, z) = value?;
+                        info.camera_position_x = x as f32;
+                        info.camera_position_y = y as f32;
+                        info.camera_position_z = z as f32;
+                    }
+                    Ok(())
+                },
+            ),
+            "cameraRotation" => borrow_member_mut(
+                member_ref,
+                |player| {
+                    let list = value.to_list()?;
+                    if list.len() >= 3 {
+                        let x = player.get_datum(&list[0]).float_value()?;
+                        let y = player.get_datum(&list[1]).float_value()?;
+                        let z = player.get_datum(&list[2]).float_value()?;
+                        Ok((x, y, z))
+                    } else {
+                        Err(ScriptError::new("cameraRotation requires a vector with 3 elements".to_string()))
+                    }
+                },
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let (x, y, z) = value?;
+                        info.camera_rotation_x = x as f32;
+                        info.camera_rotation_y = y as f32;
+                        info.camera_rotation_z = z as f32;
+                    }
+                    Ok(())
+                },
+            ),
+            "textureMember" => borrow_member_mut(
+                member_ref,
+                |player| value.string_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.texture_member = value?;
+                    }
+                    Ok(())
+                },
+            ),
+            "displayFace" => borrow_member_mut(
+                member_ref,
+                |player| {
+                    let list = value.to_list()?;
+                    let mut face_mask: i32 = 0;
+                    for item_ref in list {
+                        let face_str = player.get_datum(&item_ref).string_value()?;
+                        match face_str.trim_start_matches('#') {
+                            "front" => face_mask |= 1,
+                            "tunnel" => face_mask |= 2,
+                            "back" => face_mask |= 4,
+                            _ => {}
+                        }
+                    }
+                    // If all faces are enabled, use -1
+                    if face_mask == 7 {
+                        face_mask = -1;
+                    }
+                    Ok(face_mask)
+                },
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.display_face = value?;
+                    }
+                    Ok(())
+                },
+            ),
+            "editable" => borrow_member_mut(
+                member_ref,
+                |player| value.bool_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.editable = value?;
+                    }
+                    Ok(())
+                },
+            ),
+            "autoTab" => borrow_member_mut(
+                member_ref,
+                |player| value.bool_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.auto_tab = value?;
+                    }
+                    Ok(())
+                },
+            ),
+            "directToStage" => borrow_member_mut(
+                member_ref,
+                |player| value.bool_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.direct_to_stage = value?;
+                    }
+                    Ok(())
+                },
+            ),
+            "preRender" => borrow_member_mut(
+                member_ref,
+                |player| value.string_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let val = value?;
+                        info.pre_render = match val.trim_start_matches('#') {
+                            "none" => 0,
+                            "copyInk" => 1,
+                            "otherInk" => 2,
+                            _ => 0,
+                        };
+                    }
+                    Ok(())
+                },
+            ),
+            "saveBitmap" => borrow_member_mut(
+                member_ref,
+                |player| value.bool_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.save_bitmap = value?;
+                    }
+                    Ok(())
+                },
+            ),
+            "kerning" => borrow_member_mut(
+                member_ref,
+                |player| value.bool_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.kerning = value?;
+                    }
+                    Ok(())
+                },
+            ),
+            "kerningThreshold" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.kerning_threshold = value? as u32;
+                    }
+                    Ok(())
+                },
+            ),
+            "useHypertextStyles" => borrow_member_mut(
+                member_ref,
+                |player| value.bool_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.use_hypertext_styles = value?;
+                    }
+                    Ok(())
+                },
+            ),
+            "antiAliasThreshold" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.anti_alias_threshold = value? as u32;
+                    }
+                    Ok(())
+                },
+            ),
+            "scrollTop" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.scroll_top = value? as u32;
+                    }
+                    Ok(())
+                },
+            ),
+            "centerRegPoint" => borrow_member_mut(
+                member_ref,
+                |player| value.bool_value(),
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        info.center_reg_point = value?;
+                    }
+                    Ok(())
+                },
+            ),
+            "regPoint" => borrow_member_mut(
+                member_ref,
+                |player| {
+                    let list = value.to_list()?;
+                    if list.len() >= 2 {
+                        let x = player.get_datum(&list[0]).int_value()?;
+                        let y = player.get_datum(&list[1]).int_value()?;
+                        Ok((x, y))
+                    } else {
+                        Err(ScriptError::new("regPoint requires a point with 2 elements".to_string()))
+                    }
+                },
+                |cast_member, value| {
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    if let Some(ref mut info) = text_member.info {
+                        let (x, y) = value?;
+                        info.reg_x = x;
+                        info.reg_y = y;
+                    }
                     Ok(())
                 },
             ),

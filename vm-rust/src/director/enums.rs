@@ -640,6 +640,352 @@ impl FontInfo {
     }
 }
 
+/// TextInfo for D6+ text member specific data (with "text" FourCC header)
+/// This is different from FieldInfo which is for older D4/D5 field members
+#[derive(Clone, Debug, Default)]
+pub struct TextInfo {
+    // Header fields
+    pub fourcc_length: u32,          // Offset 0-3: typically 4
+    pub fourcc: [u8; 4],             // Offset 4-7: "text"
+    pub data_length: u32,            // Offset 8-11: total data length
+    pub editable: bool,              // Offset 12-15: editable flag (0=false, 1=true)
+
+    // Additional fields (offsets 16+)
+    pub box_type: u32,               // Offset 16-19: 0=#adjust, 1=#scroll, 2=#fixed
+    pub scroll_top: u32,             // Offset 20-23: scroll top position
+    pub auto_tab: bool,              // Offset 24-27: auto tab flag (0=false, 1=true)
+    pub direct_to_stage: bool,       // Offset 28-31: direct to stage flag
+    pub anti_alias: bool,            // Offset 32-35: anti-alias flag (0=false, 1=true)
+    pub anti_alias_threshold: u32,   // Offset 36-39: anti-alias threshold (default 14)
+    pub reserved_40: u32,            // Offset 40-43
+    pub reserved_44: u32,            // Offset 44-47
+    pub height: u32,                 // Offset 48-51: height (17 in example)
+    pub width: u32,                  // Offset 52-55: width (98 in example)
+    pub kerning: bool,               // Offset 56-59: kerning flag
+    pub kerning_threshold: u32,      // Offset 60-63: kerning threshold value
+    pub use_hypertext_styles: bool,  // Offset 64-67: use hypertext styles flag
+    pub reg_y: i32,                  // Offset 68-71: registration point Y
+    pub reg_x: i32,                  // Offset 72-75: registration point X
+    pub center_reg_point: bool,      // Offset 76-79: center registration point flag
+    pub pre_render: u32,             // Offset 80-83: 0=#none, 1=#copyInk, 2=#otherInk
+    pub save_bitmap: bool,           // Offset 84-87: save bitmap flag
+    // 3TEX section starts at offset 88
+    pub tex_fourcc: [u8; 4],         // Offset 88-91: "3TEX"
+    pub tex_length: u32,             // Offset 92-95: 3TEX section length
+    pub display_face: i32,           // Offset 96-99: displayFace bitmask (-1=all, bit0=#front, bit1=#tunnel, bit2=#back)
+    pub tunnel_depth: u16,           // Offset 100-101: tunnel depth (e.g., 50, 69)
+    pub tex_unknown_102: u16,        // Offset 102-103
+    pub bevel_type: u32,             // Offset 104-107: 0=#none, 1=#miter, 2=#round
+    pub bevel_depth: u16,            // Offset 108-109: bevel depth (e.g., 1, 3)
+    pub tex_unknown_110: u16,        // Offset 110-111
+    pub tex_unknown_112: u32,        // Offset 112-115
+    pub smoothness: u32,             // Offset 116-119: smoothness (default 5)
+    pub tex_unknown_120: u32,        // Offset 120-123
+    pub display_mode: u32,           // Offset 124-127: 0=#normal, 1=#mode3d
+    pub directional_preset: u32,     // Offset 128-131: 0=#none, 1=#topLeft, 2=#topCenter, 3=#topRight, 4=#middleLeft, 5=#middleCenter, 6=#middleRight, 7=#bottomLeft, 8=#bottomCenter, 9=#bottomRight
+    pub texture_type: u32,           // Offset 132-135: 0=#none, 1=#default, 2=#member
+    pub reflectivity: u32,           // Offset 136-139: reflectivity (default 30)
+    pub directional_color: u32,      // Offset 140-143: RGB color (e.g., #777777 = 0x77777700)
+    pub ambient_color: u32,          // Offset 144-147: RGB color (e.g., #666666 = 0x66666600)
+    pub specular_color: u32,         // Offset 148-151: RGB color (e.g., #222222 = 0x22222200)
+    pub camera_position_x: f32,      // Offset 152-155: camera position X (e.g., 48.5)
+    pub camera_position_y: f32,      // Offset 156-159: camera position Y (e.g., 9.0)
+    pub camera_position_z: f32,      // Offset 160-163: camera position Z (e.g., 27.36)
+    pub camera_rotation_x: f32,      // Offset 164-167: camera rotation X (e.g., 0.0)
+    pub camera_rotation_y: f32,      // Offset 168-171: camera rotation Y (e.g., -0.0)
+    pub camera_rotation_z: f32,      // Offset 172-175: camera rotation Z (e.g., 0.0)
+    pub tex_unknown_176: u32,        // Offset 176-179
+    pub tex_unknown_180: u32,        // Offset 180-183
+    pub tex_unknown_184: u32,        // Offset 184-187
+    pub texture_member: String,      // Offset 188+: texture member reference string (e.g., "NoTexture", "(member 0 of castLib 0)")
+
+    // Raw data for further parsing
+    pub raw_data: Vec<u8>,
+}
+
+impl From<&[u8]> for TextInfo {
+    fn from(bytes: &[u8]) -> TextInfo {
+        let mut reader = BinaryReader::from_u8(bytes);
+        reader.set_endian(binary_reader::Endian::Big);
+
+        let fourcc_length = reader.read_u32().unwrap_or(0);
+
+        let mut fourcc = [0u8; 4];
+        for i in 0..4 {
+            fourcc[i] = reader.read_u8().unwrap_or(0);
+        }
+
+        let data_length = reader.read_u32().unwrap_or(0);
+
+        // Editable flag at offset 12-15
+        let editable_raw = reader.read_u32().unwrap_or(0);
+        let editable = editable_raw != 0;
+
+        // Read remaining known fields
+        let box_type = reader.read_u32().unwrap_or(0);
+        let scroll_top = reader.read_u32().unwrap_or(0);
+        let auto_tab_raw = reader.read_u32().unwrap_or(0);
+        let auto_tab = auto_tab_raw != 0;
+        let direct_to_stage_raw = reader.read_u32().unwrap_or(0);
+        let direct_to_stage = direct_to_stage_raw != 0;
+        let anti_alias_raw = reader.read_u32().unwrap_or(0);
+        let anti_alias = anti_alias_raw != 0;
+        let anti_alias_threshold = reader.read_u32().unwrap_or(0);
+        let reserved_40 = reader.read_u32().unwrap_or(0);
+        let reserved_44 = reader.read_u32().unwrap_or(0);
+        let height = reader.read_u32().unwrap_or(0);
+        let width = reader.read_u32().unwrap_or(0);
+        let kerning_raw = reader.read_u32().unwrap_or(0);
+        let kerning = kerning_raw != 0;
+        let kerning_threshold = reader.read_u32().unwrap_or(0);
+        let use_hypertext_styles_raw = reader.read_u32().unwrap_or(0);
+        let use_hypertext_styles = use_hypertext_styles_raw != 0;
+        let reg_y = reader.read_i32().unwrap_or(0);
+        let reg_x = reader.read_i32().unwrap_or(0);
+        let center_reg_point_raw = reader.read_u32().unwrap_or(0);
+        let center_reg_point = center_reg_point_raw != 0;
+        let pre_render = reader.read_u32().unwrap_or(0);
+        let save_bitmap_raw = reader.read_u32().unwrap_or(0);
+        let save_bitmap = save_bitmap_raw != 0;
+        // 3TEX section
+        let mut tex_fourcc = [0u8; 4];
+        for i in 0..4 {
+            tex_fourcc[i] = reader.read_u8().unwrap_or(0);
+        }
+        let tex_length = reader.read_u32().unwrap_or(0);
+        let display_face = reader.read_i32().unwrap_or(0);
+        let tunnel_depth = reader.read_u16().unwrap_or(0);
+        let tex_unknown_102 = reader.read_u16().unwrap_or(0);
+        let bevel_type = reader.read_u32().unwrap_or(0);
+        let bevel_depth = reader.read_u16().unwrap_or(0);
+        let tex_unknown_110 = reader.read_u16().unwrap_or(0);
+        let tex_unknown_112 = reader.read_u32().unwrap_or(0);
+        let smoothness = reader.read_u32().unwrap_or(0);
+        let tex_unknown_120 = reader.read_u32().unwrap_or(0);
+        let display_mode = reader.read_u32().unwrap_or(0);
+        let directional_preset = reader.read_u32().unwrap_or(0);
+        let texture_type = reader.read_u32().unwrap_or(0);
+        let reflectivity = reader.read_u32().unwrap_or(0);
+        let directional_color = reader.read_u32().unwrap_or(0);
+        let ambient_color = reader.read_u32().unwrap_or(0);
+        let specular_color = reader.read_u32().unwrap_or(0);
+        let camera_position_x = reader.read_f32().unwrap_or(0.0);
+        let camera_position_y = reader.read_f32().unwrap_or(0.0);
+        let camera_position_z = reader.read_f32().unwrap_or(0.0);
+        let camera_rotation_x = reader.read_f32().unwrap_or(0.0);
+        let camera_rotation_y = reader.read_f32().unwrap_or(0.0);
+        let camera_rotation_z = reader.read_f32().unwrap_or(0.0);
+        let tex_unknown_176 = reader.read_u32().unwrap_or(0);
+        let tex_unknown_180 = reader.read_u32().unwrap_or(0);
+        let tex_unknown_184 = reader.read_u32().unwrap_or(0);
+
+        // Read texture_member as null-terminated string (fixed buffer size)
+        let mut texture_member_bytes = Vec::new();
+        while let Ok(byte) = reader.read_u8() {
+            if byte == 0 {
+                break;
+            }
+            texture_member_bytes.push(byte);
+        }
+        let texture_member = String::from_utf8_lossy(&texture_member_bytes).to_string();
+
+        TextInfo {
+            fourcc_length,
+            fourcc,
+            data_length,
+            editable,
+            box_type,
+            scroll_top,
+            auto_tab,
+            direct_to_stage,
+            anti_alias,
+            anti_alias_threshold,
+            reserved_40,
+            reserved_44,
+            height,
+            width,
+            kerning,
+            kerning_threshold,
+            use_hypertext_styles,
+            reg_y,
+            reg_x,
+            center_reg_point,
+            pre_render,
+            save_bitmap,
+            tex_fourcc,
+            tex_length,
+            display_face,
+            tunnel_depth,
+            tex_unknown_102,
+            bevel_type,
+            bevel_depth,
+            tex_unknown_110,
+            tex_unknown_112,
+            smoothness,
+            tex_unknown_120,
+            display_mode,
+            directional_preset,
+            texture_type,
+            reflectivity,
+            directional_color,
+            ambient_color,
+            specular_color,
+            camera_position_x,
+            camera_position_y,
+            camera_position_z,
+            camera_rotation_x,
+            camera_rotation_y,
+            camera_rotation_z,
+            tex_unknown_176,
+            tex_unknown_180,
+            tex_unknown_184,
+            texture_member,
+            raw_data: bytes.to_vec(),
+        }
+    }
+}
+
+impl TextInfo {
+    /// Check if the bytes look like D6+ text member data (has "text" FourCC)
+    pub fn looks_like_text_info(bytes: &[u8]) -> bool {
+        if bytes.len() < 8 {
+            return false;
+        }
+        // Check for "text" FourCC at offset 4
+        bytes[4] == b't' && bytes[5] == b'e' && bytes[6] == b'x' && bytes[7] == b't'
+    }
+
+    /// Get the FourCC as a string
+    pub fn fourcc_str(&self) -> String {
+        String::from_utf8_lossy(&self.fourcc).to_string()
+    }
+
+    /// Get the box type as a Lingo symbol string
+    pub fn box_type_str(&self) -> &'static str {
+        match self.box_type {
+            0 => "#adjust",
+            1 => "#scroll",
+            2 => "#fixed",
+            _ => "#unknown",
+        }
+    }
+
+    /// Get the display mode as a Lingo symbol string
+    pub fn display_mode_str(&self) -> &'static str {
+        match self.display_mode {
+            0 => "#normal",
+            1 => "#mode3d",
+            _ => "#unknown",
+        }
+    }
+
+    /// Get the pre-render mode as a Lingo symbol string
+    pub fn pre_render_str(&self) -> &'static str {
+        match self.pre_render {
+            0 => "#none",
+            1 => "#copyInk",
+            2 => "#otherInk",
+            _ => "#unknown",
+        }
+    }
+
+    /// Get the 3TEX FourCC as a string
+    pub fn tex_fourcc_str(&self) -> String {
+        String::from_utf8_lossy(&self.tex_fourcc).to_string()
+    }
+
+    /// Get the texture type as a Lingo symbol string
+    pub fn texture_type_str(&self) -> &'static str {
+        match self.texture_type {
+            0 => "#none",
+            1 => "#default",
+            2 => "#member",
+            _ => "#unknown",
+        }
+    }
+
+    /// Get the bevel type as a Lingo symbol string
+    pub fn bevel_type_str(&self) -> &'static str {
+        match self.bevel_type {
+            0 => "#none",
+            1 => "#miter",
+            2 => "#round",
+            _ => "#unknown",
+        }
+    }
+
+    /// Check if a specific face is enabled in displayFace
+    pub fn has_face(&self, face: &str) -> bool {
+        if self.display_face == -1 {
+            return true; // All faces enabled
+        }
+        match face {
+            "#front" => (self.display_face & 1) != 0,
+            "#tunnel" => (self.display_face & 2) != 0,
+            "#back" => (self.display_face & 4) != 0,
+            _ => false,
+        }
+    }
+
+    /// Get displayFace as a list of enabled faces
+    pub fn display_face_list(&self) -> Vec<&'static str> {
+        if self.display_face == -1 {
+            return vec!["#front", "#back", "#tunnel"];
+        }
+        let mut faces = Vec::new();
+        if (self.display_face & 1) != 0 {
+            faces.push("#front");
+        }
+        if (self.display_face & 4) != 0 {
+            faces.push("#back");
+        }
+        if (self.display_face & 2) != 0 {
+            faces.push("#tunnel");
+        }
+        faces
+    }
+
+    /// Get the directional preset as a Lingo symbol string
+    pub fn directional_preset_str(&self) -> &'static str {
+        match self.directional_preset {
+            0 => "#none",
+            1 => "#topLeft",
+            2 => "#topCenter",
+            3 => "#topRight",
+            4 => "#middleLeft",
+            5 => "#middleCenter",
+            6 => "#middleRight",
+            7 => "#bottomLeft",
+            8 => "#bottomCenter",
+            9 => "#bottomRight",
+            _ => "#unknown",
+        }
+    }
+
+    /// Extract RGB tuple from a color u32 (format: RR GG BB 00)
+    pub fn color_to_rgb(color: u32) -> (u8, u8, u8) {
+        let r = ((color >> 24) & 0xFF) as u8;
+        let g = ((color >> 16) & 0xFF) as u8;
+        let b = ((color >> 8) & 0xFF) as u8;
+        (r, g, b)
+    }
+
+    /// Get directional color as RGB tuple
+    pub fn directional_color_rgb(&self) -> (u8, u8, u8) {
+        Self::color_to_rgb(self.directional_color)
+    }
+
+    /// Get ambient color as RGB tuple
+    pub fn ambient_color_rgb(&self) -> (u8, u8, u8) {
+        Self::color_to_rgb(self.ambient_color)
+    }
+
+    /// Get specular color as RGB tuple
+    pub fn specular_color_rgb(&self) -> (u8, u8, u8) {
+        Self::color_to_rgb(self.specular_color)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TextMemberData {
     pub width: u32,

@@ -3148,9 +3148,26 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
         CastMemberType::Field(field_member) => {
             IntRect::from_size(sprite.loc_h, sprite.loc_v, field_member.width as i32, 12)
         } // TODO
-        CastMemberType::Text(_text_member) => {
-            // Use sprite dimensions from score data
-            IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height)
+        CastMemberType::Text(text_member) => {
+            // Calculate draw position based on registration point from TextInfo
+            let (draw_x, draw_y) = if let Some(info) = &text_member.info {
+                if info.center_reg_point {
+                    // When center_reg_point is enabled, loc is the center of the sprite
+                    let half_width = sprite.width / 2;
+                    let half_height = sprite.height / 2;
+                    (sprite.loc_h - half_width, sprite.loc_v - half_height)
+                } else if info.reg_x != 0 || info.reg_y != 0 {
+                    // Use custom registration point offset
+                    (sprite.loc_h - info.reg_x, sprite.loc_v - info.reg_y)
+                } else {
+                    // Default: loc is top-left corner
+                    (sprite.loc_h, sprite.loc_v)
+                }
+            } else {
+                // No TextInfo available, use default positioning
+                (sprite.loc_h, sprite.loc_v)
+            };
+            IntRect::from_size(draw_x, draw_y, sprite.width, sprite.height)
         }
         CastMemberType::FilmLoop(film_loop) => {
             // For filmloops, use info.reg_point to calculate dimensions.

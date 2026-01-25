@@ -17,7 +17,7 @@ use super::{
 use crate::director::{
     chunks::{cast_member::CastMemberDef, score::ScoreChunk, xmedia::PfrFont, xmedia::XMediaChunk, sound::SoundChunk, Chunk, cast_member::CastMemberChunk},
     enums::{
-        BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, TextMemberData, SoundInfo, FieldInfo,
+        BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, TextMemberData, SoundInfo, FieldInfo, TextInfo,
     },
     lingo::script::ScriptContext,
 };
@@ -67,6 +67,7 @@ pub struct TextMember {
     pub width: u16,
     pub height: u16,
     pub html_styled_spans: Vec<StyledSpan>,
+    pub info: Option<TextInfo>,
 }
 
 pub struct PfrBitmap {
@@ -148,6 +149,7 @@ impl TextMember {
             width: 100,
             height: 20,
             html_styled_spans: Vec::new(),
+            info: None,
         }
     }
 
@@ -980,6 +982,28 @@ impl CastMember {
 
             web_sys::console::log_1(&format!("🔍 Checking XMedia child (member #{}, {} bytes)", number, xm.raw_data.len()).into());
 
+            let hex_dump = xm.raw_data
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<String>>()
+                .join(" ");
+            web_sys::console::log_1(&format!(
+                "raw data (XMED, {} bytes):\n{}",
+                xm.raw_data.len(),
+                hex_dump
+            ).into());
+
+            let hex_dump = chunk.specific_data_raw
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<String>>()
+                .join(" ");
+            web_sys::console::log_1(&format!(
+                "raw data (specific data, {} bytes):\n{}",
+                chunk.specific_data_raw.len(),
+                hex_dump
+            ).into());
+
             // 1) If SWF: return SWF
             if let Some(cm) = Self::try_parse_swf(xm.raw_data.to_vec(), number, chunk) {
                 web_sys::console::log_1(&"✅ Detected as SWF".into());
@@ -1011,17 +1035,6 @@ impl CastMember {
         bitmap_manager: &mut BitmapManager,
     ) -> CastMember {
         let font_name = Self::resolve_font_name(chunk, member_def, number);
-
-        let hex_dump = xm.raw_data
-            .iter()
-            .map(|b| format!("{:02X}", b))
-            .collect::<Vec<String>>()
-            .join(" ");
-        web_sys::console::log_1(&format!(
-            "raw data (XMED, {} bytes):\n{}",
-            xm.raw_data.len(),
-            hex_dump
-        ).into());
 
         let preview_text = Self::extract_text_from_xmedia(&xm.raw_data)
             .filter(|s| s.len() > 3)
@@ -1098,6 +1111,9 @@ impl CastMember {
             styled_text.word_wrap
         ).into());
 
+        // Get TextInfo from specific_data if available
+        let text_info = chunk.specific_data.text_info().cloned();
+
         let text_member = TextMember {
             text: styled_text.text.clone(),
             html_source: String::new(),
@@ -1113,6 +1129,7 @@ impl CastMember {
             width: 0,   // Not used - sprite dimensions are used for rendering
             height: 0,  // Not used - sprite dimensions are used for rendering
             html_styled_spans: styled_text.styled_spans,
+            info: text_info,
         };
 
         CastMember {

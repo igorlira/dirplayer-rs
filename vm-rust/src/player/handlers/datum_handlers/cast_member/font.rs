@@ -35,6 +35,8 @@ pub struct HtmlStyle {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub kerning: i32,       // Kerning amount (from XMED Section 7 dword98, stored as fixed-point * 65536)
+    pub char_spacing: i32,  // Character spacing in pixels (from XMED Section 7 dword9C, stored as fixed-point * 65536)
 }
 
 impl Default for HtmlStyle {
@@ -47,6 +49,8 @@ impl Default for HtmlStyle {
             bold: false,
             italic: false,
             underline: false,
+            kerning: 0,
+            char_spacing: 0,
         }
     }
 }
