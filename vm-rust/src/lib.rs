@@ -56,8 +56,8 @@ pub fn set_system_font_path(path: String) {
 }
 
 #[wasm_bindgen]
-pub async fn load_movie_file(path: String) {
-    player_dispatch(PlayerVMCommand::LoadMovieFromFile(path));
+pub async fn load_movie_file(path: String, autoplay: bool) {
+    player_dispatch(PlayerVMCommand::LoadMovieFromFile(path, autoplay));
 }
 
 // Player control commands bypass the command queue to allow stopping/resetting
@@ -126,6 +126,53 @@ pub fn resume_breakpoint() {
     reserve_player_mut(|player| {
         player.resume_breakpoint();
     });
+}
+
+#[wasm_bindgen]
+pub fn step_into() {
+    reserve_player_mut(|player| {
+        player.step_into();
+    });
+}
+
+#[wasm_bindgen]
+pub fn step_over() {
+    reserve_player_mut(|player| {
+        player.step_over();
+    });
+}
+
+#[wasm_bindgen]
+pub fn step_out() {
+    reserve_player_mut(|player| {
+        player.step_out();
+    });
+}
+
+#[wasm_bindgen]
+pub fn step_over_line(skip_bytecode_indices: Vec<usize>) {
+    reserve_player_mut(|player| {
+        player.step_over_line(skip_bytecode_indices);
+    });
+}
+
+#[wasm_bindgen]
+pub fn step_into_line(skip_bytecode_indices: Vec<usize>) {
+    reserve_player_mut(|player| {
+        player.step_into_line(skip_bytecode_indices);
+    });
+}
+
+#[wasm_bindgen]
+pub fn set_break_on_error(enabled: bool) {
+    reserve_player_mut(|player| {
+        player.break_on_error = enabled;
+    });
+}
+
+#[wasm_bindgen]
+pub fn get_break_on_error() -> bool {
+    reserve_player_ref(|player| player.break_on_error)
 }
 
 #[wasm_bindgen]

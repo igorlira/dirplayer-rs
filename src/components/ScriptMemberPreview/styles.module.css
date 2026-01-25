@@ -1,34 +1,471 @@
-.handlerName {
-  composes: bodyMonospace from global;
+:root {
+  --script-bg: #1e1e1e;
+  --script-fg: #d4d4d4;
+  --script-font-family: "Consolas", "Monaco", "Courier New", monospace;
+
+  --tab-bg: #252526;
+  --tab-fg: #969696;
+  --tab-fg-hover: #d4d4d4;
+  --tab-bg-hover: #2d2d2d;
+  --tab-fg-active: #ffffff;
+  --tab-bg-active: #1e1e1e;
+  --tab-border: #3c3c3c;
+  --tab-indicator: #007acc;
+
+  --handler-bg: #252526;
+  --handler-bg-hover: #2a2a2a;
+  --handler-border: #2d2d2d;
+  --handler-icon-fg: #858585;
+  --handler-signature-fg: #dcdcaa;
+  --handler-keyword-fg: #569cd6;
+  --handler-args-fg: #9cdcfe;
+
+  --line-bg-hover: #2a2a2a;
+  --line-highlight-bg: #264f78;
+  --line-highlight-fg: #ffffff;
+  --line-alt-highlight-bg: #2d4f4f;
+
+  --gutter-bg: #1e1e1e;
+  --gutter-fg: #6e7681;
+
+  --breakpoint-color: #f14c4c;
+  --breakpoint-hover-bg: rgba(241, 76, 76, 0.4);
+
+  --bytecode-offset-fg: #6a9955;
+  --bytecode-opcode-fg: #569cd6;
+  --bytecode-operand-fg: #b5cea8;
+  --bytecode-text-fg: #ce9178;
+
+  --empty-state-fg: #6e7681;
+
+  --scrollbar-track-bg: #1e1e1e;
+  --scrollbar-thumb-bg: #424242;
+  --scrollbar-thumb-border: #1e1e1e;
+  --scrollbar-thumb-hover-bg: #4f4f4f;
+
+  /* Syntax Highlighting Tokens */
+  --token-keyword-fg: #569cd6;
+  --token-identifier-fg: #9cdcfe;
+  --token-number-fg: #b5cea8;
+  --token-string-fg: #ce9178;
+  --token-symbol-fg: #4ec9b0;
+  --token-operator-fg: #d4d4d4;
+  --token-comment-fg: #6a9955;
+  --token-builtin-fg: #dcdcaa;
+  --token-punctuation-fg: #d4d4d4;
 }
 
-.bytecodeLine {
-  composes: bodyMonospace from global;
+.scriptContainer.light {
+  --script-bg: #ffffff;
+  --script-fg: #000000;
+
+  --tab-bg: #f3f3f3;
+  --tab-fg: #505050;
+  --tab-fg-hover: #000000;
+  --tab-bg-hover: #e6e6e6;
+  --tab-fg-active: #000000;
+  --tab-bg-active: #ffffff;
+  --tab-border: #e0e0e0;
+
+  --handler-bg: #f3f3f3;
+  --handler-bg-hover: #e6e6e6;
+  --handler-border: #e0e0e0;
+  --handler-icon-fg: #707070;
+  --handler-signature-fg: #001080; /* blue */
+  --handler-keyword-fg: #0000ff; /* blue */
+  --handler-args-fg: #098658; /* dark green */
+
+  --line-bg-hover: #f0f0f0;
+  --line-highlight-bg: #fffbad;
+  --line-highlight-fg: #000000;
+  --line-alt-highlight-bg: #a6e3a1;
+
+  --gutter-bg: #ffffff;
+  --gutter-fg: #858585;
+
+  --breakpoint-color: #e51400;
+  --breakpoint-hover-bg: rgba(229, 20, 0, 0.4);
+
+  --bytecode-offset-fg: #008000; /* green */
+  --bytecode-opcode-fg: #0000ff; /* blue */
+  --bytecode-operand-fg: #098658; /* dark green */
+  --bytecode-text-fg: #a31515; /* dark red */
+
+  --empty-state-fg: #858585;
+
+  --scrollbar-track-bg: #ffffff;
+  --scrollbar-thumb-bg: #cccccc;
+  --scrollbar-thumb-border: #ffffff;
+  --scrollbar-thumb-hover-bg: #b3b3b3;
+
+  /* Syntax Highlighting Tokens */
+  --token-keyword-fg: #0000ff;
+  --token-identifier-fg: #001080;
+  --token-number-fg: #098658;
+  --token-string-fg: #a31515;
+  --token-symbol-fg: #267f99;
+  --token-operator-fg: #000000;
+  --token-comment-fg: #008000;
+  --token-builtin-fg: #001080;
+  --token-punctuation-fg: #000000;
 }
 
-.bytecodeLineHighlighted, .handlerNameHighlighted {
-  composes: bytecodeLine from global;
-  background-color: #ffff00;
-}
-
-.bytecodeLineBackground, .handlerNameBackground {
-  background-color: #f0f0f0;
-}
+/* Script Member Preview - IDE-style theme */
 
 .scriptContainer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: var(--script-bg);
+  color: var(--script-fg);
+  font-family: var(--script-font-family);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* View Mode Toggle - Tab style */
+.viewModeToggle {
+  display: flex;
+  background-color: var(--tab-bg);
+  border-bottom: 1px solid var(--tab-border);
+  padding: 0;
+  margin: 0;
+}
+
+.viewModeButton {
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  color: var(--tab-fg);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  position: relative;
+  transition: color 0.15s ease;
+}
+
+.viewModeButton:hover {
+  color: var(--tab-fg-hover);
+  background: var(--tab-bg-hover);
+}
+
+.viewModeButtonActive {
+  color: var(--tab-fg-active);
+  background: var(--tab-bg-active);
+}
+
+.viewModeButtonActive::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--tab-indicator);
+}
+
+/* Handler Header - Collapsible section */
+.handlerContainer {
+  border-bottom: 1px solid var(--handler-border);
+}
+
+.handlerHeader {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  background-color: var(--handler-bg);
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.1s ease;
+  border: none;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+.handlerHeader:hover {
+  background-color: var(--handler-bg-hover);
+}
+
+.handlerName {
+  composes: handlerHeader;
+}
+
+.expandIcon {
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--handler-icon-fg);
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.expandIconExpanded {
+  transform: rotate(90deg);
+}
+
+.handlerSignature {
+  color: var(--handler-signature-fg);
   flex: 1;
 }
 
-.breakpointColumn {
-  width: 30px;
-
-  &.hasBreakpoint {
-    background-color: #ff0000;
-  }
+.handlerKeyword {
+  color: var(--handler-keyword-fg);
+  margin-right: 4px;
 }
 
-.bytecodeLine {
+.handlerArgs {
+  color: var(--handler-args-fg);
+}
+
+.handlerNameHighlighted {
+  background-color: var(--line-highlight-bg) !important;
+}
+
+.handlerNameBackground {
+  background-color: var(--line-alt-highlight-bg) !important;
+}
+
+/* Code Body */
+.codeBody {
+  background-color: var(--script-bg);
+}
+
+/* Line Container - Shared by bytecode and lingo */
+.lineContainer {
   display: flex;
-  flex-direction: row;
-  justify-content: stretch;
+  min-height: 20px;
+  position: relative;
+}
+
+.lineContainer:hover {
+  background-color: var(--line-bg-hover);
+}
+
+/* Gutter - Line numbers and breakpoints */
+.gutter {
+  display: flex;
+  flex-shrink: 0;
+  width: 76px;
+  background-color: var(--gutter-bg);
+}
+
+.breakpointArea {
+  width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+}
+
+.breakpointArea::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: transparent;
+  transition: background-color 0.1s ease;
+}
+
+.breakpointArea:hover::before {
+  background-color: var(--breakpoint-hover-bg);
+}
+
+.hasBreakpoint .breakpointArea::before,
+.lineContainer.hasBreakpoint .breakpointArea::before {
+  background-color: var(--breakpoint-color);
+}
+
+.breakpointColumn {
+  width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.breakpointColumn::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: transparent;
+  transition: background-color 0.1s ease;
+}
+
+.breakpointColumn:hover::before {
+  background-color: var(--breakpoint-hover-bg);
+}
+
+.breakpointColumn.hasBreakpoint::before {
+  background-color: var(--breakpoint-color);
+}
+
+.breakpointDisabled {
+  cursor: default;
+}
+
+.breakpointDisabled::before {
+  display: none;
+}
+
+.lineNumber {
+  width: 40px;
+  padding-right: 16px;
+  text-align: right;
+  color: var(--gutter-fg);
+  font-size: 12px;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* Code Content */
+.codeContent {
+  flex: 1;
+  padding: 0 16px 0 8px;
+  white-space: pre;
+  display: flex;
+  align-items: center;
+}
+
+/* Bytecode Line */
+.bytecodeLine {
+  composes: lineContainer;
+}
+
+.bytecodeText {
+  color: var(--bytecode-text-fg);
+}
+
+.bytecodeOffset {
+  color: var(--bytecode-offset-fg);
+  margin-right: 12px;
+  min-width: 32px;
+}
+
+.bytecodeOpcode {
+  color: var(--bytecode-opcode-fg);
+  margin-right: 8px;
+}
+
+.bytecodeOperand {
+  color: var(--bytecode-operand-fg);
+}
+
+/* Lingo Line */
+.lingoLine {
+  composes: lineContainer;
+}
+
+.lingoLineText {
+  color: var(--script-fg);
+  flex: 1;
+  white-space: pre;
+  padding-right: 16px;
+  line-height: 20px;
+}
+
+/* Highlighting */
+.bytecodeLineHighlighted,
+.lingoLineHighlighted {
+  background-color: var(--line-highlight-bg) !important;
+}
+
+.bytecodeLineHighlighted .bytecodeText,
+.lingoLineHighlighted .lingoLineText {
+  color: var(--line-highlight-fg);
+}
+
+.bytecodeLineBackground,
+.lingoLineBackground {
+  background-color: var(--line-alt-highlight-bg);
+}
+
+/* End Handler */
+.endHandler {
+  padding: 6px 12px;
+  padding-left: 34px;
+  color: var(--token-keyword-fg);
+  background-color: var(--handler-bg);
+}
+
+/* Empty State */
+.noLingo {
+  padding: 16px 24px;
+  color: var(--empty-state-fg);
+  font-style: italic;
+}
+
+/* Scrollbar styling */
+.scriptContainer::-webkit-scrollbar {
+  width: 14px;
+}
+
+.scriptContainer::-webkit-scrollbar-track {
+  background: var(--scrollbar-track-bg);
+}
+
+.scriptContainer::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb-bg);
+  border: 3px solid var(--scrollbar-thumb-border);
+  border-radius: 7px;
+}
+
+.scriptContainer::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover-bg);
+}
+
+/* Syntax Highlighting Tokens */
+.tokenKeyword {
+  color: var(--token-keyword-fg);
+  font-weight: 500;
+}
+
+.tokenIdentifier {
+  color: var(--token-identifier-fg);
+}
+
+.tokenNumber {
+  color: var(--token-number-fg);
+}
+
+.tokenString {
+  color: var(--token-string-fg);
+}
+
+.tokenSymbol {
+  color: var(--token-symbol-fg);
+}
+
+.tokenOperator {
+  color: var(--token-operator-fg);
+}
+
+.tokenComment {
+  color: var(--token-comment-fg);
+  font-style: italic;
+}
+
+.tokenBuiltin {
+  color: var(--token-builtin-fg);
+}
+
+.tokenPunctuation {
+  color: var(--token-punctuation-fg);
+}
+
+.tokenWhitespace {
+  /* Whitespace doesn't need special styling */
 }

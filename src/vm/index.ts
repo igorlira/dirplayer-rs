@@ -139,11 +139,37 @@ export interface IHandlerSnapshot {
   name: string
   args: string[],
   bytecode: IBytecodeSnapshot[],
+  lingo?: ILingoLine[],
+  bytecodeToLine?: Record<number, number>,
 }
 
 export interface IBytecodeSnapshot {
   pos: number
   text: string
+}
+
+export type LingoTokenType =
+  | 'keyword'
+  | 'identifier'
+  | 'number'
+  | 'string'
+  | 'symbol'
+  | 'operator'
+  | 'comment'
+  | 'builtin'
+  | 'punctuation'
+  | 'whitespace';
+
+export interface ILingoSpan {
+  text: string
+  type: LingoTokenType
+}
+
+export interface ILingoLine {
+  text: string
+  indent: number
+  bytecodeIndices: number[]
+  spans: ILingoSpan[]
 }
 
 export interface IUnknownMemberSnapshot {

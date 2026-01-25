@@ -9,7 +9,7 @@ use crate::{
         chunks::{script::ScriptChunk, ChunkContainer, score::ScoreFrameChannelData},
         enums::ScriptType,
         file::{DirectorFile, get_variable_multiplier},
-        lingo::{datum::Datum, script::ScriptContext},
+        lingo::{datum::Datum, decompiler, script::ScriptContext},
         utils::fourcc_to_string,
     },
     player::{
@@ -80,6 +80,7 @@ pub struct OnScriptErrorCallbackData {
     pub message: String,
     pub script_member_ref: Option<JsBridgeMemberRef>,
     pub handler_name: Option<String>,
+    pub is_paused: bool,
 }
 
 impl Into<js_sys::Map> for OnScriptErrorCallbackData {
@@ -96,6 +97,7 @@ impl Into<js_sys::Map> for OnScriptErrorCallbackData {
         } else {
             map.str_set("handler_name", &JsValue::NULL);
         }
+        map.str_set("is_paused", &JsValue::from_bool(self.is_paused));
         map
     }
 }
@@ -756,6 +758,48 @@ impl JsApi {
             handler_map.str_set("name", &name.to_js_value());
             handler_map.str_set("args", &args_array);
             handler_map.str_set("bytecode", &bytecode_array);
+
+            // Decompile handler to Lingo source
+            let decompiled = decompiler::decompile_handler(handler, chunk, lctx, dir_version, multiplier);
+
+            // Add lingo lines
+            let lingo_array = js_sys::Array::new();
+            for line in &decompiled.lines {
+                let line_map = js_sys::Map::new();
+                line_map.str_set("text", &line.text.to_js_value());
+                line_map.str_set("indent", &JsValue::from(line.indent));
+
+                let indices_array = js_sys::Array::new();
+                for &idx in &line.bytecode_indices {
+                    indices_array.push(&JsValue::from(idx as u32));
+                }
+                line_map.str_set("bytecodeIndices", &indices_array);
+
+                // Add syntax highlighting spans
+                let spans_array = js_sys::Array::new();
+                for span in &line.spans {
+                    let span_map = js_sys::Map::new();
+                    span_map.str_set("text", &span.text.to_js_value());
+                    span_map.str_set("type", &JsValue::from_str(span.token_type.as_str()));
+                    spans_array.push(&span_map.to_js_object());
+                }
+                line_map.str_set("spans", &spans_array);
+
+                lingo_array.push(&line_map.to_js_object());
+            }
+            handler_map.str_set("lingo", &lingo_array);
+
+            // Add bytecode to line mapping
+            let mapping_obj = js_sys::Object::new();
+            for (&bc_idx, &line_idx) in &decompiled.bytecode_to_line {
+                js_sys::Reflect::set(
+                    &mapping_obj,
+                    &JsValue::from(bc_idx as u32),
+                    &JsValue::from(line_idx as u32),
+                ).ok();
+            }
+            handler_map.str_set("bytecodeToLine", &mapping_obj);
+
             handlers_array.push(&handler_map.to_js_object());
         }
         member_map.str_set("handlers", &handlers_array);
@@ -817,6 +861,10 @@ impl JsApi {
     }
 
     pub fn dispatch_script_error(player: &DirPlayer, err: &ScriptError) {
+        let is_paused = player.current_breakpoint.as_ref()
+            .map(|bp| bp.error.is_some())
+            .unwrap_or(false);
+
         let data: js_sys::Map =
             if let Some(current_scope) = player.scopes.get(player.current_scope_ref()) {
                 let cast_lib = player
@@ -836,6 +884,7 @@ impl JsApi {
                     message: err.message.to_owned(),
                     script_member_ref: Some(current_scope.script_ref.to_js()),
                     handler_name: Some(current_handler_name.to_owned()),
+                    is_paused,
                 }
                 .into()
             } else {
@@ -843,11 +892,11 @@ impl JsApi {
                     message: err.message.to_owned(),
                     script_member_ref: None,
                     handler_name: None,
+                    is_paused,
                 }
                 .into()
             };
 
-        Self::dispatch_debug_update(player);
         onScriptError(data.to_js_object());
     }
 

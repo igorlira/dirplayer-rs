@@ -19,8 +19,7 @@ export default function EmbedPlayer({width, height, src, externalParams}: EmbedP
       const fullPath = getFullPathFromOrigin(src);
       set_base_path(getBasePath(fullPath));
       set_external_params(externalParams || {});
-      await load_movie_file(fullPath);
-      play()
+      await load_movie_file(fullPath, true);
     }
     if (isVmReady) {
       loadMovie().catch(e => console.error('Failed to load movie', e))

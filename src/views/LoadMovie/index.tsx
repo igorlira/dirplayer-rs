@@ -17,10 +17,7 @@ export default function LoadMovie() {
     try {
       setIsLoading(true);
       set_base_path(getBasePath(fullPath));
-      await load_movie_file(fullPath);
-      if (autoPlay) {
-        play();
-      }
+      await load_movie_file(fullPath, autoPlay);
     } catch (e) {
       console.error('Failed to load movie', e);
     } finally {

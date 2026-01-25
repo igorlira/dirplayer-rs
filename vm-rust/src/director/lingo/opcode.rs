@@ -1,6 +1,6 @@
 use num_derive::{FromPrimitive, ToPrimitive};
 
-#[derive(Copy, Clone, FromPrimitive, ToPrimitive, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, FromPrimitive, ToPrimitive, PartialEq, Eq, Hash)]
 pub enum OpCode {
     // single-byte
     Invalid = 0x0,
