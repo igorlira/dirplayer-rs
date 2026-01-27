@@ -2390,6 +2390,7 @@ pub async fn player_trigger_error_pause(
     reserve_player_mut(|player| {
         player.current_breakpoint = Some(breakpoint_ctx);
         player.pause_script();
+        JsApi::dispatch_scope_list(player);
         JsApi::dispatch_script_error(player, &err);
     });
     future.await;
