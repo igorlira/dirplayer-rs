@@ -1311,6 +1311,7 @@ pub fn render_score_to_bitmap_with_offset(
                             sprite.width as i32,
                             text_member.word_wrap,
                             None, // Color is now in the spans
+                            text_member.fixed_line_space,
                         ) {
                             console_warn!("Native text render error for Text member: {:?}", e);
                         }

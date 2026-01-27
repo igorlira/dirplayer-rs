@@ -574,6 +574,7 @@ impl TextMemberHandlers {
                         width as i32,
                         text_data.word_wrap,
                         None, // Don't pass text_color - it's now in the span
+                        text_data.fixed_line_space,
                     );
                 } else {
                     // Create a basic styled span from text member properties
@@ -625,6 +626,7 @@ impl TextMemberHandlers {
                         width as i32,
                         text_data.word_wrap,
                         None, // Don't pass text_color since we set it in the span
+                        text_data.fixed_line_space,
                     );
                 }
 

@@ -430,6 +430,7 @@ impl FontMemberHandlers {
         max_width: i32,
         word_wrap: bool,
         sprite_color: Option<&ColorRef>,
+        fixed_line_space: u16,
     ) -> Result<(), ScriptError> {
         // Get style from first span
         let first_style = spans.first().map(|s| &s.style);
@@ -545,7 +546,9 @@ impl FontMemberHandlers {
         };
 
         // Render each line (relative to canvas origin, not bitmap origin)
-        let line_height = (font_size as f64 * 1.2).ceil();
+        // Line advancement = font_size (base character height) + fixed_line_space (additional spacing) + 1
+        // This matches the logic in draw_text and measure_text
+        let line_height = font_size as f64 + fixed_line_space as f64;
         let mut y = 0.0;
 
         for line in &lines {

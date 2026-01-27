@@ -2061,6 +2061,7 @@ impl WebGL2Renderer {
                 width as i32,
                 word_wrap,
                 None, // Color is in the spans
+                line_spacing,
             ) {
                 web_sys::console::warn_1(
                     &format!("WebGL2 render_text_to_texture: Native text render error: {:?}", e).into()
