@@ -357,8 +357,13 @@ pub fn get_renderer_backend() -> String {
 // ============================================================================
 
 #[wasm_bindgen]
-pub fn mcp_list_scripts() -> String {
-    reserve_player_ref(|player| player::mcp::mcp_list_scripts(player))
+pub fn mcp_list_scripts(cast_lib: i32, limit: i32, offset: i32) -> String {
+    reserve_player_ref(|player| {
+        let cast_lib_opt = if cast_lib < 0 { None } else { Some(cast_lib) };
+        let limit_opt = if limit < 0 { None } else { Some(limit as usize) };
+        let offset_opt = if offset < 0 { None } else { Some(offset as usize) };
+        player::mcp::mcp_list_scripts(player, cast_lib_opt, limit_opt, offset_opt)
+    })
 }
 
 #[wasm_bindgen]
@@ -381,8 +386,16 @@ pub fn mcp_decompile_handler(cast_lib: i32, cast_member: i32, handler_name: Stri
 }
 
 #[wasm_bindgen]
-pub fn mcp_get_call_stack() -> String {
-    reserve_player_ref(|player| player::mcp::mcp_get_call_stack(player))
+pub fn mcp_get_call_stack(depth: i32, include_locals: bool) -> String {
+    reserve_player_ref(|player| {
+        let depth_opt = if depth < 0 { None } else { Some(depth as usize) };
+        player::mcp::mcp_get_call_stack(player, depth_opt, include_locals)
+    })
+}
+
+#[wasm_bindgen]
+pub fn mcp_get_context() -> String {
+    reserve_player_ref(|player| player::mcp::mcp_get_context(player))
 }
 
 #[wasm_bindgen]
@@ -446,6 +459,14 @@ pub fn mcp_inspect_cast_member(cast_lib: i32, cast_member: i32) -> String {
 #[wasm_bindgen]
 pub fn mcp_list_breakpoints() -> String {
     reserve_player_ref(|player| player::mcp::mcp_list_breakpoints(player))
+}
+
+/// Evaluate a Lingo expression and return the result as JSON.
+/// Unlike eval_command, this waits for completion and returns the result.
+#[wasm_bindgen]
+pub async fn mcp_eval_lingo(code: String) -> String {
+    let result = eval_lingo_command(code).await;
+    reserve_player_ref(|player| player::mcp::mcp_format_eval_result(player, result))
 }
 
 #[wasm_bindgen(start)]

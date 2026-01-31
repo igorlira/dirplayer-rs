@@ -128,7 +128,7 @@ export class McpServer {
     };
   }
 
-  private handleToolCall(request: McpRequest): McpResponse {
+  private async handleToolCall(request: McpRequest): Promise<McpResponse> {
     const params = request.params as { name: string; arguments?: Record<string, unknown> };
     const toolName = params.name as McpToolName;
     const args = params.arguments || {};
@@ -145,7 +145,7 @@ export class McpServer {
     }
 
     try {
-      const result = this.callTool(toolName, args);
+      const result = await this.callTool(toolName, args);
       return {
         jsonrpc: '2.0',
         id: request.id,
@@ -170,7 +170,7 @@ export class McpServer {
     }
   }
 
-  private callTool(name: McpToolName, args: Record<string, unknown>): string {
+  private async callTool(name: McpToolName, args: Record<string, unknown>): Promise<string> {
     if (!this.wasm) {
       throw new Error('WASM module not initialized');
     }
@@ -178,7 +178,11 @@ export class McpServer {
     switch (name) {
       // Script tools
       case 'list_scripts':
-        return this.wasm.mcp_list_scripts();
+        return this.wasm.mcp_list_scripts(
+          args.cast_lib !== undefined ? (args.cast_lib as number) : -1,
+          args.limit !== undefined ? (args.limit as number) : -1,
+          args.offset !== undefined ? (args.offset as number) : -1
+        );
 
       case 'get_script':
         return this.wasm.mcp_get_script(
@@ -207,15 +211,20 @@ export class McpServer {
         );
 
       case 'get_call_stack':
-        return this.wasm.mcp_get_call_stack();
+        return this.wasm.mcp_get_call_stack(
+          args.depth !== undefined ? (args.depth as number) : -1,
+          args.include_locals === true
+        );
+
+      case 'get_context':
+        return this.wasm.mcp_get_context();
 
       case 'get_execution_state':
         return this.wasm.mcp_get_execution_state();
 
       case 'eval_lingo':
-        // eval_command is async and uses callbacks, so we call it but can't get sync result
-        this.wasm.eval_command(args.code as string);
-        return JSON.stringify({ status: 'command sent', note: 'Results will appear in the debug console' });
+        // Await the result of evaluating the Lingo code
+        return await this.wasm.mcp_eval_lingo(args.code as string);
 
       case 'pause':
         this.wasm.stop();
