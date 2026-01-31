@@ -353,9 +353,9 @@ pub fn subtract_datums(
             }
             (ColorRef::Rgb(a_r, a_g, a_b), ColorRef::Rgb(b_r, b_g, b_b)) => {
                 Ok(Datum::ColorRef(ColorRef::Rgb(
-                    a_r.wrapping_sub(*b_r),
-                    a_g.wrapping_sub(*b_g),
-                    a_b.wrapping_sub(*b_b),
+                    a_r.saturating_sub(*b_r),
+                    a_g.saturating_sub(*b_g),
+                    a_b.saturating_sub(*b_b),
                 )))
             }
             _ => Err(ScriptError::new(format!(
