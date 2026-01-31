@@ -6,12 +6,15 @@ import {
   useContext,
 } from "react";
 import init, { add_breakpoint, set_system_font_path } from "vm-rust";
+import * as wasm from "vm-rust";
 import { initVmCallbacks } from "../vm/callbacks";
 import { JsBridgeBreakpoint } from "dirplayer-js-api";
 import { getFullPathFromOrigin } from "../utils/path";
 import { initAudioContext, initAudioBackend } from "../audio/audioInit";
 import { useDispatch } from "react-redux";
 import { ready } from "../store/vmSlice";
+import { isElectron } from "../utils/electron";
+import { initMcpServer } from "../mcp";
 
 interface VMProviderProps {
   children?: string | JSX.Element | JSX.Element[];
@@ -79,7 +82,18 @@ export default function VMProvider({ children, systemFontPath, wasmUrl }: VMProv
           }
         }
 
-        // Step 5: Mark VM as ready
+        // Step 5: Initialize MCP server (Electron only)
+        if (isElectron()) {
+          try {
+            const mcpServer = initMcpServer(wasm);
+            mcpServer.start();
+            console.log("MCP server initialized");
+          } catch (err) {
+            console.warn("Failed to initialize MCP server:", err);
+          }
+        }
+
+        // Step 6: Mark VM as ready
         send({ type: "INIT_OK" });
         dispatch(ready());
       } catch (err) {
