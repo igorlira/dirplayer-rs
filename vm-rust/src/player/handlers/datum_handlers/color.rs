@@ -66,6 +66,10 @@ impl ColorDatumHandlers {
                 },
             },
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("color".to_owned()))),
+            "paletteIndex" => match color_ref {
+                ColorRef::PaletteIndex(i) => Ok(player.alloc_datum(Datum::Int(*i as i32))),
+                ColorRef::Rgb(..) => Err(ScriptError::new("RGB color has no palette index".to_owned())),
+            },
             _ => Err(ScriptError::new(format!(
                 "Cannot get color property {}",
                 prop
