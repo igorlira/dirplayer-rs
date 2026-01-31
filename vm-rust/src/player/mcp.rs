@@ -6,11 +6,11 @@ use std::rc::Rc;
 use fxhash::FxHashMap;
 use serde::Serialize;
 
-use crate::director::{
+use crate::{director::{
     enums::ScriptType,
     file::get_variable_multiplier,
     lingo::{decompiler::handler::decompile_handler, script::ScriptContext as LingoScriptContext},
-};
+}, player::datum_formatting::format_concrete_datum_with_depth};
 
 use super::{
     allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
@@ -78,7 +78,7 @@ pub struct McpDecompiledLine {
 pub struct McpDecompileResult {
     pub handler_name: String,
     pub arguments: Vec<String>,
-    pub lines: Vec<McpDecompiledLine>,
+    // pub lines: Vec<McpDecompiledLine>,
     pub source: String,
 }
 
@@ -146,6 +146,14 @@ pub struct McpDatumInspection {
     pub type_name: String,
     pub value: String,
     pub properties: Option<FxHashMap<String, McpDatumValue>>,
+}
+
+#[derive(Serialize)]
+pub struct McpCastLibInfo {
+    pub number: i32,
+    pub name: String,
+    pub member_count: usize,
+    pub script_count: usize,
 }
 
 #[derive(Serialize)]
@@ -218,7 +226,7 @@ fn datum_to_mcp_value(player: &DirPlayer, datum_ref: &super::DatumRef) -> McpDat
             super::DatumRef::Ref(id, _) => Some(*id),
         },
         type_name: datum.type_str().to_string(),
-        value: format_concrete_datum(datum, player),
+        value: format_concrete_datum_with_depth(datum, player, 0, 0),
     }
 }
 
@@ -425,15 +433,15 @@ pub fn mcp_decompile_handler(
     to_json(&McpDecompileResult {
         handler_name: decompiled.name,
         arguments: decompiled.arguments,
-        lines: decompiled
-            .lines
-            .iter()
-            .map(|line| McpDecompiledLine {
-                text: line.text.clone(),
-                indent: line.indent,
-                bytecode_indices: line.bytecode_indices.clone(),
-            })
-            .collect(),
+        // lines: decompiled
+        //     .lines
+        //     .iter()
+        //     .map(|line| McpDecompiledLine {
+        //         text: line.text.clone(),
+        //         indent: line.indent,
+        //         bytecode_indices: line.bytecode_indices.clone(),
+        //     })
+        //     .collect(),
         source,
     })
 }
@@ -590,7 +598,7 @@ pub fn mcp_inspect_datum(player: &DirPlayer, datum_id: DatumId) -> String {
             entries
                 .iter()
                 .map(|(k, v)| {
-                    (format_concrete_datum(player.get_datum(k), player), datum_to_mcp_value(player, v))
+                    (format_concrete_datum_with_depth(player.get_datum(k), player, 0, 0), datum_to_mcp_value(player, v))
                 })
                 .collect(),
         ),
@@ -600,9 +608,27 @@ pub fn mcp_inspect_datum(player: &DirPlayer, datum_id: DatumId) -> String {
     to_json(&McpDatumInspection {
         datum_id,
         type_name: datum.type_str().to_string(),
-        value: format_concrete_datum(datum, player),
+        value: format_concrete_datum_with_depth(datum, player, 0, 0),
         properties,
     })
+}
+
+/// List all cast libraries
+pub fn mcp_list_cast_libs(player: &DirPlayer) -> String {
+    let libs: Vec<McpCastLibInfo> = player
+        .movie
+        .cast_manager
+        .casts
+        .iter()
+        .map(|cast| McpCastLibInfo {
+            number: cast.number as i32,
+            name: cast.name.clone(),
+            member_count: cast.members.len(),
+            script_count: cast.scripts.len(),
+        })
+        .collect();
+
+    to_json(&libs)
 }
 
 /// List cast members

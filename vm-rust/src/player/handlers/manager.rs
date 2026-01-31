@@ -21,7 +21,7 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_global_handler, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, xtra::manager::call_xtra_instance_handler
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_global_handler, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, trace_output, xtra::manager::call_xtra_instance_handler
     },
 };
 
@@ -254,7 +254,7 @@ impl BuiltInHandlerManager {
     pub fn put(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_ref(|player| {
             if args.is_empty() {
-                JsApi::dispatch_debug_message("--");
+                trace_output(player, "--");
                 return Ok(());
             }
             
@@ -279,7 +279,7 @@ impl BuiltInHandlerManager {
                 parts.join(" ")
             };
             
-            JsApi::dispatch_debug_message(&format!("-- {}", output));
+            trace_output(player, &format!("-- {}", output));
             Ok(())
         })?;
         Ok(DatumRef::Void)
@@ -909,7 +909,7 @@ impl BuiltInHandlerManager {
     fn alert(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let message = player.get_datum(&args[0]).string_value()?;
-            JsApi::dispatch_debug_message(&format!("Alert: {}", message));
+            trace_output(player, &format!("Alert: {}", message));
             Ok(DatumRef::Void)
         })
     }
@@ -947,10 +947,10 @@ impl BuiltInHandlerManager {
 
     fn show_globals() -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            JsApi::dispatch_debug_message("--- Global Variables ---");
+            trace_output(player, "--- Global Variables ---");
             for (name, value) in &player.globals {
                 let value = format_datum(value, player);
-                JsApi::dispatch_debug_message(&format!("{} = {}", name, value));
+                trace_output(player, &format!("{} = {}", name, value));
             }
         });
         Ok(DatumRef::Void)

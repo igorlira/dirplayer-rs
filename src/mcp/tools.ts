@@ -65,6 +65,17 @@ export const mcpTools: McpTool[] = [
 
   // Execution tools
   {
+    name: 'get_console_output',
+    description: 'Get the last N lines of debug console output from the player',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        last_n_lines: { type: 'number', description: 'Number of last lines to retrieve from console output' }
+      },
+      required: ['last_n_lines']
+    }
+  },
+  {
     name: 'get_call_stack',
     description: 'Get the current call stack with all active scopes, showing handler names, script refs, bytecode positions, locals, and arguments',
     inputSchema: {
@@ -174,6 +185,15 @@ export const mcpTools: McpTool[] = [
 
   // Cast tools
   {
+    name: 'list_cast_libs',
+    description: 'List all cast libraries in the movie with their names and member/script counts',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
+  },
+  {
     name: 'list_cast_members',
     description: 'List all cast members, optionally filtered by cast library',
     inputSchema: {
@@ -241,6 +261,7 @@ export type McpToolName =
   | 'get_script'
   | 'disassemble_handler'
   | 'decompile_handler'
+  | 'get_console_output'
   | 'get_call_stack'
   | 'get_execution_state'
   | 'eval_lingo'
@@ -252,6 +273,7 @@ export type McpToolName =
   | 'get_globals'
   | 'get_locals'
   | 'inspect_datum'
+  | 'list_cast_libs'
   | 'list_cast_members'
   | 'inspect_cast_member'
   | 'set_breakpoint'
