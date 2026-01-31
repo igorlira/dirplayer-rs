@@ -31,6 +31,7 @@ impl BitmapDatumHandlers {
             "createMatte" => Self::create_matte(datum, args),
             "trimWhiteSpace" => Self::trim_whitespace(datum, args),
             "getPixel" => Self::get_pixel(datum, args),
+            "crop" => Self::crop(datum, args),
             "floodFill" => reserve_player_mut(|player| {
                 // Args: point, color
                 if args.len() != 2 {
@@ -125,6 +126,74 @@ impl BitmapDatumHandlers {
 
     pub fn duplicate(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         Ok(player_duplicate_datum(datum))
+    }
+
+    pub fn crop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() != 1 {
+                return Err(ScriptError::new(
+                    "crop requires 1 argument (rect)".to_string(),
+                ));
+            }
+
+            let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
+            let rect_refs = player.get_datum(&args[0]).to_rect()?;
+
+            let left = player.get_datum(&rect_refs[0]).int_value()?;
+            let top = player.get_datum(&rect_refs[1]).int_value()?;
+            let right = player.get_datum(&rect_refs[2]).int_value()?;
+            let bottom = player.get_datum(&rect_refs[3]).int_value()?;
+
+            // Calculate cropped dimensions
+            let crop_width = (right - left).max(0) as u16;
+            let crop_height = (bottom - top).max(0) as u16;
+
+            if crop_width == 0 || crop_height == 0 {
+                return Err(ScriptError::new(
+                    "crop rect must have positive dimensions".to_string(),
+                ));
+            }
+
+            let src_bitmap = player
+                .bitmap_manager
+                .get_bitmap(*bitmap_ref)
+                .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+
+            // Create new bitmap with cropped dimensions, preserving bit depth and palette
+            let mut cropped_bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+                crop_width,
+                crop_height,
+                src_bitmap.bit_depth,
+                src_bitmap.original_bit_depth,
+                if src_bitmap.use_alpha { 8 } else { 0 },
+                src_bitmap.palette_ref.clone(),
+            );
+            cropped_bitmap.use_alpha = src_bitmap.use_alpha;
+            cropped_bitmap.trim_white_space = src_bitmap.trim_white_space;
+
+            let palettes = player.movie.cast_manager.palettes();
+
+            // Copy pixels from source rect to destination (0,0 to crop_width, crop_height)
+            let src_rect = IntRect::from(left, top, right, bottom);
+            let dst_rect = IntRect::from(0, 0, crop_width as i32, crop_height as i32);
+
+            let params = crate::player::bitmap::drawing::CopyPixelsParams::default(&src_bitmap);
+
+            // Need to clone src_bitmap to avoid borrow issues
+            let src_bitmap_clone = src_bitmap.clone();
+
+            cropped_bitmap.copy_pixels_with_params(
+                &palettes,
+                &src_bitmap_clone,
+                dst_rect,
+                src_rect,
+                &params,
+            );
+
+            // Add the new bitmap to the manager and return a reference
+            let new_bitmap_ref = player.bitmap_manager.add_bitmap(cropped_bitmap);
+            Ok(player.alloc_datum(Datum::BitmapRef(new_bitmap_ref)))
+        })
     }
 
     pub fn draw(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
