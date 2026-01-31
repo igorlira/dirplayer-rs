@@ -203,14 +203,33 @@ impl BitmapDatumHandlers {
                 Datum::BitmapRef(bitmap) => Ok(bitmap),
                 _ => Err(ScriptError::new("Cannot draw non-bitmap".to_string())),
             }?;
-            let rect_refs = player.get_datum(&args[0]).to_rect()?;
+            let first_arg = player.get_datum(&args[0]);
+            let mut arg_pos = 1;
+            let (x1, y1, x2, y2) = match first_arg {
+                Datum::Int(x1) => {
+                    let y1 = player.get_datum(&args[arg_pos]).int_value()?;
+                    arg_pos += 1;
+                    let x2 = player.get_datum(&args[arg_pos]).int_value()?;
+                    arg_pos += 1;
+                    let y2 = player.get_datum(&args[arg_pos]).int_value()?;
+                    arg_pos += 1;
+                    (*x1, y1, x2, y2)
+                }
+                Datum::Rect(rect_refs) => {
+                    let x1 = player.get_datum(&rect_refs[0]).int_value()?;
+                    let y1 = player.get_datum(&rect_refs[1]).int_value()?;
+                    let x2 = player.get_datum(&rect_refs[2]).int_value()?;
+                    let y2 = player.get_datum(&rect_refs[3]).int_value()?;
+                    (x1, y1, x2, y2)
+                }
+                _ => {
+                    return Err(ScriptError::new(
+                        "First argument to draw must be a rect".to_string(),
+                    ))
+                }
+            };
 
-            let x1 = player.get_datum(&rect_refs[0]).int_value()?;
-            let y1 = player.get_datum(&rect_refs[1]).int_value()?;
-            let x2 = player.get_datum(&rect_refs[2]).int_value()?;
-            let y2 = player.get_datum(&rect_refs[3]).int_value()?;
-
-            let draw_map = player.get_datum(&args[1]).to_map()?;
+            let draw_map = player.get_datum(&args[arg_pos]).to_map()?;
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
 
             let color_ref = PropListUtils::get_by_concrete_key(
