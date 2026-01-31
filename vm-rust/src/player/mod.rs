@@ -44,6 +44,7 @@ pub mod timeout;
 pub mod xtra;
 pub mod score_keyframes;
 pub mod virtual_scripts;
+pub mod console;
 
 use std::{
     collections::HashMap,
@@ -138,9 +139,11 @@ use crate::player::handlers::datum_handlers::xml::{XmlDocument, XmlNode};
 use crate::player::handlers::movie::MovieHandlers;
 use crate::player::handlers::datum_handlers::player_call_datum_handler;
 
-fn trace_output(message: &str, trace_log_file: &str) {
+fn trace_output(player: &DirPlayer, message: &str) {
     use crate::js_api::JsApi;
     
+    player.console.write_line(message);
+    let trace_log_file = &player.movie.trace_log_file;
     if trace_log_file.is_empty() {
         // Use the same output as 'put' command, but without the "-- " prefix
         // since trace messages already have their own prefixes (-->, ==, etc.)
@@ -266,6 +269,7 @@ pub struct DirPlayer {
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
     pub last_sprite_prop_ref: Option<DatumRef>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
+    pub console: console::ConsoleBuffer,
 }
 
 /// Target frame for a movie transition (gotoNetMovie or go movie).
@@ -399,6 +403,7 @@ impl DirPlayer {
             script_instance_list_cache: FxHashMap::default(),
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
+            console: console::ConsoleBuffer::new(),
         };
 
         result.reset();
@@ -2217,7 +2222,7 @@ pub async fn player_call_script_handler_raw_args(
                 "== Script: (member {} of castLib {}) Handler: {}",
                 cast_member, cast_lib, handler_name
             );
-            trace_output(&msg, &trace_file);
+            trace_output(player, &msg);
             
             // ADD THIS BLOCK HERE - Clear expression tracker for new handler
             use crate::player::bytecode::handler_manager::EXPRESSION_TRACKER;
@@ -2396,8 +2401,7 @@ pub async fn player_call_script_handler_raw_args(
     let scope = reserve_player_mut(|player| {
         // Trace handler exit
         if player.movie.trace_script {
-            let trace_file = player.movie.trace_log_file.clone();
-            trace_output("--> end", &trace_file);
+            trace_output(player, "--> end");
         }
 
         let result = {
