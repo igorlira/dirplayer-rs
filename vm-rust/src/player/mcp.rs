@@ -35,6 +35,16 @@ pub struct McpScriptInfo {
 }
 
 #[derive(Serialize)]
+pub struct McpScriptList {
+    pub scripts: Vec<McpScriptInfo>,
+    pub total_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize)]
 pub struct McpScriptDetails {
     pub cast_lib: i32,
     pub cast_member: i32,
@@ -90,9 +100,31 @@ pub struct McpScopeInfo {
     pub cast_member: i32,
     pub handler_name: String,
     pub bytecode_index: usize,
-    pub locals: FxHashMap<String, McpDatumValue>,
-    pub args: Vec<McpDatumValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locals: Option<FxHashMap<String, McpDatumValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<McpDatumValue>>,
     pub stack_depth: usize,
+}
+
+#[derive(Serialize)]
+pub struct McpScopeSummary {
+    pub index: usize,
+    pub script_name: String,
+    pub handler_name: String,
+    pub bytecode_index: usize,
+}
+
+/// Lightweight execution context - single call to get current position
+#[derive(Serialize)]
+pub struct McpContext {
+    pub is_playing: bool,
+    pub is_paused: bool,
+    pub at_breakpoint: bool,
+    pub current_frame: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_handler: Option<McpScopeSummary>,
+    pub scope_count: usize,
 }
 
 #[derive(Serialize)]
@@ -191,6 +223,19 @@ pub struct McpError {
     pub error: String,
 }
 
+#[derive(Serialize)]
+pub struct McpEvalResult {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datum_id: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 // ============================================================================
 // Helper functions
 // ============================================================================
@@ -218,15 +263,104 @@ fn script_type_str(script_type: &ScriptType) -> &'static str {
     }
 }
 
+/// Max length for compact value representation
+const COMPACT_VALUE_MAX_LEN: usize = 60;
+
 fn datum_to_mcp_value(player: &DirPlayer, datum_ref: &super::DatumRef) -> McpDatumValue {
+    datum_to_mcp_value_with_options(player, datum_ref, false)
+}
+
+fn datum_to_mcp_value_compact(player: &DirPlayer, datum_ref: &super::DatumRef) -> McpDatumValue {
+    datum_to_mcp_value_with_options(player, datum_ref, true)
+}
+
+fn datum_to_mcp_value_with_options(player: &DirPlayer, datum_ref: &super::DatumRef, compact: bool) -> McpDatumValue {
     let datum = player.get_datum(datum_ref);
+    let datum_id = match datum_ref {
+        super::DatumRef::Void => None,
+        super::DatumRef::Ref(id, _) => Some(*id),
+    };
+
+    // For compact mode, use short representations for complex types
+    let value = if compact {
+        format_datum_compact(datum, player, datum_id)
+    } else {
+        format_concrete_datum_with_depth(datum, player, 0, 0)
+    };
+
     McpDatumValue {
-        datum_id: match datum_ref {
-            super::DatumRef::Void => None,
-            super::DatumRef::Ref(id, _) => Some(*id),
-        },
+        datum_id,
         type_name: datum.type_str().to_string(),
-        value: format_concrete_datum_with_depth(datum, player, 0, 0),
+        value,
+    }
+}
+
+/// Format datum in compact form for summaries
+fn format_datum_compact(datum: &crate::director::lingo::datum::Datum, player: &DirPlayer, datum_id: Option<usize>) -> String {
+    use crate::director::lingo::datum::Datum;
+
+    match datum {
+        // Simple types - use standard formatting
+        Datum::Int(i) => i.to_string(),
+        Datum::Float(f) => format!("{}", f),
+        Datum::Symbol(s) => format!("#{}", s),
+        Datum::Void => "Void".to_string(),
+        Datum::Null => "<Null>".to_string(),
+
+        // Strings - truncate if long
+        Datum::String(s) => {
+            if s.len() > COMPACT_VALUE_MAX_LEN - 2 {
+                format!("\"{}...\"", &s[..COMPACT_VALUE_MAX_LEN - 5])
+            } else {
+                format!("\"{}\"", s)
+            }
+        },
+        Datum::StringChunk(..) => {
+            let s = datum.string_value().unwrap_or_default();
+            if s.len() > COMPACT_VALUE_MAX_LEN - 2 {
+                format!("\"{}...\"", &s[..COMPACT_VALUE_MAX_LEN - 5])
+            } else {
+                format!("\"{}\"", s)
+            }
+        },
+
+        // Lists - show count only
+        Datum::List(_, items, _) => {
+            format!("<list:{}>", items.len())
+        },
+
+        // PropLists - show count only
+        Datum::PropList(entries, _) => {
+            format!("<propList:{}>", entries.len())
+        },
+
+        // Script instances - compact form with ID
+        Datum::ScriptInstanceRef(instance_ref) => {
+            let instance = player.allocator.get_script_instance(instance_ref);
+            if let Some(script) = player.movie.cast_manager.get_script_by_ref(&instance.script) {
+                format!("<{}:{}>", script.name, instance_ref)
+            } else {
+                format!("<instance:{}>", instance_ref)
+            }
+        },
+
+        // Script refs
+        Datum::ScriptRef(member_ref) => {
+            if let Some(script) = player.movie.cast_manager.get_script_by_ref(member_ref) {
+                format!("<script:{}>", script.name)
+            } else {
+                format!("<script:{},{}>", member_ref.cast_lib, member_ref.cast_member)
+            }
+        },
+
+        // For other types, use ID-based short form if available
+        _ => {
+            if let Some(id) = datum_id {
+                format!("<{}:{}>", datum.type_str(), id)
+            } else {
+                format!("<{}>", datum.type_str())
+            }
+        }
     }
 }
 
@@ -306,17 +440,42 @@ fn get_argument_names(lctx: Option<&LingoScriptContext>, arg_ids: &[u16]) -> Vec
 // MCP Query Functions
 // ============================================================================
 
-/// List all scripts in the movie
-pub fn mcp_list_scripts(player: &DirPlayer) -> String {
-    let scripts: Vec<McpScriptInfo> = player
+/// List scripts in the movie with optional filtering and pagination
+///
+/// Parameters:
+/// - cast_lib: Filter to a specific cast library (None = all)
+/// - limit: Maximum number of scripts to return (None = all)
+/// - offset: Number of scripts to skip (None = 0)
+pub fn mcp_list_scripts(
+    player: &DirPlayer,
+    cast_lib: Option<i32>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> String {
+    let all_scripts: Vec<McpScriptInfo> = player
         .movie
         .cast_manager
         .casts
         .iter()
+        .filter(|cast| cast_lib.map_or(true, |lib| cast.number as i32 == lib))
         .flat_map(|cast| cast.scripts.values().map(|s| get_script_info(s)))
         .collect();
 
-    to_json(&scripts)
+    let total_count = all_scripts.len();
+    let offset_val = offset.unwrap_or(0);
+
+    let scripts: Vec<McpScriptInfo> = all_scripts
+        .into_iter()
+        .skip(offset_val)
+        .take(limit.unwrap_or(usize::MAX))
+        .collect();
+
+    to_json(&McpScriptList {
+        scripts,
+        total_count,
+        offset: if offset_val > 0 { Some(offset_val) } else { None },
+        limit,
+    })
 }
 
 /// Get detailed information about a specific script
@@ -447,12 +606,29 @@ pub fn mcp_decompile_handler(
 }
 
 /// Get the current call stack
-pub fn mcp_get_call_stack(player: &DirPlayer) -> String {
-    let scopes: Vec<McpScopeInfo> = player
+///
+/// Parameters:
+/// - depth: Maximum number of scopes to return from the top (None = all)
+/// - include_locals: Whether to include local variables and arguments (default: false)
+pub fn mcp_get_call_stack(player: &DirPlayer, depth: Option<usize>, include_locals: bool) -> String {
+    // Filter out placeholder scopes (cast_lib == 0 && cast_member == 0)
+    let valid_scopes: Vec<_> = player
         .scopes
         .iter()
         .enumerate()
         .filter(|(_, scope)| scope.script_ref.cast_lib != 0 || scope.script_ref.cast_member != 0)
+        .collect();
+
+    let total_count = valid_scopes.len();
+
+    // Apply depth limit from the top of the stack
+    let scopes_to_process: Vec<_> = match depth {
+        Some(d) if d < total_count => valid_scopes.into_iter().rev().take(d).rev().collect(),
+        _ => valid_scopes,
+    };
+
+    let scopes: Vec<McpScopeInfo> = scopes_to_process
+        .into_iter()
         .map(|(index, scope)| {
             let script_name = player
                 .movie
@@ -475,16 +651,24 @@ pub fn mcp_get_call_stack(player: &DirPlayer) -> String {
                 cast_member: scope.script_ref.cast_member,
                 handler_name: get_handler_name(lctx, scope.handler_name_id),
                 bytecode_index: scope.bytecode_index,
-                locals: scope
-                    .locals
-                    .iter()
-                    .map(|(name, datum_ref)| (name.clone(), datum_to_mcp_value(player, datum_ref)))
-                    .collect(),
-                args: scope
-                    .args
-                    .iter()
-                    .map(|datum_ref| datum_to_mcp_value(player, datum_ref))
-                    .collect(),
+                locals: if include_locals {
+                    Some(scope
+                        .locals
+                        .iter()
+                        .map(|(name, datum_ref)| (name.clone(), datum_to_mcp_value_compact(player, datum_ref)))
+                        .collect())
+                } else {
+                    None
+                },
+                args: if include_locals {
+                    Some(scope
+                        .args
+                        .iter()
+                        .map(|datum_ref| datum_to_mcp_value_compact(player, datum_ref))
+                        .collect())
+                } else {
+                    None
+                },
                 stack_depth: scope.stack.len(),
             }
         })
@@ -493,6 +677,49 @@ pub fn mcp_get_call_stack(player: &DirPlayer) -> String {
     to_json(&McpCallStack {
         current_scope_index: if scopes.is_empty() { None } else { Some(scopes.len() - 1) },
         scopes,
+    })
+}
+
+/// Get lightweight execution context - current position only
+pub fn mcp_get_context(player: &DirPlayer) -> String {
+    // Filter out placeholder scopes
+    let valid_scopes: Vec<_> = player
+        .scopes
+        .iter()
+        .enumerate()
+        .filter(|(_, scope)| scope.script_ref.cast_lib != 0 || scope.script_ref.cast_member != 0)
+        .collect();
+
+    let current_handler = valid_scopes.last().map(|(index, scope)| {
+        let script_name = player
+            .movie
+            .cast_manager
+            .get_script_by_ref(&scope.script_ref)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let lctx = player
+            .movie
+            .cast_manager
+            .get_cast(scope.script_ref.cast_lib as u32)
+            .ok()
+            .and_then(|c| c.lctx.as_ref());
+
+        McpScopeSummary {
+            index: *index,
+            script_name,
+            handler_name: get_handler_name(lctx, scope.handler_name_id),
+            bytecode_index: scope.bytecode_index,
+        }
+    });
+
+    to_json(&McpContext {
+        is_playing: player.is_playing,
+        is_paused: player.is_script_paused,
+        at_breakpoint: player.current_breakpoint.is_some(),
+        current_frame: player.movie.current_frame,
+        current_handler,
+        scope_count: valid_scopes.len(),
     })
 }
 
@@ -703,4 +930,36 @@ pub fn mcp_list_breakpoints(player: &DirPlayer) -> String {
             })
             .collect(),
     })
+}
+
+/// Format eval result as JSON
+pub fn mcp_format_eval_result(
+    player: &DirPlayer,
+    result: Result<super::DatumRef, super::ScriptError>,
+) -> String {
+    match result {
+        Ok(datum_ref) => {
+            let datum = player.get_datum(&datum_ref);
+            let datum_id = match &datum_ref {
+                super::DatumRef::Void => None,
+                super::DatumRef::Ref(id, _) => Some(*id),
+            };
+            to_json(&McpEvalResult {
+                success: true,
+                result_type: Some(datum.type_str().to_string()),
+                result_value: Some(format_concrete_datum_with_depth(datum, player, 0, 0)),
+                datum_id,
+                error: None,
+            })
+        }
+        Err(err) => {
+            to_json(&McpEvalResult {
+                success: false,
+                result_type: None,
+                result_value: None,
+                datum_id: None,
+                error: Some(err.message),
+            })
+        }
+    }
 }
