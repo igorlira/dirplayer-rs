@@ -801,6 +801,99 @@ pub fn decompress_bitmap(
     Ok(bitmap)
 }
 
+#[inline]
+fn lookup_builtin_palette(palette: &BuiltInPalette, color_index: u8, original_bit_depth: u8) -> Option<(u8, u8, u8)> {
+    match palette {
+        BuiltInPalette::GrayScale => {
+            // Uses 4-color palette for 2-bit images and 16-color palette for 4-bit images
+            if original_bit_depth == 2 {
+                GRAYSCALE_4_PALETTE.get(color_index as usize).copied()
+            } else if original_bit_depth == 4 {
+                GRAYSCALE_16_PALETTE.get(color_index as usize).copied()
+            } else {
+                GRAYSCALE_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::SystemMac => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                MAC_16_PALETTE.get(color_index as usize).copied()
+            } else {
+                SYSTEM_MAC_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::SystemWin => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                WIN_16_PALETTE.get(color_index as usize).copied()
+            } else {
+                SYSTEM_WIN_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Rainbow => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                RAINBOW16_PALETTE.get(color_index as usize).copied()
+            } else {
+                RAINBOW_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Pastels => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                PASTELS16_PALETTE.get(color_index as usize).copied()
+            } else {
+                PASTELS_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Vivid => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                VIVID16_PALETTE.get(color_index as usize).copied()
+            } else {
+                VIVID_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Ntsc => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                NTSC16_PALETTE.get(color_index as usize).copied()
+            } else {
+                NTSC_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Metallic => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                METALLIC16_PALETTE.get(color_index as usize).copied()
+            } else {
+                METALLIC_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Web216 => WEB_216_PALETTE.get(color_index as usize).copied(),
+        // Vga and SystemWinDir4 fall back to SystemWin palette
+        BuiltInPalette::Vga | BuiltInPalette::SystemWinDir4 => {
+            if original_bit_depth == 4 {
+                WIN_16_PALETTE.get(color_index as usize).copied()
+            } else {
+                SYSTEM_WIN_PALETTE.get(color_index as usize).copied()
+            }
+        }
+    }
+}
+
+#[inline]
+fn color_fallback(color_index: u8) -> (u8, u8, u8) {
+    if color_index == 0 {
+        (255, 255, 255)
+    } else if color_index == 255 {
+        (0, 0, 0)
+    } else {
+        (255, 0, 255) // magenta for missing colors
+    }
+}
+
+#[inline]
 pub fn resolve_color_ref(
     palettes: &PaletteMap,
     color_ref: &ColorRef,
@@ -810,157 +903,31 @@ pub fn resolve_color_ref(
     match color_ref {
         ColorRef::Rgb(r, g, b) => (*r, *g, *b),
         ColorRef::PaletteIndex(color_index) => {
-            let color = match palette_ref {
-                PaletteRef::BuiltIn(palette) => match palette {
-                    BuiltInPalette::GrayScale => {
-                        // Uses 4-color palette for 2-bit images and 16-color palette for 4-bit images
-                        if original_bit_depth == 2 {
-                            GRAYSCALE_4_PALETTE.get(*color_index as usize).copied()
-                        } else if original_bit_depth == 4 {
-                            GRAYSCALE_16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            GRAYSCALE_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::SystemMac => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            MAC_16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            SYSTEM_MAC_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::SystemWin => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            WIN_16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            SYSTEM_WIN_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Rainbow => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            RAINBOW16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            RAINBOW_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Pastels => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            PASTELS16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            PASTELS_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Vivid => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            VIVID16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            VIVID_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Ntsc => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            NTSC16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            NTSC_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Metallic => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            METALLIC16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            METALLIC_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Web216 => WEB_216_PALETTE.get(*color_index as usize).copied(),
-                    // Vga and SystemWinDir4 fall back to SystemWin palette
-                    BuiltInPalette::Vga | BuiltInPalette::SystemWinDir4 => {
-                        if original_bit_depth == 4 {
-                            WIN_16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            SYSTEM_WIN_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                },
-                PaletteRef::Member(palette_ref) => {
+            let idx = *color_index;
+            match palette_ref {
+                PaletteRef::BuiltIn(palette) => {
+                    lookup_builtin_palette(palette, idx, original_bit_depth)
+                        .unwrap_or_else(|| color_fallback(idx))
+                }
+                PaletteRef::Member(member_ref) => {
                     let slot_number = CastMemberRefHandlers::get_cast_slot_number(
-                        palette_ref.cast_lib as u32,
-                        palette_ref.cast_member as u32,
+                        member_ref.cast_lib as u32,
+                        member_ref.cast_member as u32,
                     );
-                    let palette_member = palettes.get(slot_number as usize);
-                    match palette_member {
-                        Some(member) => {
-                            let result = member.colors.get(*color_index as usize).copied();
-                            if result.is_none() && *color_index > 0 {
-                                // Color index out of bounds - log warning (only once per unique index/palette combo)
-                                static LOGGED_OOB: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<(u32, u8)>>> = std::sync::OnceLock::new();
-                                let logged = LOGGED_OOB.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-                                if let Ok(mut set) = logged.lock() {
-                                    if set.insert((slot_number, *color_index)) {
-                                        web_sys::console::warn_1(
-                                            &format!(
-                                                "Color index {} out of bounds for palette member {} (has {} colors). Falling back to default.",
-                                                color_index, slot_number, member.colors.len()
-                                            ).into()
-                                        );
-                                    }
-                                }
-                            }
-                            result
-                        }
-                        None => {
-                            // Palette not found - log warning (only once per unique palette ref)
-                            // This helps diagnose palette loading issues
-                            static LOGGED_MISSING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> = std::sync::OnceLock::new();
-                            let logged = LOGGED_MISSING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-                            if let Ok(mut set) = logged.lock() {
-                                if set.insert(slot_number) {
-                                    web_sys::console::warn_1(
-                                        &format!(
-                                            "Palette member not found: castLib {} member {} (slot {}). Available palettes: {:?}. Falling back to SystemWin.",
-                                            palette_ref.cast_lib, palette_ref.cast_member, slot_number,
-                                            palettes.palettes.iter().map(|p| (p.number, p.member.colors.len())).collect::<Vec<_>>()
-                                        ).into()
-                                    );
-                                }
-                            }
-                            // Fall back to system palette
-                            Some(resolve_color_ref(
-                                palettes,
-                                color_ref,
-                                &PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
-                                original_bit_depth,
-                            ))
-                        }
+                    if let Some(member) = palettes.get(slot_number as usize) {
+                        member.colors.get(idx as usize).copied()
+                            .unwrap_or_else(|| color_fallback(idx))
+                    } else {
+                        // Palette not found - fall back to system palette directly
+                        lookup_builtin_palette(&get_system_default_palette(), idx, original_bit_depth)
+                            .unwrap_or_else(|| color_fallback(idx))
                     }
                 }
                 PaletteRef::Default => {
                     // palette_id=0 means "no specific palette set" - use system default palette
-                    // This matches Director behavior where bitmaps without explicit palettes
-                    // use the system palette (SystemWin on Windows, SystemMac on Mac)
-                    Some(resolve_color_ref(
-                        palettes,
-                        color_ref,
-                        &PaletteRef::BuiltIn(get_system_default_palette()),
-                        original_bit_depth,
-                    ))
+                    lookup_builtin_palette(&get_system_default_palette(), idx, original_bit_depth)
+                        .unwrap_or_else(|| color_fallback(idx))
                 }
-            };
-
-            if let Some(color) = color {
-                return color.clone();
-            } else if *color_index == 0 {
-                return (255, 255, 255);
-            } else if *color_index == 255 {
-                return (0, 0, 0);
-            } else {
-                return (255, 0, 255); // magenta for missing colors
             }
         }
     }
