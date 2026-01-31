@@ -201,6 +201,11 @@ export class McpServer {
         );
 
       // Execution tools
+      case 'get_console_output':
+        return this.wasm.mcp_get_console_output(
+          args.last_n_lines as number
+        );
+
       case 'get_call_stack':
         return this.wasm.mcp_get_call_stack();
 
@@ -245,6 +250,9 @@ export class McpServer {
         return this.wasm.mcp_inspect_datum(args.datum_id as number);
 
       // Cast tools
+      case 'list_cast_libs':
+        return this.wasm.mcp_list_cast_libs();
+
       case 'list_cast_members':
         return this.wasm.mcp_list_cast_members(
           args.cast_lib !== undefined ? (args.cast_lib as number) : -1

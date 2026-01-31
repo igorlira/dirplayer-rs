@@ -413,6 +413,22 @@ pub fn mcp_inspect_datum(datum_id: u32) -> String {
 }
 
 #[wasm_bindgen]
+pub fn mcp_list_cast_libs() -> String {
+    reserve_player_ref(|player| player::mcp::mcp_list_cast_libs(player))
+}
+
+#[wasm_bindgen]
+pub fn mcp_get_console_output(last_n_lines: usize) -> String {
+    let lines = reserve_player_ref(|player| {
+        player
+            .console
+            .read_tail(last_n_lines) 
+    });
+    return lines;
+}
+
+
+#[wasm_bindgen]
 pub fn mcp_list_cast_members(cast_lib: i32) -> String {
     reserve_player_ref(|player| {
         let lib = if cast_lib < 0 { None } else { Some(cast_lib) };
