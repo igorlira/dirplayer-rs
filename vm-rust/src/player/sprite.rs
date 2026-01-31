@@ -100,7 +100,27 @@ pub struct Sprite {
     pub base_bg_color: ColorRef,
 }
 
+/// Threshold for detecting skew flip (in degrees)
+const SKEW_FLIP_EPSILON: f64 = 0.1;
+
+/// Check if a skew value represents a flip transform (±180°)
+///
+/// In Director, skew=180 (or -180) combined with rotation=180 produces
+/// a vertical flip (left-right mirror) instead of an upside-down rotation.
+///
+/// Mathematically, this checks if |skew| ≈ 180°
+#[inline]
+pub fn is_skew_flip(skew: f64) -> bool {
+    (skew.abs() - 180.0).abs() < SKEW_FLIP_EPSILON
+}
+
 impl Sprite {
+    /// Check if this sprite has a skew flip transform
+    #[inline]
+    pub fn has_skew_flip(&self) -> bool {
+        is_skew_flip(self.skew)
+    }
+
     pub fn new(number: usize) -> Sprite {
         Sprite {
             number,
@@ -179,5 +199,14 @@ impl Sprite {
         self.has_size_tweened = false;
         self.has_size_changed = false;
         self.bitmap_size_owned_by_sprite = false;
+    }
+
+    pub fn reset_for_new_member(&mut self) {
+        self.rotation = 0.0;
+        self.skew = 0.0;
+        self.flip_h = false;
+        self.flip_v = false;
+        self.color = ColorRef::PaletteIndex(255);
+        self.bg_color = ColorRef::PaletteIndex(0);
     }
 }

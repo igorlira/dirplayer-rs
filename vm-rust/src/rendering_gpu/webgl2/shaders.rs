@@ -66,6 +66,7 @@ pub struct ShaderProgram {
     pub u_flip: Option<WebGlUniformLocation>,
     pub u_rotation: Option<WebGlUniformLocation>,
     pub u_rotation_center: Option<WebGlUniformLocation>,
+    pub u_skew_flip: Option<WebGlUniformLocation>,
 }
 
 /// Manages shader programs for different ink modes
@@ -142,6 +143,7 @@ uniform vec4 u_tex_rect;     // src tex coords
 uniform vec2 u_flip;         // flip x, flip y
 uniform float u_rotation;
 uniform vec2 u_rotation_center;  // sprite's loc (registration point)
+uniform float u_skew_flip;   // 1.0 = negate y before rotation (for skew=180 effect)
 
 out vec2 v_texcoord;
 
@@ -154,9 +156,18 @@ void main() {
 
     // Apply rotation around registration point (sprite's loc)
     // Director rotates around the registration point, not the sprite center
-    if (abs(u_rotation) > 0.001) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5) {
         vec2 center = u_rotation_center;
         world_pos -= center;
+
+        // Apply skew flip: negate y before rotation
+        // This matches the software path in drawing.rs
+        // rotation=180 alone: (x,y) -> (-x,-y) = upside down
+        // rotation=180 + skew=180: (x,-y) -> (-x,y) = left-right mirror
+        if (u_skew_flip > 0.5) {
+            world_pos.y = -world_pos.y;
+        }
+
         float c = cos(u_rotation);
         float s = sin(u_rotation);
         world_pos = vec2(world_pos.x * c - world_pos.y * s,
@@ -486,6 +497,7 @@ void main() {
         let u_flip = gl.get_uniform_location(&program, "u_flip");
         let u_rotation = gl.get_uniform_location(&program, "u_rotation");
         let u_rotation_center = gl.get_uniform_location(&program, "u_rotation_center");
+        let u_skew_flip = gl.get_uniform_location(&program, "u_skew_flip");
 
         Ok(ShaderProgram {
             program,
@@ -502,6 +514,7 @@ void main() {
             u_flip,
             u_rotation,
             u_rotation_center,
+            u_skew_flip,
         })
     }
 }

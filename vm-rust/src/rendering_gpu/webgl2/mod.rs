@@ -26,7 +26,7 @@ use crate::player::{
     geometry::IntRect,
     handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
     score::{get_concrete_sprite_rect, ScoreRef},
-    sprite::ColorRef,
+    sprite::{ColorRef, is_skew_flip},
     DirPlayer,
 };
 use crate::rendering::{render_score_to_bitmap_with_offset, FilmLoopParentProps};
@@ -268,6 +268,7 @@ impl WebGL2Renderer {
             mask_image: None,
             is_text_rendering: true,
             rotation: 0.0,
+            skew: 0.0,
             sprite: None,
             original_dst_rect: None,
         };
@@ -350,6 +351,10 @@ impl WebGL2Renderer {
         }
         if let Some(ref loc) = program.u_rotation_center {
             gl.uniform2f(Some(loc), 0.0, 0.0);
+        }
+        // No skew flip
+        if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
         }
 
         // Full blend
@@ -485,7 +490,7 @@ impl WebGL2Renderer {
     /// Render a single sprite
     fn render_sprite(&mut self, player: &mut DirPlayer, channel_num: i16) {
         // Get sprite and member info
-        let (member_ref, sprite_rect, ink, blend, flip_h, flip_v, rotation, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height) = {
+        let (member_ref, sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height) = {
             let score = &player.movie.score;
             let sprite = match score.get_sprite(channel_num) {
                 Some(s) => s,
@@ -506,6 +511,7 @@ impl WebGL2Renderer {
                 sprite.flip_h,
                 sprite.flip_v,
                 sprite.rotation,
+                sprite.skew,
                 sprite.bg_color.clone(),
                 sprite.color.clone(),
                 sprite.has_fore_color,
@@ -1107,13 +1113,23 @@ impl WebGL2Renderer {
             gl.uniform4f(Some(loc), 0.0, 0.0, 1.0, 1.0);
         }
 
-        // Set flip
+        // Handle skew=±180° as a y-flip before rotation (matching software path in drawing.rs)
+        // rotation=180 alone: (x,y) -> (-x,-y) = upside down
+        // rotation=180 + skew=180: (x,-y) -> (-x,y) = left-right mirror
+        let has_skew_flip = is_skew_flip(skew);
+
+        // Set flip (texture coordinates only, for sprite.flip_h and sprite.flip_v)
         if let Some(ref loc) = u_flip {
             gl.uniform2f(
                 Some(loc),
                 if flip_h { 1.0 } else { 0.0 },
                 if flip_v { 1.0 } else { 0.0 },
             );
+        }
+
+        // Set skew flip (vertex space y-negation before rotation)
+        if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), if has_skew_flip { 1.0 } else { 0.0 });
         }
 
         // Set rotation (convert degrees to radians)
@@ -2034,6 +2050,7 @@ impl WebGL2Renderer {
             mask_image: None,
             is_text_rendering: true,
             rotation: 0.0,
+            skew: 0.0,
             sprite: None,
             original_dst_rect: None,
         };

@@ -8,7 +8,7 @@ use crate::{
     player::{
         font::{bitmap_font_copy_char, BitmapFont},
         geometry::IntRect,
-        sprite::ColorRef,
+        sprite::{ColorRef, is_skew_flip},
         bitmap::bitmap::{get_system_default_palette, PaletteRef},
         bitmap::palette::SYSTEM_WIN_PALETTE, Sprite, Score,
         reserve_player_mut,
@@ -29,6 +29,7 @@ pub struct CopyPixelsParams<'a> {
     pub mask_image: Option<&'a BitmapMask>,
     pub is_text_rendering: bool,
     pub rotation: f64,
+    pub skew: f64,
     pub sprite: Option<&'a Sprite>,
     pub original_dst_rect: Option<IntRect>,
 }
@@ -43,6 +44,7 @@ impl CopyPixelsParams<'_> {
             mask_image: None,
             is_text_rendering: false,
             rotation: 0.0,
+            skew: 0.0,
             sprite: None,
             original_dst_rect: None,
         }
@@ -642,6 +644,12 @@ impl Bitmap {
             .and_then(|x| x.float_value().ok())
             .unwrap_or(0.0);
 
+        // Extract skew parameter (defaults to 0.0 if not provided)
+        let skew = param_list
+            .get("skew")
+            .and_then(|x| x.float_value().ok())
+            .unwrap_or(0.0);
+
         // Check if is_text_rendering parameter exists and is true
         // This is typically NOT set from Lingo scripts, only internally
         let is_text_rendering = param_list
@@ -687,6 +695,7 @@ impl Bitmap {
             color,
             is_text_rendering,
             rotation,
+            skew,
             sprite,
             original_dst_rect,
         };
@@ -880,6 +889,9 @@ impl Bitmap {
             (1.0, 0.0)
         };
 
+        // Check for skew-based flip (skew=±180° combined with rotation produces a mirror)
+        let has_skew_flip = is_skew_flip(params.skew);
+
         // ----------------------------------------------------------
         // Director-style draw bounds (allow rotated overflow)
         // ----------------------------------------------------------
@@ -1034,17 +1046,25 @@ impl Bitmap {
                 }
 
                 // ----------------------------------------------------------
-                // SPRITE ROTATION: Apply rotation to destination coordinates
+                // SPRITE ROTATION & SKEW: Apply transforms to destination coordinates
                 // ----------------------------------------------------------
-                let (rotated_x, rotated_y) = if has_sprite_rotation {
+                let (rotated_x, rotated_y) = if has_sprite_rotation || has_skew_flip {
                     // Translate to center
                     let dx = dst_x as f64 - center_x as f64;
-                    let dy = dst_y as f64 - center_y as f64;
-                    
+                    let mut dy = dst_y as f64 - center_y as f64;
+
+                    // Apply skew flip (negate Y before rotation)
+                    // When combined with rotation=180, this produces a vertical flip (mirror)
+                    // rotation=180 alone: (dx, dy) -> (-dx, -dy) = upside down
+                    // rotation=180 + skew=180: (dx, -dy) -> (-dx, dy) = vertical flip
+                    if has_skew_flip {
+                        dy = -dy;
+                    }
+
                     // Apply inverse rotation matrix
                     let rx = dx * cos_theta - dy * sin_theta;
                     let ry = dx * sin_theta + dy * cos_theta;
-                    
+
                     // Translate back
                     (rx + center_x as f64, ry + center_y as f64)
                 } else {

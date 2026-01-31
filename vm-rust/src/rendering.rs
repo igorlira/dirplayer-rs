@@ -637,6 +637,7 @@ fn render_filmloop_from_channel_data(
                     mask_image: mask.map(|m| m as &BitmapMask),
                     is_text_rendering: false,
                     rotation: 0.0,
+                    skew: 0.0,
                     sprite: None,
                     original_dst_rect: Some(dst_rect.clone()),
                 };
@@ -958,6 +959,7 @@ pub fn render_score_to_bitmap_with_offset(
                     mask_image: None,
                     is_text_rendering: false,
                     rotation: sprite.rotation,
+                    skew: sprite.skew,
                     sprite: Some(&sprite.clone()),
                     original_dst_rect: Some(logical_rect),
                 };
@@ -1053,6 +1055,7 @@ pub fn render_score_to_bitmap_with_offset(
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
+                        skew: 0.0,
                         sprite: None,
                         original_dst_rect: None,
                     };
@@ -1122,6 +1125,7 @@ pub fn render_score_to_bitmap_with_offset(
                     mask_image: None,
                     is_text_rendering: true,
                     rotation: 0.0,
+                    skew: 0.0,
                     sprite: None,
                     original_dst_rect: None,
                 };
@@ -1236,6 +1240,7 @@ pub fn render_score_to_bitmap_with_offset(
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
+                        skew: 0.0,
                         sprite: None,
                         original_dst_rect: None,
                     };
@@ -1350,6 +1355,7 @@ pub fn render_score_to_bitmap_with_offset(
                     color,
                     bg_color,
                     rotation,
+                    skew,
                     logical_rect,
                     initial_rect,
                     current_frame,
@@ -1367,6 +1373,7 @@ pub fn render_score_to_bitmap_with_offset(
                         sprite.color.clone(),
                         sprite.bg_color.clone(),
                         sprite.rotation,
+                        sprite.skew,
                         rect, // logical rect
                         info_initial_rect,
                         film_loop.current_frame,
@@ -1448,6 +1455,7 @@ pub fn render_score_to_bitmap_with_offset(
                     mask_image: None,
                     is_text_rendering: false,
                     rotation,
+                    skew,
                     sprite: None,
                     original_dst_rect: Some(logical_rect),
                 };
@@ -1595,6 +1603,7 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
                 mask_image: mask.as_ref(),
                 is_text_rendering: false,
                 rotation: 0.0,
+                skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
             },
@@ -1840,6 +1849,7 @@ impl PlayerCanvasRenderer {
                 mask_image: None,
                 is_text_rendering: false,
                 rotation: 0.0,
+                skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
             };

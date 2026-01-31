@@ -181,6 +181,7 @@ impl FieldMemberHandlers {
                             mask_image: None,
                             is_text_rendering: true,
                             rotation: 0.0,
+                            skew: 0.0,
                             sprite: None,
                             original_dst_rect: None,
                         };

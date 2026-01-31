@@ -2546,15 +2546,19 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 // Assign the new member
                 sprite.member = mem_ref.clone();
 
-                // Initialize size ONLY if:
+                // Initialize size and reset rotation/skew ONLY if:
                 //  - member actually changed
-                if member_changed && !sprite.has_size_changed {
-                    if let Some((w, h)) = intrinsic_size {
-                        if w > 0 && h > 0 {
-                            sprite.width = w;
-                            sprite.height = h;
-                            sprite.base_width = w;
-                            sprite.base_height = h;
+                if member_changed {
+                    sprite.reset_for_new_member();
+
+                    if !sprite.has_size_changed {
+                        if let Some((w, h)) = intrinsic_size {
+                            if w > 0 && h > 0 {
+                                sprite.width = w;
+                                sprite.height = h;
+                                sprite.base_width = w;
+                                sprite.base_height = h;
+                            }
                         }
                     }
                 }
@@ -2839,6 +2843,41 @@ pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: 
     // If the entire rect is in negative space, it's intentionally hidden
     if rect.right < 0 || rect.bottom < 0 {
         return false;
+    }
+
+    // Check for rotation or skew that requires coordinate transformation
+    let has_rotation = sprite.rotation.abs() > 0.1;
+    let has_skew_flip = sprite.has_skew_flip();
+
+    if has_rotation || has_skew_flip {
+        // Transform mouse coordinates using INVERSE transform
+        // to check against the original (untransformed) sprite rect
+        let center_x = sprite.loc_h as f64;
+        let center_y = sprite.loc_v as f64;
+
+        // Translate to registration point
+        let dx = x as f64 - center_x;
+        let dy = y as f64 - center_y;
+
+        // Apply inverse rotation (negate the angle)
+        let theta = -sprite.rotation * std::f64::consts::PI / 180.0;
+        let cos_theta = theta.cos();
+        let sin_theta = theta.sin();
+
+        let rx = dx * cos_theta - dy * sin_theta;
+        let mut ry = dx * sin_theta + dy * cos_theta;
+
+        // Apply inverse skew flip (negate y after inverse rotation)
+        if has_skew_flip {
+            ry = -ry;
+        }
+
+        // Translate back
+        let transformed_x = (rx + center_x) as i32;
+        let transformed_y = (ry + center_y) as i32;
+
+        return transformed_x >= rect.left && transformed_x < rect.right
+            && transformed_y >= rect.top && transformed_y < rect.bottom;
     }
 
     let left = rect.left;
