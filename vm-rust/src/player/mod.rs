@@ -402,23 +402,6 @@ impl DirPlayer {
         use crate::js_api::safe_string;
         web_sys::console::log_1(&format!("Loading Movie: {}", safe_string(&self.movie.file_name)).into());
 
-        let is_furnifactory = safe_string(&self.movie.file_name) == "FurniFactory.dcr";
-
-        if !is_furnifactory {
-            self.external_params.insert("sw1".to_string(), "connection.info.host=127.0.0.1".to_string());
-            // Use WebSocket proxy port (3091) instead of raw TCP port (3090)
-            // Run: node ws-tcp-proxy.js --ws-port=3091 --tcp-port=3090
-            self.external_params.insert("sw2".to_string(), "connection.info.port=3091".to_string());
-            self.external_params.insert("sw3".to_string(), "client.reload.url=http://localhost/v7/index.htm".to_string());
-            self.external_params.insert("sw4".to_string(), "connection.mus.host=127.0.0.1".to_string());
-            // Use WebSocket proxy port (3081) instead of raw TCP port (3080)
-            // Run: node ws-tcp-proxy.js --ws-port=3081 --tcp-port=3080
-            self.external_params.insert("sw5".to_string(), "connection.mus.port=3081".to_string());
-            self.external_params.insert("sw6".to_string(), "external.variables.txt=http://localhost/v7/ext/external_variables.txt".to_string());
-            self.external_params.insert("sw7".to_string(), "external.texts.txt=http://localhost/v7/ext/external_texts.txt".to_string());
-            self.external_params.insert("sw8".to_string(), "site.url=http://localhost/v7/".to_string());
-        }
-
         async_std::task::spawn_local(async move {
             // Relay prepareMovie to timeout targets
             dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
