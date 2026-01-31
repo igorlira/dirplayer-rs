@@ -19,6 +19,7 @@ pub mod handlers;
 pub mod keyboard;
 pub mod keyboard_events;
 pub mod keyboard_map;
+pub mod mcp;
 pub mod movie;
 pub mod net_manager;
 pub mod net_task;
