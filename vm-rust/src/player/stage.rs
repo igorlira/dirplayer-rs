@@ -1,6 +1,4 @@
-use log::warn;
-
-use crate::{director::lingo::datum::Datum, player::bitmap::bitmap::PaletteRef};
+use crate::{director::lingo::datum::Datum, player::bitmap::bitmap::PaletteRef, rendering::render_stage_to_bitmap};
 
 use super::{
     bitmap::bitmap::{get_system_default_palette, Bitmap},
@@ -27,8 +25,7 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
         }
         "bgColor" => Ok(Datum::ColorRef(player.bg_color.clone())),
         "image" => {
-            warn!("TODO get stage image");
-            let new_bitmap = Bitmap::new(
+            let mut new_bitmap = Bitmap::new(
                 player.movie.rect.width() as u16,
                 player.movie.rect.height() as u16,
                 32,
@@ -36,6 +33,7 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
                 0,
                 PaletteRef::BuiltIn(get_system_default_palette()),
             );
+            render_stage_to_bitmap(player, &mut new_bitmap, None);
             let bitmap_id = player.bitmap_manager.add_bitmap(new_bitmap);
             Ok(Datum::BitmapRef(bitmap_id))
         }
