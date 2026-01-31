@@ -79,9 +79,11 @@ impl From<&String> for StringChunkType {
 impl From<&i32> for StringChunkType {
     fn from(n: &i32) -> Self {
         match n {
-            0x01 => StringChunkType::Item,
+            // 0x01 => StringChunkType::Item,
+            0x01 => StringChunkType::Char,
             0x02 => StringChunkType::Word,
-            0x03 => StringChunkType::Char,
+            0x03 => StringChunkType::Item,
+            // 0x03 => StringChunkType::Char,
             0x04 => StringChunkType::Line,
             _ => panic!("Invalid string chunk type"),
         }
