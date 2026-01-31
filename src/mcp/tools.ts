@@ -17,10 +17,14 @@ export const mcpTools: McpTool[] = [
   // Script tools
   {
     name: 'list_scripts',
-    description: 'List all Lingo scripts in the movie with their cast references and handler names',
+    description: 'List Lingo scripts in the movie with their cast references and handler names. Supports pagination and filtering by cast library.',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: {
+        cast_lib: { type: 'number', description: 'Filter to a specific cast library number (omit or -1 for all libraries)' },
+        limit: { type: 'number', description: 'Maximum number of scripts to return (omit or -1 for all)' },
+        offset: { type: 'number', description: 'Number of scripts to skip for pagination (omit or -1 for none)' }
+      },
       required: []
     }
   },
@@ -77,7 +81,19 @@ export const mcpTools: McpTool[] = [
   },
   {
     name: 'get_call_stack',
-    description: 'Get the current call stack with all active scopes, showing handler names, script refs, bytecode positions, locals, and arguments',
+    description: 'Get the current call stack. By default returns a lightweight summary (handler names, script refs, bytecode positions). Use include_locals=true to also get local variables and arguments.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        depth: { type: 'number', description: 'Maximum number of scopes to return from the top of the stack (omit or -1 for all scopes)' },
+        include_locals: { type: 'boolean', description: 'Whether to include local variables and arguments for each scope (default: false)' }
+      },
+      required: []
+    }
+  },
+  {
+    name: 'get_context',
+    description: 'Get a lightweight execution context: current frame, handler name, script name, bytecode position, and player state. Single call replacement for get_execution_state + get_call_stack when you just need current position.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -263,6 +279,7 @@ export type McpToolName =
   | 'decompile_handler'
   | 'get_console_output'
   | 'get_call_stack'
+  | 'get_context'
   | 'get_execution_state'
   | 'eval_lingo'
   | 'pause'
