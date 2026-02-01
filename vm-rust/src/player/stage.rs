@@ -37,6 +37,7 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
             let bitmap_id = player.bitmap_manager.add_bitmap(new_bitmap);
             Ok(Datum::BitmapRef(bitmap_id))
         }
+        "name" => Ok(Datum::String("stage".to_string())),
         _ => return Err(ScriptError::new(format!("Invalid stage property {}", prop))),
     }
 }
