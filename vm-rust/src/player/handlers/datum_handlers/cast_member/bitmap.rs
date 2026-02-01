@@ -62,6 +62,7 @@ impl BitmapMemberHandlers {
                     .map(|x| x.bit_depth as i32)
                     .unwrap_or(0),
             )),
+            "useAlpha" => Ok(Datum::Int(if bitmap_member.info.use_alpha { 1 } else { 0 })),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for bitmap",
                 prop
@@ -213,6 +214,32 @@ impl BitmapMemberHandlers {
                     }
                 }
                 Ok(())
+            }
+            "useAlpha" => {
+                let use_alpha = value.to_bool()?;
+                borrow_member_mut(
+                    member_ref,
+                    |_| {},
+                    |cast_member, _| {
+                        let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                        bitmap_member.info.use_alpha = use_alpha;
+                        Ok(())
+                    },
+                )?;
+                // Also update the actual bitmap's use_alpha flag
+                reserve_player_mut(|player| {
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(member_ref)
+                        .unwrap();
+                    let bitmap_member = member.member_type.as_bitmap().unwrap();
+                    let bitmap_ref = bitmap_member.image_ref;
+                    if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(bitmap_ref) {
+                        bitmap.use_alpha = use_alpha;
+                    }
+                    Ok(())
+                })
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set castMember prop {} for bitmap",
