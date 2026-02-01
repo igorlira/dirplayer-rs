@@ -138,6 +138,12 @@ impl NetHandlers {
             let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
             let text = if is_ok {
                 let text = task_state.result.as_ref().unwrap().as_ref().unwrap();
+                // Strip UTF-8 BOM (0xEF 0xBB 0xBF) if present
+                let text = if text.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                    &text[3..]
+                } else {
+                    text
+                };
                 Datum::String(String::from_utf8_lossy(text).to_string())
             } else {
                 Datum::String("".to_owned())
