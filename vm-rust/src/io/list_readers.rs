@@ -23,7 +23,9 @@ pub fn read_string(item_bufs: &Vec<Vec<u8>>, index: usize) -> String {
     }
 
     let buf = &item_bufs[index];
-    return String::from_utf8(buf.to_vec()).unwrap();
+    // Use lossy conversion to handle legacy encodings (MacRoman/Windows-1252)
+    // that are common in Director files
+    return String::from_utf8_lossy(buf).into_owned();
 }
 
 pub fn read_u16(item_bufs: &Vec<Vec<u8>>, index: usize, item_endian: Endian) -> u16 {
