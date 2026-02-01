@@ -569,7 +569,23 @@ impl Datum {
     pub fn to_mask(&self) -> Result<&BitmapMask, ScriptError> {
         match self {
             Datum::Matte(mask) => Ok(mask),
-            _ => Err(ScriptError::new("Cannot convert datum to mask".to_string())),
+            _ => Err(ScriptError::new(format!(
+                "Cannot convert datum of type {} to bitmap mask",
+                self.type_str()
+            ))),
+        }
+    }
+
+    pub fn to_mask_or_none(&self) -> Option<&BitmapMask> {
+        match self {
+            Datum::Matte(mask) => Some(mask),
+            _ => {
+                log::error!(
+                    "Cannot convert datum of type {} to bitmap mask. Returning None.",
+                    self.type_str()
+                );
+                None
+            }
         }
     }
 
