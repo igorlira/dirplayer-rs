@@ -65,6 +65,7 @@ use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
+use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
 
 use crate::{
     console_warn,
@@ -1159,6 +1160,18 @@ impl DirPlayer {
                 let x_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.0));
                 let y_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.1));
                 Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
+            }
+            "xtraList" => {
+                let xtra_names = xtra::manager::get_registered_xtra_names();
+                let xtra_list: Vec<DatumRef> = xtra_names
+                    .iter()
+                    .map(|name| {
+                        let name_key = self.alloc_datum(Datum::Symbol("name".to_string()));
+                        let name_val = self.alloc_datum(Datum::String(name.to_string()));
+                        self.alloc_datum(Datum::PropList(vec![(name_key, name_val)], false))
+                    })
+                    .collect();
+                Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
             }
             _ => {
                 let datum = self.movie.get_prop(prop)?;
@@ -2478,6 +2491,7 @@ pub fn init_player() {
         PLAYER_TX = Some(tx.clone());
         PLAYER_EVENT_TX = Some(event_tx.clone());
         MULTIUSER_XTRA_MANAGER_OPT = Some(MultiuserXtraManager::new());
+        XMLPARSER_XTRA_MANAGER_OPT = Some(XmlParserXtraManager::new());
     }
 
     unsafe {
