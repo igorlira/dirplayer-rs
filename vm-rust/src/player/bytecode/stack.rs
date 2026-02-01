@@ -217,15 +217,26 @@ impl StackBytecodeHandler {
                 scope.stack.pop().unwrap()
             };
             let arg_list = player.get_datum(&arg_list).to_list()?;
-            let script_name = player.get_datum(&arg_list[0]).string_value()?;
+            let script_arg = player.get_datum(&arg_list[0]);
             let extra_args = arg_list[1..].to_vec();
-
-            let script_ref = player
-                .movie
-                .cast_manager
-                .find_member_ref_by_name(&script_name)
-                .unwrap();
-            let script_ref = player.alloc_datum(Datum::ScriptRef(script_ref));
+            let script_ref = match script_arg {
+                Datum::String(script_name) => {
+                    let script_ref = player
+                        .movie
+                        .cast_manager
+                        .find_member_ref_by_name(&script_name)
+                        .unwrap();
+                    player.alloc_datum(Datum::ScriptRef(script_ref))
+                }
+                Datum::CastMember(member_ref) => {
+                    player.alloc_datum(Datum::ScriptRef(member_ref.clone()))
+                }
+                _ => {
+                    return Err(ScriptError::new(
+                        "First argument to new script must be script name or CastMember".to_string(),
+                    ))
+                }
+            };
 
             Ok((script_ref, extra_args))
         })?;
