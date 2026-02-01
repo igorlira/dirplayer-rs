@@ -32,6 +32,7 @@ impl BitmapDatumHandlers {
             "trimWhiteSpace" => Self::trim_whitespace(datum, args),
             "getPixel" => Self::get_pixel(datum, args),
             "crop" => Self::crop(datum, args),
+            "setAlpha" => Self::set_alpha(datum, args),
             "floodFill" => reserve_player_mut(|player| {
                 // Args: point, color
                 if args.len() != 2 {
@@ -193,6 +194,100 @@ impl BitmapDatumHandlers {
             // Add the new bitmap to the manager and return a reference
             let new_bitmap_ref = player.bitmap_manager.add_bitmap(cropped_bitmap);
             Ok(player.alloc_datum(Datum::BitmapRef(new_bitmap_ref)))
+        })
+    }
+
+    pub fn set_alpha(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() != 1 {
+                return Err(ScriptError::new(
+                    "setAlpha requires 1 argument".to_string(),
+                ));
+            }
+
+            let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
+            let arg = player.get_datum(&args[0]);
+
+            // Check if target bitmap is 32-bit
+            let (width, height, bit_depth) = {
+                let bitmap = player
+                    .bitmap_manager
+                    .get_bitmap(*bitmap_ref)
+                    .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+                (bitmap.width, bitmap.height, bitmap.bit_depth)
+            };
+
+            if bit_depth != 32 {
+                // setAlpha only works on 32-bit images
+                log::warn!("setAlpha called on non-32-bit bitmap");
+                return Ok(player.alloc_datum(datum_bool(false)));
+            }
+
+            match arg {
+                Datum::Int(alpha_level) => {
+                    // Set all pixels to a flat alpha level (0-255)
+                    let alpha = (*alpha_level).clamp(0, 255) as u8;
+                    let bitmap = player
+                        .bitmap_manager
+                        .get_bitmap_mut(*bitmap_ref)
+                        .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+
+                    // For 32-bit images, data is RGBA, so we modify every 4th byte (alpha channel)
+                    for i in (3..bitmap.data.len()).step_by(4) {
+                        bitmap.data[i] = alpha;
+                    }
+                    // bitmap.version += 1;
+
+                    Ok(player.alloc_datum(datum_bool(true)))
+                }
+                Datum::BitmapRef(alpha_bitmap_ref) => {
+                    // Set alpha from an 8-bit grayscale image
+                    let alpha_bitmap = player
+                        .bitmap_manager
+                        .get_bitmap(*alpha_bitmap_ref)
+                        .ok_or_else(|| ScriptError::new("Invalid alpha bitmap reference".to_string()))?;
+
+                    // Alpha image must be 8-bit
+                    if alpha_bitmap.bit_depth != 8 {
+                        return Ok(player.alloc_datum(datum_bool(false)));
+                    }
+
+                    // Both images must have the same dimensions
+                    if alpha_bitmap.width != width || alpha_bitmap.height != height {
+                        return Ok(player.alloc_datum(datum_bool(false)));
+                    }
+
+                    // Clone the alpha data to avoid borrow issues
+                    let alpha_data = alpha_bitmap.data.clone();
+
+                    let bitmap = player
+                        .bitmap_manager
+                        .get_bitmap_mut(*bitmap_ref)
+                        .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+
+                    // Copy alpha values from the 8-bit image to the alpha channel of the 32-bit image
+                    // For 8-bit images, each byte is a grayscale value that we use as alpha
+                    for y in 0..height {
+                        for x in 0..width {
+                            let alpha_idx = (y as usize * width as usize + x as usize) * 4;
+                            let dst_idx = (y as usize * width as usize + x as usize) * 4 + 3;
+
+                            if alpha_idx < alpha_data.len() && dst_idx < bitmap.data.len() {
+                                // Use the red channel of the alpha image as the alpha value
+                                // (since it's grayscale, R=G=B)
+                                bitmap.data[dst_idx] = alpha_data[alpha_idx];
+                            }
+                        }
+                    }
+                    // bitmap.version += 1;
+
+                    Ok(player.alloc_datum(datum_bool(true)))
+                }
+                _ => {
+                    // Invalid argument type
+                    Ok(player.alloc_datum(datum_bool(false)))
+                }
+            }
         })
     }
 
@@ -484,6 +579,7 @@ impl BitmapDatumHandlers {
                 }
             }
             "ilk" => Ok(Datum::Symbol("image".to_string())),
+            "useAlpha" => Ok(Datum::Int(if bitmap.use_alpha { 1 } else { 0 })),
             _ => Err(ScriptError::new(format!(
                 "Cannot get bitmap property {}",
                 prop
@@ -520,6 +616,12 @@ impl BitmapDatumHandlers {
                     value.type_str()
                 ))),
             },
+            "useAlpha" => {
+                let use_alpha = value.to_bool()?;
+                let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).unwrap();
+                bitmap.use_alpha = use_alpha;
+                Ok(())
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot set bitmap property {}",
                 prop
