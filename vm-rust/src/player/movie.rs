@@ -23,6 +23,7 @@ pub struct Movie {
     pub score: Score,
     pub current_frame: u32,
     pub puppet_tempo: u32,
+    pub random_seed: Option<i32>,
     pub exit_lock: bool,
     pub dir_version: u16,
     pub item_delimiter: char,
@@ -46,6 +47,17 @@ pub struct Movie {
 }
 
 impl Movie {
+    pub fn next_random_int(&mut self, max: i32) -> Option<i32> {
+        let seed = self.random_seed?;
+        let seed_u32 = seed as u32;
+
+        // Note: This does not match the Director implementation exactly - there is no public knowledge of the seed algorithm.
+        let next_seed = seed_u32.wrapping_mul(214013).wrapping_add(2531011);
+        self.random_seed = Some(next_seed as i32);
+        let value = (next_seed % (max as u32)) as i32 + 1;
+        Some(value)
+    }
+
     pub async fn load_from_file(
         &mut self,
         file: DirectorFile,
@@ -162,6 +174,7 @@ impl Movie {
             }
             "mouseDown" => Ok(datum_bool(self.mouse_down)),
             "traceScript" => Ok(datum_bool(self.trace_script)),
+            "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
         }
     }
@@ -248,6 +261,9 @@ impl Movie {
             }
             "puppetTempo" => {
                 self.puppet_tempo = value.int_value()? as u32;
+            }
+            "randomSeed" => {
+                self.random_seed = Some(value.int_value()?);
             }
             _ => return Err(ScriptError::new(format!("Cannot set movie prop {prop}"))),
         }
