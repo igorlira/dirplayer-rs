@@ -77,11 +77,11 @@ impl StringHandlers {
                 .get_datum(&args[0])
                 .string_value()
                 .unwrap_or_default();
-            let start = player
+            let start = (player
                 .get_datum(&args[1])
                 .int_value()
                 .unwrap_or(1)
-                .saturating_sub(1) as usize;
+                .max(1) - 1) as usize;
             let mut end = player.get_datum(&args[2]).int_value().unwrap_or(0) as usize;
 
             let len = string.chars().count();
