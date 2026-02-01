@@ -410,7 +410,45 @@ impl BitmapDatumHandlers {
             let bitmap = player.get_datum(datum);
             let (rect_i32, color_ref) = if args.len() == 2 {
                 let rect_refs = player.get_datum(&args[0]).to_rect()?;
-                let color = player.get_datum(&args[1]).to_color_ref()?;
+                let params = player.get_datum(&args[1]);
+                let (color, shape) = match params {
+                    Datum::ColorRef(color_ref) => (color_ref.clone(), "rect".to_string()),
+                    Datum::PropList(prop_list, ..) => {
+                        let color_ref = PropListUtils::get_by_concrete_key(
+                            &prop_list,
+                            &Datum::Symbol("color".to_string()),
+                            &player.allocator,
+                        )?;
+                        let shape_ref = PropListUtils::get_by_concrete_key(
+                            &prop_list,
+                            &Datum::Symbol("shapeType".to_string()),
+                            &player.allocator,
+                        )?;
+                        let shape_datum = player.get_datum(&shape_ref);
+                        let shape = match shape_datum {
+                            Datum::Symbol(s) => s.clone(),
+                            Datum::Void => "rect".to_string(),
+                            _ => {
+                                return Err(ScriptError::new(
+                                    "Invalid shapeType in fill prop list".to_string(),
+                                ))
+                            }
+                        };
+                        let color_ref = player.get_datum(&color_ref).to_color_ref()?;
+                        (color_ref.clone(), shape)
+                    }
+                    _ => {
+                        return Err(ScriptError::new(
+                            "Invalid parameter for fill".to_string(),
+                        ))
+                    }
+                };
+                
+                if shape != "rect" {
+                    return Err(ScriptError::new(
+                        format!("Invalid shapeType {} for fill", shape)
+                    ));
+                }
 
                 let x1 = player.get_datum(&rect_refs[0]).int_value()?;
                 let y1 = player.get_datum(&rect_refs[1]).int_value()?;
@@ -424,7 +462,7 @@ impl BitmapDatumHandlers {
                 let width = player.get_datum(&args[2]).int_value()?;
                 let height = player.get_datum(&args[3]).int_value()?;
                 let color = player.get_datum(&args[4]).to_color_ref()?;
-                ((x, y, width, height), color)
+                ((x, y, width, height), color.clone())
             } else {
                 return Err(ScriptError::new(
                     "Invalid number of arguments for fill".to_string(),
