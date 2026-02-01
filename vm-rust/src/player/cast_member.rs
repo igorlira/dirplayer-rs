@@ -32,7 +32,7 @@ pub struct CastMember {
     pub bg_color: ColorRef,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct FieldMember {
     pub text: String,
     pub alignment: String,
@@ -1130,11 +1130,23 @@ impl CastMember {
                 let text_chunk = member_def.children[0]
                     .as_ref()
                     .unwrap()
-                    .as_text()
-                    .expect("Not a text chunk");
-                let field_info = FieldInfo::from(chunk.specific_data_raw.as_slice());
-                let mut field_member = FieldMember::from_field_info(field_info);
-                field_member.text = text_chunk.text.clone();
+                    .as_text();
+
+                let field_member = if let Some(text_chunk) = text_chunk {
+                    let field_info = FieldInfo::from(chunk.specific_data_raw.as_slice());
+                    let mut field_member = FieldMember::from_field_info(field_info);
+                    field_member.text = text_chunk.text.clone();
+                    field_member
+                } else {
+                    log::error!(
+                        "Cast member #{} in cast lib {} is of type Text but has no valid Text chunk.",
+                        number,
+                        cast_lib
+                    );
+                    let mut field_member = FieldMember::default();
+                    field_member.text = "<Invalid Text Member>".to_string();
+                    field_member
+                };
                 CastMemberType::Field(field_member)
             }
             MemberType::Script => {
