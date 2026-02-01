@@ -1,14 +1,9 @@
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        compare::datum_is_zero,
-        handlers::datum_handlers::{
+        HandlerExecutionResult, PLAYER_OPT, ScriptError, compare::datum_is_zero, datum_formatting::format_datum, handlers::datum_handlers::{
             player_call_datum_handler, script_instance::ScriptInstanceUtils,
-        },
-        player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return,
-        reserve_player_mut, reserve_player_ref,
-        script::{get_current_handler_def, get_current_script, get_name},
-        HandlerExecutionResult, ScriptError, PLAYER_OPT,
+        }, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}
     },
 };
 
@@ -213,6 +208,21 @@ impl FlowControlBytecodeHandler {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.bytecode_index = new_index;
             Ok(HandlerExecutionResult::Jump)
+        })
+    }
+
+    pub fn call_javascript(
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let arg1 = scope.stack.pop().unwrap();
+            let arg2 = scope.stack.pop().unwrap();
+            let arg1_formatted = format_datum(&arg1, player);
+            let arg2_formatted = format_datum(&arg2, player);
+
+            log::warn!("TODO: call_javascript with args: {}, {}", arg1_formatted, arg2_formatted);
+            Ok(HandlerExecutionResult::Advance)
         })
     }
 }
