@@ -308,6 +308,8 @@ impl CastMemberRefHandlers {
                     } else {
                         Err(ScriptError::new("Script member has no text".to_string()))
                     }
+                } else if prop == "script" {
+                    Ok(Datum::ScriptRef(cast_member_ref.clone()))
                 } else {
                     Err(ScriptError::new(format!("Script members don't support property {}", prop)))
                 }
