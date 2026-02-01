@@ -286,15 +286,26 @@ impl GetSetBytecodeHandler {
 
     pub fn set_global(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let value_ref = scope.stack.pop().unwrap();
+            let value_ref = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.pop().unwrap()
+            };
             let prop_name = get_name(
                 &player,
                 &ctx,
                 player.get_ctx_current_bytecode(ctx).obj as u16,
             )
-            .unwrap();
-            player.globals.insert(prop_name.to_owned(), value_ref);
+            .unwrap()
+            .to_owned();
+
+            // In Lingo, strings are value types and should be copied when assigned
+            // to prevent mutations from affecting the original variable
+            let value_ref = match player.get_datum(&value_ref) {
+                Datum::String(s) => player.alloc_datum(Datum::String(s.clone())),
+                _ => value_ref,
+            };
+
+            player.globals.insert(prop_name, value_ref);
             Ok(HandlerExecutionResult::Advance)
         })
     }
@@ -368,6 +379,13 @@ impl GetSetBytecodeHandler {
                 scope.stack.pop().unwrap()
             };
 
+            // In Lingo, strings are value types and should be copied when assigned
+            // to prevent mutations from affecting the original variable
+            let value_ref = match player.get_datum(&value_ref) {
+                Datum::String(s) => player.alloc_datum(Datum::String(s.clone())),
+                _ => value_ref,
+            };
+
             let var_name = get_name(&player, &ctx, name_id).unwrap().to_owned();
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.locals.insert(var_name, value_ref);
@@ -394,11 +412,22 @@ impl GetSetBytecodeHandler {
         reserve_player_mut(|player| {
             let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as u32
                 / get_current_variable_multiplier(player, ctx);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let arg_count = scope.args.len();
-            let arg_index = bytecode_obj as usize;
-            let value_ref = scope.stack.pop().unwrap();
+            let (arg_count, arg_index, value_ref) = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                let arg_count = scope.args.len();
+                let arg_index = bytecode_obj as usize;
+                let value_ref = scope.stack.pop().unwrap();
+                (arg_count, arg_index, value_ref)
+            };
 
+            // In Lingo, strings are value types and should be copied when assigned
+            // to prevent mutations from affecting the original variable
+            let value_ref = match player.get_datum(&value_ref) {
+                Datum::String(s) => player.alloc_datum(Datum::String(s.clone())),
+                _ => value_ref,
+            };
+
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             if arg_index < scope.args.len() {
                 scope.args[arg_index] = value_ref;
                 Ok(HandlerExecutionResult::Advance)
