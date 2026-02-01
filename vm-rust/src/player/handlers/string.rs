@@ -117,8 +117,9 @@ impl StringHandlers {
             let num = player.get_datum(&args[0]).int_value()?;
             let byte_val = (num & 0xFF) as u8;
 
-            // Build a single-byte string directly from raw bytes (Latin-1 1:1)
-            let result_string = unsafe { String::from_utf8_unchecked(vec![byte_val]) };
+            // Build a single-byte string from the byte value
+            // Use lossy conversion to handle values > 127 which are invalid UTF-8
+            let result_string = String::from_utf8_lossy(&[byte_val]).into_owned();
 
             Ok(player.alloc_datum(Datum::String(result_string)))
         })

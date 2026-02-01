@@ -310,8 +310,9 @@ impl StringChunkUtils {
             StringChunkType::Char => {
                 let (start, end) =
                     Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
-                let bytes = string.bytes().skip(start).take(end - start);
-                unsafe { String::from_utf8_unchecked(bytes.collect_vec()) }
+                let bytes: Vec<u8> = string.bytes().skip(start).take(end - start).collect();
+                // Use lossy conversion to handle strings that may contain invalid UTF-8
+                String::from_utf8_lossy(&bytes).into_owned()
             }
             StringChunkType::Line => {
                 let chunk_list = Self::resolve_chunk_list(
