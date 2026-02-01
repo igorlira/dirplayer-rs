@@ -221,12 +221,17 @@ impl StackBytecodeHandler {
             let extra_args = arg_list[1..].to_vec();
             let script_ref = match script_arg {
                 Datum::String(script_name) => {
-                    let script_ref = player
+                    if let Some(script_ref) = player
                         .movie
                         .cast_manager
-                        .find_member_ref_by_name(&script_name)
-                        .unwrap();
-                    player.alloc_datum(Datum::ScriptRef(script_ref))
+                        .find_member_ref_by_name(&script_name) {
+                        player.alloc_datum(Datum::ScriptRef(script_ref))
+                    } else {
+                        return Err(ScriptError::new(format!(
+                            "No script found with name {}",
+                            script_name
+                        )));
+                    }
                 }
                 Datum::CastMember(member_ref) => {
                     player.alloc_datum(Datum::ScriptRef(member_ref.clone()))
