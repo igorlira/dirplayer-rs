@@ -1974,9 +1974,15 @@ pub async fn player_call_script_handler_raw_args(
 
         match result {
             HandlerExecutionResult::Advance => {
-                reserve_player_mut(|player| {
-                    player.scopes.get_mut(scope_ref).unwrap().bytecode_index += 1;
-                });
+                let handler = unsafe { &*ctx.handler_def_ptr };
+                if bytecode_index + 1 >= handler.bytecode_array.len() {
+                    // Reached end of handler - exit
+                    should_return = true;
+                } else {
+                    reserve_player_mut(|player| {
+                        player.scopes.get_mut(scope_ref).unwrap().bytecode_index += 1;
+                    });
+                }
             }
             HandlerExecutionResult::Stop => {
                 should_return = true;
