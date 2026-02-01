@@ -162,6 +162,7 @@ impl Movie {
             }
             "mouseDown" => Ok(datum_bool(self.mouse_down)),
             "traceScript" => Ok(datum_bool(self.trace_script)),
+            "activeWindow" => Ok(Datum::Stage),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
         }
     }
