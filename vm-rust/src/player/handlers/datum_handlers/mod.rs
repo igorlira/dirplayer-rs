@@ -1,4 +1,5 @@
 pub mod bitmap;
+pub mod cast_lib;
 pub mod cast_member;
 pub mod cast_member_ref;
 pub mod color;
@@ -25,6 +26,7 @@ pub mod float;
 
 use player::PlayerDatumHandlers;
 
+use self::cast_lib::CastLibDatumHandlers;
 use self::date::DateDatumHandlers;
 use self::math::MathDatumHandlers;
 use self::vector::VectorDatumHandlers;
@@ -156,6 +158,7 @@ pub async fn player_call_datum_handler(
         DatumType::SoundChannel => reserve_player_mut(|player| {
             SoundChannelDatumHandlers::call(player, obj_ref, handler_name, args)
         }),
+        DatumType::CastLibRef => CastLibDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Void => {
             // Try VoidDatumHandlers first for specific methods that should return VOID gracefully
             match VoidDatumHandlers::call(obj_ref.clone(), handler_name, args) {

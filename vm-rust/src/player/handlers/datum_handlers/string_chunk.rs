@@ -105,9 +105,12 @@ impl StringChunkUtils {
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
-                let (start, end) =
-                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
-                new_string.replace_range(start..end, "");
+                let (start_char, end_char) =
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
+                // Convert character indices to byte indices for replace_range
+                let start_byte = Self::char_index_to_byte_index(string, start_char);
+                let end_byte = Self::char_index_to_byte_index(string, end_char);
+                new_string.replace_range(start_byte..end_byte, "");
                 Ok(new_string)
             }
             StringChunkType::Item => {
@@ -164,9 +167,12 @@ impl StringChunkUtils {
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
-                let (start, end) =
-                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
-                new_string.replace_range(start..end, &replace_with);
+                let (start_char, end_char) =
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
+                // Convert character indices to byte indices for replace_range
+                let start_byte = Self::char_index_to_byte_index(string, start_char);
+                let end_byte = Self::char_index_to_byte_index(string, end_char);
+                new_string.replace_range(start_byte..end_byte, &replace_with);
                 Ok(new_string)
             }
             _ => Err(ScriptError::new(
@@ -188,6 +194,16 @@ impl StringChunkUtils {
         let start_index = std::cmp::min(std::cmp::max(start_index, 0), max_length);
         let end_index = std::cmp::max(start_index, std::cmp::min(end_index, max_length));
         (start_index, end_index)
+    }
+
+    /// Converts a character index to a byte index in a UTF-8 string.
+    /// Returns the byte offset where the nth character starts.
+    pub fn char_index_to_byte_index(string: &str, char_index: usize) -> usize {
+        string
+            .char_indices()
+            .nth(char_index)
+            .map(|(byte_idx, _)| byte_idx)
+            .unwrap_or(string.len())
     }
 
     #[allow(dead_code)]
@@ -254,7 +270,7 @@ impl StringChunkUtils {
                 Ok(string.chars().filter(|c| item_delimiter == *c).count() + 1)
             }
             StringChunkType::Word => Ok(string.split_whitespace().count()),
-            StringChunkType::Char => Ok(string.len()),
+            StringChunkType::Char => Ok(string.chars().count()),
             StringChunkType::Line => Ok(string_get_lines(string).len()),
         }
     }
@@ -309,9 +325,8 @@ impl StringChunkUtils {
             }
             StringChunkType::Char => {
                 let (start, end) =
-                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
-                let bytes = string.bytes().skip(start).take(end - start);
-                unsafe { String::from_utf8_unchecked(bytes.collect_vec()) }
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
+                string.chars().skip(start).take(end - start).collect()
             }
             StringChunkType::Line => {
                 let chunk_list = Self::resolve_chunk_list(
@@ -344,9 +359,12 @@ impl StringChunkUtils {
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
-                let (start, end) =
-                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
-                new_string.replace_range(start..end, replace_with);
+                let (start_char, end_char) =
+                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
+                // Convert character indices to byte indices for replace_range
+                let start_byte = StringChunkUtils::char_index_to_byte_index(string, start_char);
+                let end_byte = StringChunkUtils::char_index_to_byte_index(string, end_char);
+                new_string.replace_range(start_byte..end_byte, replace_with);
                 Ok(new_string)
             }
             StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
@@ -386,9 +404,11 @@ impl StringChunkUtils {
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
-                let (start, _) =
-                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
-                new_string.insert_str(start, insert_value);
+                let (start_char, _) =
+                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
+                // Convert character index to byte index for insert_str
+                let start_byte = StringChunkUtils::char_index_to_byte_index(string, start_char);
+                new_string.insert_str(start_byte, insert_value);
                 Ok(new_string)
             }
             StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
@@ -437,9 +457,11 @@ impl StringChunkUtils {
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
-                let (_, end) =
-                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
-                new_string.insert_str(end, insert_value);
+                let (_, end_char) =
+                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
+                // Convert character index to byte index for insert_str
+                let end_byte = StringChunkUtils::char_index_to_byte_index(string, end_char);
+                new_string.insert_str(end_byte, insert_value);
                 Ok(new_string)
             }
             StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
@@ -448,7 +470,7 @@ impl StringChunkUtils {
                     chunk_expr.chunk_type.clone(),
                     chunk_expr.item_delimiter,
                 )?;
-                let (start, end) = StringChunkUtils::vm_range_to_host(
+                let (_, end) = StringChunkUtils::vm_range_to_host(
                     (chunk_expr.start, chunk_expr.end),
                     chunk_list.len(),
                 );

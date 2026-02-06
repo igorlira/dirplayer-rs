@@ -175,6 +175,7 @@ impl Movie {
             "mouseDown" => Ok(datum_bool(self.mouse_down)),
             "traceScript" => Ok(datum_bool(self.trace_script)),
             "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
+            "activeWindow" => Ok(Datum::Stage),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
         }
     }
@@ -190,7 +191,7 @@ impl Movie {
                 self.exit_lock = value.int_value()? == 1;
             }
             "itemDelimiter" => {
-                self.item_delimiter = (value.string_value()?).as_bytes()[0] as char;
+                self.item_delimiter = (value.string_value()?).chars().next().unwrap();
             }
             "debugPlaybackEnabled" => {
                 // TODO

@@ -129,6 +129,7 @@ pub fn datum_equals(
             );
             Ok(false)
         }
+        (Datum::ScriptRef(a_ref), Datum::ScriptRef(b_ref)) => Ok(a_ref == b_ref),
         _ => {
             warn!(
                 "datum_equals not supported for types: {} and {}",

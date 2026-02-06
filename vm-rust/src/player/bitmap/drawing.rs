@@ -614,7 +614,7 @@ impl Bitmap {
         };
 
         let mask_image = param_list.get("maskImage");
-        let mask_image = mask_image.map(|x| x.to_mask().unwrap());
+        let mask_image = mask_image.and_then(|x| x.to_mask_or_none());
 
         // Extract rotation parameter (defaults to 0.0 if not provided)
         let rotation = param_list

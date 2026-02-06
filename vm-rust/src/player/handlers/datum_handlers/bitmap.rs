@@ -32,6 +32,7 @@ impl BitmapDatumHandlers {
             "trimWhiteSpace" => Self::trim_whitespace(datum, args),
             "getPixel" => Self::get_pixel(datum, args),
             "crop" => Self::crop(datum, args),
+            "setAlpha" => Self::set_alpha(datum, args),
             "floodFill" => reserve_player_mut(|player| {
                 // Args: point, color
                 if args.len() != 2 {
@@ -196,6 +197,100 @@ impl BitmapDatumHandlers {
         })
     }
 
+    pub fn set_alpha(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() != 1 {
+                return Err(ScriptError::new(
+                    "setAlpha requires 1 argument".to_string(),
+                ));
+            }
+
+            let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
+            let arg = player.get_datum(&args[0]);
+
+            // Check if target bitmap is 32-bit
+            let (width, height, bit_depth) = {
+                let bitmap = player
+                    .bitmap_manager
+                    .get_bitmap(*bitmap_ref)
+                    .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+                (bitmap.width, bitmap.height, bitmap.bit_depth)
+            };
+
+            if bit_depth != 32 {
+                // setAlpha only works on 32-bit images
+                log::warn!("setAlpha called on non-32-bit bitmap");
+                return Ok(player.alloc_datum(datum_bool(false)));
+            }
+
+            match arg {
+                Datum::Int(alpha_level) => {
+                    // Set all pixels to a flat alpha level (0-255)
+                    let alpha = (*alpha_level).clamp(0, 255) as u8;
+                    let bitmap = player
+                        .bitmap_manager
+                        .get_bitmap_mut(*bitmap_ref)
+                        .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+
+                    // For 32-bit images, data is RGBA, so we modify every 4th byte (alpha channel)
+                    for i in (3..bitmap.data.len()).step_by(4) {
+                        bitmap.data[i] = alpha;
+                    }
+                    // bitmap.version += 1;
+
+                    Ok(player.alloc_datum(datum_bool(true)))
+                }
+                Datum::BitmapRef(alpha_bitmap_ref) => {
+                    // Set alpha from an 8-bit grayscale image
+                    let alpha_bitmap = player
+                        .bitmap_manager
+                        .get_bitmap(*alpha_bitmap_ref)
+                        .ok_or_else(|| ScriptError::new("Invalid alpha bitmap reference".to_string()))?;
+
+                    // Alpha image must be 8-bit
+                    if alpha_bitmap.bit_depth != 8 {
+                        return Ok(player.alloc_datum(datum_bool(false)));
+                    }
+
+                    // Both images must have the same dimensions
+                    if alpha_bitmap.width != width || alpha_bitmap.height != height {
+                        return Ok(player.alloc_datum(datum_bool(false)));
+                    }
+
+                    // Clone the alpha data to avoid borrow issues
+                    let alpha_data = alpha_bitmap.data.clone();
+
+                    let bitmap = player
+                        .bitmap_manager
+                        .get_bitmap_mut(*bitmap_ref)
+                        .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+
+                    // Copy alpha values from the 8-bit image to the alpha channel of the 32-bit image
+                    // For 8-bit images, each byte is a grayscale value that we use as alpha
+                    for y in 0..height {
+                        for x in 0..width {
+                            let alpha_idx = (y as usize * width as usize + x as usize) * 4;
+                            let dst_idx = (y as usize * width as usize + x as usize) * 4 + 3;
+
+                            if alpha_idx < alpha_data.len() && dst_idx < bitmap.data.len() {
+                                // Use the red channel of the alpha image as the alpha value
+                                // (since it's grayscale, R=G=B)
+                                bitmap.data[dst_idx] = alpha_data[alpha_idx];
+                            }
+                        }
+                    }
+                    // bitmap.version += 1;
+
+                    Ok(player.alloc_datum(datum_bool(true)))
+                }
+                _ => {
+                    // Invalid argument type
+                    Ok(player.alloc_datum(datum_bool(false)))
+                }
+            }
+        })
+    }
+
     pub fn draw(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let bitmap = player.get_datum(datum);
@@ -334,7 +429,45 @@ impl BitmapDatumHandlers {
             let bitmap = player.get_datum(datum);
             let (rect_i32, color_ref) = if args.len() == 2 {
                 let rect_refs = player.get_datum(&args[0]).to_rect()?;
-                let color = player.get_datum(&args[1]).to_color_ref()?;
+                let params = player.get_datum(&args[1]);
+                let (color, shape) = match params {
+                    Datum::ColorRef(color_ref) => (color_ref.clone(), "rect".to_string()),
+                    Datum::PropList(prop_list, ..) => {
+                        let color_ref = PropListUtils::get_by_concrete_key(
+                            &prop_list,
+                            &Datum::Symbol("color".to_string()),
+                            &player.allocator,
+                        )?;
+                        let shape_ref = PropListUtils::get_by_concrete_key(
+                            &prop_list,
+                            &Datum::Symbol("shapeType".to_string()),
+                            &player.allocator,
+                        )?;
+                        let shape_datum = player.get_datum(&shape_ref);
+                        let shape = match shape_datum {
+                            Datum::Symbol(s) => s.clone(),
+                            Datum::Void => "rect".to_string(),
+                            _ => {
+                                return Err(ScriptError::new(
+                                    "Invalid shapeType in fill prop list".to_string(),
+                                ))
+                            }
+                        };
+                        let color_ref = player.get_datum(&color_ref).to_color_ref()?;
+                        (color_ref.clone(), shape)
+                    }
+                    _ => {
+                        return Err(ScriptError::new(
+                            "Invalid parameter for fill".to_string(),
+                        ))
+                    }
+                };
+                
+                if shape != "rect" {
+                    return Err(ScriptError::new(
+                        format!("Invalid shapeType {} for fill", shape)
+                    ));
+                }
 
                 let x1 = player.get_datum(&rect_refs[0]).int_value()?;
                 let y1 = player.get_datum(&rect_refs[1]).int_value()?;
@@ -348,7 +481,7 @@ impl BitmapDatumHandlers {
                 let width = player.get_datum(&args[2]).int_value()?;
                 let height = player.get_datum(&args[3]).int_value()?;
                 let color = player.get_datum(&args[4]).to_color_ref()?;
-                ((x, y, width, height), color)
+                ((x, y, width, height), color.clone())
             } else {
                 return Err(ScriptError::new(
                     "Invalid number of arguments for fill".to_string(),
@@ -502,6 +635,7 @@ impl BitmapDatumHandlers {
                 }
             }
             "ilk" => Ok(Datum::Symbol("image".to_string())),
+            "useAlpha" => Ok(Datum::Int(if bitmap.use_alpha { 1 } else { 0 })),
             _ => Err(ScriptError::new(format!(
                 "Cannot get bitmap property {}",
                 prop
@@ -538,6 +672,12 @@ impl BitmapDatumHandlers {
                     value.type_str()
                 ))),
             },
+            "useAlpha" => {
+                let use_alpha = value.to_bool()?;
+                let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).unwrap();
+                bitmap.use_alpha = use_alpha;
+                Ok(())
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot set bitmap property {}",
                 prop
