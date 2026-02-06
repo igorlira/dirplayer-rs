@@ -49,7 +49,7 @@ impl StringDatumUtils {
 
     pub fn get_built_in_prop(value: &String, prop_name: &String) -> Result<Datum, ScriptError> {
         match prop_name.as_str() {
-            "length" => Ok(Datum::Int(value.len() as i32)),
+            "length" => Ok(Datum::Int(value.chars().count() as i32)),
             "ilk" => Ok(Datum::Symbol("string".to_owned())),
             "string" => Ok(Datum::String(value.clone())),
             _ => Err(ScriptError::new(format!(
@@ -150,9 +150,9 @@ pub fn string_get_count(
     delimiter: char,
 ) -> Result<u32, ScriptError> {
     match operand.as_str() {
-        "char" | "chars" => Ok(value.len() as u32),
+        "char" | "chars" => Ok(value.chars().count() as u32),
         "item" | "items" => Ok(string_get_items(value, delimiter).len() as u32),
-        "word" | "words" => Ok(if value.len() > 0 {
+        "word" | "words" => Ok(if value.chars().count() > 0 {
             value.split_whitespace().count() as u32
         } else {
             0

@@ -173,10 +173,16 @@ impl MultiuserXtraManager {
                 instance.socket_tx = Some(tx);
                 spawn_local(async move {
                     while let Ok(message) = rx.recv().await {
-                        warn!("Sending message: {:?}", message);
-                        socket_clone
-                            .send_with_u8_array(&message.as_bytes())
-                            .unwrap();
+                        // Check if WebSocket is open (readyState == 1) before sending
+                        // readyState: 0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED
+                        if socket_clone.ready_state() != 1 {
+                            log::error!("Multiuser: Cannot send message, WebSocket not open (state={})", socket_clone.ready_state());
+                            continue;
+                        }
+                        // multiuser_log!("Multiuser: Sending message: {:?}", message);
+                        if let Err(e) = socket_clone.send_with_u8_array(&message.chars().map(|c| c as u8).collect::<Vec<u8>>()) {
+                            log::error!("Multiuser: Failed to send message: {:?}", e);
+                        }
                     }
                 });
 
