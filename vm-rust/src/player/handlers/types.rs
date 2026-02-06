@@ -1328,7 +1328,7 @@ impl TypeHandlers {
         // - Inside B::start, callAncestor(#start, me, ...) is called
         //   -> current receiver is A, but we need B's ancestor (C)
         //   -> We look at the scope's script_ref to find B, then get B's ancestor
-        let (ancestor_list, original_me_list, handler_name, call_args) = reserve_player_mut(|player| {
+        let (ancestor_list, original_me_list, instance_datum_refs, handler_name, extra_args) = reserve_player_mut(|player| {
             let handler_name = player.get_datum(&args[0]).string_value()?;
 
             // Get the current scope's script_ref to determine which script we're currently in
@@ -1351,9 +1351,11 @@ impl TypeHandlers {
 
             let mut ancestor_list = vec![];
             let mut original_me_list = vec![];
+            let mut instance_datum_refs = vec![];
             for instance_ref in instance_list {
                 let original_me_ref = player.get_datum(&instance_ref).to_script_instance_ref()?;
                 original_me_list.push(original_me_ref.clone());
+                instance_datum_refs.push(instance_ref.clone());
 
                 // Determine which instance's ancestor to use:
                 //
@@ -1403,14 +1405,18 @@ impl TypeHandlers {
                 })?;
                 ancestor_list.push(ancestor.clone());
             }
-            // Include the original 'me' (args[1]) in the call args
-            // so the handler receives the original instance as its first argument
-            let call_args = args[1..].to_vec();
-            Ok((ancestor_list, original_me_list, handler_name, call_args))
+            // Get extra arguments beyond the instance list (args[2..])
+            // The instance itself will be prepended in each iteration
+            let extra_args = args[2..].to_vec();
+            Ok((ancestor_list, original_me_list, instance_datum_refs, handler_name, extra_args))
         })?;
 
         let mut result = DatumRef::Void;
-        for (ancestor_ref, original_me_ref) in ancestor_list.into_iter().zip(original_me_list.into_iter()) {
+        for ((ancestor_ref, original_me_ref), instance_datum_ref) in ancestor_list
+            .into_iter()
+            .zip(original_me_list.into_iter())
+            .zip(instance_datum_refs.into_iter())
+        {
             // Walk up the ancestor chain to find a script that has the handler.
             // For example, if A->B->C and B doesn't have the handler but C does,
             // we should call C's handler.
@@ -1436,10 +1442,15 @@ impl TypeHandlers {
             });
 
             if let Some((handler_ref, _handler_instance_ref)) = handler_and_instance {
+                // Build call_args with the individual instance first, then extra args.
+                // This ensures that when callAncestor is called with a list like [me],
+                // the handler receives 'me' as its first argument, not '[me]'.
+                let mut call_args = vec![instance_datum_ref.clone()];
+                call_args.extend(extra_args.clone());
+
                 // Call with the ORIGINAL me as receiver (for property access),
                 // but use the handler we found in the ancestor chain.
                 // use_raw_arg_list=true so args are used as-is
-                // (the original 'me' is already in call_args as the first element)
                 let scope_result = crate::player::player_call_script_handler_raw_args(
                     Some(original_me_ref.clone()),  // receiver = original me, for property access
                     handler_ref,                    // handler from ancestor's script

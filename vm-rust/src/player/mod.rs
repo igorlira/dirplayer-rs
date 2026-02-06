@@ -19,6 +19,7 @@ pub mod handlers;
 pub mod keyboard;
 pub mod keyboard_events;
 pub mod keyboard_map;
+pub mod mcp;
 pub mod movie;
 pub mod net_manager;
 pub mod net_task;
@@ -32,6 +33,7 @@ pub mod stage;
 pub mod timeout;
 pub mod xtra;
 pub mod score_keyframes;
+pub mod console;
 
 use std::{
     collections::HashMap,
@@ -123,9 +125,11 @@ use crate::player::handlers::datum_handlers::xml::{XmlDocument, XmlNode};
 use crate::player::handlers::movie::MovieHandlers;
 use crate::player::handlers::datum_handlers::player_call_datum_handler;
 
-fn trace_output(message: &str, trace_log_file: &str) {
+fn trace_output(player: &DirPlayer, message: &str) {
     use crate::js_api::JsApi;
     
+    player.console.write_line(message);
+    let trace_log_file = &player.movie.trace_log_file;
     if trace_log_file.is_empty() {
         // Use the same output as 'put' command, but without the "-- " prefix
         // since trace messages already have their own prefixes (-->, ==, etc.)
@@ -226,6 +230,7 @@ pub struct DirPlayer {
     /// When a filmloop sprite's behavior runs, this is set to the filmloop's ScoreRef
     /// so that sprite(n) accesses the filmloop's sprites, not the main stage.
     pub current_score_context: ScoreRef,
+    pub console: console::ConsoleBuffer,
 }
 
 impl DirPlayer {
@@ -329,6 +334,7 @@ impl DirPlayer {
             is_initializing_behavior_props: false,
             last_initialized_frame: None,
             current_score_context: ScoreRef::Stage,
+            console: console::ConsoleBuffer::new(),
         };
 
         result.reset();
@@ -1885,7 +1891,7 @@ pub async fn player_call_script_handler_raw_args(
                 "== Script: (member {} of castLib {}) Handler: {}",
                 cast_member, cast_lib, handler_name
             );
-            trace_output(&msg, &trace_file);
+            trace_output(player, &msg);
             
             // ADD THIS BLOCK HERE - Clear expression tracker for new handler
             use crate::player::bytecode::handler_manager::EXPRESSION_TRACKER;
@@ -2038,8 +2044,7 @@ pub async fn player_call_script_handler_raw_args(
     let scope = reserve_player_mut(|player| {
         // Trace handler exit
         if player.movie.trace_script {
-            let trace_file = player.movie.trace_log_file.clone();
-            trace_output("--> end", &trace_file);
+            trace_output(player, "--> end");
         }
 
         let result = {
@@ -2462,6 +2467,7 @@ pub async fn player_trigger_error_pause(
     reserve_player_mut(|player| {
         player.current_breakpoint = Some(breakpoint_ctx);
         player.pause_script();
+        JsApi::dispatch_scope_list(player);
         JsApi::dispatch_script_error(player, &err);
     });
     future.await;

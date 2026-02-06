@@ -351,6 +351,124 @@ pub fn get_renderer_backend() -> String {
     })
 }
 
+// ============================================================================
+// MCP (Model Context Protocol) functions for VM debugging
+// These functions return JSON strings and are used by the MCP server
+// ============================================================================
+
+#[wasm_bindgen]
+pub fn mcp_list_scripts(cast_lib: i32, limit: i32, offset: i32) -> String {
+    reserve_player_ref(|player| {
+        let cast_lib_opt = if cast_lib < 0 { None } else { Some(cast_lib) };
+        let limit_opt = if limit < 0 { None } else { Some(limit as usize) };
+        let offset_opt = if offset < 0 { None } else { Some(offset as usize) };
+        player::mcp::mcp_list_scripts(player, cast_lib_opt, limit_opt, offset_opt)
+    })
+}
+
+#[wasm_bindgen]
+pub fn mcp_get_script(cast_lib: i32, cast_member: i32) -> String {
+    reserve_player_ref(|player| player::mcp::mcp_get_script(player, cast_lib, cast_member))
+}
+
+#[wasm_bindgen]
+pub fn mcp_disassemble_handler(cast_lib: i32, cast_member: i32, handler_name: String) -> String {
+    reserve_player_ref(|player| {
+        player::mcp::mcp_disassemble_handler(player, cast_lib, cast_member, &handler_name)
+    })
+}
+
+#[wasm_bindgen]
+pub fn mcp_decompile_handler(cast_lib: i32, cast_member: i32, handler_name: String) -> String {
+    reserve_player_ref(|player| {
+        player::mcp::mcp_decompile_handler(player, cast_lib, cast_member, &handler_name)
+    })
+}
+
+#[wasm_bindgen]
+pub fn mcp_get_call_stack(depth: i32, include_locals: bool) -> String {
+    reserve_player_ref(|player| {
+        let depth_opt = if depth < 0 { None } else { Some(depth as usize) };
+        player::mcp::mcp_get_call_stack(player, depth_opt, include_locals)
+    })
+}
+
+#[wasm_bindgen]
+pub fn mcp_get_context() -> String {
+    reserve_player_ref(|player| player::mcp::mcp_get_context(player))
+}
+
+#[wasm_bindgen]
+pub fn mcp_get_execution_state() -> String {
+    reserve_player_ref(|player| player::mcp::mcp_get_execution_state(player))
+}
+
+#[wasm_bindgen]
+pub fn mcp_get_globals() -> String {
+    reserve_player_ref(|player| player::mcp::mcp_get_globals(player))
+}
+
+#[wasm_bindgen]
+pub fn mcp_get_locals(scope_index: i32) -> String {
+    reserve_player_ref(|player| {
+        let index = if scope_index < 0 {
+            None
+        } else {
+            Some(scope_index as usize)
+        };
+        player::mcp::mcp_get_locals(player, index)
+    })
+}
+
+#[wasm_bindgen]
+pub fn mcp_inspect_datum(datum_id: u32) -> String {
+    reserve_player_ref(|player| player::mcp::mcp_inspect_datum(player, datum_id as usize))
+}
+
+#[wasm_bindgen]
+pub fn mcp_list_cast_libs() -> String {
+    reserve_player_ref(|player| player::mcp::mcp_list_cast_libs(player))
+}
+
+#[wasm_bindgen]
+pub fn mcp_get_console_output(last_n_lines: usize) -> String {
+    let lines = reserve_player_ref(|player| {
+        player
+            .console
+            .read_tail(last_n_lines) 
+    });
+    return lines;
+}
+
+
+#[wasm_bindgen]
+pub fn mcp_list_cast_members(cast_lib: i32) -> String {
+    reserve_player_ref(|player| {
+        let lib = if cast_lib < 0 { None } else { Some(cast_lib) };
+        player::mcp::mcp_list_cast_members(player, lib)
+    })
+}
+
+#[wasm_bindgen]
+pub fn mcp_inspect_cast_member(cast_lib: i32, cast_member: i32) -> String {
+    reserve_player_ref(|player| {
+        player::mcp::mcp_inspect_cast_member(player, cast_lib, cast_member)
+    })
+}
+
+#[wasm_bindgen]
+pub fn mcp_list_breakpoints() -> String {
+    reserve_player_ref(|player| player::mcp::mcp_list_breakpoints(player))
+}
+
+/// Evaluate a Lingo expression and return the result as JSON.
+/// Unlike eval_command, this waits for completion and returns the result.
+#[wasm_bindgen]
+pub async fn mcp_eval_lingo(code: String) -> String {
+    let result = eval_lingo_command(code).await;
+    reserve_player_ref(|player| player::mcp::mcp_format_eval_result(player, result))
+}
+
 #[wasm_bindgen(start)]
 pub fn main() {
     set_panic_hook();

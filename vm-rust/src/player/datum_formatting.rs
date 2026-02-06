@@ -6,13 +6,17 @@ use crate::{
 use super::{DatumRef, DirPlayer};
 
 pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
+    return format_concrete_datum_with_depth(datum, player, 0, usize::MAX);
+}
+
+pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth: usize, max_depth: usize) -> String {
     match datum {
         Datum::String(s) => format!("\"{s}\""),
         Datum::Int(i) => i.to_string(),
         Datum::Float(f) => format_float_with_precision(*f, player),
         Datum::List(_, items, _) => {
             let formatted_items: Vec<String> =
-                items.iter().map(|x| format_datum(x, player)).collect();
+                items.iter().map(|x| format_datum_with_depth(x, player, depth + 1, max_depth)).collect();
             format!("[{}]", formatted_items.join(", "))
         }
         Datum::VarRef(_) => "VarRef".to_string(),
@@ -26,7 +30,7 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
             }
             let formatted_entries: Vec<String> = entries
                 .iter()
-                .map(|(k, v)| format!("{}: {}", format_datum(k, player), format_datum(v, player)))
+                .map(|(k, v)| format!("{}: {}", format_datum_with_depth(k, player, depth + 1, max_depth), format_datum_with_depth(v, player, depth + 1, max_depth)))
                 .collect();
             format!("[{}]", formatted_entries.join(", "))
         }
@@ -219,7 +223,15 @@ pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
 
 pub fn format_datum(datum_ref: &DatumRef, player: &DirPlayer) -> String {
     let datum = player.get_datum(datum_ref);
-    format_concrete_datum(datum, player)
+    format_concrete_datum_with_depth(datum, player, 0, usize::MAX)
+}
+
+pub fn format_datum_with_depth(datum_ref: &DatumRef, player: &DirPlayer, depth: usize, max_depth: usize) -> String {
+    if depth >= max_depth {
+        return format!("<{}>", datum_ref);
+    }
+    let datum = player.get_datum(datum_ref);
+    format_concrete_datum_with_depth(datum, player, depth, max_depth)
 }
 
 // Helper function to format a numeric value according to floatPrecision

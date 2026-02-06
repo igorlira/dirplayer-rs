@@ -6,13 +6,10 @@ use crate::{
         lingo::{constants::get_opcode_name, opcode::OpCode},
     },
     player::{
-        bytecode::{
+        HandlerExecutionResult, PLAYER_OPT, ScriptError, bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
-        },
-        scope::ScopeRef,
-        script::Script,
-        HandlerExecutionResult, ScriptError, PLAYER_OPT,
+        }, reserve_player_mut, scope::ScopeRef, script::Script, trace_output
     },
 };
 
@@ -160,20 +157,6 @@ pub fn dump_execution_history_on_error(error_message: &str) {
         });
 
         console::group_end();
-    }
-}
-
-fn trace_output(message: &str, trace_log_file: &str) {
-    use crate::js_api::JsApi;
-    
-    if trace_log_file.is_empty() {
-        // Use the same output as 'put' command, but without the "-- " prefix
-        // since trace messages already have their own prefixes (-->, ==, etc.)
-        JsApi::dispatch_debug_message(message);
-    } else {
-        // TODO: Append to file
-        // For now, output to message window with file indicator
-        JsApi::dispatch_debug_message(&format!("[{}] {}", trace_log_file, message));
     }
 }
 
@@ -381,11 +364,10 @@ pub async fn player_execute_bytecode<'a>(
     if should_trace {
         let trace_file = {
             let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            let msg = format!("--> {}", bytecode_text);
+            trace_output(player, &msg);
             player.movie.trace_log_file.clone()
         };
-        
-        let msg = format!("--> {}", bytecode_text);
-        trace_output(&msg, &trace_file);
     }
 
     // Execute the bytecode
@@ -399,8 +381,7 @@ pub async fn player_execute_bytecode<'a>(
     if should_trace && result.is_ok() {
         match opcode {
             OpCode::SetLocal | OpCode::SetGlobal | OpCode::SetParam => {
-                let (trace_file, var_name, value) = {
-                    let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+                reserve_player_mut(|player| {
                     let scope = player.scopes.get(ctx.scope_ref).unwrap();
                     let handler = unsafe { &*ctx.handler_def_ptr };
                     let script = unsafe { &*ctx.script_ptr };
@@ -455,11 +436,13 @@ pub async fn player_execute_bytecode<'a>(
                     };
                     
                     let trace_file = player.movie.trace_log_file.clone();
+                    
+
+                    let msg = format!("== {} = {}", var_name, value_str);
+                    trace_output(player, &msg);
+
                     (trace_file, var_name, value_str)
-                };
-                
-                let msg = format!("== {} = {}", var_name, value);
-                trace_output(&msg, &trace_file);
+                });
             }
             _ => {}
         }
