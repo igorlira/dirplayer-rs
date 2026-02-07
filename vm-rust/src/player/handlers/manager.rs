@@ -313,8 +313,13 @@ impl BuiltInHandlerManager {
             }
             
             // Director's random(n) returns a value from 1 to n (inclusive)
-            let random_value = js_sys::Math::random() * (max as f64);
-            let random_int = random_value.floor() as i32 + 1;
+            let random_int = match player.movie.next_random_int(max) {
+                Some(value) => value,
+                None => {
+                    let random_value = js_sys::Math::random() * (max as f64);
+                    random_value.floor() as i32 + 1
+                }
+            };
             
             Ok(player.alloc_datum(Datum::Int(random_int)))
         })

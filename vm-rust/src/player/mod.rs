@@ -240,6 +240,7 @@ impl DirPlayer {
                 score: Score::empty(),
                 current_frame: 1,
                 puppet_tempo: 30,
+                random_seed: None,
                 exit_lock: false,
                 dir_version: 0,
                 item_delimiter: ',',
