@@ -176,6 +176,7 @@ impl Movie {
             "traceScript" => Ok(datum_bool(self.trace_script)),
             "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
             "activeWindow" => Ok(Datum::Stage),
+            "maxInteger" => Ok(Datum::Int(i32::MAX)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
         }
     }
