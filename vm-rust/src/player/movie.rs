@@ -177,6 +177,16 @@ impl Movie {
             "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
             "activeWindow" => Ok(Datum::Stage),
             "maxInteger" => Ok(Datum::Int(i32::MAX)),
+            "labelList" => {
+                let s = self
+                    .score
+                    .frame_labels
+                    .iter()
+                    .map(|fl| fl.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\r");
+                Ok(Datum::String(s))
+            }
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
         }
     }
