@@ -2,7 +2,7 @@ use crate::{
     director::lingo::datum::{
         Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
     },
-    player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{reserve_player_ref, reserve_player_mut, DatumRef, DirPlayer, ScriptError},
 };
 
 use super::string_chunk::StringChunkUtils;
@@ -52,6 +52,21 @@ impl StringDatumUtils {
             "length" => Ok(Datum::Int(value.chars().count() as i32)),
             "ilk" => Ok(Datum::Symbol("string".to_owned())),
             "string" => Ok(Datum::String(value.clone())),
+            "marker" => {
+                // Quirky director behavior:
+                // Any string can run .marker on it to get the frame number of the marker, if it does not match a marker name, it returns 0
+                reserve_player_ref(|player| {
+                    let marker_name_lower = value.to_lowercase();
+                    let frame_num = player
+                        .movie
+                        .score
+                        .frame_labels
+                        .iter()
+                        .find(|label| label.label.to_lowercase() == marker_name_lower)
+                        .map_or(0, |label| label.frame_num as i32);
+                    Ok(Datum::Int(frame_num))
+                })
+            }
             _ => Err(ScriptError::new(format!(
                 "Invalid string built-in property {prop_name}"
             ))),
