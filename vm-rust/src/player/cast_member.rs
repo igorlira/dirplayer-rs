@@ -46,11 +46,17 @@ pub struct FieldMember {
     pub font_style: String,
     pub font_size: u16,
     pub font_id: Option<u16>, // STXT font ID for lookup by ID
-    pub fixed_line_space: u16,
+    pub text_height: u16,  // Text area height from FieldInfo (for dimension calculations)
+    pub fixed_line_space: u16,  // Line spacing for text rendering
     pub top_spacing: i16,
     pub box_type: String,
     pub anti_alias: bool,
     pub width: u16,
+    pub height: u16,  // Field member height from FieldInfo
+    pub rect_left: i16,   // Initial rect from FieldInfo
+    pub rect_top: i16,
+    pub rect_right: i16,
+    pub rect_bottom: i16,
     pub auto_tab: bool, // Tabbing order depends on sprite number order, not position on the Stage.
     pub editable: bool,
     pub border: u16,
@@ -114,11 +120,17 @@ impl FieldMember {
             font_style: "plain".to_string(),
             font_size: 12,
             font_id: None,
+            text_height: 100,
             fixed_line_space: 0,
             top_spacing: 0,
             box_type: "adjust".to_string(),
             anti_alias: false,
             width: 100,
+            height: 100,
+            rect_left: 0,
+            rect_top: 0,
+            rect_right: 100,
+            rect_bottom: 100,
             auto_tab: false,
             editable: false,
             border: 0,
@@ -148,18 +160,24 @@ impl FieldMember {
             font_style: "plain".to_string(),
             font_size: 12,
             font_id: None,
-            fixed_line_space: field_info.height as u16,
-            top_spacing: field_info.scroll_top as i16,
+            text_height: field_info.text_height,  // Text area height for dimension calculations
+            fixed_line_space: 0,  // Use default line spacing for text rendering
+            top_spacing: field_info.scroll as i16,
             box_type: field_info.box_type_str(),
             anti_alias: false,
-            width: field_info.width as u16,
+            width: field_info.width(),  // Calculated from rect
+            height: (field_info.text_height + 2 * field_info.border as u16 + 2 * field_info.margin as u16),  // Member height: text_height + borders + margins
+            rect_left: field_info.rect_left,
+            rect_top: field_info.rect_top,
+            rect_right: field_info.rect_right,
+            rect_bottom: field_info.rect_bottom,
             auto_tab: field_info.auto_tab(),
             editable: field_info.editable(),
             border: field_info.border as u16,
             margin: field_info.margin as u16,
             box_drop_shadow: field_info.box_drop_shadow as u16,
-            drop_shadow: field_info.drop_shadow as u16,
-            scroll_top: field_info.scroll_top as u16,
+            drop_shadow: field_info.text_shadow as u16,
+            scroll_top: field_info.scroll,
             hilite: false,
             fore_color: None, // Set later from STXT formatting run
             back_color,
@@ -1140,11 +1158,11 @@ impl CastMember {
             let mut info = TextInfo::default();
             if let Some(field_info) = field_info_from_chunk {
                 info.box_type = field_info.box_type as u32;
-                info.scroll_top = field_info.scroll_top as u32;
+                info.scroll_top = field_info.scroll as u32;
                 info.auto_tab = field_info.auto_tab();
                 info.editable = field_info.editable();
-                info.width = field_info.width as u32;
-                info.height = field_info.height as u32;
+                info.width = field_info.width() as u32;
+                info.height = field_info.height() as u32;
             }
             info
         });
@@ -1362,22 +1380,6 @@ impl CastMember {
                     .expect("Not a text chunk");
                 let raw = chunk.specific_data_raw.as_slice();
                 let field_info = FieldInfo::from(raw);
-                let (bg_r, bg_g, bg_b) = field_info.bg_color_rgb();
-                debug!(
-                    "FieldInfo: border={} margin={} box_drop_shadow={} box_type={} \
-                     alignment=({},{}) bgpal=({},{},{}) bg_rgb=({},{},{}) \
-                     reserved_12={} scroll_top={} reserved_14_18={:?} \
-                     reserved_19={} reserved_20={} width={} reserved_22={} \
-                     height={} font_type={} drop_shadow={} flags=0x{:02X} reserved_27_28={:?}",
-                    field_info.border, field_info.margin, field_info.box_drop_shadow, field_info.box_type,
-                    field_info.alignment_high, field_info.alignment_low,
-                    field_info.bgpal_r, field_info.bgpal_g, field_info.bgpal_b,
-                    bg_r, bg_g, bg_b,
-                    field_info.reserved_12, field_info.scroll_top, field_info.reserved_14_18,
-                    field_info.reserved_19, field_info.reserved_20, field_info.width, field_info.reserved_22,
-                    field_info.height, field_info.font_type, field_info.drop_shadow, field_info.flags,
-                    field_info.reserved_27_28,
-                );
                 let mut field_member = FieldMember::from_field_info(&field_info);
                 field_member.text = text_chunk.text.clone();
 

@@ -150,13 +150,24 @@ fn get_or_load_font_with_id(
         return Some(loaded_font);
     }
 
-    web_sys::console::log_1(&format!(
-        "Font '{}' (id={:?}) not found, cache keys: {:?}",
-        font_name, font_id,
-        font_manager.font_cache.keys().collect::<Vec<_>>()
-    ).into());
+    // Font not found by any method, attempt fallback to system font
+    let system_font = font_manager.get_system_font();
 
-    font_manager.get_system_font()
+    if system_font.is_some() {
+        debug!(
+            "Font '{}' (id={:?}) not found, using system font fallback. Available fonts: {:?}",
+            font_name, font_id,
+            font_manager.font_cache.keys().collect::<Vec<_>>()
+        );
+    } else {
+        debug!(
+            "Font '{}' (id={:?}) not found and system font unavailable. Available fonts: {:?}",
+            font_name, font_id,
+            font_manager.font_cache.keys().collect::<Vec<_>>()
+        );
+    }
+
+    system_font
 }
 
 pub fn render_stage_to_bitmap(
@@ -1240,10 +1251,15 @@ pub fn render_score_to_bitmap_with_offset(
                 }
 
                 if let Some(ref font) = font_opt {
-                    web_sys::console::log_1(&format!(
-                        "✅ Using font: name='{}', size={}, style={}",
+                    debug!(
+                        "Using font: name='{}', size={}, style={}",
                         font.font_name, font.font_size, font.font_style
-                    ).into());
+                    );
+                } else {
+                    debug!(
+                        "Skipping text rendering: no font available for '{}' (size={}, style={:?}) and system font unavailable",
+                        font_name, font_size, font_style
+                    );
                 }
 
                 if let Some(font) = font_opt {

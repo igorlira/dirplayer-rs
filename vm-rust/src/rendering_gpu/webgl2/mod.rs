@@ -695,6 +695,8 @@ impl WebGL2Renderer {
                 styled_spans: Option<Vec<StyledSpan>>,
                 alignment: String,
                 word_wrap: bool,
+                border: u16,
+                box_drop_shadow: u16,
             },
             FilmLoop {
                 initial_rect: IntRect,
@@ -795,6 +797,8 @@ impl WebGL2Renderer {
                         },
                         alignment: "left".to_string(),
                         word_wrap: false,
+                        border: 0,
+                        box_drop_shadow: 0,
                     }
                 }
                 CastMemberType::Text(text_member) => {
@@ -1040,19 +1044,21 @@ impl WebGL2Renderer {
                         styled_spans: styled_spans_with_defaults,
                         alignment: text_member.alignment.clone(),
                         word_wrap: effective_word_wrap,
+                        border: 0,
+                        box_drop_shadow: 0,
                     }
                 }
                 CastMemberType::Field(field_member) => {
                     // Field member: editable text field
                     let text = &field_member.text;
 
-                    // Use sprite rect dimensions for the texture (not measured text)
-                    // This prevents stretching when sprite rect differs from text size
+                    // Use the larger of sprite rect or field member dimensions
+                    // Sprite rect gives the display size, field member gives the content size
                     let width = (sprite_rect.width())
                         .max(field_member.width as i32)
                         .max(1) as u32;
                     let height = (sprite_rect.height())
-                        .max(field_member.fixed_line_space as i32)
+                        .max(field_member.height as i32)
                         .max(1) as u32;
 
                     // Check if this field has keyboard focus (for cursor rendering)
@@ -1127,6 +1133,8 @@ impl WebGL2Renderer {
                         styled_spans: None,
                         alignment: field_member.alignment.clone(),
                         word_wrap: field_member.word_wrap,
+                        border: field_member.border,
+                        box_drop_shadow: field_member.box_drop_shadow,
                     }
                 }
                 CastMemberType::FilmLoop(film_loop) => {
@@ -1308,6 +1316,8 @@ impl WebGL2Renderer {
                 ref styled_spans,
                 ref alignment,
                 word_wrap,
+                border,
+                box_drop_shadow,
             } => {
                 // Check cache first
                 if let Some(cached) = self.rendered_text_cache.get(cache_key) {
@@ -1333,6 +1343,8 @@ impl WebGL2Renderer {
                         styled_spans.as_ref(),
                         alignment,
                         word_wrap,
+                        border,
+                        box_drop_shadow,
                     ) {
                         Some(tex) => tex,
                         None => return,
@@ -2339,6 +2351,8 @@ impl WebGL2Renderer {
         styled_spans: Option<&Vec<StyledSpan>>,
         alignment: &str,
         word_wrap: bool,
+        border: u16,
+        box_drop_shadow: u16,
     ) -> Option<web_sys::WebGlTexture> {
         let styled_span_count = styled_spans.map_or(0, |s| s.len());
         let base_requested_size = styled_spans
@@ -2391,18 +2405,24 @@ impl WebGL2Renderer {
 
             if font_opt.is_none() {
                 lookup_method = "system_fallback";
-                web_sys::console::warn_1(
-                    &format!("WebGL2 text: font '{}' (id={:?}) not found, using system font", font_name, font_id).into()
-                );
+
+                if DEBUG_WEBGL2_TEXT {
+                    web_sys::console::warn_1(
+                        &format!("WebGL2 text: font '{}' (id={:?}) not found, using system font", font_name, font_id).into()
+                    );
+                }
             }
 
             let result = font_opt.or_else(|| player.font_manager.get_system_font());
-            if let Some(ref f) = result {
-                web_sys::console::log_1(
-                    &format!("WebGL2 text: using font '{}' (lookup={}, pfr={}, size={}x{})",
-                        f.font_name, lookup_method, f.char_widths.is_some(),
-                        f.char_width, f.char_height).into()
-                );
+            
+            if DEBUG_WEBGL2_TEXT {
+                if let Some(ref f) = result {
+                    web_sys::console::log_1(
+                        &format!("WebGL2 text: using font '{}' (lookup={}, pfr={}, size={}x{})",
+                            f.font_name, lookup_method, f.char_widths.is_some(),
+                            f.char_width, f.char_height).into()
+                    );
+                }
             }
             result
         };
@@ -2452,9 +2472,10 @@ impl WebGL2Renderer {
         let mut render_height = height as u16;
         let mut render_line_spacing = line_spacing;
 
-        if is_pfr_font && styled_spans.is_none() {
-            // For bitmap/PFR text, keep rendering constrained to the sprite text box.
-            // Expanding to measured width breaks wrapping because max_width tracks render width.
+        // For bitmap font rendering (PFR or System font), keep rendering constrained to the sprite text box.
+        // Expanding to measured width breaks wrapping because max_width tracks render width.
+        // System font is a bitmap font that needs the same treatment as PFR fonts
+        if (is_pfr_font || font.font_name == "System") && styled_spans.is_none() {
             render_line_spacing = 0;
         }
 
@@ -2504,8 +2525,10 @@ impl WebGL2Renderer {
 
         // Build synthetic spans for native rendering (non-PFR fonts OR PFR with system equivalent).
         // This ensures alignment, font size, and font style are applied for field/text input.
+        // EXCEPTION: System font is a bitmap font and must use bitmap rendering, not native
+        let is_system_font = font.font_name == "System";
         let mut synthetic_spans: Option<Vec<StyledSpan>> = None;
-        let spans_for_native: Option<&Vec<StyledSpan>> = if !is_pfr_font || use_native_for_pfr {
+        let spans_for_native: Option<&Vec<StyledSpan>> = if (!is_pfr_font || use_native_for_pfr) && !is_system_font {
             if let Some(spans) = styled_spans {
                 Some(spans)
             } else {
@@ -2516,7 +2539,8 @@ impl WebGL2Renderer {
                     8,
                 );
                 let mut style = HtmlStyle::default();
-                style.font_face = Some(font_name.to_string());
+                // Use the actual loaded font name, not the requested one (important for fallback)
+                style.font_face = Some(font.font_name.clone());
                 style.font_size = Some(font_size as i32);
                 style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
                 style.bold = bold;
@@ -2557,11 +2581,14 @@ impl WebGL2Renderer {
                     format!("span[{}]={}", i, c)
                 }).collect::<Vec<_>>().join(", ")
             } else { "no spans".to_string() };
-            debug!(
-                "[render_text] font='{}' pfr={} native={} fg={:?} text='{}' spans=[{}]",
-                font_name, is_pfr_font, spans_for_native.is_some(), fg_color,
-                &text[..text.len().min(30)], span_info,
-            );
+
+            if DEBUG_WEBGL2_TEXT {
+                web_sys::console::log_1(&format!(
+                    "[render_text] font='{}' pfr={} native={} fg={:?} text='{}' spans=[{}]",
+                    font_name, is_pfr_font, spans_for_native.is_some(), fg_color,
+                    &text[..text.len().min(30)], span_info,
+                ).into());
+            }
         }
 
         // Render text to the bitmap - use styled spans if available
@@ -2596,6 +2623,13 @@ impl WebGL2Renderer {
                 );
             }
         } else {
+            if DEBUG_WEBGL2_TEXT {
+                web_sys::console::log_1(&format!(
+                    "[render_text] Using BITMAP rendering path for font='{}' text_len={}",
+                    font.font_name, text.len()
+                ).into());
+            }
+
             use crate::player::font::{
                 bitmap_font_copy_char, bitmap_font_copy_char_scaled, bitmap_font_copy_char_tight,
             };
@@ -3236,7 +3270,7 @@ impl WebGL2Renderer {
                     lines_to_draw = raw_lines.iter().map(|s| s.to_string()).collect();
                 }
 
-                if DEBUG_WEBGL2_TEXT && is_pfr_font {
+                if DEBUG_WEBGL2_TEXT {
                     let max_line_width = lines_to_draw
                         .iter()
                         .map(|line| {
@@ -3247,7 +3281,7 @@ impl WebGL2Renderer {
                         .max()
                         .unwrap_or(0);
                     web_sys::console::log_1(&format!(
-                        "[webgl2.text.pfr.simple] lines={} max_line_width={} box={}x{} y_start={} line_h={} spacing={} wrap={} align='{}'",
+                        "[webgl2.text.bitmap] lines={} max_line_width={} box={}x{} y_start={} line_h={} spacing={} wrap={} align='{}'",
                         lines_to_draw.len(),
                         max_line_width,
                         render_width,
@@ -3261,10 +3295,10 @@ impl WebGL2Renderer {
                 }
 
                 for line in lines_to_draw {
-                    if DEBUG_WEBGL2_TEXT && is_pfr_font {
+                    if DEBUG_WEBGL2_TEXT {
                         let line_width: i32 = line.chars().map(|c| font.get_char_advance(c as u8) as i32).sum();
                         web_sys::console::log_1(&format!(
-                            "[webgl2.text.pfr.simple] draw line_w={} y={} text='{}'",
+                            "[webgl2.text.bitmap] draw line_w={} y={} text='{}'",
                             line_width,
                             y,
                             line.chars().take(60).collect::<String>()
@@ -3341,6 +3375,86 @@ impl WebGL2Renderer {
                 &palettes,
                 1.0,
             );
+        }
+
+        // Draw border and drop shadow for fields
+        if border > 0 || box_drop_shadow > 0 {
+            let border_color = (0, 0, 0); // Black border
+            let shadow_color = (0, 0, 0); // Black shadow
+            let w = render_width as i32;
+            let h = render_height as i32;
+            let shadow_offset = box_drop_shadow as i32;
+
+            // Calculate the content area (excluding shadow space)
+            let content_width = if shadow_offset > 0 { w - shadow_offset } else { w };
+            let content_height = if shadow_offset > 0 { h - shadow_offset } else { h };
+
+            // Draw drop shadow OUTSIDE the content area (bottom-right)
+            if shadow_offset > 0 {
+                // Right edge shadow - from top+offset to bottom, outside content area
+                text_bitmap.fill_rect(
+                    content_width,
+                    shadow_offset,
+                    w,
+                    h,
+                    shadow_color,
+                    &palettes,
+                    1.0, // Fully opaque shadow
+                );
+                // Bottom edge shadow - from left+offset to right-shadow, outside content area
+                text_bitmap.fill_rect(
+                    shadow_offset,
+                    content_height,
+                    content_width,
+                    h,
+                    shadow_color,
+                    &palettes,
+                    1.0, // Fully opaque shadow
+                );
+                // Corner shadow - where both shadows meet
+                text_bitmap.fill_rect(
+                    content_width,
+                    content_height,
+                    w,
+                    h,
+                    shadow_color,
+                    &palettes,
+                    1.0, // Fully opaque
+                );
+
+                // Clear corner pixels to transparent
+                // Upper-right corner of shadow area (no shadow should appear here)
+                for y in 0..shadow_offset {
+                    for x in content_width..w {
+                        let idx = ((y * render_width as i32 + x) * 4) as usize;
+                        if idx + 3 < text_bitmap.data.len() {
+                            text_bitmap.data[idx + 3] = 0; // Set alpha to 0 (transparent)
+                        }
+                    }
+                }
+                // Lower-left corner of content area (no shadow should appear here)
+                for y in content_height..h {
+                    for x in 0..shadow_offset {
+                        let idx = ((y * render_width as i32 + x) * 4) as usize;
+                        if idx + 3 < text_bitmap.data.len() {
+                            text_bitmap.data[idx + 3] = 0; // Set alpha to 0 (transparent)
+                        }
+                    }
+                }
+            }
+
+            // Draw border INSIDE the content area (not extending into shadow)
+            if border > 0 {
+                let b = border as i32;
+                // Top border
+                text_bitmap.fill_rect(0, 0, content_width, b, border_color, &palettes, 1.0);
+                // Bottom border
+                text_bitmap.fill_rect(0, content_height - b, content_width, content_height, border_color, &palettes, 1.0);
+                // Left border
+                text_bitmap.fill_rect(0, b, b, content_height - b, border_color, &palettes, 1.0);
+                // Right border
+                text_bitmap.fill_rect(content_width - b, b, content_width, content_height - b, border_color, &palettes, 1.0);
+            }
         }
 
         // Upload the bitmap as a texture

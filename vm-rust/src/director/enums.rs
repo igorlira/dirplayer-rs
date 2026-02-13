@@ -102,35 +102,29 @@ pub enum Alignment {
 
 #[derive(Clone, Debug)]
 pub struct FieldInfo {
-    pub border: u8,              // Byte 0: 0-5
-    pub margin: u8,              // Byte 1: 0-5
-    pub box_drop_shadow: u8,     // Byte 2: 0-5
-    pub box_type: u8,            // Byte 3: 0=adjust, 1=scroll, 2=fixed, 3=limit
-    
-    pub alignment_high: u8,      // Byte 4
-    pub alignment_low: u8,       // Byte 5
-    
-    pub bgpal_r: u16,             // Bytes 6-7: background Red (QuickDraw u16)
-    pub bgpal_g: u16,             // Bytes 8-9: background Green (QuickDraw u16)
-    pub bgpal_b: u16,             // Bytes 10-11: background Blue (QuickDraw u16)
-    
-    pub reserved_12: u8,         // Byte 12: always 0x00
-    pub scroll_top: u8,          // Byte 13
-    
-    pub reserved_14_18: [u8; 5], // Bytes 14-18: always 0x00
-    
-    pub reserved_19: u8,         // Byte 19: unknown purpose
-    pub reserved_20: u8,         // Byte 20: always 0x00
-    pub width: u8,               // Byte 21
-    pub reserved_22: u8,         // Byte 22: unknown purpose
-    
-    pub height: u8,              // Byte 23
-    pub font_type: u8,           // Byte 24
-    
-    pub drop_shadow: u8,         // Byte 25: 0-5
-    pub flags: u8,               // Byte 26: editable|autoTab|wordwrap bits
-    
-    pub reserved_27_28: [u8; 2], // Bytes 27-28: always 0x00
+    pub border: u8,              // Byte 0: borderSize (0-5)
+    pub margin: u8,              // Byte 1: gutterSize (0-5)
+    pub box_drop_shadow: u8,     // Byte 2: boxShadow (0-5)
+    pub box_type: u8,            // Byte 3: textType (0=adjust, 1=scroll, 2=fixed, 3=limit)
+
+    pub alignment: i16,          // Bytes 4-5: textAlign (-1=right, 0=left, 1=center)
+
+    pub bgpal_r: u16,            // Bytes 6-7: background Red (QuickDraw u16)
+    pub bgpal_g: u16,            // Bytes 8-9: background Green (QuickDraw u16)
+    pub bgpal_b: u16,            // Bytes 10-11: background Blue (QuickDraw u16)
+
+    pub scroll: u16,             // Bytes 12-13: scroll position
+
+    pub rect_left: i16,          // Bytes 14-15: initial rect left
+    pub rect_top: i16,           // Bytes 16-17: initial rect top
+    pub rect_right: i16,         // Bytes 18-19: initial rect right
+    pub rect_bottom: i16,        // Bytes 20-21: initial rect bottom
+
+    pub max_height: u16,         // Bytes 22-23: maximum height
+    pub text_shadow: u8,         // Byte 24: text shadow
+    pub flags: u8,               // Byte 25: 0x1=editable, 0x2=autoTab, 0x4=don't wrap
+
+    pub text_height: u16,        // Bytes 26-27: actual text height
 }
 
 impl From<&[u8]> for FieldInfo {
@@ -142,59 +136,54 @@ impl From<&[u8]> for FieldInfo {
         let margin = reader.read_u8().unwrap_or(0);
         let box_drop_shadow = reader.read_u8().unwrap_or(0);
         let box_type = reader.read_u8().unwrap_or(0);
-        
-        let alignment_high = reader.read_u8().unwrap_or(0);
-        let alignment_low = reader.read_u8().unwrap_or(0);
-        
+
+        // Bytes 4-5: alignment as i16
+        let alignment = reader.read_i16().unwrap_or(0);
+
+        // Bytes 6-11: background palette RGB as u16
         let bgpal_r = reader.read_u16().unwrap_or(0);
         let bgpal_g = reader.read_u16().unwrap_or(0);
         let bgpal_b = reader.read_u16().unwrap_or(0);
-        
-        let reserved_12 = reader.read_u8().unwrap_or(0);
-        let scroll_top = reader.read_u8().unwrap_or(0);
-        
-        let mut reserved_14_18 = [0u8; 5];
-        for i in 0..5 {
-            reserved_14_18[i] = reader.read_u8().unwrap_or(0);
-        }
-        
-        let reserved_19 = reader.read_u8().unwrap_or(0);
-        let reserved_20 = reader.read_u8().unwrap_or(0);
-        let width = reader.read_u8().unwrap_or(0);
-        let reserved_22 = reader.read_u8().unwrap_or(0);
-        
-        let height = reader.read_u8().unwrap_or(0);
-        let font_type = reader.read_u8().unwrap_or(0);
-        
-        let drop_shadow = reader.read_u8().unwrap_or(0);
+
+        // Bytes 12-13: scroll as u16
+        let scroll = reader.read_u16().unwrap_or(0);
+
+        // Bytes 14-21: rect (4 × i16)
+        let rect_left = reader.read_i16().unwrap_or(0);
+        let rect_top = reader.read_i16().unwrap_or(0);
+        let rect_right = reader.read_i16().unwrap_or(0);
+        let rect_bottom = reader.read_i16().unwrap_or(0);
+
+        // Bytes 22-23: max_height as u16
+        let max_height = reader.read_u16().unwrap_or(0);
+
+        // Byte 24: text_shadow
+        let text_shadow = reader.read_u8().unwrap_or(0);
+
+        // Byte 25: flags (0x1=editable, 0x2=autoTab, 0x4=don't wrap)
         let flags = reader.read_u8().unwrap_or(0);
-        
-        let mut reserved_27_28 = [0u8; 2];
-        reserved_27_28[0] = reader.read_u8().unwrap_or(0);
-        reserved_27_28[1] = reader.read_u8().unwrap_or(0);
+
+        // Bytes 26-27: text_height as u16
+        let text_height = reader.read_u16().unwrap_or(0);
 
         FieldInfo {
             border,
             margin,
             box_drop_shadow,
             box_type,
-            alignment_high,
-            alignment_low,
+            alignment,
             bgpal_r,
             bgpal_g,
             bgpal_b,
-            reserved_12,
-            scroll_top,
-            reserved_14_18,
-            reserved_19,
-            reserved_20,
-            width,
-            reserved_22,
-            height,
-            font_type,
-            drop_shadow,
+            scroll,
+            rect_left,
+            rect_top,
+            rect_right,
+            rect_bottom,
+            max_height,
+            text_shadow,
             flags,
-            reserved_27_28,
+            text_height,
         }
     }
 }
@@ -213,10 +202,10 @@ impl FieldInfo {
     }
     
     pub fn alignment_str(&self) -> String {
-        match (self.alignment_high, self.alignment_low) {
-            (0x00, 0x00) => "left".to_string(),
-            (0x00, 0x01) => "center".to_string(),
-            (0xFF, 0xFF) => "right".to_string(),
+        match self.alignment {
+            0x0000 => "left".to_string(),
+            0x0001 => "center".to_string(),
+            -1 => "right".to_string(),  // 0xFFFF as i16
             _ => "left".to_string(),
         }
     }
@@ -232,15 +221,21 @@ impl FieldInfo {
     }
     
     pub fn font_name(&self) -> &str {
-        match self.font_type {
-            0x10 => "Arial",
-            0x0E => "Courier",
-            0x11 => "Times New Roman",
-            0x0F => "Calibri",
-            _ => "Arial",
-        }
+        // Note: font_type was removed from FieldInfo in D4/D5 format
+        // Font information comes from STXT chunk instead
+        "Arial"  // Default font
     }
-    
+
+    /// Calculate field width from rect
+    pub fn width(&self) -> u16 {
+        (self.rect_right - self.rect_left).max(0) as u16
+    }
+
+    /// Calculate field height from rect
+    pub fn height(&self) -> u16 {
+        (self.rect_bottom - self.rect_top).max(0) as u16
+    }
+
     /// Background color as RGB (u8, u8, u8).
     /// low byte of each QuickDraw u16.
     pub fn bg_color_rgb(&self) -> (u8, u8, u8) {
