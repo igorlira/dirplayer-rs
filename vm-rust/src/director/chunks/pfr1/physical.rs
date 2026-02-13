@@ -167,33 +167,34 @@ pub fn parse_physical_font(
         // Normal case: consume aux data payload.
         reader.skip(n_aux_bytes);
     } else if n_aux_bytes >= 10000 {
-        // Fallback flow for suspiciously large nAuxBytes.
-        let start_pos = reader.position();
-        let n_aux_end = start_pos.saturating_add(n_aux_bytes).min(phys_end);
+        let _start_pos = reader.position();
 
-        while reader.position() < phys_end {
-            let n_chars_probe = reader.read_u16();
-            if n_chars_probe == max_chars {
-                reader.set_position(n_aux_end);
+        while reader.position() != phys_end {
+            let probe_pos = reader.position();
 
-                let n_blue_values = reader.read_u8() as usize;
-                let byte_counter = n_blue_values.saturating_mul(2).saturating_add(6);
-                let after_blue_pos = reader.position().saturating_add(byte_counter).min(phys_end);
-                reader.set_position(after_blue_pos);
+            let n_blue_values = reader.read_u8() as usize;
+            let byte_counter = (n_blue_values * 2) + 6;
 
-                let n_characters = reader.read_u16();
-                if n_characters == max_chars {
-                    reader.set_position(n_aux_end);
-                    break;
-                } else {
-                    // Keep parser resilient: fall back to aux end when probe fails.
-                    reader.set_position(n_aux_end);
-                    break;
-                }
-            } else {
-                reader.set_position(n_aux_end);
+            // Need room to skip and read 16 bits
+            let n_chars_pos = reader.position() + byte_counter;
+            if n_chars_pos + 2 > phys_end {
+                // not enough room, slide window
+                reader.set_position(probe_pos + 1);
+                continue;
+            }
+
+            reader.set_position(n_chars_pos);
+            let n_characters = reader.read_u16();
+
+            if n_characters == max_chars {
+                reader.set_position(probe_pos);
+
+                // Found the "final" marker
                 break;
             }
+
+            // No match -> slide forward by 1 byte
+            reader.set_position(probe_pos + 1);
         }
     }
 
