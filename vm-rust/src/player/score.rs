@@ -3013,266 +3013,99 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
 
     match &member.member_type {
         CastMemberType::Bitmap(bitmap_member) => {
-            let sprite_bitmap = player
-                .bitmap_manager
-                .get_bitmap(bitmap_member.image_ref);
-
-            if sprite_bitmap.is_none() {
-                return IntRect::from(
-                    sprite.loc_h,
-                    sprite.loc_v,
-                    sprite.width,
-                    sprite.height,
-                );
-            }
-
-            let src_bitmap = sprite_bitmap.unwrap();
-
-            // Original registration point from bitmap member
+            // Get registration point from bitmap member
             let reg_x = bitmap_member.reg_point.0;
             let reg_y = bitmap_member.reg_point.1;
 
-            // Compute draw origin, compensating for flipH/flipV
-            let mut draw_x = sprite.loc_h - reg_x as i32;
-            let mut draw_y = sprite.loc_v - reg_y as i32;
+            // Get bitmap dimensions from info
+            let bitmap_width = bitmap_member.info.width as i32;
+            let bitmap_height = bitmap_member.info.height as i32;
 
-            let mut dst_rect = IntRect::from(0, 0, 0, 0);
-            let mut option = 0;
-
-            if sprite.has_size_changed {
-                option = 1;
-
-                let sprite_width;
-                let sprite_height;
-
-                if sprite.has_size_tweened {
-                    // For tweened sprites, width/height are already correct
-                    sprite_width = sprite.width;
-                    sprite_height = sprite.height;
-                    // Scale registration point proportionally to sprite scaling
-                    if bitmap_member.info.width > 0 && bitmap_member.info.height > 0 {
-                        let scale_x = sprite.width as f64 / bitmap_member.info.width as f64;
-                        let scale_y = sprite.height as f64 / bitmap_member.info.height as f64;
-                        let scaled_reg_x = (reg_x as f64 * scale_x).round() as i32;
-                        let scaled_reg_y = (reg_y as f64 * scale_y).round() as i32;
-                        draw_x = sprite.loc_h - scaled_reg_x;
-                        draw_y = sprite.loc_v - scaled_reg_y;
-
-                        // Handle flip adjustments with scaled reg point
-                        if sprite.flip_h && scaled_reg_x != (sprite_width / 2) {
-                            draw_x = sprite.loc_h - (sprite_width - scaled_reg_x);
-                        }
-                        if sprite.flip_v && scaled_reg_y != (sprite_height / 2) {
-                            draw_y = sprite.loc_v - (sprite_height - scaled_reg_y);
-                        }
-                    }
-                } else {
-                    // For non-tweened sprites, handle wrong score data
-                    if (bitmap_member.info.width as i32
-                        + bitmap_member.info.height as i32)
-                        > (sprite.width + sprite.height)
-                    {
-                        if sprite.flip_h && reg_x != (bitmap_member.info.width as i32 / 2) as i16 {
-                            draw_x = sprite.loc_h - (bitmap_member.info.width as i32 - reg_x as i32);
-                        }
-
-                        if sprite.flip_v && reg_y != (bitmap_member.info.height as i32 / 2) as i16 {
-                            draw_y = sprite.loc_v - (bitmap_member.info.height as i32 - reg_y as i32);
-                        }
-
-                        sprite_width = bitmap_member.info.width as i32;
-                        sprite_height = bitmap_member.info.height as i32;
-                    } else {
-                        // Scale registration point proportionally to sprite scaling
-                        if bitmap_member.info.width > 0 && bitmap_member.info.height > 0 {
-                            let scale_x = sprite.width as f64 / bitmap_member.info.width as f64;
-                            let scale_y = sprite.height as f64 / bitmap_member.info.height as f64;
-                            let scaled_reg_x = (reg_x as f64 * scale_x).round() as i32;
-                            let scaled_reg_y = (reg_y as f64 * scale_y).round() as i32;
-                            draw_x = sprite.loc_h - scaled_reg_x;
-                            draw_y = sprite.loc_v - scaled_reg_y;
-
-                            // Handle flip adjustments with scaled reg point
-                            if sprite.flip_h && scaled_reg_x != (sprite.width / 2) {
-                                draw_x = sprite.loc_h - (sprite.width - scaled_reg_x);
-                            }
-                            if sprite.flip_v && scaled_reg_y != (sprite.height / 2) {
-                                draw_y = sprite.loc_v - (sprite.height - scaled_reg_y);
-                            }
-                        } else {
-                            if sprite.flip_h && reg_x != (sprite.width / 2) as i16 {
-                                draw_x = sprite.loc_h - (sprite.width - reg_x as i32);
-                            }
-
-                            if sprite.flip_v && reg_y != (sprite.height / 2) as i16 {
-                                draw_y = sprite.loc_v - (sprite.height - reg_y as i32);
-                            }
-                        }
-
-                        sprite_width = sprite.width;
-                        sprite_height = sprite.height;
-                    }
-                }
-
-                let left = draw_x;
-                let top = draw_y;
-                let right = sprite_width + left;
-                let bottom = sprite_height + top;
-
-                dst_rect = IntRect::from(left, top, right, bottom);
-            } else if sprite.bitmap_size_owned_by_sprite {
-                option = 7;
-
-                if sprite.flip_h && reg_x != (bitmap_member.info.width as i32 / 2) as i16 {
-                    draw_x = sprite.loc_h - (bitmap_member.info.width as i32 - reg_x as i32);
-                }
-
-                if sprite.flip_v && reg_y != (bitmap_member.info.height as i32 / 2) as i16 {
-                    draw_y = sprite.loc_v - (bitmap_member.info.height as i32 - reg_y as i32);
-                }
-
-                let sprite_width = bitmap_member.info.width as i32;
-                let sprite_height = bitmap_member.info.height as i32;
-                let left = draw_x;
-                let top = draw_y;
-                let right = sprite_width + left;
-                let bottom = sprite_height + top;
-
-                dst_rect = IntRect::from(left, top, right, bottom);
-            } else if sprite.width > player.movie.rect.width()
-                && sprite.height > player.movie.rect.height()
-            {
-                option = 2;
-
-                let sprite_width = sprite.width as i32;
-                let sprite_height = sprite.height as i32;
-
-                let left =
-                    ((player.movie.rect.width() / 2) / sprite.loc_h)
-                        - reg_x as i32;
-                let top =
-                    ((player.movie.rect.height() / 2) / sprite.loc_v)
-                        - reg_y as i32;
-
-                let right =
-                    player.movie.rect.width() + reg_x as i32 + left;
-                let bottom =
-                    player.movie.rect.height() + reg_y as i32 + top;
-
-                dst_rect = IntRect::from(left, top, right, bottom);
-            } else if bitmap_member.info.width == 0
-                && bitmap_member.info.height == 0
-            {
-                option = 3;
-
-                dst_rect = IntRect::from(
-                    sprite.loc_h - reg_x as i32,
-                    sprite.loc_v - reg_y as i32,
-                    sprite.loc_h - reg_x as i32 + sprite.width,
-                    sprite.loc_v - reg_y as i32 + sprite.height,
-                );
-            } else if (i32::from(bitmap_member.info.width) < sprite.width
-                && i32::from(bitmap_member.info.height) < sprite.height)
-                || (i32::from(bitmap_member.info.width) > sprite.width
-                    && i32::from(bitmap_member.info.height) > sprite.height)
-            {
-                option = 4;
-
-                let sprite_width = bitmap_member.info.width as i32;
-                let sprite_height = bitmap_member.info.height as i32;
-
-                if sprite.flip_h && reg_x != (bitmap_member.info.width as i32 / 2) as i16 {
-                    draw_x = sprite.loc_h - (bitmap_member.info.width as i32 - reg_x as i32);
-                }
-
-                if sprite.flip_v && reg_y != (bitmap_member.info.height as i32 / 2) as i16 {
-                    draw_y = sprite.loc_v - (bitmap_member.info.height as i32 - reg_y as i32);
-                }
-
-                let left = draw_x;
-                let top = draw_y;
-                let right = sprite_width + left;
-                let bottom = sprite_height + top;
-
-                dst_rect = IntRect::from(left, top, right, bottom);
-            } else if sprite.width > i32::from(bitmap_member.info.width)
-                || sprite.height > i32::from(bitmap_member.info.height)
-                || (sprite.width
-                    == i32::from(bitmap_member.info.width)
-                    && sprite.height
-                        == i32::from(bitmap_member.info.height))
-            {
-                option = 5;
-
-                let sprite_width;
-                let sprite_height;
-
-                if (bitmap_member.info.width as i32
-                    + bitmap_member.info.height as i32)
-                    > (sprite.width + sprite.height)
-                {
-                    sprite_width = bitmap_member.info.width as i32;
-                    sprite_height = bitmap_member.info.height as i32;
-
-                    if sprite.flip_h && reg_x != (bitmap_member.info.width as i32 / 2) as i16 {
-                        draw_x = sprite.loc_h - (bitmap_member.info.width as i32 - reg_x as i32);
-                    }
-
-                    if sprite.flip_v && reg_y != (bitmap_member.info.height as i32 / 2) as i16 {
-                        draw_y = sprite.loc_v - (bitmap_member.info.height as i32 - reg_y as i32);
-                    }
-                } else {
-                    sprite_width = sprite.width;
-                    sprite_height = sprite.height;
-
-                    if sprite.flip_h && reg_x != (sprite.width / 2) as i16 {
-                        draw_x = sprite.loc_h - (sprite.width - reg_x as i32);
-                    }
-
-                    if sprite.flip_v && reg_y != (sprite.height / 2) as i16 {
-                        draw_y = sprite.loc_v - (sprite.height - reg_y as i32);
-                    }
-                }
-
-                let left = draw_x;
-                let top = draw_y;
-                let right = sprite_width + left;
-                let bottom = sprite_height + top;
-
-                dst_rect = IntRect::from(left, top, right, bottom);
+            // Determine the actual dimensions to use for the sprite rectangle.
+            // In some cases, we need to use the bitmap's original dimensions instead of
+            // the sprite's dimensions. This matches Director's behavior where sprites
+            // can either have explicitly set dimensions or inherit from their bitmap.
+            let (sprite_width, sprite_height) = if sprite.bitmap_size_owned_by_sprite
+                && bitmap_width >= 10 && bitmap_height >= 10 {
+                // Sprite size is owned by bitmap, and bitmap is not tiny
+                // (avoid using 4×4 or other very small bitmaps that are meant to be stretched)
+                (bitmap_width, bitmap_height)
+            } else if !sprite.has_size_changed
+                && (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
+                && bitmap_width >= 10 && bitmap_height >= 10 {
+                // Sprite hasn't been explicitly resized and bitmap is larger (by sum).
+                // This catches cases like a 145×43 bitmap in a 350×280 sprite,
+                // while avoiding 4×4 bitmaps stretched to 352×282.
+                (bitmap_width, bitmap_height)
             } else {
-                option = 6;
+                // Use sprite's explicit dimensions (default case)
+                (sprite.width, sprite.height)
+            };
 
-                if sprite.flip_h && reg_x != (sprite.width / 2) as i16 {
-                    draw_x = sprite.loc_h - (sprite.width - reg_x as i32);
-                }
+            // Step 1: Calculate scaled registration offset
+            // The registration point needs to be scaled proportionally when sprite is stretched.
+            let scaled_reg_x = if bitmap_width > 0 {
+                ((reg_x as i32 * sprite_width) as f32 / bitmap_width as f32).round() as i32
+            } else {
+                reg_x as i32
+            };
 
-                if sprite.flip_v && reg_y != (sprite.height / 2) as i16 {
-                    draw_y = sprite.loc_v - (sprite.height - reg_y as i32);
-                }
+            let scaled_reg_y = if bitmap_height > 0 {
+                ((reg_y as i32 * sprite_height) as f32 / bitmap_height as f32).round() as i32
+            } else {
+                reg_y as i32
+            };
 
-                dst_rect = IntRect::from(
-                    draw_x,
-                    draw_y,
-                    sprite.loc_h - reg_x as i32 + sprite.width,
-                    sprite.loc_v - reg_y as i32 + sprite.height,
-                );
-            }
+            // Step 2: Apply flips by mirroring the registration offset
+            // When flipped, the registration point's position relative to the sprite changes.
+            let final_reg_x = if sprite.flip_h {
+                sprite_width - scaled_reg_x
+            } else {
+                scaled_reg_x
+            };
 
-            if sprite.number == 12 {
-                debug!(
-                    "Sprite {} dimensions {}x{} was chosen Option {} and got this rect: {:?}",
-                    sprite.number,
-                    sprite.width,
-                    sprite.height,
-                    option,
-                    dst_rect
-                );
-            }
+            let final_reg_y = if sprite.flip_v {
+                sprite_height - scaled_reg_y
+            } else {
+                scaled_reg_y
+            };
 
-            dst_rect
+            // Step 3: Create rect centered on registration point, then translate to sprite position
+            // The rect is positioned so the registration point sits at (loc_h, loc_v).
+            let left = sprite.loc_h - final_reg_x;
+            let top = sprite.loc_v - final_reg_y;
+            let right = left + sprite_width;
+            let bottom = top + sprite_height;
+
+            IntRect::from(left, top, right, bottom)
         }
+        CastMemberType::Shape(shape_member) => {
+            let reg_x = shape_member.shape_info.reg_point.0;
+            let reg_y = shape_member.shape_info.reg_point.1;
 
+            // Handle flips for shapes
+            let final_reg_x = if sprite.flip_h {
+                sprite.width - reg_x as i32
+            } else {
+                reg_x as i32
+            };
+
+            let final_reg_y = if sprite.flip_v {
+                sprite.height - reg_y as i32
+            } else {
+                reg_y as i32
+            };
+
+            let left = sprite.loc_h - final_reg_x;
+            let top = sprite.loc_v - final_reg_y;
+
+            IntRect::from(
+                left,
+                top,
+                left + sprite.width,
+                top + sprite.height,
+            )
+        }
         CastMemberType::Shape(shape_member) => {
             let reg_x = shape_member.shape_info.reg_point.0;
             let reg_y = shape_member.shape_info.reg_point.1;
@@ -3286,8 +3119,21 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.height + draw_y,
             )
         }
-        CastMemberType::Field(_field_member) => {
-            IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height)
+        CastMemberType::Field(field_member) => {
+            // For fields, use sprite width but calculate height from field properties
+            // Member height = text_height + 2*border + 2*margin
+            // Sprite height = member height + 4*box_drop_shadow (for shadow rendering space)
+            let field_width = sprite.width;
+
+            // Calculate sprite height: text_height + 2*border + 2*margin + 4*box_drop_shadow
+            let calculated_height = field_member.text_height as i32
+                + (2 * field_member.border as i32)
+                + (2 * field_member.margin as i32)
+                + (4 * field_member.box_drop_shadow as i32);
+
+            let field_height = calculated_height.max(sprite.height).max(1);
+
+            IntRect::from_size(sprite.loc_h, sprite.loc_v, field_width, field_height)
         }
         CastMemberType::Text(text_member) => {
             // Calculate draw position based on registration point from TextInfo
