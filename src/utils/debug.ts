@@ -5,5 +5,5 @@ export function isDebugSession() {
 }
 
 export function isUIShown() {
-  return process.env.REACT_APP_SHOW_UI === "true" || isDebugSession();
+  return (typeof process !== 'undefined' && process.env?.REACT_APP_SHOW_UI === "true") || isDebugSession();
 }
