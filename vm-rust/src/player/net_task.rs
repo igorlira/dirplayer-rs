@@ -9,7 +9,6 @@ use web_sys::Response;
 
 use percent_encoding::percent_decode_str;
 
-use crate::utils::log_i;
 
 pub type NetResult = Result<Vec<u8>, i32>;
 
@@ -104,10 +103,12 @@ pub async fn fetch_net_task(task: &NetTask) -> NetResult {
 
             task_result = Ok(blob_buffer.to_vec().iter().map(|x| *x as u8).collect_vec());
         } else {
-            task_result = Err(4); // TODO: Error code
+            log::warn!("Fetch failed for {} (status {})", url_string, resp.status());
+            task_result = Err(resp.status() as i32);
         }
     } else {
-        task_result = Err(4); // TODO: Error code
+        log::warn!("Fetch rejected for {}", url_string);
+        task_result = Err(-1);
     }
 
     return task_result;

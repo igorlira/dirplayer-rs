@@ -366,24 +366,43 @@ impl DirPlayer {
     pub async fn load_movie_from_file(&mut self, path: &str) {
         let task_id = self.net_manager.preload_net_thing(path.to_owned());
         self.net_manager.await_task(task_id).await;
-        let task = self.net_manager.get_task(task_id).unwrap();
-        let data_bytes = self
-            .net_manager
-            .get_task_result(Some(task_id))
-            .unwrap()
-            .unwrap();
+
+        let task = match self.net_manager.get_task(task_id) {
+            Some(task) => task,
+            None => {
+                log::error!("load_movie_from_file: task {} not found for {}", task_id, path);
+                return;
+            }
+        };
+
+        let data_bytes = match self.net_manager.get_task_result(Some(task_id)) {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(code)) => {
+                log::error!("load_movie_from_file: fetch failed for {} (error code {})", task.resolved_url, code);
+                return;
+            }
+            None => {
+                log::error!("load_movie_from_file: no result for task {} ({})", task_id, path);
+                return;
+            }
+        };
 
         let file_name = task.resolved_url
             .path_segments()
             .and_then(|segments| segments.last())
             .unwrap_or("untitled.dcr");
 
-        let movie_file = read_director_file_bytes(
+        let movie_file = match read_director_file_bytes(
             &data_bytes,
             &file_name,
             &get_base_url(&task.resolved_url).to_string(),
-        )
-        .unwrap();
+        ) {
+            Ok(file) => file,
+            Err(e) => {
+                log::error!("load_movie_from_file: failed to parse {}: {:?}", path, e);
+                return;
+            }
+        };
         self.load_movie_from_dir(movie_file).await;
     }
 
