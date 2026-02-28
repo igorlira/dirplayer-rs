@@ -783,6 +783,7 @@ impl BuiltInHandlerManager {
             "sin" => TypeHandlers::sin(args),
             "cos" => TypeHandlers::cos(args),
             "sqrt" => TypeHandlers::sqrt(args),
+            "tan" => TypeHandlers::tan(args),
             "atan" => TypeHandlers::atan(args),
             "sound" => TypeHandlers::sound(args),
             "vector" => TypeHandlers::vector(args),

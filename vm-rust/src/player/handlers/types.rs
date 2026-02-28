@@ -1279,6 +1279,13 @@ impl TypeHandlers {
         })
     }
 
+    pub fn tan(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let value = player.get_datum(&args[0]).to_float()?;
+            Ok(player.alloc_datum(Datum::Float(value.tan())))
+        })
+    }
+
     pub fn atan(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let value = player.get_datum(&args[0]);
