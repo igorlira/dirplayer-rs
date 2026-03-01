@@ -1094,6 +1094,10 @@ impl Score {
             ScoreRef::FilmLoop(member_ref) => Some(member_ref.cast_lib),
         };
 
+        // D6+ uses sprite detail table (spriteListIdx) for behavior attachment.
+        // Frame interval scripts are a D5 mechanism; using both causes duplicate behaviors.
+        let dir_version = reserve_player_ref(|player| player.movie.dir_version);
+
         // Debug: Log how many channels have behaviors
         let total_scripts: usize = spans_by_channel.values()
             .flat_map(|spans| spans.iter())
@@ -1119,6 +1123,11 @@ impl Score {
 
             for span in channel_spans {
                 if span.scripts.is_empty() {
+                    continue;
+                }
+
+                // For D6+, skip frame_interval behavior attachment - behaviors come from sprite details
+                if dir_version >= 600 {
                     continue;
                 }
 
