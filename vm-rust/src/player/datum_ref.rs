@@ -14,7 +14,9 @@ impl DatumRef {
     pub fn from_id(id: DatumId, ref_count: *mut u32) -> DatumRef {
         if id != 0 {
             let mut_ref = unsafe { &mut *ref_count };
-            *mut_ref += 1;
+            if *mut_ref != u32::MAX {
+                *mut_ref += 1;
+            }
             DatumRef::Ref(id, ref_count)
         } else {
             DatumRef::Void
@@ -73,6 +75,9 @@ impl Drop for DatumRef {
                 // Normal operation: the ref_count pointer is always valid because
                 // a DatumRef can only exist while its datum is alive in the arena.
                 let rc = &mut **ref_count;
+                if *rc == u32::MAX {
+                    return; // Pooled/immortal entry, skip ref counting
+                }
                 *rc -= 1;
                 if *rc == 0 {
                     if let Some(player) = PLAYER_OPT.as_mut() {

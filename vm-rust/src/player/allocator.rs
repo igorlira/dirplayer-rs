@@ -1,5 +1,6 @@
 use std::cell::UnsafeCell;
 
+use fxhash::FxHashMap;
 use log::{debug, warn};
 
 use crate::director::lingo::datum::Datum;
@@ -18,6 +19,10 @@ use super::{
 pub static mut ALLOCATOR_RESETTING: bool = false;
 
 const ARENA_CHUNK_SIZE: usize = 4096;
+
+const INT_POOL_MIN: i32 = -128;
+const INT_POOL_MAX: i32 = 255;
+const INT_POOL_SIZE: usize = (INT_POOL_MAX - INT_POOL_MIN + 1) as usize; // 384
 
 pub struct Arena<T> {
     chunks: Vec<Box<[Option<T>]>>,
@@ -157,6 +162,19 @@ impl<T> Arena<T> {
         self.count
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &T)> {
+        let next_slot = self.next_slot;
+        (0..next_slot).filter_map(move |idx| {
+            let chunk_idx = idx / ARENA_CHUNK_SIZE;
+            let slot_idx = idx % ARENA_CHUNK_SIZE;
+            if chunk_idx < self.chunks.len() {
+                self.chunks[chunk_idx][slot_idx].as_ref().map(|v| (idx + 1, v))
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.free_list.clear();
@@ -226,17 +244,43 @@ pub struct DatumAllocator {
     pub script_instances: Arena<ScriptInstanceRefEntry>,
     script_instance_counter: ScriptInstanceId,
     void_datum: Datum,
+    pub int_alloc_count: usize,
+    pub int_dealloc_count: usize,
+    pub snapshot_max_id: usize,
+    int_pool_ids: [DatumId; INT_POOL_SIZE],
+    symbol_pool: FxHashMap<String, DatumId>,
 }
 
 const MAX_SCRIPT_INSTANCE_ID: ScriptInstanceId = 0xFFFFFF;
 
 impl DatumAllocator {
     pub fn default() -> Self {
-        DatumAllocator {
+        let mut alloc = DatumAllocator {
             datums: Arena::with_capacity(4096),
             script_instances: Arena::new(),
             script_instance_counter: 1,
             void_datum: Datum::Void,
+            int_alloc_count: 0,
+            int_dealloc_count: 0,
+            snapshot_max_id: 0,
+            int_pool_ids: [0; INT_POOL_SIZE],
+            symbol_pool: FxHashMap::default(),
+        };
+        alloc.init_int_pool();
+        alloc
+    }
+
+    fn init_int_pool(&mut self) {
+        for i in 0..INT_POOL_SIZE {
+            let n = (i as i32) + INT_POOL_MIN;
+            let entry = DatumRefEntry {
+                id: 0,
+                ref_count: UnsafeCell::new(u32::MAX),
+                datum: Datum::Int(n),
+            };
+            let id = self.datums.alloc(entry);
+            self.datums.get_mut(id).unwrap().id = id;
+            self.int_pool_ids[i] = id;
         }
     }
 
@@ -276,7 +320,99 @@ impl DatumAllocator {
         self.datums.len()
     }
 
+    pub fn datum_type_stats(&self) -> String {
+        let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+        // Int-specific tracking
+        let mut int_rc_dist: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        let mut int_value_dist: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+        let mut int_samples: Vec<(usize, i32, u32)> = Vec::new(); // (id, value, rc)
+
+        for (id, entry) in self.datums.iter() {
+            let type_name = entry.datum.type_str().to_string();
+            let rc = unsafe { *entry.ref_count.get() };
+            let (count, total_rc) = counts.entry(type_name).or_insert((0, 0));
+            *count += 1;
+            *total_rc += rc as usize;
+
+            // Track Int datum details
+            if let Datum::Int(val) = &entry.datum {
+                *int_rc_dist.entry(rc).or_insert(0) += 1;
+                *int_value_dist.entry(*val).or_insert(0) += 1;
+                if int_samples.len() < 20 {
+                    int_samples.push((id, *val, rc));
+                }
+            }
+        }
+        let mut sorted: Vec<_> = counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        let mut result = format!("Live datums: {}\n", self.datums.len());
+        for (type_name, (count, total_rc)) in &sorted {
+            result.push_str(&format!("  {}: {} (total rc: {})\n", type_name, count, total_rc));
+        }
+        result.push_str(&format!("Free list: {}\n", self.datums.free_list.len()));
+
+        // Int ref count distribution
+        let mut rc_sorted: Vec<_> = int_rc_dist.into_iter().collect();
+        rc_sorted.sort_by_key(|&(rc, _)| rc);
+        result.push_str("Int rc distribution:\n");
+        for (rc, count) in &rc_sorted {
+            result.push_str(&format!("  rc={}: {}\n", rc, count));
+        }
+
+        // Int value distribution (top 15 most common values)
+        let mut val_sorted: Vec<_> = int_value_dist.into_iter().collect();
+        val_sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        result.push_str("Int value distribution (top 15):\n");
+        for (val, count) in val_sorted.iter().take(15) {
+            result.push_str(&format!("  val={}: {}\n", val, count));
+        }
+
+        // Int alloc/dealloc counters
+        result.push_str(&format!("Int allocs: {}, deallocs: {}, delta: {}\n",
+            self.int_alloc_count, self.int_dealloc_count,
+            self.int_alloc_count as i64 - self.int_dealloc_count as i64));
+
+        // Show new Int datums since snapshot (if set)
+        if self.snapshot_max_id > 0 {
+            let mut new_ints = 0;
+            let mut new_int_samples: Vec<(usize, i32, u32)> = Vec::new();
+            for (id, entry) in self.datums.iter() {
+                if id > self.snapshot_max_id {
+                    if let Datum::Int(val) = &entry.datum {
+                        let rc = unsafe { *entry.ref_count.get() };
+                        new_ints += 1;
+                        if new_int_samples.len() < 20 {
+                            new_int_samples.push((id, *val, rc));
+                        }
+                    }
+                }
+            }
+            result.push_str(&format!("New Int datums since snapshot (id>{}): {}\n",
+                self.snapshot_max_id, new_ints));
+            result.push_str("New Int samples:\n");
+            for (id, val, rc) in &new_int_samples {
+                result.push_str(&format!("  #{}: val={}, rc={}\n", id, val, rc));
+            }
+        }
+
+        result
+    }
+
+    pub fn take_datum_snapshot(&mut self) {
+        self.snapshot_max_id = self.datums.next_slot;
+        self.int_alloc_count = 0;
+        self.int_dealloc_count = 0;
+    }
+
     fn dealloc_datum(&mut self, id: DatumId) {
+        if let Some(entry) = self.datums.get(id) {
+            if unsafe { *entry.ref_count.get() } == u32::MAX {
+                return; // Pooled/immortal entry, never free
+            }
+            if matches!(&entry.datum, Datum::Int(_)) {
+                self.int_dealloc_count += 1;
+            }
+        }
         self.datums.remove(id);
     }
 
@@ -322,6 +458,37 @@ impl DatumAllocatorTrait for DatumAllocator {
             return Ok(DatumRef::Void);
         }
 
+        // Return pooled entry for common int values
+        if let Datum::Int(n) = &datum {
+            if *n >= INT_POOL_MIN && *n <= INT_POOL_MAX {
+                let pool_idx = (*n - INT_POOL_MIN) as usize;
+                let id = self.int_pool_ids[pool_idx];
+                let entry = self.datums.get(id).unwrap();
+                return Ok(DatumRef::Ref(id, entry.ref_count.get()));
+            }
+        }
+
+        // Intern symbols: same symbol string returns the same pooled entry
+        if let Datum::Symbol(s) = &datum {
+            if let Some(&id) = self.symbol_pool.get(s) {
+                let entry = self.datums.get(id).unwrap();
+                return Ok(DatumRef::Ref(id, entry.ref_count.get()));
+            }
+            // First time seeing this symbol — allocate and register
+            let key = s.clone();
+            let entry = DatumRefEntry {
+                id: 0,
+                ref_count: UnsafeCell::new(u32::MAX),
+                datum,
+            };
+            let id = self.datums.alloc(entry);
+            self.datums.get_mut(id).unwrap().id = id;
+            self.symbol_pool.insert(key, id);
+            let entry = self.datums.get(id).unwrap();
+            return Ok(DatumRef::Ref(id, entry.ref_count.get()));
+        }
+
+        let is_int = matches!(&datum, Datum::Int(_));
         let entry = DatumRefEntry {
             id: 0,
             ref_count: UnsafeCell::new(1), // Start at 1 to avoid the extra increment in from_id
@@ -331,6 +498,9 @@ impl DatumAllocatorTrait for DatumAllocator {
         let entry = self.datums.get_mut(id).unwrap();
         entry.id = id;
         let ref_count_ptr = entry.ref_count.get();
+        if is_int {
+            self.int_alloc_count += 1;
+        }
         Ok(DatumRef::Ref(id, ref_count_ptr))
     }
 
@@ -432,5 +602,9 @@ impl ResetableAllocator for DatumAllocator {
         self.script_instance_counter = 1;
 
         unsafe { ALLOCATOR_RESETTING = false; }
+
+        // Re-create pools after clearing
+        self.symbol_pool.clear();
+        self.init_int_pool();
     }
 }
