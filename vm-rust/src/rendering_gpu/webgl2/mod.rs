@@ -1781,6 +1781,14 @@ impl WebGL2Renderer {
                 }
             }
             TextureSource::SolidColor { r, g, b } => {
+                // For inks that make bgColor pixels transparent (7, 8, 36, 40),
+                // if the solid foreground color matches the resolved bgColor,
+                // the entire shape would be invisible — skip rendering.
+                if ink == 7 || ink == 8 || ink == 36 || ink == 40 {
+                    if (r, g, b) == bg_color_rgb {
+                        return;
+                    }
+                }
                 self.get_or_create_solid_color_texture(r, g, b)
             }
             TextureSource::RenderedText {
