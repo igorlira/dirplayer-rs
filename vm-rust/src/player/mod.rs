@@ -2061,6 +2061,22 @@ pub async fn player_call_script_handler_raw_args(
             None
         };
 
+        // Mark older invocations of same handler on same instance as stale,
+        // but only during mouse command handling (user click spam protection)
+        if player.in_mouse_command {
+            if let Some(ref recv) = receiver {
+                let recv_id = recv.id();
+                for i in 0..player.scope_count as usize {
+                    let existing = &mut player.scopes[i];
+                    if existing.handler_name_id == handler_name_id
+                        && existing.receiver.as_ref().map(|r| r.id()) == Some(recv_id)
+                    {
+                        existing.stale = true;
+                    }
+                }
+            }
+        }
+
         let scope_ref = player.push_scope();
         {
             let scope = player.scopes.get_mut(scope_ref).unwrap();
@@ -2179,6 +2195,14 @@ pub async fn player_call_script_handler_raw_args(
         let result = match player_execute_bytecode(&ctx).await {
             Ok(result) => result,
             Err(err) => {
+                // If scope was marked stale by a re-entrant call, suppress the
+                // error and exit cleanly instead of propagating it
+                let is_stale = reserve_player_ref(|player| {
+                    player.scopes.get(scope_ref).unwrap().stale
+                });
+                if is_stale {
+                    break;
+                }
                 // abort is flow control, not a real error - skip break-on-error
                 if err.code != ScriptErrorCode::Abort {
                     let should_break = reserve_player_ref(|player| player.break_on_error);
@@ -2206,6 +2230,14 @@ pub async fn player_call_script_handler_raw_args(
                 return Err(err);
             }
         };
+
+        // Check if scope was marked stale by a re-entrant call after a yield point
+        let is_stale = reserve_player_ref(|player| {
+            player.scopes.get(scope_ref).unwrap().stale
+        });
+        if is_stale {
+            break;
+        }
 
         match result {
             HandlerExecutionResult::Advance => {

@@ -256,6 +256,10 @@ impl FlowControlBytecodeHandler {
 
     pub fn end_repeat(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
+            let scope = player.scopes.get(ctx.scope_ref).unwrap();
+            if scope.stale {
+                return Ok(HandlerExecutionResult::Stop);
+            }
             let new_index = {
                 let bytecode = player.get_ctx_current_bytecode(ctx);
                 let handler = get_current_handler_def(player, &ctx);
