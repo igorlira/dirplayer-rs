@@ -1,11 +1,11 @@
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        context_vars::{player_get_context_var, read_context_var_args},
+        context_vars::player_get_context_var,
         handlers::datum_handlers::script::ScriptDatumHandlers,
         reserve_player_mut,
-        script::{get_current_script, get_current_variable_multiplier, get_name},
-        DatumRef, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError, PLAYER_OPT,
+        script::{get_current_handler_def, get_current_script, get_current_variable_multiplier, get_name},
+        DatumRef, HandlerExecutionResult, ScriptError, PLAYER_OPT,
     },
 };
 
@@ -182,17 +182,47 @@ impl StackBytecodeHandler {
     pub fn push_chunk_var_ref(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
+        // PushChunkVarRef uses RAW (non-multiplied) variable indices,
+        // unlike getparam/setparam/deletechunk which use multiplied indices.
+        // e.g. for handler(me, t): deletechunk uses pushint8 8 for t (8/8=1),
+        // but pushchunkvarref uses pushint8 1 for t (raw index 1).
         reserve_player_mut(|player| {
-            let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj;
-            let (id_ref, cast_id_ref) =
-                read_context_var_args(player, bytecode_obj as u32, ctx.scope_ref);
-            let value_ref = player_get_context_var(
-                player,
-                &id_ref,
-                cast_id_ref.as_ref(),
-                bytecode_obj as u32,
-                ctx,
-            )?;
+            let var_type = player.get_ctx_current_bytecode(ctx).obj as u32;
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let id_ref = scope.stack.pop().unwrap();
+            let id = player.get_datum(&id_ref).int_value()?;
+
+            let value_ref = match var_type {
+                0x4 => {
+                    // argument - raw index, no variable multiplier
+                    let arg_index = id as usize;
+                    let scope = player.scopes.get(ctx.scope_ref).unwrap();
+                    scope.args.get(arg_index).cloned().unwrap_or(DatumRef::Void)
+                }
+                0x5 => {
+                    // local - raw index, no variable multiplier
+                    let handler = get_current_handler_def(player, ctx);
+                    let name_id = handler.local_name_ids[id as usize];
+                    let scope = player.scopes.get(ctx.scope_ref).unwrap();
+                    scope.locals.get(&name_id).cloned().unwrap_or(DatumRef::Void)
+                }
+                _ => {
+                    // For other var types (field etc.), fall back to the standard path
+                    let cast_id_ref = if var_type == 0x6 && player.movie.dir_version >= 500 {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        Some(scope.stack.pop().unwrap())
+                    } else {
+                        None
+                    };
+                    player_get_context_var(
+                        player,
+                        &id_ref,
+                        cast_id_ref.as_ref(),
+                        var_type,
+                        ctx,
+                    )?
+                }
+            };
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(value_ref);

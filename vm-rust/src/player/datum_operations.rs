@@ -788,6 +788,21 @@ pub fn divide_datums(
             }
             Datum::Point(result)
         }
+        // Point / List: element-wise division (Director treats 2-element lists as points)
+        (Datum::Point(a), Datum::List(_, ref_list, _)) if ref_list.len() == 2 => {
+            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
+            for i in 0..2 {
+                let a_val = player.get_datum(&a[i]).clone();
+                let b_val = player.get_datum(&ref_list[i]).clone();
+                let quot = divide_datums(
+                    player.alloc_datum(a_val),
+                    player.alloc_datum(b_val),
+                    player
+                )?;
+                result[i] = player.alloc_datum(quot);
+            }
+            Datum::Point(result)
+        }
         (Datum::Rect(a), Datum::Int(right)) => {
             let right_ref = player.alloc_datum(Datum::Int(*right));
             let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);

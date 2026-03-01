@@ -6,7 +6,7 @@ ident = @{ !digit ~ (alpha | digit | "_")+ }
 lang_ident = { !reserved_keyword ~ ident }
 
 reserved_keyword = @{
-    ("sprite" | "castLib" | "set" | "to" | "into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item") ~ !(alpha | digit | "_")
+    ("sprite" | "castLib" | "set" | "to" | "into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item" | "delete") ~ !(alpha | digit | "_")
 }
 
 void_keyword = _{ ("void" | "VOID" | "Void") ~ !(alpha | digit | "_") }
@@ -153,11 +153,14 @@ put_statement = {
 // This is syntactic sugar for assignment
 set_statement = { ^"set" ~ expr ~ ^"to" ~ expr }
 
-// Assignment can be to any expression (identifier, property access, function result property, etc.)
+// Delete statement: "delete char 1 of s", "delete word 3 of myStr"
+delete_statement = { ^"delete" ~ chunk_expr }
+
+// Assignment can be to any expression (identifier, property access, list index, etc.)
 // The parser will validate that the left side is a valid lvalue
-assignment_expr = { term ~ (obj_prop ~ (prop_name | term))* }
+assignment_expr = { term ~ (obj_prop ~ (prop_name | term) | list_index)* }
 assignment = { assignment_expr ~ "=" ~ expr }
-command    = _{ set_statement | assignment | put_statement | command_inline | expr }
+command    = _{ set_statement | delete_statement | assignment | put_statement | command_inline | expr }
 obj_prop   =  { "." }
 add        =  { "+" }
 subtract   =  { "-" }

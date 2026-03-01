@@ -11,14 +11,14 @@ use crate::{
     player::{
         bytecode::{get_set::GetSetUtils, string::StringBytecodeHandler},
         datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums},
-        handlers::datum_handlers::{player_call_datum_handler, string_chunk::StringChunkUtils},
+        handlers::datum_handlers::{player_call_datum_handler, prop_list::PropListUtils, string_chunk::StringChunkUtils},
         player_call_global_handler, reserve_player_mut,
         script::{get_lctx_for_script, get_obj_prop, player_set_obj_prop, script_get_prop_opt},
         DirPlayer,
     },
 };
 
-use super::{cast_lib::INVALID_CAST_MEMBER_REF, sprite::ColorRef, DatumRef, ScriptError};
+use super::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, sprite::ColorRef, DatumRef, ScriptError};
 
 #[derive(Parser)]
 #[grammar = "lingo.pest"]
@@ -69,6 +69,7 @@ pub enum LingoExpr {
     PutDisplay(Box<LingoExpr>),
     ThePropOf(Box<LingoExpr>, String), // "the X of Y" constructs
     ChunkExpr(String, Box<LingoExpr>, Box<LingoExpr>),
+    DeleteChunk(Box<LingoExpr>), // delete <chunk_expr>
 }
 
 /// Evaluate a static Lingo expression. This does not support function calls.
@@ -796,22 +797,27 @@ pub fn parse_lingo_rule_runtime(
         }
         Rule::assignment_expr => {
             let mut inner = pair.into_inner();
-            
+
             let first_term = inner.next().ok_or_else(|| ScriptError::new("Expected first term in assignment_expr".to_string()))?;
             let mut result = parse_lingo_rule_runtime(first_term, pratt)?;
-            
+
             while let Some(next_pair) = inner.next() {
                 if next_pair.as_rule() == Rule::obj_prop {
                     if let Some(term_pair) = inner.next() {
                         let prop_name = term_pair.as_str();
                         result = LingoExpr::ObjProp(Box::new(result), prop_name.to_string());
                     }
+                } else if next_pair.as_rule() == Rule::list_index {
+                    // Bracket indexing: [expr]
+                    let index_pairs = next_pair.into_inner();
+                    let index_expr = parse_lingo_expr_runtime(index_pairs, pratt)?;
+                    result = LingoExpr::ListAccess(Box::new(result), Box::new(index_expr));
                 } else {
                     let prop_name = next_pair.as_str();
                     result = LingoExpr::ObjProp(Box::new(result), prop_name.to_string());
                 }
             }
-            
+
             Ok(result)
         }
         Rule::assignment => {
@@ -929,6 +935,12 @@ pub fn parse_lingo_rule_runtime(
             let left_expr = parse_lingo_expr_runtime(left_pair.into_inner(), pratt)?;
             let right_expr = parse_lingo_expr_runtime(right_pair.into_inner(), pratt)?;
             Ok(LingoExpr::Assignment(Box::new(left_expr), Box::new(right_expr)))
+        }
+        Rule::delete_statement => {
+            let mut inner = pair.into_inner();
+            let chunk_pair = inner.next().ok_or_else(|| ScriptError::new("Expected chunk expression after delete".to_string()))?;
+            let chunk_expr = parse_lingo_rule_runtime(chunk_pair, pratt)?;
+            Ok(LingoExpr::DeleteChunk(Box::new(chunk_expr)))
         }
         Rule::chunk_expr => {
             let mut inner = pair.into_inner();
@@ -1273,13 +1285,11 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             reserve_player_mut(|player| {
                 let list_datum = player.get_datum(&list_ref);
                 let index_datum = player.get_datum(&index_ref);
-                
-                // Get index as integer (Lingo uses 1-based indexing!)
-                let index_num = index_datum.int_value()?;
-                
-                // Access list element
+
+                // Access list/proplist/point/rect element
                 match list_datum {
                     Datum::List(_, items, _) => {
+                        let index_num = index_datum.int_value()?;
                         if index_num < 1 || index_num as usize > items.len() {
                             Err(ScriptError::new(format!(
                                 "List index {} out of bounds (list has {} items)",
@@ -1289,6 +1299,32 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                         } else {
                             // Lingo uses 1-based indexing, so subtract 1
                             Ok(items[(index_num - 1) as usize].clone())
+                        }
+                    }
+                    // PropList: int index = Nth value, symbol/string = key lookup
+                    Datum::PropList(pairs, _) => {
+                        PropListUtils::get_at(pairs, &index_ref, &player.allocator)
+                    }
+                    // Point indexed by number: 1=x, 2=y
+                    Datum::Point(point_arr) => {
+                        let index_num = index_datum.int_value()?;
+                        if index_num < 1 || index_num > 2 {
+                            Err(ScriptError::new(format!(
+                                "Point index {} out of bounds (must be 1 or 2)", index_num
+                            )))
+                        } else {
+                            Ok(point_arr[(index_num - 1) as usize].clone())
+                        }
+                    }
+                    // Rect indexed by number: 1-4
+                    Datum::Rect(rect_arr) => {
+                        let index_num = index_datum.int_value()?;
+                        if index_num < 1 || index_num > 4 {
+                            Err(ScriptError::new(format!(
+                                "Rect index {} out of bounds (must be 1-4)", index_num
+                            )))
+                        } else {
+                            Ok(rect_arr[(index_num - 1) as usize].clone())
                         }
                     }
                     _ => Err(ScriptError::new(format!(
@@ -1443,6 +1479,63 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                     player_set_obj_prop(&obj_datum, prop_name, &right_datum).await?;
                     Ok(DatumRef::Void)
                 }
+                // Handle bracket-indexed assignment: list[index] = value
+                LingoExpr::ListAccess(list_expr, index_expr) => {
+                    let list_ref = Box::pin(eval_lingo_expr_ast_runtime(list_expr.as_ref())).await?;
+                    let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr.as_ref())).await?;
+                    reserve_player_mut(|player| {
+                        let list_datum = player.get_datum(&list_ref);
+                        let index_datum = player.get_datum(&index_ref);
+                        match list_datum {
+                            Datum::List(_, items, _) => {
+                                let index_num = index_datum.int_value()?;
+                                let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
+                                if adjusted >= items.len() {
+                                    return Err(ScriptError::new(format!(
+                                        "List index {} out of bounds (list has {} items)",
+                                        index_num, items.len()
+                                    )));
+                                }
+                                let (_, list_vec, _) = player.get_datum_mut(&list_ref).to_list_mut()?;
+                                list_vec[adjusted] = right_datum.clone();
+                                Ok(right_datum)
+                            }
+                            Datum::PropList(..) => {
+                                let formatted_key = format_datum(&index_ref, &player);
+                                PropListUtils::set_at(player, &list_ref, &index_ref, &right_datum, formatted_key)?;
+                                Ok(right_datum)
+                            }
+                            Datum::Point(_) => {
+                                let index_num = index_datum.int_value()?;
+                                let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
+                                if adjusted >= 2 {
+                                    return Err(ScriptError::new(format!(
+                                        "Point index {} out of bounds", index_num
+                                    )));
+                                }
+                                let point = player.get_datum_mut(&list_ref).to_point_mut()?;
+                                point[adjusted] = right_datum.clone();
+                                Ok(right_datum)
+                            }
+                            Datum::Rect(_) => {
+                                let index_num = index_datum.int_value()?;
+                                let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
+                                if adjusted >= 4 {
+                                    return Err(ScriptError::new(format!(
+                                        "Rect index {} out of bounds", index_num
+                                    )));
+                                }
+                                let rect = player.get_datum_mut(&list_ref).to_rect_mut()?;
+                                rect[adjusted] = right_datum.clone();
+                                Ok(right_datum)
+                            }
+                            _ => Err(ScriptError::new(format!(
+                                "Cannot assign to index of type: {}",
+                                list_datum.type_str()
+                            ))),
+                        }
+                    })
+                }
                 _ => Err(ScriptError::new(
                     "Invalid assignment left-hand side".to_string(),
                 )),
@@ -1592,6 +1685,50 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 let result_ref = player.alloc_datum(result);
                 
                 player.globals.insert(target_name, result_ref);
+                Ok(DatumRef::Void)
+            })
+        },
+        LingoExpr::DeleteChunk(chunk_target) => {
+            // "delete char 1 of s" - delete a chunk from a variable
+            let (chunk_type_str, index_expr, source_expr) = match chunk_target.as_ref() {
+                LingoExpr::ChunkExpr(chunk_type, index, source) => (chunk_type, index, source),
+                _ => return Err(ScriptError::new("Expected chunk expression after delete".to_string())),
+            };
+
+            let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr)).await?;
+            let index = reserve_player_mut(|player| {
+                player.get_datum(&index_ref).int_value()
+            })?;
+
+            let chunk_type = StringChunkType::from(chunk_type_str);
+
+            let source_name = match source_expr.as_ref() {
+                LingoExpr::Identifier(name) => name.clone(),
+                _ => return Err(ScriptError::new("Expected identifier as chunk source for delete".to_string())),
+            };
+
+            reserve_player_mut(|player| {
+                let current_ref = player.globals.get(&source_name)
+                    .cloned()
+                    .unwrap_or_else(|| player.alloc_datum(Datum::String(String::new())));
+
+                let current_str = player.get_datum(&current_ref).string_value()?;
+
+                let chunk_expr = StringChunkExpr {
+                    chunk_type,
+                    start: index,
+                    end: 0,
+                    item_delimiter: player.movie.item_delimiter,
+                };
+
+                let new_string = StringChunkUtils::string_by_deleting_chunk(
+                    &current_str,
+                    &chunk_expr,
+                )?;
+
+                let new_string_ref = player.alloc_datum(Datum::String(new_string));
+                player.globals.insert(source_name, new_string_ref);
+
                 Ok(DatumRef::Void)
             })
         },

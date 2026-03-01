@@ -77,6 +77,8 @@ impl StringBytecodeHandler {
             let search_str = player.get_datum(&search_str).string_value()?;
             let search_in = player.get_datum(&search_in);
 
+            // Director's `contains` operator is case-insensitive
+            let search_str_lower = search_str.to_ascii_lowercase();
             let contains = if search_in.is_list() {
                 let search_list = search_in.to_list()?;
                 let mut contains = false;
@@ -84,7 +86,7 @@ impl StringBytecodeHandler {
                     let item = player.get_datum(item);
                     if item.is_string() {
                         let item = item.string_value()?;
-                        if item.contains(search_str.as_str()) {
+                        if item.to_ascii_lowercase().contains(search_str_lower.as_str()) {
                             contains = true;
                             break;
                         }
@@ -93,7 +95,7 @@ impl StringBytecodeHandler {
                 Ok(contains)
             } else if search_in.is_string() {
                 let search_in = search_in.string_value()?;
-                Ok(search_in.contains(search_str.as_str()))
+                Ok(search_in.to_ascii_lowercase().contains(search_str_lower.as_str()))
             } else if search_in.is_symbol() {
                 Ok(false)
             } else if search_in.is_number() {
@@ -421,9 +423,10 @@ impl StringBytecodeHandler {
             let result = if search_in.is_void() {
                 false
             } else {
+                // Director's `starts` operator is case-insensitive
                 let search_str = player.get_datum(&search_str_ref).string_value()?;
                 let search_in = search_in.string_value()?;
-                search_in.starts_with(search_str.as_str())
+                search_in.to_ascii_lowercase().starts_with(search_str.to_ascii_lowercase().as_str())
             };
             let result = player.alloc_datum(datum_bool(result));
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();

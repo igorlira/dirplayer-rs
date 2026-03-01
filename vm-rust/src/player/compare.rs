@@ -53,6 +53,29 @@ pub fn datum_equals(
         | (Datum::Int(_), Datum::Point(_))
         | (Datum::Rect(_), Datum::Int(_))
         | (Datum::Int(_), Datum::Rect(_)) => Ok(false),
+        (Datum::PropList(pairs_a, _), Datum::PropList(pairs_b, _)) => {
+            // Fast path: same datum in memory (same DatumRef)
+            if std::ptr::eq(left, right) {
+                return Ok(true);
+            }
+            // Structural comparison: same keys and values in same order
+            if pairs_a.len() != pairs_b.len() {
+                return Ok(false);
+            }
+            for (pair_a, pair_b) in pairs_a.iter().zip(pairs_b.iter()) {
+                let key_a = allocator.get_datum(&pair_a.0);
+                let key_b = allocator.get_datum(&pair_b.0);
+                if !datum_equals(key_a, key_b, allocator)? {
+                    return Ok(false);
+                }
+                let val_a = allocator.get_datum(&pair_a.1);
+                let val_b = allocator.get_datum(&pair_b.1);
+                if !datum_equals(val_a, val_b, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
         (Datum::PropList(..), Datum::Int(_)) => Ok(false),
         (Datum::BitmapRef(_), Datum::Void) => Ok(false),
         (Datum::Symbol(_), Datum::CastMember(_)) => Ok(false),

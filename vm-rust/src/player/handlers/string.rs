@@ -64,6 +64,9 @@ impl StringHandlers {
                 Datum::String(obj.string_value()?.to_string())
             } else if obj.is_void() {
                 Datum::String("".to_string())
+            } else if let Datum::Symbol(s) = obj {
+                // In Director, string(#symbol) returns "symbol" without the # prefix
+                Datum::String(s.clone())
             } else {
                 Datum::String(format_concrete_datum(obj, player))
             };

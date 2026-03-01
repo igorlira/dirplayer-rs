@@ -206,6 +206,22 @@ impl ArithmeticsBytecodeHandler {
                     };
                     Datum::Point([x_ref, y_ref])
                 }
+                Datum::List(list_type, items, sorted) => {
+                    let mut negated_items = Vec::with_capacity(items.len());
+                    for item_ref in &items {
+                        let item = player.get_datum(item_ref).clone();
+                        let negated = match item {
+                            Datum::Int(n) => player.alloc_datum(Datum::Int(-n)),
+                            Datum::Float(n) => player.alloc_datum(Datum::Float(-n)),
+                            _ => return Err(ScriptError::new(format!(
+                                "Cannot negate list element of type: {}",
+                                item.type_str()
+                            ))),
+                        };
+                        negated_items.push(negated);
+                    }
+                    Datum::List(list_type, negated_items, sorted)
+                }
                 _ => {
                     return Err(ScriptError::new(format!(
                         "Cannot inv non-numeric value: {}",
