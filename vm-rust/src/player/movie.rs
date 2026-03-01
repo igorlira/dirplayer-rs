@@ -298,7 +298,7 @@ impl Movie {
                 self.puppet_tempo = value.int_value()? as u32;
                 Ok(())
             },
-            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" => {
+            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" | "cpuHogTicks" => {
                 // Read-only / no-op in practice; ignore sets like Director does
                 Ok(())
             },
