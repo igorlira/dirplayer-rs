@@ -1154,6 +1154,7 @@ impl ScoreChunk {
         }
     }
 
+<<<<<<< HEAD
     /// Parse sprite details directly from extracted VWSC entries.
     /// For spriteListIdx = N, entries[N] is the 44-byte sprite info,
     /// and entries[N+1] contains behaviors (8 bytes each: cast_lib u16, cast_member u16, initializer_idx u32).
@@ -1264,40 +1265,31 @@ impl ScoreChunk {
 
     /// Parse sprite detail offsets from Entry[0] (D6+)
     ///
+    /// The VWSC stream layout:
     /// - Bytes 0-3: framesStreamSize
     /// - Bytes 4-7: version
-    /// - Bytes 8-11: listStart (position of sprite detail info)
+    /// - Bytes 8-11: listStart (position of sprite detail list)
     ///
     /// At listStart:
-    /// - numEntries (u32): count of sprite detail offset entries
-    /// - listSize (u32): size of the offset index (should equal numEntries)
+    /// - numEntries (u32): count of offset entries
+    /// - listSize (u32): size of the offset index
     /// - maxDataLen (u32): max data size
     /// - Offset table: numEntries x u32 (relative offsets from frameDataOffset)
     ///
-    /// The offsets point to sprite detail data. For a sprite with spriteListIdx = N:
-    /// - Sprite info is at offset[N]
-    /// - Behaviors are at offset[N+1]
-    /// - Sprite name is at offset[N+2]
-    fn parse_sprite_details(entries: &Vec<Vec<u8>>) -> std::collections::HashMap<u32, SpriteDetailInfo> {
+    /// Each offset group of 3 represents one sprite's detail data:
+    /// - offset[N*3+0] = sprite info
+    /// - offset[N*3+1] = behaviors
+    /// - offset[N*3+2] = sprite name
+    fn parse_sprite_details_from_raw(raw_data: &[u8]) -> std::collections::HashMap<u32, SpriteDetailInfo> {
         let mut details = std::collections::HashMap::new();
 
-        // Log entry count for diagnosis
-        debug!(
-            "parse_sprite_details: {} entries, entry0 size: {}",
-            entries.len(),
-            if entries.is_empty() { 0 } else { entries[0].len() }
-        );
-
-        // Entry[0] contains the frames stream with sprite detail offsets embedded
-        if entries.is_empty() || entries[0].len() < 12 {
-            debug!("   Entry[0] missing or too small");
+        if raw_data.len() < 12 {
             return details;
         }
 
-        let entry0 = &entries[0];
-        let entry0_len = entry0.len();
+        let stream_len = raw_data.len();
 
-        let mut reader = BinaryReader::from_u8(entry0);
+        let mut reader = BinaryReader::from_u8(raw_data);
         reader.set_endian(Endian::Big);
 
         // Read header: framesStreamSize, version, listStart
@@ -1314,26 +1306,7 @@ impl ScoreChunk {
             Err(_) => return details,
         };
 
-        debug!(
-            "   framesStreamSize={} version={} listStart={}",
-            frames_stream_size, version, list_start
-        );
-
-        // listStart of 0 means no sprite details present
-        if list_start == 0 {
-            debug!("   listStart=0, no sprite details");
-            return details;
-        }
-
-        // Validate listStart - it should be within entry0 bounds
-        // Note: listStart is an ABSOLUTE position in the stream. It can point anywhere
-        // within Entry[0], including inside the frame data region.
-        if list_start >= entry0_len {
-            return details;
-        }
-
-        // Need enough space for the sprite detail header (3 x u32 = 12 bytes)
-        if list_start + 12 > entry0_len {
+        if list_start == 0 || list_start >= stream_len || list_start + 12 > stream_len {
             return details;
         }
 
@@ -1366,11 +1339,10 @@ impl ScoreChunk {
             return details;
         }
 
-        // Calculate key positions:
-        // - index_start: where the offset table begins (after the 3 u32 header values)
-        // - frame_data_offset: where the actual sprite detail data begins (after the offset table)
-        let index_start = list_start + 12; // After numEntries, listSize, maxDataLen
-        let frame_data_offset = index_start + list_size * 4; // After the offset table
+        // index_start: where the offset table begins (after the 3 u32 header values)
+        // frame_data_offset: where the actual sprite detail data begins (after the offset table)
+        let index_start = list_start + 12;
+        let frame_data_offset = index_start + list_size * 4;
 
         debug!(
             "📋 Sprite detail table: framesStreamSize={} version={} listStart={} numEntries={} listSize={} maxDataLen={} frameDataOffset={}",
@@ -1382,8 +1354,7 @@ impl ScoreChunk {
         for i in 0..num_entries {
             match reader.read_u32() {
                 Ok(relative_off) => {
-                    let abs_off = frame_data_offset + relative_off as usize;
-                    absolute_offsets.push(abs_off);
+                    absolute_offsets.push(frame_data_offset + relative_off as usize);
                 }
                 Err(_) => {
                     debug!(
@@ -1413,13 +1384,9 @@ impl ScoreChunk {
         }
 
         // For a sprite with sprite_list_idx = N:
-        //   - Behaviors are at getSpriteDetailsStream(N + 1), i.e., absolute_offsets[N + 1]
-        //
-        // So we iterate through sprite_list_idx values (0, 1, 2, ...) and look up behaviors
-        // at index sprite_list_idx + 1
+        //   Behaviors are at absolute_offsets[N + 1]
         let mut behavior_count = 0;
         for sprite_list_idx in 0..num_entries.saturating_sub(1) {
-            // Behavior stream is at index sprite_list_idx + 1
             let behavior_stream_idx = sprite_list_idx + 1;
 
             if behavior_stream_idx >= absolute_offsets.len() {
@@ -1427,34 +1394,29 @@ impl ScoreChunk {
             }
 
             let behavior_start = absolute_offsets[behavior_stream_idx];
-
-            // Calculate behavior stream size (to next offset or end of entry0)
             let behavior_end = if behavior_stream_idx + 1 < absolute_offsets.len() {
                 absolute_offsets[behavior_stream_idx + 1]
             } else {
-                entry0_len
+                stream_len
             };
 
-            // Validate bounds
-            if behavior_start >= entry0_len || behavior_start >= behavior_end {
+            if behavior_start >= stream_len || behavior_start >= behavior_end {
                 continue;
             }
 
             let behavior_size = behavior_end - behavior_start;
             if behavior_size < 8 {
-                // Need at least 8 bytes for one behavior element
                 continue;
             }
 
             // Parse behaviors from this stream
-            let behavior_data = &entry0[behavior_start..behavior_end];
+            let behavior_data = &raw_data[behavior_start..behavior_end];
             let mut behavior_reader = BinaryReader::from_u8(behavior_data);
             behavior_reader.set_endian(Endian::Big);
 
             let mut info = SpriteDetailInfo::default();
 
-            // BehaviorElement format
-            //   castLib (u16), member (u16), initializerIndex (u32)
+            // BehaviorElement format: castLib (u16), member (u16), initializerIndex (u32)
             while behavior_reader.pos + 8 <= behavior_size {
                 let cast_lib = match behavior_reader.read_u16() {
                     Ok(v) => v,
@@ -1464,19 +1426,17 @@ impl ScoreChunk {
                     Ok(v) => v,
                     Err(_) => break,
                 };
-                let _initializer_idx = match behavior_reader.read_u32() {
+                let initializer_idx = match behavior_reader.read_u32() {
                     Ok(v) => v,
                     Err(_) => break,
                 };
 
-                // Check for valid behavior reference
                 // cast_lib == 0 && cast_member == 0 is end marker
                 if cast_lib == 0 && cast_member == 0 {
                     break;
                 }
 
-                // cast_lib can be 65535 (-1 as u16) meaning "use parent cast lib"
-                // cast_member should be > 0 for a valid reference
+                // cast_lib 65535 means "use parent cast lib"; cast_member must be valid
                 if cast_member > 0 && cast_member < 10000 {
                     info.behaviors.push(SpriteBehavior { cast_lib, cast_member, parameter: Vec::new() });
                 }
