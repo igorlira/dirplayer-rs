@@ -2749,7 +2749,7 @@ impl WebGL2Renderer {
                     // Note: 1-bit bitmaps are excluded - they use is_1bit_transparent for alpha instead
                     255
                 } else if should_use_matte {
-                    // Use matte for inks 0 and 8 when trim_white_space is true
+                    // Use matte for inks 7, 8, 9, 41 (ink 0 matte handled above)
                     if let Some(ref computed) = computed_matte {
                         // Use computed flood-fill matte
                         if computed[y * width + x] { 255 } else { 0 }
