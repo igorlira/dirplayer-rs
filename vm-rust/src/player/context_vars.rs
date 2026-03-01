@@ -1,7 +1,8 @@
 use super::{
     bytecode::handler_manager::BytecodeHandlerContext,
+    ci_string::{CiStr, CiString},
     scope::ScopeRef,
-    script::{get_current_handler_def, get_current_variable_multiplier, get_name},
+    script::{get_current_handler_def, get_current_script, get_current_variable_multiplier, get_name, script_get_prop, script_set_prop},
     DatumRef, DirPlayer, ScriptError,
 };
 use crate::director::lingo::datum::Datum;
@@ -37,10 +38,36 @@ pub fn player_get_context_var(
     let handler = get_current_handler_def(player, &ctx);
 
     match var_type {
-        // global | global | property/instance
-        0x1 | 0x2 | 0x3 => Err(ScriptError::new(
-            "readVar global/prop/instance not implemented".to_string(),
-        )),
+        // global
+        0x1 | 0x2 => {
+            let name_index = (id.int_value()? / variable_multiplier as i32) as usize;
+            let name_id = handler.global_name_ids[name_index];
+            let global_name = get_name(player, ctx, name_id).unwrap().to_owned();
+            let value_ref = player
+                .globals
+                .get(&global_name)
+                .unwrap_or(&DatumRef::Void)
+                .clone();
+            Ok(value_ref)
+        }
+        // property/instance
+        0x3 => {
+            let name_index = (id.int_value()? / variable_multiplier as i32) as usize;
+            let script = get_current_script(player, ctx).unwrap();
+            let prop_name_id = script.chunk.property_name_ids[name_index];
+            let prop_name = get_name(player, ctx, prop_name_id).unwrap().to_owned();
+            let scope = player.scopes.get(ctx.scope_ref).unwrap();
+            let receiver = scope.receiver.clone();
+            let script_ref = scope.script_ref.clone();
+            if let Some(instance_ref) = receiver {
+                script_get_prop(player, &instance_ref, &prop_name)
+            } else {
+                // Static property on script
+                let script_rc = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
+                let properties = script_rc.properties.borrow();
+                Ok(properties.get(CiStr::new(&prop_name)).unwrap_or(&DatumRef::Void).clone())
+            }
+        }
         0x4 => {
             // arg
             let arg_index = (id.int_value()? / variable_multiplier as i32) as usize;
@@ -97,10 +124,32 @@ pub fn player_set_context_var(
     let id_datum = player.get_datum(id_ref);
 
     match var_type {
-        // global | global | property/instance
-        0x1 | 0x2 | 0x3 => Err(ScriptError::new(
-            "set readVar global/prop/instance not implemented".to_string(),
-        )),
+        // global
+        0x1 | 0x2 => {
+            let name_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
+            let name_id = handler.global_name_ids[name_index];
+            let global_name = get_name(player, ctx, name_id).unwrap().to_owned();
+            player.globals.insert(global_name, value_ref.clone());
+            Ok(())
+        }
+        // property/instance
+        0x3 => {
+            let name_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
+            let script = get_current_script(player, ctx).unwrap();
+            let prop_name_id = script.chunk.property_name_ids[name_index];
+            let prop_name = get_name(player, ctx, prop_name_id).unwrap().to_owned();
+            let scope = player.scopes.get(ctx.scope_ref).unwrap();
+            if let Some(instance_ref) = scope.receiver.clone() {
+                script_set_prop(player, &instance_ref, &prop_name, value_ref, true)
+            } else {
+                let scope = player.scopes.get(ctx.scope_ref).unwrap();
+                let script_ref = scope.script_ref.clone();
+                let script_rc = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
+                let mut properties = script_rc.properties.borrow_mut();
+                properties.insert(CiString::from(prop_name), value_ref.clone());
+                Ok(())
+            }
+        }
         0x4 => {
             // argument
             let arg_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
