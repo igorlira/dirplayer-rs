@@ -53,4 +53,16 @@ impl PaletteMap {
             .max_by_key(|entry| entry.number & 0xFFFF)
             .map(|entry| &entry.member)
     }
+
+    /// Search all palettes for one with a matching member number, ignoring cast lib.
+    /// Used when cast_lib is 0 (unspecified).
+    pub fn find_by_member(&self, cast_member: u32) -> Option<&PaletteMember> {
+        for entry in &self.palettes {
+            let entry_member = entry.number & 0xFFFF;
+            if entry_member == cast_member {
+                return Some(&entry.member);
+            }
+        }
+        None
+    }
 }
