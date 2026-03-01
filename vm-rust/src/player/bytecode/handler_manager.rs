@@ -260,6 +260,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::PushFloat32 => StackBytecodeHandler::push_f32(ctx),
             OpCode::Mul => ArithmeticsBytecodeHandler::mul(ctx),
             OpCode::PushChunkVarRef => StackBytecodeHandler::push_chunk_var_ref(ctx),
+            OpCode::PushVarRef => StackBytecodeHandler::push_var_ref(ctx),
             OpCode::DeleteChunk => StringBytecodeHandler::delete_chunk(ctx),
             OpCode::GetTopLevelProp => GetSetBytecodeHandler::get_top_level_prop(ctx),
             OpCode::PutChunk => StringBytecodeHandler::put_chunk(ctx),
