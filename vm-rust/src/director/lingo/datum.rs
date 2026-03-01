@@ -610,11 +610,17 @@ impl Datum {
     }
 
     pub fn to_string_mut(&mut self) -> Result<&mut String, ScriptError> {
+        // Coerce non-string types to String first (Lingo allows chunk ops on any value)
+        match self {
+            Datum::String(_) => {}
+            _ => {
+                let s = self.string_value()?;
+                *self = Datum::String(s);
+            }
+        }
         match self {
             Datum::String(s) => Ok(s),
-            _ => Err(ScriptError::new(
-                "Cannot convert datum to string".to_string(),
-            )),
+            _ => unreachable!(),
         }
     }
 
