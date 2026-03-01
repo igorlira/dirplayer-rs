@@ -125,23 +125,25 @@ impl TextMemberHandlers {
             .find_member_by_ref(cast_member_ref)
             .unwrap();
         let text_data = member.member_type.as_text().unwrap().clone();
-        match prop.as_str() {
+        // Director property names are case-insensitive
+        let prop_lc = prop.to_ascii_lowercase();
+        match prop_lc.as_str() {
             "text" => Ok(Datum::String(text_data.text.to_owned())),
             "alignment" => Ok(Datum::String(text_data.alignment.to_owned())),
-            "wordWrap" => Ok(datum_bool(text_data.word_wrap)),
+            "wordwrap" => Ok(datum_bool(text_data.word_wrap)),
             "width" => Ok(Datum::Int(text_data.width as i32)),
             "font" => Ok(Datum::String(text_data.font.to_owned())),
-            "fontSize" => Ok(Datum::Int(text_data.font_size as i32)),
-            "fontStyle" => {
+            "fontsize" => Ok(Datum::Int(text_data.font_size as i32)),
+            "fontstyle" => {
                 let mut item_refs = Vec::new();
                 for item in &text_data.font_style {
                     item_refs.push(player.alloc_datum(Datum::Symbol(item.to_owned())));
                 }
                 Ok(Datum::List(DatumType::List, item_refs, false))
             }
-            "fixedLineSpace" => Ok(Datum::Int(text_data.fixed_line_space as i32)),
-            "topSpacing" => Ok(Datum::Int(text_data.top_spacing as i32)),
-            "boxType" => Ok(Datum::Symbol(text_data.box_type.to_owned())),
+            "fixedlinespace" => Ok(Datum::Int(text_data.fixed_line_space as i32)),
+            "topspacing" => Ok(Datum::Int(text_data.top_spacing as i32)),
+            "boxtype" => Ok(Datum::Symbol(text_data.box_type.to_owned())),
             "antialias" => Ok(datum_bool(text_data.anti_alias)),
             "html" => {
                 // Generate Director-style HTML from current text member state
@@ -261,7 +263,7 @@ impl TextMemberHandlers {
                     Ok(Datum::Int(height as i32))
                 }
             }
-            "foreColor" | "color" => {
+            "forecolor" | "color" => {
                 // Get foreground color from cast member
                 match member.color {
                     crate::player::sprite::ColorRef::PaletteIndex(idx) => Ok(Datum::Int(idx as i32)),
@@ -272,7 +274,7 @@ impl TextMemberHandlers {
                     }
                 }
             }
-            "bgColor" | "backColor" => {
+            "bgcolor" | "backcolor" => {
                 // Get background color from cast member
                 match member.bg_color {
                     crate::player::sprite::ColorRef::PaletteIndex(idx) => Ok(Datum::Int(idx as i32)),
@@ -283,12 +285,12 @@ impl TextMemberHandlers {
                     }
                 }
             }
-            "lineHeight" => {
+            "lineheight" => {
                 // Line height is typically font height + fixed line space
                 Ok(Datum::Int(text_data.fixed_line_space as i32))
             }
             // TextInfo (3D text / D6+ text member) properties
-            "displayFace" => {
+            "displayface" => {
                 if let Some(ref info) = text_data.info {
                     let faces = info.display_face_list();
                     let mut item_refs = Vec::new();
@@ -300,21 +302,21 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "tunnelDepth" => {
+            "tunneldepth" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.tunnel_depth as i32))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "bevelType" => {
+            "beveltype" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.bevel_type_str().trim_start_matches('#').to_string()))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "bevelDepth" => {
+            "beveldepth" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.bevel_depth as i32))
                 } else {
@@ -328,21 +330,21 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "displayMode" => {
+            "displaymode" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.display_mode_str().trim_start_matches('#').to_string()))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "directionalPreset" => {
+            "directionalpreset" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.directional_preset_str().trim_start_matches('#').to_string()))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "textureType" => {
+            "texturetype" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.texture_type_str().trim_start_matches('#').to_string()))
                 } else {
@@ -356,7 +358,7 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "directionalColor" => {
+            "directionalcolor" => {
                 if let Some(ref info) = text_data.info {
                     let (r, g, b) = info.directional_color_rgb();
                     let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
@@ -365,7 +367,7 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "ambientColor" => {
+            "ambientcolor" => {
                 if let Some(ref info) = text_data.info {
                     let (r, g, b) = info.ambient_color_rgb();
                     let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
@@ -374,7 +376,7 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "specularColor" => {
+            "specularcolor" => {
                 if let Some(ref info) = text_data.info {
                     let (r, g, b) = info.specular_color_rgb();
                     let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
@@ -383,7 +385,7 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "cameraPosition" => {
+            "cameraposition" => {
                 if let Some(ref info) = text_data.info {
                     // Return as a vector(x, y, z)
                     let x_ref = player.alloc_datum(Datum::Float(info.camera_position_x as f64));
@@ -394,7 +396,7 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "cameraRotation" => {
+            "camerarotation" => {
                 if let Some(ref info) = text_data.info {
                     // Return as a vector(x, y, z)
                     let x_ref = player.alloc_datum(Datum::Float(info.camera_rotation_x as f64));
@@ -405,7 +407,7 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "textureMember" => {
+            "texturemember" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::String(info.texture_member.clone()))
                 } else {
@@ -419,28 +421,28 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "autoTab" => {
+            "autotab" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.auto_tab))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "directToStage" => {
+            "directtostage" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.direct_to_stage))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "preRender" => {
+            "prerender" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.pre_render_str().trim_start_matches('#').to_string()))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "saveBitmap" => {
+            "savebitmap" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.save_bitmap))
                 } else {
@@ -454,35 +456,35 @@ impl TextMemberHandlers {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "kerningThreshold" => {
+            "kerningthreshold" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.kerning_threshold as i32))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "useHypertextStyles" => {
+            "usehypertextstyles" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.use_hypertext_styles))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "antiAliasThreshold" => {
+            "antialiasthreshold" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.anti_alias_threshold as i32))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "scrollTop" => {
+            "scrolltop" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.scroll_top as i32))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
-            "centerRegPoint" => {
+            "centerregpoint" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.center_reg_point))
                 } else {
@@ -491,7 +493,7 @@ impl TextMemberHandlers {
                     Ok(datum_bool(false))
                 }
             }
-            "regPoint" => {
+            "regpoint" => {
                 if let Some(ref info) = text_data.info {
                     let x_ref = player.alloc_datum(Datum::Int(info.reg_x));
                     let y_ref = player.alloc_datum(Datum::Int(info.reg_y));
@@ -932,7 +934,9 @@ impl TextMemberHandlers {
         prop: &String,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        // Director property names are case-insensitive
+        let prop_lc = prop.to_ascii_lowercase();
+        match prop_lc.as_str() {
             "text" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
@@ -978,7 +982,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "wordWrap" => borrow_member_mut(
+            "wordwrap" => borrow_member_mut(
                 member_ref,
                 |player| value.bool_value(),
                 |cast_member, value| {
@@ -1007,7 +1011,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "fontSize" => borrow_member_mut(
+            "fontsize" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1020,7 +1024,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "fontStyle" => borrow_member_mut(
+            "fontstyle" => borrow_member_mut(
                 member_ref,
                 |player| {
                     let mut item_strings = Vec::new();
@@ -1044,7 +1048,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "fixedLineSpace" => borrow_member_mut(
+            "fixedlinespace" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1056,7 +1060,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "topSpacing" => borrow_member_mut(
+            "topspacing" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1064,7 +1068,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "boxType" => borrow_member_mut(
+            "boxtype" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
@@ -1238,7 +1242,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "foreColor" | "color" => borrow_member_mut(
+            "forecolor" | "color" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1255,7 +1259,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "bgColor" | "backColor" => borrow_member_mut(
+            "bgcolor" | "backcolor" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1272,7 +1276,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "lineHeight" => borrow_member_mut(
+            "lineheight" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1281,7 +1285,7 @@ impl TextMemberHandlers {
                 },
             ),
             // TextInfo (3D text / D6+ text member) property setters
-            "tunnelDepth" => borrow_member_mut(
+            "tunneldepth" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1292,7 +1296,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "bevelDepth" => borrow_member_mut(
+            "beveldepth" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1325,7 +1329,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "bevelType" => borrow_member_mut(
+            "beveltype" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
@@ -1342,7 +1346,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "displayMode" => borrow_member_mut(
+            "displaymode" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
@@ -1358,7 +1362,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "directionalPreset" => borrow_member_mut(
+            "directionalpreset" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
@@ -1382,7 +1386,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "textureType" => borrow_member_mut(
+            "texturetype" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
@@ -1399,7 +1403,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "directionalColor" => borrow_member_mut(
+            "directionalcolor" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1415,7 +1419,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "ambientColor" => borrow_member_mut(
+            "ambientcolor" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1430,7 +1434,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "specularColor" => borrow_member_mut(
+            "specularcolor" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1445,7 +1449,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "cameraPosition" => borrow_member_mut(
+            "cameraposition" => borrow_member_mut(
                 member_ref,
                 |player| {
                     let list = value.to_list()?;
@@ -1469,7 +1473,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "cameraRotation" => borrow_member_mut(
+            "camerarotation" => borrow_member_mut(
                 member_ref,
                 |player| {
                     let list = value.to_list()?;
@@ -1493,7 +1497,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "textureMember" => borrow_member_mut(
+            "texturemember" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
@@ -1504,7 +1508,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "displayFace" => borrow_member_mut(
+            "displayface" => borrow_member_mut(
                 member_ref,
                 |player| {
                     let list = value.to_list()?;
@@ -1543,7 +1547,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "autoTab" => borrow_member_mut(
+            "autotab" => borrow_member_mut(
                 member_ref,
                 |player| value.bool_value(),
                 |cast_member, value| {
@@ -1554,7 +1558,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "directToStage" => borrow_member_mut(
+            "directtostage" => borrow_member_mut(
                 member_ref,
                 |player| value.bool_value(),
                 |cast_member, value| {
@@ -1565,7 +1569,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "preRender" => borrow_member_mut(
+            "prerender" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
@@ -1582,7 +1586,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "saveBitmap" => borrow_member_mut(
+            "savebitmap" => borrow_member_mut(
                 member_ref,
                 |player| value.bool_value(),
                 |cast_member, value| {
@@ -1604,7 +1608,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "kerningThreshold" => borrow_member_mut(
+            "kerningthreshold" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1615,7 +1619,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "useHypertextStyles" => borrow_member_mut(
+            "usehypertextstyles" => borrow_member_mut(
                 member_ref,
                 |player| value.bool_value(),
                 |cast_member, value| {
@@ -1626,7 +1630,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "antiAliasThreshold" => borrow_member_mut(
+            "antialiasthreshold" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1637,7 +1641,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "scrollTop" => borrow_member_mut(
+            "scrolltop" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
@@ -1648,7 +1652,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "centerRegPoint" => borrow_member_mut(
+            "centerregpoint" => borrow_member_mut(
                 member_ref,
                 |player| value.bool_value(),
                 |cast_member, value| {
@@ -1662,7 +1666,7 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "regPoint" => borrow_member_mut(
+            "regpoint" => borrow_member_mut(
                 member_ref,
                 |player| {
                     let list = value.to_list()?;

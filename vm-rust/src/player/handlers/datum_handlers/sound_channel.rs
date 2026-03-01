@@ -600,12 +600,16 @@ impl SoundChannelDatumHandlers {
                 }
 
                 // Validate and push
-                match (member_value, loopcount_value) {
+                // Default loopCount to 1 when not provided (consistent with queue() and set_playlist())
+                let loop_count = loopcount_value.unwrap_or(1);
+
+                match (member_value, loop_count) {
                     // ✅ valid member and positive loopCount
-                    (Some(member_val), Some(loop_count)) if loop_count > 0 => {
-                        let member_ref = player.alloc_datum(member_val);
+                    (Some(_member_val), loop_count) if loop_count > 0 => {
+                        // Store the original proplist ref (not the extracted member datum)
+                        // to match queue() behavior - play_segment_for_member extracts #member from proplist
                         segments.push(SoundSegment {
-                            member_ref: member_ref.clone(),
+                            member_ref: segment_ref.clone(),
                             loop_count,
                             loops_remaining: loop_count,
                         });
@@ -613,21 +617,16 @@ impl SoundChannelDatumHandlers {
                     }
 
                     // ⚠️ loopCount == 0
-                    (Some(_), Some(0)) => {
+                    (Some(_), 0) => {
                         console::log_1(&"  ⚠️ Skipped: loopCount is 0 (nothing to play)".into());
                     }
 
                     // ⚠️ loopCount negative (invalid)
-                    (Some(_), Some(loop_count)) if loop_count < 0 => {
+                    (Some(_), loop_count) if loop_count < 0 => {
                         console::log_1(
                             &format!("  ⚠️ Skipped: invalid negative loopCount ({})", loop_count)
                                 .into(),
                         );
-                    }
-
-                    // ⚠️ missing loopCount
-                    (Some(_), None) => {
-                        console::log_1(&"  ⚠️ Skipped: missing loopCount property".into());
                     }
 
                     // ⚠️ missing member entirely

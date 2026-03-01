@@ -589,6 +589,8 @@ impl CastMemberRefHandlers {
             "color" => Ok(Datum::ColorRef(color)),
             "bgColor" => Ok(Datum::ColorRef(bg_color)),
             "mediaReady" => Ok(Datum::Int(1)),
+            // In Director, member.member returns the member reference itself
+            "member" => Ok(Datum::CastMember(cast_member_ref.clone())),
             _ => Self::get_member_type_prop(player, cast_member_ref, &member_type, prop),
         }
     }

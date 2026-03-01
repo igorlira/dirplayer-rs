@@ -2972,6 +2972,16 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                             Ok(())
                         })
                     }
+                    // Director auto-coerces a 2-element list to a point for loc
+                    Datum::List(_, list, _) if list.len() == 2 => {
+                        reserve_player_mut(|player| {
+                            let x = player.get_datum(&list[0]).int_value()?;
+                            let y = player.get_datum(&list[1]).int_value()?;
+                            sprite.loc_h = x;
+                            sprite.loc_v = y;
+                            Ok(())
+                        })
+                    }
                     Datum::Void => Ok(()), // no-op
                     _ => Err(ScriptError::new(format!(
                         "loc must be a Point (received {})",

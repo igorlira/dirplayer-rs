@@ -74,8 +74,18 @@ impl StringChunkUtils {
     ) -> Result<(), ScriptError> {
         match original_str_src {
             StringChunkSource::Datum(original_str_ref) => {
-                let original_str_value = player.get_datum_mut(original_str_ref).to_string_mut()?;
-                *original_str_value = new_string;
+                // The datum might be a StringChunk (e.g. when trim() receives t.line[ln] as argument).
+                // In Director, strings are value types, so mutating a StringChunk-backed variable
+                // should "materialize" it into a plain String. Replace the datum entirely.
+                let datum = player.get_datum_mut(original_str_ref);
+                match datum {
+                    Datum::String(s) => {
+                        *s = new_string;
+                    }
+                    _ => {
+                        *datum = Datum::String(new_string);
+                    }
+                }
             }
             StringChunkSource::Member(member_ref) => {
                 let member = &mut player
@@ -177,6 +187,12 @@ impl StringChunkUtils {
 
     fn vm_range_to_host(range: (i32, i32), max_length: usize) -> (usize, usize) {
         let (start, end) = range;
+        // Director's compiler uses -30000 as a sentinel for "the last element"
+        // (e.g. `delete the last char of t` compiles to `delete char -30000 of t`)
+        if start <= -30000 && max_length > 0 {
+            let last = max_length - 1;
+            return (last, max_length);
+        }
         let start_index = std::cmp::max(0, start - 1) as usize;
         let end_index = if end == 0 {
             if start <= 0 {

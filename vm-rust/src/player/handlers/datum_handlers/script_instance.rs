@@ -91,8 +91,12 @@ impl ScriptInstanceUtils {
         let script = player
             .movie
             .cast_manager
-            .get_script_by_ref(&instance.script)
-            .unwrap();
+            .get_script_by_ref(&instance.script);
+        if script.is_none() {
+            // Script not found — cast library may be unloaded or empty
+            return Ok(None);
+        }
+        let script = script.unwrap();
         let own_handler = script.get_own_handler_ref(name);
         if let Some(own_handler) = own_handler {
             return Ok(Some(own_handler));
@@ -498,8 +502,11 @@ impl ScriptInstanceDatumHandlers {
             let script = player
                 .movie
                 .cast_manager
-                .get_script_by_ref(&script_instance.script)
-                .unwrap();
+                .get_script_by_ref(&script_instance.script);
+            if script.is_none() {
+                return Ok(player.alloc_datum(Datum::List(DatumType::List, vec![], false)));
+            }
+            let script = script.unwrap();
             let handler_names = script.handler_names.clone();
             let handler_name_datums = handler_names
                 .iter()
@@ -542,23 +549,30 @@ impl ScriptInstanceDatumHandlers {
             }
             _ => {
                 // Check for non-ScriptInstance ancestor to delegate to (e.g., TimeoutInstance)
-                let (ancestor_ref, ancestor_type, script_name) = reserve_player_ref(|player| {
-                    let script_name = if let Datum::ScriptInstanceRef(ref inst_ref) = player.get_datum(datum) {
+                let (ancestor_ref, ancestor_type, script_name, script_missing) = reserve_player_ref(|player| {
+                    let (script_name, script_missing) = if let Datum::ScriptInstanceRef(ref inst_ref) = player.get_datum(datum) {
                         let instance = player.allocator.get_script_instance(inst_ref);
-                        player.movie.cast_manager.get_script_by_ref(&instance.script)
-                            .map(|s| s.name.clone())
-                            .unwrap_or_else(|| "unknown".to_string())
+                        let script = player.movie.cast_manager.get_script_by_ref(&instance.script);
+                        match script {
+                            Some(s) => (s.name.clone(), false),
+                            None => ("unknown".to_string(), true),
+                        }
                     } else {
-                        "not-script-instance".to_string()
+                        ("not-script-instance".to_string(), false)
                     };
 
                     if let Some(ancestor) = Self::find_non_script_ancestor(datum, player) {
                         let datum_type = player.get_datum(&ancestor).type_enum();
-                        (Some(ancestor), Some(datum_type), script_name)
+                        (Some(ancestor), Some(datum_type), script_name, script_missing)
                     } else {
-                        (None, None, script_name)
+                        (None, None, script_name, script_missing)
                     }
                 });
+
+                // If the script's cast library is unloaded/empty, silently ignore the call
+                if script_missing {
+                    return Ok(DatumRef::Void);
+                }
 
                 if let (Some(ancestor_ref), Some(ancestor_type)) = (ancestor_ref, ancestor_type) {
                     use crate::director::lingo::datum::DatumType;

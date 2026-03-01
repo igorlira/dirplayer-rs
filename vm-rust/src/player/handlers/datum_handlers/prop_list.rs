@@ -316,6 +316,32 @@ impl PropListDatumHandlers {
                                 )?;
                                 Ok(DatumRef::Void)
                             }
+                            Datum::Point(_) => {
+                                // Point: index 1 = locH (x), index 2 = locV (y)
+                                if adjusted_index < 2 {
+                                    let point = player.get_datum_mut(&list_ref).to_point_mut()?;
+                                    let _ = std::mem::replace(&mut point[adjusted_index], value_ref.clone());
+                                    Ok(DatumRef::Void)
+                                } else {
+                                    Err(ScriptError::new(format!(
+                                        "Point index out of bounds: {} (must be 1 or 2)",
+                                        index
+                                    )))
+                                }
+                            }
+                            Datum::Rect(_) => {
+                                // Rect: index 1-4
+                                if adjusted_index < 4 {
+                                    let rect = player.get_datum_mut(&list_ref).to_rect_mut()?;
+                                    let _ = std::mem::replace(&mut rect[adjusted_index], value_ref.clone());
+                                    Ok(DatumRef::Void)
+                                } else {
+                                    Err(ScriptError::new(format!(
+                                        "Rect index out of bounds: {} (must be 1-4)",
+                                        index
+                                    )))
+                                }
+                            }
                             _ => {
                                 Err(ScriptError::new(format!(
                                     "Property is not a list or propList, it's: {}",
@@ -794,11 +820,11 @@ impl PropListDatumHandlers {
                 // If there's a second argument and the property is a list, index into it
                 if args.len() >= 2 {
                     let index_ref = &args[1];
-                    let index = player.get_datum(index_ref).int_value()?;
                     let prop_datum = player.get_datum(&prop_value);
 
                     match prop_datum {
                         Datum::List(_, items, _) => {
+                            let index = player.get_datum(index_ref).int_value()?;
                             // Support both 0-based and 1-based indexing
                             let actual_index = if index == 0 {
                                 0
@@ -820,8 +846,36 @@ impl PropListDatumHandlers {
 
                             items[actual_index].clone()
                         }
+                        // Nested PropList: use second arg as key for the inner PropList
+                        Datum::PropList(inner_pairs, _) => {
+                            PropListUtils::get_by_key(&inner_pairs, index_ref, &player.allocator)?
+                        }
+                        // Point: index 1 = locH (x), index 2 = locV (y)
+                        Datum::Point(point_arr) => {
+                            let index = player.get_datum(index_ref).int_value()?;
+                            let actual_index = if index >= 1 { (index - 1) as usize } else { 0 };
+                            if actual_index < 2 {
+                                point_arr[actual_index].clone()
+                            } else {
+                                return Err(ScriptError::new(format!(
+                                    "Point index out of bounds: {}", index
+                                )));
+                            }
+                        }
+                        // Rect: index 1-4
+                        Datum::Rect(rect_arr) => {
+                            let index = player.get_datum(index_ref).int_value()?;
+                            let actual_index = if index >= 1 { (index - 1) as usize } else { 0 };
+                            if actual_index < 4 {
+                                rect_arr[actual_index].clone()
+                            } else {
+                                return Err(ScriptError::new(format!(
+                                    "Rect index out of bounds: {}", index
+                                )));
+                            }
+                        }
                         _ => return Err(ScriptError::new(
-                            "Second argument to getPropRef requires first property to be a list"
+                            "Second argument to getPropRef requires first property to be a list or propList"
                                 .to_string(),
                         )),
                     }
