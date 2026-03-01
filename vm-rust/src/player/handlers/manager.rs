@@ -552,7 +552,15 @@ impl BuiltInHandlerManager {
                 // Yield to the browser event loop. In Director, nothing() is
                 // a no-op, but in WASM we use it to yield in busy-wait loops
                 // like waitABit() so the browser can repaint the canvas.
-                async_std::task::sleep(std::time::Duration::from_millis(0)).await;
+                // We use MessageChannel.postMessage() which fires as a macrotask
+                // (yields to the browser event loop) but with near-zero delay,
+                // unlike setTimeout(0) which has a browser-imposed ~4ms minimum.
+                let promise = js_sys::Promise::new(&mut |resolve, _| {
+                    let channel = web_sys::MessageChannel::new().unwrap();
+                    channel.port2().set_onmessage(Some(&resolve));
+                    channel.port1().post_message(&wasm_bindgen::JsValue::NULL).unwrap();
+                });
+                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
                 Ok(DatumRef::Void)
             }
             _ => {
