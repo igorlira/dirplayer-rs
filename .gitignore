@@ -28,6 +28,8 @@ yarn-error.log*
 .DS_Store
 public/dcr*
 .vscode
+.claude
+CLAUDE.md
 
 /dist-extension
 /dist-extension.zip
