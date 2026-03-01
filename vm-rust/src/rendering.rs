@@ -486,6 +486,29 @@ pub fn render_score_to_bitmap(
     render_score_to_bitmap_with_offset(player, score_source, bitmap, debug_sprite_num, dest_rect, (0, 0), None);
 }
 
+/// Get the filmloop's info rect (the authoritative viewport from the Director file).
+/// The info rect is stored in the filmloop's member-specific data as:
+///   reg_point = (left, top), width = right, height = bottom
+/// Returns None if the member isn't a filmloop or the rect has zero dimensions.
+pub fn get_filmloop_info_rect(player: &DirPlayer, member_ref: &CastMemberRef) -> Option<IntRect> {
+    let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+    let film_loop = match &member.member_type {
+        CastMemberType::FilmLoop(fl) => fl,
+        _ => return None,
+    };
+    let rect = IntRect::from(
+        film_loop.info.reg_point.0 as i32,
+        film_loop.info.reg_point.1 as i32,
+        film_loop.info.width as i32,
+        film_loop.info.height as i32,
+    );
+    if rect.width() > 0 && rect.height() > 0 {
+        Some(rect)
+    } else {
+        None
+    }
+}
+
 /// Recompute the initial_rect for a filmloop using actual bitmap dimensions.
 /// This is more accurate than the precomputed initial_rect because it uses
 /// the real cast member dimensions instead of the channel_data dimensions.
@@ -789,7 +812,9 @@ fn render_filmloop_from_channel_data(
                 };
                 (w, h, bm.reg_point.0 as i32, bm.reg_point.1 as i32)
             }
-            _ => (data.width, data.height, data.width as i32 / 2, data.height as i32 / 2),
+            // For shapes and other non-bitmap members, pos_x/pos_y is the top-left corner.
+            // Use (0,0) registration — shapes don't have a registration point like bitmaps.
+            _ => (data.width, data.height, 0, 0),
         };
 
         // Use channel data dimensions if valid, otherwise fall back to member dimensions
@@ -806,9 +831,22 @@ fn render_filmloop_from_channel_data(
         // IMPORTANT: pos_x/pos_y are the sprite's loc (registration point position).
         // We need to subtract the registration point (the bitmap's anchor)
         // to get the sprite's top-left corner, then translate relative to initial_rect.
-        // This matches how initial_rect was computed in compute_filmloop_initial_rect.
-        let sprite_left = pos_x as i32 - reg_x;
-        let sprite_top = pos_y as i32 - reg_y;
+        //
+        // When bitmap dimensions differ from display dimensions (channel data),
+        // scale the registration point proportionally from bitmap space to display space.
+        // This matches how Director handles stretched sprites within filmloops.
+        let (scaled_reg_x, scaled_reg_y) = if member_width > 0 && member_height > 0
+            && (member_width != use_width || member_height != use_height)
+        {
+            (
+                reg_x * use_width as i32 / member_width as i32,
+                reg_y * use_height as i32 / member_height as i32,
+            )
+        } else {
+            (reg_x, reg_y)
+        };
+        let sprite_left = pos_x as i32 - scaled_reg_x;
+        let sprite_top = pos_y as i32 - scaled_reg_y;
         let rel_x = sprite_left - initial_rect.left;
         let rel_y = sprite_top - initial_rect.top;
 
@@ -851,15 +889,11 @@ fn render_filmloop_from_channel_data(
                 let src_bitmap = sprite_bitmap.unwrap();
 
                 let src_rect = IntRect::from(0, 0, src_bitmap.width as i32, src_bitmap.height as i32);
-                // Use actual bitmap dimensions for dst_rect to avoid scaling/distortion.
-                // Channel data width/height may differ from actual bitmap dimensions
-                // (e.g., due to SCVW header parsing differences between D5/D7 formats).
-                let dst_rect = IntRect::from(
-                    sprite_rect.left,
-                    sprite_rect.top,
-                    sprite_rect.left + src_bitmap.width as i32,
-                    sprite_rect.top + src_bitmap.height as i32,
-                );
+                // Use the display dimensions (from channel data) for dst_rect.
+                // When bitmap dimensions differ from display dimensions (e.g. thin strips
+                // that Director stretches to fill the display rect), copy_pixels will
+                // handle the scaling automatically via its scale_x/scale_y computation.
+                let dst_rect = sprite_rect.clone();
 
                 // Check if bitmap has actual data
                 let has_data = !src_bitmap.data.is_empty();
@@ -1058,10 +1092,11 @@ pub fn render_score_to_bitmap_with_offset(
             dest_rect.bottom,
         );
 
-        // Use actual member dimensions to compute the initial_rect instead of
-        // channel data dimensions. The SCVW score data may have different width/height
-        // than the actual bitmap members, causing wrong filmloop bitmap size.
-        let initial_rect = compute_filmloop_initial_rect_with_members(player, member_ref)
+        // Use the filmloop's info rect (from the Director file) as the authoritative viewport.
+        // This is the rect that Director uses for the filmloop's coordinate space.
+        // Fall back to computed rect if info rect is unavailable.
+        let initial_rect = get_filmloop_info_rect(player, member_ref)
+            .or_else(|| compute_filmloop_initial_rect_with_members(player, member_ref))
             .unwrap_or_else(|| {
                 // Fall back to load-time computed initial_rect
                 let member = player.movie.cast_manager.find_member_by_ref(member_ref);

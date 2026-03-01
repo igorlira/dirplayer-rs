@@ -1560,10 +1560,20 @@ impl WebGL2Renderer {
                     }
                 }
                 CastMemberType::FilmLoop(film_loop) => {
-                    // Film loop: render the film loop's score to an offscreen bitmap
-                    // Use the computed initial_rect (bounding box of all sprites) instead of
-                    // the info header rect. ScummVM also recomputes this from actual sprite data.
-                    let initial_rect = film_loop.initial_rect.clone();
+                    // Film loop: render the film loop's score to an offscreen bitmap.
+                    // Prefer the info rect (authoritative viewport from Director file)
+                    // over the load-time computed initial_rect.
+                    let info_rect = IntRect::from(
+                        film_loop.info.reg_point.0 as i32,
+                        film_loop.info.reg_point.1 as i32,
+                        film_loop.info.width as i32,
+                        film_loop.info.height as i32,
+                    );
+                    let initial_rect = if info_rect.width() > 0 && info_rect.height() > 0 {
+                        info_rect
+                    } else {
+                        film_loop.initial_rect.clone()
+                    };
 
                     // Store just the metadata - we'll render after this block ends
                     let width = initial_rect.width().max(1);
@@ -1582,34 +1592,34 @@ impl WebGL2Renderer {
             }
         };
 
-        // For filmloops, recompute initial_rect using actual member dimensions and registration
-        // points. The load-time compute_filmloop_initial_rect uses channel data dimensions which
-        // may not match actual bitmap sizes (especially for D5 SCVW format filmloops).
-        // Also update sprite_rect to match the recomputed dimensions so the texture isn't
-        // stretched when drawn.
+        // For filmloops, use info rect (already computed above) as the authoritative viewport.
+        // When the sprite doesn't have explicit dimensions, use center registration
+        // to position the filmloop on the stage.
         let texture_source = match texture_source {
-            TextureSource::FilmLoop { initial_rect, .. } => {
-                let better_rect = crate::rendering::compute_filmloop_initial_rect_with_members(player, &member_ref)
-                    .unwrap_or(initial_rect);
-                let width = better_rect.width().max(1);
-                let height = better_rect.height().max(1);
+            TextureSource::FilmLoop { initial_rect, width, height } => {
+                let w = width as i32;
+                let h = height as i32;
 
-                // Override sprite_rect to use the correct filmloop dimensions.
-                // sprite_rect may have been computed from film_loop.info header which
-                // can have wrong dimensions for D5 SCVW format filmloops.
-                let reg_x = width / 2;
-                let reg_y = height / 2;
-                sprite_rect = IntRect::from(
-                    raw_loc.0 as i32 - reg_x,
-                    raw_loc.1 as i32 - reg_y,
-                    raw_loc.0 as i32 - reg_x + width,
-                    raw_loc.1 as i32 - reg_y + height,
-                );
+                // Only override sprite_rect when the sprite doesn't have explicit
+                // dimensions from the score. When the score specifies width/height
+                // (e.g. a filmloop with Scale checked, stretched to a specific size),
+                // those dimensions must be respected — the GPU will scale the texture
+                // from its natural size to the sprite's display rect.
+                if sprite_width <= 0 || sprite_height <= 0 {
+                    let reg_x = w / 2;
+                    let reg_y = h / 2;
+                    sprite_rect = IntRect::from(
+                        raw_loc.0 as i32 - reg_x,
+                        raw_loc.1 as i32 - reg_y,
+                        raw_loc.0 as i32 - reg_x + w,
+                        raw_loc.1 as i32 - reg_y + h,
+                    );
+                }
 
                 TextureSource::FilmLoop {
-                    initial_rect: better_rect,
-                    width: width as u32,
-                    height: height as u32,
+                    initial_rect,
+                    width,
+                    height,
                 }
             }
             other => other,
@@ -3955,10 +3965,7 @@ impl WebGL2Renderer {
                         let mut token_is_ws: Option<bool> = None;
 
                         for ch in span.text.chars() {
-                            if ch == '\r' {
-                                continue;
-                            }
-                            if ch == '\n' {
+                            if ch == '\r' || ch == '\n' {
                                 if !token.is_empty() {
                                     pieces.push(Piece::Token(PfrToken {
                                         text: std::mem::take(&mut token),
