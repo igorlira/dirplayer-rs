@@ -129,8 +129,8 @@ command_inline_args              = _{ command_inline_args_comma | command_inline
 // put() with parentheses must have at least one argument, otherwise it's an error
 put_handler_call                 =  { ^"put" ~ "(" ~ handler_call_args ~ ")" }
 // Allow other handlers with parentheses to be called normally
-handler_call                     =  { !^"put" ~ !^"set" ~ lang_ident ~ "(" ~ handler_call_args? ~ ")" }
-command_inline                   =  { !^"put" ~ !^"set" ~ lang_ident ~ !(WHITESPACE* ~ ("(" | "." | "=")) ~ WHITESPACE+ ~ command_inline_args }
+handler_call                     =  { !(^"put" ~ word_boundary) ~ !(^"set" ~ word_boundary) ~ lang_ident ~ "(" ~ handler_call_args? ~ ")" }
+command_inline                   =  { !(^"put" ~ word_boundary) ~ !(^"set" ~ word_boundary) ~ lang_ident ~ !(WHITESPACE* ~ ("(" | "." | "=")) ~ command_inline_args }
 
 // Put statement variations (order matters - most specific first!)
 put_into_chunk   = { ^"put" ~ expr ~ ^"into" ~ chunk_expr }
