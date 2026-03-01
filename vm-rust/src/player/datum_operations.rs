@@ -902,6 +902,20 @@ pub fn divide_datums(
             Datum::Float(left_float / right)
         }
         (Datum::Void, _) => Datum::Int(0),
+        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
+            let mut result = vec![];
+            for item in list {
+                let a_val = player.get_datum(item).clone();
+                let b_val = right.clone();
+                let quot = divide_datums(
+                    player.alloc_datum(a_val),
+                    player.alloc_datum(b_val),
+                    player,
+                )?;
+                result.push(player.alloc_datum(quot));
+            }
+            Datum::List(DatumType::List, result, false)
+        }
         _ => {
             return Err(ScriptError::new(format!(
                 "Div operator only works with ints and floats (Provided: {} and {})",
