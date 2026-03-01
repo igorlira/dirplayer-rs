@@ -1180,7 +1180,7 @@ impl Score {
                         );
                     });
 
-                    // Parameter setup
+                    // Apply saved parameters from frame_intervals
                     if !behavior_ref.parameter.is_empty() {
                         reserve_player_mut(|player| {
                             debug!("🔧 Applying {} saved parameters", behavior_ref.parameter.len());
@@ -1265,11 +1265,8 @@ impl Score {
         }
 
         // Attach behaviors from spriteListIdx (D6+ sprite detail mechanism)
-        // This is an alternative to frame_intervals for behavior attachment
-        // NOTE: spriteListIdx references the MAIN MOVIE's sprite detail table, not local filmloop tables
-        //
-        // Log summary of available sprite_details for diagnosis
-        let (sprite_details_info, dir_version) = reserve_player_ref(|player| {
+        // spriteListIdx references the MAIN MOVIE's sprite detail table, not local filmloop tables
+        let (sprite_details_info, _) = reserve_player_ref(|player| {
             let count = player.movie.score.sprite_details.len();
             let max_idx = player.movie.score.sprite_details.keys().max().cloned();
             ((count, max_idx), player.movie.dir_version)
@@ -1279,6 +1276,7 @@ impl Score {
             sprite_details_info.0, sprite_details_info.1, score_ref
         );
 
+        let mut spritelistidx_attached_channels: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (span, _channel_index, data) in span_init_data.iter() {
             let sprite_list_idx = data.sprite_list_idx();
             if sprite_list_idx == 0 && !(dir_version < 600 && data.sprite_list_idx_lo != 0) {
