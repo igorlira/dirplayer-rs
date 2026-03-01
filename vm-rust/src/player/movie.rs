@@ -290,7 +290,7 @@ impl Movie {
             "puppetTempo" => {
                 self.puppet_tempo = value.int_value()? as u32;
             }
-            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" => {
+            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" | "cpuHogTicks" => {
                 // Read-only / no-op in practice; ignore sets like Director does
             }
             "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
