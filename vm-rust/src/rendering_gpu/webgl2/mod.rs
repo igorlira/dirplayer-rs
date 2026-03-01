@@ -604,7 +604,7 @@ impl WebGL2Renderer {
         let palettes = player.movie.cast_manager.palettes();
         let (r, g, b) = resolve_color_ref(
             &palettes,
-            &player.movie.stage_color_ref,
+            &player.bg_color,
             &PaletteRef::BuiltIn(get_system_default_palette()),
             8, // bit depth
         );
