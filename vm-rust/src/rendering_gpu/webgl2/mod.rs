@@ -2562,15 +2562,13 @@ impl WebGL2Renderer {
         let is_ink39_indexed_transparent = ink == 39 && is_indexed_not_1bit;
         // Total: when to use matte (either pre-computed or on-the-fly)
         // Note: ink 33 uses color-key in shader, NOT matte
-        let should_use_matte = should_use_matte_ink0 || should_use_matte_ink7 || should_use_matte_ink8 || should_use_matte_ink9 || should_use_matte_ink41;
+        let should_use_matte = should_use_matte_ink7 || should_use_matte_ink8 || should_use_matte_ink9 || should_use_matte_ink41;
 
         // For ink 7, 8, 9, and 41, ALWAYS compute matte (flood-fill from edges)
         // This matches score rendering behavior where these inks use matte
         // The matte makes edge-connected background transparent while keeping interior pixels opaque
         //
-        // For ink 0, only compute matte when trim_white_space is true
         // Note: Ink 33 does NOT use flood-fill matte - it uses shader color-key
-        let is_matte_bitmap = bitmap.trim_white_space;
         let ink_7_needs_matte = ink == 7 && (is_indexed || is_16bit);
         let ink_8_needs_matte = ink == 8 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
         let ink_9_needs_matte = ink == 9 && (is_32bit && !bitmap.use_alpha);
@@ -2581,16 +2579,12 @@ impl WebGL2Renderer {
             && width > 0
             && height > 0
             && (
-                // Indexed bitmaps ink 0: matte only when trim_white_space
-                (is_indexed && is_matte_bitmap && ink == 0)
                 // Indexed bitmaps ink 7: ALWAYS use matte (flood-fill, not color-key)
-                || (is_indexed && ink == 7)
+                (is_indexed && ink == 7)
                 // Indexed bitmaps ink 8: ALWAYS use matte (flood-fill transparency)
                 || (is_indexed && ink == 8)
                 // Indexed bitmaps ink 41: ALWAYS use matte (background shouldn't darken)
                 || (is_indexed && ink == 41)
-                // 16-bit bitmaps ink 0: matte only when trim_white_space
-                || (is_16bit && should_use_matte_ink0)
                 // 16-bit bitmaps ink 7: ALWAYS use matte (flood-fill, not color-key)
                 || (is_16bit && ink == 7)
                 // 16-bit bitmaps ink 8: ALWAYS use matte (flood-fill transparency)
@@ -2749,7 +2743,7 @@ impl WebGL2Renderer {
                     // Note: 1-bit bitmaps are excluded - they use is_1bit_transparent for alpha instead
                     255
                 } else if should_use_matte {
-                    // Use matte for inks 0 and 8 when trim_white_space is true
+                    // Use matte for inks 7, 8, 9, 41 (ink 0 matte handled above)
                     if let Some(ref computed) = computed_matte {
                         // Use computed flood-fill matte
                         if computed[y * width + x] { 255 } else { 0 }
