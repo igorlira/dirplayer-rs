@@ -466,72 +466,15 @@ impl BuiltInHandlerManager {
     async fn do_command(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         // Get the code string from the first argument
         let code = reserve_player_ref(|player| player.get_datum(&args[0]).string_value())?;
+        let code = code.trim().to_string();
         debug!("do: executing code: {}", code);
 
-        let code = code.trim();
-
-        // Determine handler name and argument references
-        let (handler_name, arg_refs) = if let Some(paren_pos) = code.find('(') {
-            let handler_name = code[..paren_pos].trim().to_string();
-            let args_str = &code[paren_pos + 1..];
-
-            if let Some(close_paren) = args_str.rfind(')') {
-                let args_str = &args_str[..close_paren];
-                let arg_refs = if args_str.trim().is_empty() {
-                    vec![]
-                } else {
-                    reserve_player_mut(|player| {
-                        args_str.split(',')
-                            .map(|arg| {
-                                let arg = arg.trim();
-                                if let Ok(i) = arg.parse::<i32>() {
-                                    player.alloc_datum(Datum::Int(i))
-                                } else if let Ok(f) = arg.parse::<f64>() {
-                                    player.alloc_datum(Datum::Float(f))
-                                } else if arg.starts_with('"') && arg.ends_with('"') {
-                                    player.alloc_datum(Datum::String(arg[1..arg.len()-1].to_string()))
-                                } else if arg.starts_with('#') {
-                                    player.alloc_datum(Datum::Symbol(arg[1..].to_string()))
-                                } else {
-                                    player.alloc_datum(Datum::String(arg.to_string()))
-                                }
-                            })
-                            .collect()
-                    })
-                };
-                (handler_name, arg_refs)
-            } else {
-                (code.to_string(), vec![])
-            }
-        } else {
-            (code.to_string(), vec![])
-        };
-
-        // Call the global handler
-        let result = player_call_global_handler(&handler_name, &arg_refs).await;
-
-        // Log the result
-        match &result {
-            Ok(datum_ref) => {
-                let formatted_res: Result<String, ScriptError> = reserve_player_ref(|player| {
-                    Ok(format_concrete_datum(player.get_datum(datum_ref), player))
-                });
-
-                match formatted_res {
-                    Ok(formatted) => {
-                        debug!("do completed: {}", formatted);
-                    }
-                    Err(_) => {
-                        debug!("do completed: <formatting failed>");
-                    }
-                }
-            }
-            Err(e) => {
-                error!("do failed: {}", e.message);
-            }
+        if code.is_empty() || code == "nothing" {
+            return Ok(DatumRef::Void);
         }
 
-        result
+        use crate::player::eval::eval_lingo_command;
+        eval_lingo_command(code).await
     }
 
     pub fn has_async_handler(name: &str) -> bool {
