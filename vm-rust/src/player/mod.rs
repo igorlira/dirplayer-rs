@@ -833,8 +833,344 @@ impl DirPlayer {
         return self.allocator.alloc_datum(datum).unwrap();
     }
 
+    fn datum_leak_scan(&self) -> String {
+        use std::collections::{HashMap, HashSet};
+        use crate::player::datum_formatting::format_datum;
+
+        let snapshot_id = self.allocator.snapshot_max_id;
+        let is_new = |id: usize| -> bool { snapshot_id > 0 && id > snapshot_id };
+
+        let ref_id = |r: &DatumRef| -> Option<usize> {
+            if let DatumRef::Ref(id, ..) = r { Some(*id) } else { None }
+        };
+
+        // Step 1: Count ALL new datums by type
+        let mut type_counts_new: HashMap<String, usize> = HashMap::new();
+        let mut new_datum_ids: HashSet<usize> = HashSet::new();
+        for (id, entry) in self.allocator.datums.iter() {
+            if is_new(id) {
+                let type_name = entry.datum.type_str().to_string();
+                *type_counts_new.entry(type_name).or_insert(0) += 1;
+                new_datum_ids.insert(id);
+            }
+        }
+
+        // Step 2: Find OLD containers that hold NEW datums (= GROWING containers)
+        let mut growing_containers: Vec<(String, usize)> = Vec::new();
+        let mut accounted: HashSet<usize> = HashSet::new();
+
+        for (cid, entry) in self.allocator.datums.iter() {
+            if is_new(cid) { continue; } // only look at old containers
+            let rc = unsafe { *entry.ref_count.get() };
+            match &entry.datum {
+                Datum::List(list_type, items, _) => {
+                    let new_items: Vec<usize> = items.iter()
+                        .filter_map(|r| ref_id(r).filter(|id| new_datum_ids.contains(id)))
+                        .collect();
+                    if !new_items.is_empty() {
+                        // Show what the new items ARE (types)
+                        let mut child_types: HashMap<String, usize> = HashMap::new();
+                        for &nid in &new_items {
+                            if let Some(e) = self.allocator.datums.get(nid) {
+                                *child_types.entry(e.datum.type_str().to_string()).or_insert(0) += 1;
+                            }
+                        }
+                        let types_str: Vec<String> = child_types.iter()
+                            .map(|(t, c)| format!("{}x{}", c, t)).collect();
+                        growing_containers.push((
+                            format!("OLD {:?}List #{} (len={},rc={}) +{} new [{}]",
+                                list_type, cid, items.len(), rc, new_items.len(), types_str.join(",")),
+                            new_items.len()
+                        ));
+                        for nid in new_items { accounted.insert(nid); }
+                    }
+                }
+                Datum::PropList(pairs, _) => {
+                    let mut new_count = 0;
+                    for (k, v) in pairs {
+                        if ref_id(v).map_or(false, |id| new_datum_ids.contains(&id)) { new_count += 1; accounted.insert(ref_id(v).unwrap()); }
+                        if ref_id(k).map_or(false, |id| new_datum_ids.contains(&id)) { new_count += 1; accounted.insert(ref_id(k).unwrap()); }
+                    }
+                    if new_count > 0 {
+                        let keys_preview: Vec<String> = pairs.iter().take(3)
+                            .map(|(k, _)| format_datum(k, self)).collect();
+                        growing_containers.push((
+                            format!("OLD PropList #{} (len={},rc={}) +{} new keys=[{}...]",
+                                cid, pairs.len(), rc, new_count, keys_preview.join(",")),
+                            new_count
+                        ));
+                    }
+                }
+                Datum::Point(arr) => {
+                    let nc: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
+                    if nc > 0 {
+                        growing_containers.push((format!("OLD Point #{} (rc={}) +{} new", cid, rc, nc), nc));
+                        for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } }
+                    }
+                }
+                Datum::Rect(arr) => {
+                    let nc: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
+                    if nc > 0 {
+                        growing_containers.push((format!("OLD Rect #{} (rc={}) +{} new", cid, rc, nc), nc));
+                        for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Step 3: Find NEW compound datums containing NEW children (new sub-trees)
+        let mut new_subtree_types: HashMap<String, usize> = HashMap::new();
+        for (cid, entry) in self.allocator.datums.iter() {
+            if !is_new(cid) { continue; }
+            let rc = unsafe { *entry.ref_count.get() };
+            let new_child_count = match &entry.datum {
+                Datum::List(_, items, _) => {
+                    let c: usize = items.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
+                    if c > 0 { for r in items { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } } }
+                    c
+                }
+                Datum::PropList(pairs, _) => {
+                    let mut c = 0;
+                    for (k, v) in pairs {
+                        if ref_id(v).map_or(false, |id| new_datum_ids.contains(&id)) { c += 1; accounted.insert(ref_id(v).unwrap()); }
+                        if ref_id(k).map_or(false, |id| new_datum_ids.contains(&id)) { c += 1; accounted.insert(ref_id(k).unwrap()); }
+                    }
+                    c
+                }
+                Datum::Point(arr) => {
+                    let c: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
+                    if c > 0 { for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } } }
+                    c
+                }
+                Datum::Rect(arr) => {
+                    let c: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
+                    if c > 0 { for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } } }
+                    c
+                }
+                _ => 0,
+            };
+            if new_child_count > 0 {
+                *new_subtree_types.entry(format!("NEW {}(rc={})", entry.datum.type_str(), rc)).or_insert(0) += 1;
+            }
+        }
+
+        // Step 4: Check script instance properties for new datums
+        let mut si_new: HashMap<String, usize> = HashMap::new();
+        for (si_id, entry) in self.allocator.script_instances.iter() {
+            for (prop_name, r) in &entry.script_instance.properties {
+                if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
+                    let sn = self.movie.cast_manager.get_script_by_ref(&entry.script_instance.script)
+                        .map(|s| s.name.clone()).unwrap_or_else(|| format!("si#{}", si_id));
+                    let dtype = self.allocator.datums.get(id).map(|e| e.datum.type_str()).unwrap_or("?".to_string());
+                    *si_new.entry(format!("si({}).{} [{}]", sn, prop_name.as_str(), dtype)).or_insert(0) += 1;
+                    accounted.insert(id);
+                }
+            }
+        }
+
+        // Step 5: Check globals and scopes
+        let mut other_roots: HashMap<String, usize> = HashMap::new();
+        for (name, r) in &self.globals {
+            if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
+                *other_roots.entry(format!("global.{}", name)).or_insert(0) += 1;
+                accounted.insert(id);
+            }
+        }
+        for i in 0..self.scopes.len() {
+            let scope = &self.scopes[i];
+            let pfx = if i >= self.scope_count as usize { "STALE" } else { "active" };
+            for r in &scope.stack {
+                if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
+                    *other_roots.entry(format!("{}[{}].stack", pfx, i)).or_insert(0) += 1;
+                    accounted.insert(id);
+                }
+            }
+            for (_, r) in &scope.locals {
+                if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
+                    *other_roots.entry(format!("{}[{}].locals", pfx, i)).or_insert(0) += 1;
+                    accounted.insert(id);
+                }
+            }
+            if let Some(id) = ref_id(&scope.return_value).filter(|id| new_datum_ids.contains(id)) {
+                *other_roots.entry(format!("{}[{}].retval", pfx, i)).or_insert(0) += 1;
+                accounted.insert(id);
+            }
+        }
+        if let Some(id) = ref_id(&self.last_handler_result).filter(|id| new_datum_ids.contains(id)) {
+            *other_roots.entry("last_handler_result".to_string()).or_insert(0) += 1;
+            accounted.insert(id);
+        }
+
+        // Build report
+        let mut result = format!("=== Datum Leak Scan v3 ===\nSnapshot: {}, Total new: {}\n\n", snapshot_id, new_datum_ids.len());
+
+        result.push_str("New datums by type:\n");
+        let mut ns: Vec<_> = type_counts_new.into_iter().collect();
+        ns.sort_by(|a, b| b.1.cmp(&a.1));
+        for (t, c) in &ns { result.push_str(&format!("  {}: {}\n", t, c)); }
+
+        result.push_str(&format!("\nOLD containers with new items (GROWING):\n"));
+        growing_containers.sort_by(|a, b| b.1.cmp(&a.1));
+        for (desc, _) in growing_containers.iter().take(25) {
+            result.push_str(&format!("  {}\n", desc));
+        }
+
+        if !new_subtree_types.is_empty() {
+            result.push_str(&format!("\nNew compound sub-trees:\n"));
+            let mut nst: Vec<_> = new_subtree_types.into_iter().collect();
+            nst.sort_by(|a, b| b.1.cmp(&a.1));
+            for (t, c) in nst.iter().take(15) { result.push_str(&format!("  {} x{}\n", t, c)); }
+        }
+
+        if !si_new.is_empty() {
+            result.push_str(&format!("\nScript props with new datums:\n"));
+            let mut si: Vec<_> = si_new.into_iter().collect();
+            si.sort_by(|a, b| b.1.cmp(&a.1));
+            for (k, c) in si.iter().take(15) { result.push_str(&format!("  {}: {}\n", k, c)); }
+        }
+
+        if !other_roots.is_empty() {
+            result.push_str(&format!("\nOther roots with new datums:\n"));
+            let mut or: Vec<_> = other_roots.into_iter().collect();
+            or.sort_by(|a, b| b.1.cmp(&a.1));
+            for (k, c) in or.iter().take(10) { result.push_str(&format!("  {}: {}\n", k, c)); }
+        }
+
+        let unacc = new_datum_ids.len() - accounted.len();
+        result.push_str(&format!("\nAccounted: {}, Unaccounted: {}\n", accounted.len(), unacc));
+
+        // Step 6: Inspect top growing containers - show content samples and ownership chain
+        // Collect top 3 growing container IDs from the sorted list
+        let top_container_ids: Vec<usize> = growing_containers.iter().take(3)
+            .filter_map(|(desc, _)| {
+                // Parse the datum ID from the description string "OLD ...List #XXXX ..."
+                desc.find('#').and_then(|start| {
+                    let after_hash = &desc[start + 1..];
+                    after_hash.split(|c: char| !c.is_ascii_digit()).next()
+                        .and_then(|s| s.parse::<usize>().ok())
+                })
+            })
+            .collect();
+
+        for &cid in &top_container_ids {
+            if let Some(entry) = self.allocator.datums.get(cid) {
+                result.push_str(&format!("\n--- Inspect #{} ---\n", cid));
+
+                // Show content sample
+                match &entry.datum {
+                    Datum::List(_, items, _) => {
+                        result.push_str(&format!("List len={}\n", items.len()));
+                        // First 5 items
+                        result.push_str("First 5: ");
+                        for (i, r) in items.iter().enumerate().take(5) {
+                            if i > 0 { result.push_str(", "); }
+                            result.push_str(&format_datum(r, self));
+                        }
+                        result.push('\n');
+                        // Last 5 items
+                        let start = if items.len() > 5 { items.len() - 5 } else { 0 };
+                        result.push_str("Last 5: ");
+                        for (i, r) in items.iter().skip(start).enumerate() {
+                            if i > 0 { result.push_str(", "); }
+                            result.push_str(&format_datum(r, self));
+                        }
+                        result.push('\n');
+                    }
+                    _ => {
+                        result.push_str(&format!("Type: {}\n", entry.datum.type_str()));
+                    }
+                }
+
+                // Trace ownership: who holds a reference to this datum?
+                result.push_str("Stored in: ");
+                let mut found_owner = false;
+
+                // Check script instance properties
+                for (si_id, si_entry) in self.allocator.script_instances.iter() {
+                    for (prop_name, r) in &si_entry.script_instance.properties {
+                        if ref_id(r) == Some(cid) {
+                            let sn = self.movie.cast_manager.get_script_by_ref(&si_entry.script_instance.script)
+                                .map(|s| s.name.clone()).unwrap_or_else(|| format!("si#{}", si_id));
+                            result.push_str(&format!("si({}).{}", sn, prop_name.as_str()));
+                            found_owner = true;
+                        }
+                    }
+                }
+
+                // Check globals
+                if !found_owner {
+                    for (name, r) in &self.globals {
+                        if ref_id(r) == Some(cid) {
+                            result.push_str(&format!("global.{}", name));
+                            found_owner = true;
+                        }
+                    }
+                }
+
+                // Check inside compound datums (one level up)
+                if !found_owner {
+                    for (pid, pentry) in self.allocator.datums.iter() {
+                        if pid == cid { continue; }
+                        let contains = match &pentry.datum {
+                            Datum::List(_, items, _) => items.iter().any(|r| ref_id(r) == Some(cid)),
+                            Datum::PropList(pairs, _) => pairs.iter().any(|(k, v)|
+                                ref_id(k) == Some(cid) || ref_id(v) == Some(cid)),
+                            _ => false,
+                        };
+                        if contains {
+                            let prc = unsafe { *pentry.ref_count.get() };
+                            result.push_str(&format!("inside {} #{} (rc={})", pentry.datum.type_str(), pid, prc));
+
+                            // Trace one more level: who holds the parent?
+                            for (si_id, si_entry) in self.allocator.script_instances.iter() {
+                                for (prop_name, r) in &si_entry.script_instance.properties {
+                                    if ref_id(r) == Some(pid) {
+                                        let sn = self.movie.cast_manager.get_script_by_ref(&si_entry.script_instance.script)
+                                            .map(|s| s.name.clone()).unwrap_or_else(|| format!("si#{}", si_id));
+                                        result.push_str(&format!(" ← si({}).{}", sn, prop_name.as_str()));
+                                    }
+                                }
+                            }
+                            for (name, r) in &self.globals {
+                                if ref_id(r) == Some(pid) {
+                                    result.push_str(&format!(" ← global.{}", name));
+                                }
+                            }
+
+                            found_owner = true;
+                            break;
+                        }
+                    }
+                }
+
+                if !found_owner {
+                    result.push_str("(unknown - not found in script props, globals, or compounds)");
+                }
+                result.push('\n');
+            }
+        }
+
+        result
+    }
+
     fn get_movie_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
         match prop {
+            "datumStats" => {
+                let stats = self.allocator.datum_type_stats();
+                web_sys::console::log_1(&stats.clone().into());
+                Ok(self.alloc_datum(Datum::String(stats)))
+            }
+            "datumSnapshot" => {
+                self.allocator.take_datum_snapshot();
+                web_sys::console::log_1(&"Datum snapshot taken. Use 'put the datumStats' to see new datums since snapshot.".into());
+                Ok(DatumRef::Void)
+            }
+            "datumLeakScan" => {
+                let stats = self.datum_leak_scan();
+                web_sys::console::log_1(&stats.clone().into());
+                Ok(self.alloc_datum(Datum::String(stats)))
+            }
             "stage" => Ok(self.alloc_datum(Datum::Stage)),
             "time" => Ok(self.alloc_datum(Datum::String(
                 chrono::Local::now().format("%H:%M %p").to_string(),

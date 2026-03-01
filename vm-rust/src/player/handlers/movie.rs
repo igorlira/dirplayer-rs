@@ -660,9 +660,15 @@ impl MovieHandlers {
             false
         });
 
-        let has_player_frame_changed = reserve_player_ref(|player| player.has_player_frame_changed);
+        let (has_player_frame_changed, current_frame) = reserve_player_ref(|player| {
+            (player.has_player_frame_changed, player.movie.current_frame)
+        });
 
         if already_updating || has_player_frame_changed {
+            web_sys::console::log_1(
+                &format!("🔄 execute_frame_update SKIPPED (already_updating={}, frame_changed={}, frame={})",
+                    already_updating, has_player_frame_changed, current_frame).into()
+            );
             return Ok(());  // Exit early if already updating
         }
 
