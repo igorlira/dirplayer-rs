@@ -699,6 +699,15 @@ impl BuiltInHandlerManager {
                     )),
                 }
             }
+            "getpos" => reserve_player_mut(|player| {
+                let list = &args[0];
+                let args = &args[1..].to_vec();
+                match player.get_datum(list) {
+                    Datum::List(..) => ListDatumHandlers::find_pos(list, &args),
+                    Datum::PropList(..) => PropListDatumHandlers::get_pos(list, &args),
+                    _ => Err(ScriptError::new("Cannot getPos of non-list".to_string())),
+                }
+            }),
             "setaprop" => {
                 let datum = &args[0];
                 let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());

@@ -1143,7 +1143,7 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
         bit_depth: 32,
         original_bit_depth: 32,
         data: rgba_data,
-        palette_ref: PaletteRef::from(info.palette_id, palette_cast_lib),
+        palette_ref: PaletteRef::from(info.palette_id, palette_cast_lib as i16, 0),
         matte: None,
         use_alpha: info.use_alpha,
         trim_white_space: info.trim_white_space,
