@@ -71,7 +71,7 @@ fn blend_color_alpha(dst: (u8, u8, u8), src: (u8, u8, u8), alpha: f32) -> (u8, u
 }
 
 pub fn should_matte_sprite(ink: u32) -> bool {
-    ink == 36 || ink == 33 || ink == 41 || ink == 8 || ink == 7
+    ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
 }
 
 fn director_blend_ink0(
@@ -203,6 +203,40 @@ fn blend_pixel(
         // If the source equals the bg_color, skip; otherwise blend normally.
         36 => {
             blend_color_alpha(dst, src, effective_alpha)
+        }
+        // 37 = Light (Lighten)
+        // Pick the higher of src and dst for each channel.
+        // bg_color pixels are transparent (skipped).
+        37 => {
+            if src == bg_color {
+                dst
+            } else {
+                let r = src.0.max(dst.0);
+                let g = src.1.max(dst.1);
+                let b = src.2.max(dst.2);
+                if blend_alpha >= 0.999 {
+                    (r, g, b)
+                } else {
+                    blend_color_alpha(dst, (r, g, b), blend_alpha)
+                }
+            }
+        }
+        // 39 = Dark (Darken)
+        // Pick the lower of src and dst for each channel.
+        // bg_color pixels are transparent (skipped).
+        39 => {
+            if src == bg_color {
+                dst
+            } else {
+                let r = src.0.min(dst.0);
+                let g = src.1.min(dst.1);
+                let b = src.2.min(dst.2);
+                if blend_alpha >= 0.999 {
+                    (r, g, b)
+                } else {
+                    blend_color_alpha(dst, (r, g, b), blend_alpha)
+                }
+            }
         }
         // 40 = Lighten
         40 => {
