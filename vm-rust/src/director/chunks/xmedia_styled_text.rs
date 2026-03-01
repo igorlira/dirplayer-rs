@@ -270,9 +270,27 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
     let doc_version = section1_data.doc_version;
 
     // Parse text content - can be in Section 2 (possibly multi-chunk) OR Section 3
+    // Each Section 2 chunk represents one line of text. Join them with \r (Director's
+    // Mac-heritage line break character) to restore the original line structure.
+    // Compute chunk boundaries for adjusting character run positions later.
+    // When we join Section 2 chunks with \r, character run positions (which reference
+    // the original concatenated-without-\r text) need to be shifted forward.
+    // Each boundary is the cumulative length of chunks 0..i (without \r separators).
+    let section2_boundaries: Vec<u32> = if section2_texts.len() > 1 {
+        let mut boundaries = Vec::with_capacity(section2_texts.len() - 1);
+        let mut cumulative = 0u32;
+        for chunk_text in &section2_texts[..section2_texts.len() - 1] {
+            cumulative += chunk_text.len() as u32;
+            boundaries.push(cumulative);
+        }
+        boundaries
+    } else {
+        Vec::new()
+    };
+
     let text_data = if !section2_texts.is_empty() {
         debug!("Found text in Section 2 ({} chunk(s))", section2_texts.len());
-        Section3Data { text: section2_texts.concat() }
+        Section3Data { text: section2_texts.join("\r") }
     } else if let Some(section3) = sections.get(&0x0003) {
         debug!("Found text in Section 3");
         parse_section_3(section3)?
@@ -326,6 +344,25 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         let data5 = parse_section_6(section5)?;
         section5_char_runs = data5.char_runs.clone();
         all_char_runs.extend(data5.char_runs);
+    }
+
+    // Adjust character run positions to account for \r characters inserted between
+    // Section 2 chunks. Each boundary represents a point where a \r was inserted,
+    // so positions at or after boundary[i] need to be shifted by (i+1).
+    if !section2_boundaries.is_empty() {
+        for run in &mut all_char_runs {
+            // Count how many chunk boundaries are <= this position
+            let shift = section2_boundaries.iter()
+                .filter(|&&b| b <= run.position)
+                .count() as u32;
+            run.position += shift;
+        }
+        for run in &mut section5_char_runs {
+            let shift = section2_boundaries.iter()
+                .filter(|&&b| b <= run.position)
+                .count() as u32;
+            run.position += shift;
+        }
     }
 
     let char_runs_data = if all_char_runs.is_empty() {
