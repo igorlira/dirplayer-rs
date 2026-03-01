@@ -1769,7 +1769,7 @@ impl WebGL2Renderer {
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
-                let sprite_bg_for_matte = if ink == 7 || ink == 8 || ink == 9 || ink == 40 || ink == 41 {
+                let sprite_bg_for_matte = if ink == 7 || ink == 8 || ink == 9 || ink == 37 || ink == 39 || ink == 40 || ink == 41 {
                     Some(bg_color_rgb)
                 } else {
                     None
@@ -2286,6 +2286,14 @@ impl WebGL2Renderer {
                 // The shader multiplies src by bgColor, then we alpha-blend the result
                 self.context.set_blend_alpha();
             }
+            InkMode::Light => {
+                // Light (ink 37): MAX(src, dst) per channel
+                self.context.set_blend_lighten();
+            }
+            InkMode::Dark => {
+                // Dark (ink 39): MIN(src, dst) per channel
+                self.context.set_blend_darken();
+            }
             InkMode::Lighten => {
                 // Lighten in Director: skip bgColor pixels, blend others normally
                 // This is NOT max(src, dst) - it's just normal alpha blending
@@ -2391,8 +2399,8 @@ impl WebGL2Renderer {
                 // For indexed ink 40 (2-8 bit): transparency is baked via RGB comparison with sprite's bgColor
                 // In both cases, disable shader color-key by setting tolerance to 0.
                 // For 16-bit and 32-bit: use small tolerance for floating-point RGB comparison.
-                let is_indexed_ink40 = bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && ink == 40;
-                let tolerance = if bitmap_bit_depth == 1 || is_indexed_ink40 { 0.0 } else { 0.01 };
+                let is_indexed_colorkey = bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && (ink == 37 || ink == 39 || ink == 40);
+                let tolerance = if bitmap_bit_depth == 1 || is_indexed_colorkey { 0.0 } else { 0.01 };
                 gl.uniform1f(Some(loc), tolerance);
             }
         }
@@ -2403,9 +2411,8 @@ impl WebGL2Renderer {
         // Unbind texture
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
 
-        // Reset blend equation if we used SubPin (which changes the blend equation to REVERSE_SUBTRACT)
-        // Note: Lighten now uses normal alpha blend, not MAX
-        if effective_ink == InkMode::SubPin {
+        // Reset blend equation if we used an ink that changes it from the default FUNC_ADD
+        if effective_ink == InkMode::SubPin || effective_ink == InkMode::Light || effective_ink == InkMode::Dark {
             self.context.reset_blend_equation();
         }
     }
@@ -2538,12 +2545,21 @@ impl WebGL2Renderer {
         // See drawing.rs lines 1421-1437 for 32-bit ink 36 handling
         let is_indexed_not_1bit = bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8;
         let should_use_colorkey_ink36 = ink == 36 && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
+        // Ink 37 (Light) uses color-key transparency: skip bgColor pixels
+        // For indexed bitmaps: bake transparency based on palette index
+        // For 16-bit and 32-bit: use RGB color-key in shader
+        let should_use_colorkey_ink37 = ink == 37 && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
+        // Ink 39 (Dark) uses color-key transparency: skip bgColor pixels
+        let should_use_colorkey_ink39 = ink == 39 && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
         // Ink 40 (Lighten) uses color-key transparency: skip bgColor pixels
         // For indexed bitmaps: use palette index comparison in texture (baked alpha)
         // For 16-bit and 32-bit: use RGB color-key in shader
         let should_use_colorkey_ink40 = ink == 40 && (is_16bit || (is_32bit && !bitmap.use_alpha));
         // For indexed ink 40, we bake transparency based on palette index
         let is_ink40_indexed_transparent = ink == 40 && is_indexed_not_1bit;
+        // For indexed ink 37/39, bake transparency based on palette index
+        let is_ink37_indexed_transparent = ink == 37 && is_indexed_not_1bit;
+        let is_ink39_indexed_transparent = ink == 39 && is_indexed_not_1bit;
         // Total: when to use matte (either pre-computed or on-the-fly)
         // Note: ink 33 uses color-key in shader, NOT matte
         let should_use_matte = should_use_matte_ink0 || should_use_matte_ink7 || should_use_matte_ink8 || should_use_matte_ink9 || should_use_matte_ink41;
@@ -2680,10 +2696,10 @@ impl WebGL2Renderer {
                     false
                 };
 
-                // Special handling for ink 40 indexed bitmaps (2-8 bit):
+                // Special handling for ink 37/39/40 indexed bitmaps (2-8 bit):
                 // Compare RGB against sprite's bgColor (like drawing.rs lines 203-209)
                 // This matches Canvas2D: if src == bg_color, skip (transparent)
-                let is_ink40_indexed_bg = if is_ink40_indexed_transparent {
+                let is_indexed_colorkey_bg = if is_ink40_indexed_transparent || is_ink37_indexed_transparent || is_ink39_indexed_transparent {
                     if let Some(bg_color) = sprite_bg_color {
                         // Compare this pixel's RGB against sprite's bgColor
                         (r, g, b) == bg_color
@@ -2694,8 +2710,8 @@ impl WebGL2Renderer {
                     false
                 };
 
-                let a = if is_1bit_transparent || is_ink40_indexed_bg {
-                    // 1-bit or ink 40 indexed background pixel
+                let a = if is_1bit_transparent || is_indexed_colorkey_bg {
+                    // 1-bit or ink 37/39/40 indexed background pixel
                     0
                 } else if ink == 0 && use_embedded_alpha {
                     // For 32-bit bitmaps with ink 0 (Copy) and use_alpha=true: use embedded alpha
@@ -2725,8 +2741,8 @@ impl WebGL2Renderer {
                     } else {
                         255
                     }
-                } else if should_use_colorkey_ink33 || should_use_colorkey_ink35 || should_use_colorkey_ink36 {
-                    // Ink 33/35/36 color-key transparency is handled by shader
+                } else if should_use_colorkey_ink33 || should_use_colorkey_ink35 || should_use_colorkey_ink36 || should_use_colorkey_ink37 || should_use_colorkey_ink39 {
+                    // Ink 33/35/36/37/39 color-key transparency is handled by shader
                     // The shader compares pixel RGB with bgColor uniform
                     // All pixels are uploaded as opaque, shader discards matching pixels
                     // Works for indexed (2-8 bit), 16-bit, and 32-bit (without use_alpha) bitmaps
@@ -3037,7 +3053,7 @@ impl WebGL2Renderer {
     /// Check if ink mode requires matte computation
     /// Matches Canvas2D's should_matte_sprite function
     fn should_matte_sprite(ink: i32) -> bool {
-        ink == 36 || ink == 33 || ink == 41 || ink == 8 || ink == 7
+        ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
     }
 
     /// Get or create a texture for a bitmap member
@@ -3092,7 +3108,7 @@ impl WebGL2Renderer {
         // Note: Ink 33 uses shader color-key, not texture matte, so no bgColor in cache key
         // Note: Ink 41 for indexed bitmaps uses palette index 0, not bgColor
         let is_ink_with_bgcolor_matte =
-            ((ink == 7 || ink == 8 || ink == 40) && bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8)
+            ((ink == 7 || ink == 8 || ink == 37 || ink == 39 || ink == 40) && bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8)
             || ((ink == 0 || ink == 8) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
             || ((ink == 9 || ink == 41) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha);
         let cache_key_bg_color = if is_ink_with_bgcolor_matte {

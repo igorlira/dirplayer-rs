@@ -247,6 +247,19 @@ impl WebGL2Context {
         );
     }
 
+    /// Set blend mode for Dark ink (ink 39)
+    /// Uses MIN blend equation: result = min(src, dst)
+    pub fn set_blend_darken(&self) {
+        self.gl.blend_equation(WebGl2RenderingContext::MIN);
+        // Preserve destination alpha (same fix as AddPin)
+        self.gl.blend_func_separate(
+            WebGl2RenderingContext::ONE,           // srcRGB
+            WebGl2RenderingContext::ONE,           // dstRGB
+            WebGl2RenderingContext::ZERO,          // srcAlpha
+            WebGl2RenderingContext::ONE,           // dstAlpha
+        );
+    }
+
     /// Set blend mode for subtractive blending (ink 35 - Sub Pin)
     /// Uses FUNC_REVERSE_SUBTRACT equation: result = dst - src
     pub fn set_blend_subtractive(&self) {
