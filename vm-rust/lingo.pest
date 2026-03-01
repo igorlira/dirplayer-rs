@@ -75,20 +75,22 @@ rgb_color     = { rgb_num_color | rgb_str_color }
 rect          = { ^"rect" ~ "(" ~ number ~ "," ~ number ~ "," ~ number ~ "," ~ number ~ ")" }
 point         = { ^"point" ~ "(" ~ number ~ "," ~ number ~ ")" }
 
+word_boundary = _{ !(alpha | digit | "_") }
+
 // CastLib references: "castLib 1" or "castLib "levels""
-castlib_ref = { ^"castLib" ~ term_arg }
+castlib_ref = { ^"castLib" ~ word_boundary ~ term_arg }
 
 // Member references: "member 5" or "member 5 of castLib 1"
-member_ref = { ^"member" ~ term_arg ~ (^"of" ~ castlib_ref)? }
+member_ref = { ^"member" ~ word_boundary ~ term_arg ~ (^"of" ~ castlib_ref)? }
 
 // Sprite references: "sprite 17"
-sprite_ref = { ^"sprite" ~ term_arg }
+sprite_ref = { ^"sprite" ~ word_boundary ~ term_arg }
 
 // Field references: "field 5" or "field "myField""
 field_ref = { ^"field" ~ term_arg }
 
 // Chunk expressions for "char 1 of myStr", "line 1 to 3 of myStr", etc.
-chunk_type  = { ^"char" | ^"word" | ^"line" | ^"item" }
+chunk_type  = { (^"char" | ^"word" | ^"line" | ^"item") ~ word_boundary }
 chunk_range = { ^"to" ~ expr }
 chunk_expr  = { chunk_type ~ expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
 
