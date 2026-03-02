@@ -811,27 +811,13 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
     // Read style count
     let style_count = packer.unpack_num();
 
-    if style_count <= 0 || style_count > 100 {
-        if packer.remaining() > 50 {
-            // ProcessSection7 guards with `if (a3 > 0)` which skips parsing when count=0.
-            // However, the packed data often has style_count=0 as the first value followed by
-            // valid style structures. The while(remaining>50) loop is the real safety check.
-            // Bypass the count guard and parse styles directly from the packed data.
-            debug!(" Section 7: style_count={} but {} bytes remaining, parsing styles anyway",
-                                             style_count, packer.remaining());
-        } else {
-            debug!(" Section 7: style_count={} and only {} bytes remaining, using default",
-                                             style_count, packer.remaining());
-            return Ok(Section7Data {
-                styles: vec![XmedStyle::default()],
-            });
-        }
-    }
+    // style_count is often reliable but sometimes 0 even when valid styles follow.
+    let max_styles = if style_count > 0 && style_count <= 100 { style_count as usize } else { 100 };
 
     debug!(" Section 7: count={}, doc_version={}, remaining={}", style_count, doc_version, packer.remaining());
 
     let mut style_idx = 0;
-    while packer.remaining() > 50 {
+    while style_idx < max_styles && packer.remaining() > 4 {
         let mut style = XmedStyle::default();
         let mut parse_failed = false;
 
@@ -1017,6 +1003,10 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
                                          style_idx, style.font_name, style.font_size,
                                          style.bold, style.italic, style.underline);
 
+        if parse_failed {
+            debug!("    Style {}: parse failed, stopping", style_idx);
+            break;
+        }
         styles.push(style);
         style_idx += 1;
     }
