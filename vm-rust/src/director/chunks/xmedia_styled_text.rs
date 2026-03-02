@@ -803,21 +803,20 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
     let mut styles: Vec<XmedStyle> = Vec::new();
 
     // Log raw first bytes for debugging color/style issues
-    let preview_len = data.len().min(20);
+    let preview_len = data.len().min(40);
     let hex_preview: Vec<String> = data[0..preview_len].iter().map(|b| format!("{:02X}", b)).collect();
     debug!(" Section 7 (styles): {} bytes, first {}: {}",
                                      data.len(), preview_len, hex_preview.join(" "));
-
     // Read style count
     let style_count = packer.unpack_num();
 
-    // style_count is often reliable but sometimes 0 even when valid styles follow.
-    let max_styles = if style_count > 0 && style_count <= 100 { style_count as usize } else { 100 };
-
+    // style_count is a hint but the packed data often contains more styles than declared.
+    // Character runs (Section 0x0004) can reference styles beyond style_count, so we must
+    // parse all styles present in the packed data, not just the declared count.
     debug!(" Section 7: count={}, doc_version={}, remaining={}", style_count, doc_version, packer.remaining());
 
     let mut style_idx = 0;
-    while style_idx < max_styles && packer.remaining() > 4 {
+    while style_idx < 100 && packer.remaining() > 4 {
         let mut style = XmedStyle::default();
         let mut parse_failed = false;
 
