@@ -4,6 +4,8 @@ use crate::director::{
 };
 use std::convert::TryInto;
 
+const MAX_EXPR_LEN: usize = 120;
+
 pub struct StackExpressionTracker {
     stack: Vec<String>,
     last_arg_count: usize, // Track argument count from PushArgList
@@ -11,7 +13,7 @@ pub struct StackExpressionTracker {
 
 impl StackExpressionTracker {
     pub fn new() -> Self {
-        Self { 
+        Self {
             stack: Vec::new(),
             last_arg_count: 0,
         }
@@ -20,6 +22,14 @@ impl StackExpressionTracker {
     pub fn clear(&mut self) {
         self.stack.clear();
         self.last_arg_count = 0;
+    }
+
+    fn push_expr(&mut self, expr: String) {
+        if expr.len() > MAX_EXPR_LEN {
+            self.stack.push(format!("{}...", &expr[..MAX_EXPR_LEN]));
+        } else {
+            self.stack.push(expr);
+        }
     }
 
     /// Process a bytecode and return its annotation
@@ -38,7 +48,7 @@ impl StackExpressionTracker {
             
             OpCode::PushInt8 | OpCode::PushInt16 | OpCode::PushInt32 => {
                 let expr = format!("{}", bytecode.obj);
-                self.stack.push(expr.clone());
+                self.push_expr(expr.clone());
                 format!("<{}>", expr)
             }
 
@@ -46,26 +56,26 @@ impl StackExpressionTracker {
                 if let Ok(bits) = bytecode.obj.try_into() {
                     let f = f32::from_bits(bits);
                     let expr = format!("{}", f);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
-                    self.stack.push("[invalid float]".to_string());
+                    self.push_expr("[invalid float]".to_string());
                     String::new()
                 }
             }
 
             OpCode::PushZero => {
-                self.stack.push("0".to_string());
+                self.push_expr("0".to_string());
                 format!("<0>")
             }
 
             OpCode::PushSymb => {
                 if let Some(name) = lctx.names.get(bytecode.obj as usize) {
                     let expr = format!("#{}", name);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
-                    self.stack.push("#UNKNOWN".to_string());
+                    self.push_expr("#UNKNOWN".to_string());
                     String::new()
                 }
             }
@@ -75,10 +85,10 @@ impl StackExpressionTracker {
                 
                 if let Some(literal) = literals.get(literal_id) {
                     let expr = Self::format_literal(literal);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
-                    self.stack.push(format!("CONST[{}]", literal_id)).clone();
+                    self.push_expr(format!("CONST[{}]", literal_id)).clone();
                     format!("<CONST[{}]>", literal_id)
                 }
             }
@@ -95,7 +105,7 @@ impl StackExpressionTracker {
                     .and_then(|&name_id| lctx.names.get(name_id as usize))
                     .map(|s| s.as_str())
                     .unwrap_or("UNKNOWN");
-                self.stack.push(name.to_string());
+                self.push_expr(name.to_string());
                 format!("<{}>", name)
             }
 
@@ -127,7 +137,7 @@ impl StackExpressionTracker {
                     .and_then(|&name_id| lctx.names.get(name_id as usize))
                     .map(|s| s.as_str())
                     .unwrap_or("UNKNOWN");
-                self.stack.push(name.to_string());
+                self.push_expr(name.to_string());
                 format!("<{}>", name)
             }
 
@@ -153,10 +163,10 @@ impl StackExpressionTracker {
             
             OpCode::GetGlobal => {
                 if let Some(name) = lctx.names.get(bytecode.obj as usize) {
-                    self.stack.push(name.to_string());
+                    self.push_expr(name.to_string());
                     format!("<{}>", name)
                 } else {
-                    self.stack.push("UNKNOWN_GLOBAL".to_string());
+                    self.push_expr("UNKNOWN_GLOBAL".to_string());
                     String::new()
                 }
             }
@@ -181,12 +191,12 @@ impl StackExpressionTracker {
                 // GetProp ALWAYS gets property from 'me' (scope receiver)
                 if let Some(name) = lctx.names.get(bytecode.obj as usize) {
                     let expr = format!("me.{}", name);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
                     // Name not found - show ID
                     let expr = format!("me.prop{}", bytecode.obj);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 }
             }
@@ -225,25 +235,25 @@ impl StackExpressionTracker {
                     if self.stack.is_empty() {
                         // No object on stack - implicit "me"
                         let expr = format!("me.{}", name);
-                        self.stack.push(expr.clone());
+                        self.push_expr(expr.clone());
                         format!("<{}>", expr)
                     } else {
                         // Explicit object on stack
                         let obj = self.stack.pop().unwrap();
                         let expr = format!("{}.{}", obj, name);
-                        self.stack.push(expr.clone());
+                        self.push_expr(expr.clone());
                         format!("<{}>", expr)
                     }
                 } else {
                     // Name not found - show ID
                     if self.stack.is_empty() {
                         let expr = format!("me.prop{}", bytecode.obj);
-                        self.stack.push(expr.clone());
+                        self.push_expr(expr.clone());
                         format!("<{}>", expr)
                     } else {
                         let obj = self.stack.pop().unwrap();
                         let expr = format!("{}.prop{}", obj, bytecode.obj);
-                        self.stack.push(expr.clone());
+                        self.push_expr(expr.clone());
                         format!("<{}>", expr)
                     }
                 }
@@ -254,25 +264,25 @@ impl StackExpressionTracker {
                     if self.stack.is_empty() {
                         // No object on stack - implicit "me"
                         let expr = format!("me[#{}]", name);
-                        self.stack.push(expr.clone());
+                        self.push_expr(expr.clone());
                         format!("<{}>", expr)
                     } else {
                         // Explicit object on stack
                         let obj = self.stack.pop().unwrap();
                         let expr = format!("{}[#{}]", obj, name);
-                        self.stack.push(expr.clone());
+                        self.push_expr(expr.clone());
                         format!("<{}>", expr)
                     }
                 } else {
                     // Name not found - show ID
                     if self.stack.is_empty() {
                         let expr = format!("me[#prop{}]", bytecode.obj);
-                        self.stack.push(expr.clone());
+                        self.push_expr(expr.clone());
                         format!("<{}>", expr)
                     } else {
                         let obj = self.stack.pop().unwrap();
                         let expr = format!("{}[#prop{}]", obj, bytecode.obj);
-                        self.stack.push(expr.clone());
+                        self.push_expr(expr.clone());
                         format!("<{}>", expr)
                     }
                 }
@@ -311,11 +321,11 @@ impl StackExpressionTracker {
                 // This one is fine as-is - it's always _global
                 if let Some(name) = lctx.names.get(bytecode.obj as usize) {
                     let expr = format!("_global.{}", name);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
                     let expr = format!("_global.prop{}", bytecode.obj);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 }
             }
@@ -329,7 +339,7 @@ impl StackExpressionTracker {
                     .cloned()
                     .unwrap_or_else(|| format!("builtin{}", bytecode.obj));
                 let expr = format!("the {}", prop_name);
-                self.stack.push(expr.clone());
+                self.push_expr(expr.clone());
                 format!("<{}>", expr)
             }
 
@@ -338,7 +348,7 @@ impl StackExpressionTracker {
                     .cloned()
                     .unwrap_or_else(|| format!("movieProp{}", bytecode.obj));
                 let expr = format!("the {}", prop_name);
-                self.stack.push(expr.clone());
+                self.push_expr(expr.clone());
                 format!("<{}>", expr)
             }
 
@@ -366,7 +376,7 @@ impl StackExpressionTracker {
             OpCode::Inv => {
                 if let Some(a) = self.stack.pop() {
                     let expr = format!("-({})", a);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
                     String::new()
@@ -389,7 +399,7 @@ impl StackExpressionTracker {
                     let start_idx = self.stack.pop().unwrap();
                     let obj = self.stack.pop().unwrap();
                     let expr = format!("char {} to {} of {}", start_idx, end_idx, obj);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
                     String::new()
@@ -447,7 +457,7 @@ impl StackExpressionTracker {
             OpCode::Not => {
                 if let Some(a) = self.stack.pop() {
                     let expr = format!("not ({})", a);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
                     String::new()
@@ -468,7 +478,7 @@ impl StackExpressionTracker {
                 }
                 items.reverse();
                 let expr = format!("[{}]", items.join(", "));
-                self.stack.push(expr.clone());
+                self.push_expr(expr.clone());
                 format!("<{}>", expr)
             }
 
@@ -484,7 +494,7 @@ impl StackExpressionTracker {
                 }
                 items.reverse();
                 let expr = format!("[{}]", items.join(", "));
-                self.stack.push(expr.clone());
+                self.push_expr(expr.clone());
                 format!("<{}>", expr)
             }
 
@@ -513,7 +523,7 @@ impl StackExpressionTracker {
                     }
                     args.reverse();
                     let expr = format!("{}({})", name, args.join(", "));
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("{}", expr)
                 } else {
                     format!("UNKNOWN()")
@@ -549,7 +559,7 @@ impl StackExpressionTracker {
                     if let Some(obj) = self.stack.pop() {
                         args.reverse();
                         let expr = format!("{}.{}({})", obj, name, args.join(", "));
-                        self.stack.push(expr.clone());
+                        self.push_expr(expr.clone());
                         format!("<{}>", expr)
                     } else {
                         format!("<?.{}(...)>", name)
@@ -578,7 +588,7 @@ impl StackExpressionTracker {
                     } else {
                         format!("new({}, {})", obj_type, args.join(", "))
                     };
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
                     String::new()
@@ -638,7 +648,7 @@ impl StackExpressionTracker {
                 if offset < self.stack.len() {
                     let idx = self.stack.len() - 1 - offset;
                     if let Some(item) = self.stack.get(idx) {
-                        self.stack.push(item.clone());
+                        self.push_expr(item.clone());
                     }
                 }
                 format!("<peek {}>", offset)
@@ -678,7 +688,7 @@ impl StackExpressionTracker {
                     let sprite = self.stack.pop().unwrap();
                     let point = self.stack.pop().unwrap();
                     let expr = format!("{} within {}", point, sprite);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
                     String::new()
@@ -690,7 +700,7 @@ impl StackExpressionTracker {
                     let sprite = self.stack.pop().unwrap();
                     let point = self.stack.pop().unwrap();
                     let expr = format!("{} intersects {}", point, sprite);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
                     String::new()
@@ -700,7 +710,7 @@ impl StackExpressionTracker {
             // OpCode::HiliteSpr => {
             //     if let Some(sprite) = self.stack.pop() {
             //         let expr = format!("hilite({})", sprite);
-            //         self.stack.push(expr.clone());
+            //         self.push_expr(expr.clone());
             //         format!("<{}>", expr)
             //     } else {
             //         String::new()
@@ -718,7 +728,7 @@ impl StackExpressionTracker {
                     let start_idx = self.stack.pop().unwrap();
                     let obj = self.stack.pop().unwrap();
                     let expr = format!("char {} to {} of {}", start_idx, end_idx, obj);
-                    self.stack.push(expr.clone());
+                    self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
                     String::new()
@@ -741,7 +751,7 @@ impl StackExpressionTracker {
             let b = self.stack.pop().unwrap();
             let a = self.stack.pop().unwrap();
             let expr = format!("{} {} {}", a, op, b);
-            self.stack.push(expr.clone());
+            self.push_expr(expr.clone());
             format!("<{}>", expr)
         } else {
             String::new()

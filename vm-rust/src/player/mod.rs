@@ -87,7 +87,8 @@ use crate::{
         profiling::get_profiler_report,
         scope::Scope,
         events::{player_invoke_event_to_instances, player_dispatch_event_beginsprite,
-        dispatch_event_to_all_behaviors, player_invoke_frame_and_movie_scripts, dispatch_system_event_to_timeouts},
+        dispatch_event_to_all_behaviors, player_invoke_frame_and_movie_scripts, dispatch_system_event_to_timeouts,
+        player_invoke_targeted_event},
     },
     rendering::with_renderer_mut,
     utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks},
@@ -238,6 +239,14 @@ pub struct DirPlayer {
     /// Pending gotoNetMovie operation: (task_id, frame_destination).
     /// Overwritten by subsequent gotoNetMovie/go-to-movie calls (cancels previous).
     pub pending_goto_net_movie: Option<(u32, MovieFrameTarget)>,
+    /// Cache of allocated scriptInstanceList datums per sprite.
+    /// Ensures that `sprite.scriptInstanceList.add(x)` modifies the live list
+    /// rather than a copy. Keyed by sprite number.
+    pub script_instance_list_cache: FxHashMap<i16, DatumRef>,
+    /// Set by `sprite_get_prop` when a property returns a pre-allocated DatumRef
+    /// (e.g. cached scriptInstanceList). Callers should check this before
+    /// allocating a new DatumRef, to ensure mutations share the same arena entry.
+    pub last_sprite_prop_ref: Option<DatumRef>,
 }
 
 /// Target frame for a movie transition (gotoNetMovie or go movie).
@@ -365,6 +374,8 @@ impl DirPlayer {
             eval_scope_index: None,
             delay_until: None,
             pending_goto_net_movie: None,
+            script_instance_list_cache: FxHashMap::default(),
+            last_sprite_prop_ref: None,
         };
 
         result.reset();
@@ -459,6 +470,7 @@ impl DirPlayer {
                 channel.sprite.entered = false;
                 channel.sprite.script_instance_list.clear();
             }
+            self.script_instance_list_cache.clear();
         }
         
         // Track which film loop members we've already processed to avoid calling
@@ -767,6 +779,7 @@ impl DirPlayer {
         // netManager.clear();
         debug!("Resetting score");
         self.movie.score.reset();
+        self.script_instance_list_cache.clear();
         self.movie.current_frame = 1;
         // TODO cancel breakpoints
         self.current_breakpoint = None;
@@ -1507,7 +1520,9 @@ impl DirPlayer {
         }
         let scope_ref = self.scope_count;
         let scope = self.scopes.get_mut(scope_ref as ScopeRef).unwrap();
+        let prev_gen = scope.generation;
         scope.reset();
+        scope.generation = prev_gen + 1;
         self.scope_count += 1;
         scope_ref as ScopeRef
     }
@@ -2061,22 +2076,6 @@ pub async fn player_call_script_handler_raw_args(
             None
         };
 
-        // Mark older invocations of same handler on same instance as stale,
-        // but only during mouse command handling (user click spam protection)
-        if player.in_mouse_command {
-            if let Some(ref recv) = receiver {
-                let recv_id = recv.id();
-                for i in 0..player.scope_count as usize {
-                    let existing = &mut player.scopes[i];
-                    if existing.handler_name_id == handler_name_id
-                        && existing.receiver.as_ref().map(|r| r.id()) == Some(recv_id)
-                    {
-                        existing.stale = true;
-                    }
-                }
-            }
-        }
-
         let scope_ref = player.push_scope();
         {
             let scope = player.scopes.get_mut(scope_ref).unwrap();
@@ -2129,8 +2128,19 @@ pub async fn player_call_script_handler_raw_args(
     });
 
     let mut should_return = false;
+    let scope_generation = reserve_player_ref(|player| {
+        player.scopes.get(scope_ref).unwrap().generation
+    });
 
     loop {
+        // Check if scope was reused (generation changed = scope was popped and re-pushed)
+        let current_gen = reserve_player_ref(|player| {
+            player.scopes.get(scope_ref).unwrap().generation
+        });
+        if current_gen != scope_generation {
+            break;
+        }
+
         // Single player access to read bytecode_index and debugger state
         let (bytecode_index, debugger_active) = reserve_player_ref(|player| {
             let bi = player.scopes.get(scope_ref).unwrap().bytecode_index;
@@ -2195,14 +2205,6 @@ pub async fn player_call_script_handler_raw_args(
         let result = match player_execute_bytecode(&ctx).await {
             Ok(result) => result,
             Err(err) => {
-                // If scope was marked stale by a re-entrant call, suppress the
-                // error and exit cleanly instead of propagating it
-                let is_stale = reserve_player_ref(|player| {
-                    player.scopes.get(scope_ref).unwrap().stale
-                });
-                if is_stale {
-                    break;
-                }
                 // abort is flow control, not a real error - skip break-on-error
                 if err.code != ScriptErrorCode::Abort {
                     let should_break = reserve_player_ref(|player| player.break_on_error);
@@ -2231,25 +2233,25 @@ pub async fn player_call_script_handler_raw_args(
             }
         };
 
-        // Check if scope was marked stale by a re-entrant call after a yield point
-        let is_stale = reserve_player_ref(|player| {
-            player.scopes.get(scope_ref).unwrap().stale
+        // Check if scope was reused after an async yield point
+        let post_gen = reserve_player_ref(|player| {
+            player.scopes.get(scope_ref).unwrap().generation
         });
-        if is_stale {
+        if post_gen != scope_generation {
             break;
         }
 
         match result {
             HandlerExecutionResult::Advance => {
                 let handler = unsafe { &*ctx.handler_def_ptr };
-                if bytecode_index + 1 >= handler.bytecode_array.len() {
-                    // Reached end of handler - exit
-                    should_return = true;
-                } else {
-                    reserve_player_mut(|player| {
-                        player.scopes.get_mut(scope_ref).unwrap().bytecode_index += 1;
-                    });
-                }
+                reserve_player_mut(|player| {
+                    let scope = player.scopes.get_mut(scope_ref).unwrap();
+                    if scope.bytecode_index + 1 >= handler.bytecode_array.len() {
+                        should_return = true;
+                    } else {
+                        scope.bytecode_index += 1;
+                    }
+                });
             }
             HandlerExecutionResult::Stop => {
                 should_return = true;
@@ -2408,8 +2410,8 @@ async fn run_movie_init_sequence() {
             .collect()
     });
 
-    for (behavior_ref, sprite_num) in behaviors_to_init {
-        if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
+    for (behavior_ref, sprite_num) in &behaviors_to_init {
+        if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref.clone(), *sprite_num).await {
             web_sys::console::warn_1(
                 &format!("Failed to initialize behavior defaults: {}", err.message).into()
             );
@@ -2448,6 +2450,38 @@ async fn run_movie_init_sequence() {
             }
         }
     });
+
+    // Dispatch beginSprite to remaining behaviors not handled above
+    let remaining_behaviors: Vec<ScriptInstanceRef> = reserve_player_mut(|player| {
+        behaviors_to_init.iter()
+            .filter(|(behavior_ref, _)| {
+                player.allocator.get_script_instance_entry(behavior_ref.id())
+                    .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
+            })
+            .map(|(behavior_ref, _)| behavior_ref.clone())
+            .collect()
+    });
+
+    for behavior_ref in &remaining_behaviors {
+        let receivers = vec![behavior_ref.clone()];
+        let _ = player_invoke_targeted_event(
+            &"beginSprite".to_string(),
+            &vec![],
+            Some(&receivers),
+        ).await;
+    }
+
+    if !remaining_behaviors.is_empty() {
+        reserve_player_mut(|player| {
+            for behavior_ref in &remaining_behaviors {
+                if let Some(entry) =
+                    player.allocator.get_script_instance_entry_mut(behavior_ref.id())
+                {
+                    entry.script_instance.begin_sprite_called = true;
+                }
+            }
+        });
+    }
 
     player_wait_available().await;
 
@@ -2578,6 +2612,7 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     // 3. Load the new movie data (preserving globals and allocator)
     reserve_player_mut(|player| {
         player.movie.score.reset();
+        player.script_instance_list_cache.clear();
         player.movie.frame_script_instance = None;
         player.movie.frame_script_member = None;
         player.movie.current_frame = 1;
@@ -2901,8 +2936,8 @@ pub async fn run_frame_loop() {
             });
 
             // Initialize behavior default properties
-            for (behavior_ref, sprite_num) in behaviors_to_init {
-                if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
+            for (behavior_ref, sprite_num) in &behaviors_to_init {
+                if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref.clone(), *sprite_num).await {
                     web_sys::console::warn_1(
                         &format!("Failed to initialize behavior defaults: {}", err.message).into()
                     );
@@ -2941,6 +2976,41 @@ pub async fn run_frame_loop() {
                     }
                 }
             });
+
+            // Dispatch beginSprite to any remaining behaviors that weren't handled
+            // by player_dispatch_event_beginsprite (e.g., puppet sprites not in the
+            // score's sprite_spans, or sprites without entered=true).
+            let remaining_behaviors: Vec<ScriptInstanceRef> = reserve_player_mut(|player| {
+                behaviors_to_init.iter()
+                    .filter(|(behavior_ref, _)| {
+                        player.allocator.get_script_instance_entry(behavior_ref.id())
+                            .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
+                    })
+                    .map(|(behavior_ref, _)| behavior_ref.clone())
+                    .collect()
+            });
+
+            for behavior_ref in &remaining_behaviors {
+                let receivers = vec![behavior_ref.clone()];
+                let _ = player_invoke_targeted_event(
+                    &"beginSprite".to_string(),
+                    &vec![],
+                    Some(&receivers),
+                ).await;
+            }
+
+            // Mark all remaining behaviors as having had beginSprite called
+            if !remaining_behaviors.is_empty() {
+                reserve_player_mut(|player| {
+                    for behavior_ref in &remaining_behaviors {
+                        if let Some(entry) =
+                            player.allocator.get_script_instance_entry_mut(behavior_ref.id())
+                        {
+                            entry.script_instance.begin_sprite_called = true;
+                        }
+                    }
+                });
+            }
 
             reserve_player_mut(|player| {
                 player.is_in_frame_update = false;
@@ -3154,7 +3224,7 @@ async fn player_ext_call<'a>(
             }
         }
     };
-    
+
     // Always decrement handler depth before returning
     reserve_player_mut(|player| {
         player.handler_stack_depth -= 1;

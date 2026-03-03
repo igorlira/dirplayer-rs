@@ -163,7 +163,8 @@ impl SpriteDatumHandlers {
                         &prop_name,
                     ) {
                         Ok(prop_datum) => {
-                            let result = player.alloc_datum(prop_datum);
+                            let result = player.last_sprite_prop_ref.take()
+                                .unwrap_or_else(|| player.alloc_datum(prop_datum));
 
                             // If there's a second argument, it's a sub-property access
                             if args.len() > 1 {
@@ -227,7 +228,8 @@ impl SpriteDatumHandlers {
                         &prop_name,
                     ) {
                         Ok(prop_datum) => {
-                            return Ok(player.alloc_datum(prop_datum));
+                            return Ok(player.last_sprite_prop_ref.take()
+                                .unwrap_or_else(|| player.alloc_datum(prop_datum)));
                         }
                         Err(_) => {}
                     }
