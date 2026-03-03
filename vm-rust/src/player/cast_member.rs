@@ -110,6 +110,7 @@ pub struct ButtonMember {
 pub struct TextMember {
     pub text: String,
     pub html_source: String,  // Original HTML string when set via html property
+    pub rtf_source: String,   // Original RTF string when set via RTF property
     pub alignment: String,
     pub box_type: String,
     pub word_wrap: bool,
@@ -228,6 +229,7 @@ impl TextMember {
         TextMember {
             text: "".to_string(),
             html_source: String::new(),
+            rtf_source: String::new(),
             alignment: "left".to_string(),
             word_wrap: true,
             font: "Arial".to_string(),
@@ -1555,6 +1557,7 @@ impl CastMember {
                 info.scroll_top = field_info.scroll as u32;
                 info.auto_tab = field_info.auto_tab();
                 info.editable = field_info.editable();
+                info.dont_wrap = !field_info.wordwrap();
                 info.width = field_info.width() as u32;
                 info.height = field_info.height() as u32;
             }
@@ -1583,13 +1586,15 @@ impl CastMember {
         text_info.height = box_h as u32;
 
         let box_type = text_info.box_type_str().trim_start_matches('#').to_string();
+        let word_wrap = text_info.word_wrap();
         let xmed_bg_color = styled_text.bg_color;
         let text_member = TextMember {
             text: styled_text.text.clone(),
             html_source: String::new(),
+            rtf_source: String::new(),
             alignment: alignment_str.to_string(),
             box_type,
-            word_wrap: styled_text.word_wrap,
+            word_wrap,
             anti_alias: true,
             font: font_name,
             font_style: Vec::new(),

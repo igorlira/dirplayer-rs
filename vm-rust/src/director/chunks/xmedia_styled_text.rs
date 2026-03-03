@@ -864,7 +864,9 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
 
         if !parse_failed && packer.remaining() >= 2 {
             let word_wrap_value = packer.unpack_num();
-            style.word_wrap = word_wrap_value == 2;
+            // 0 = #adjust (no wrap), 1 = #scroll, 2 = #fixed, 3 = #limit (all wrap)
+            style.word_wrap = word_wrap_value != 0;
+            debug!("    Style {}: word_wrap_value={} → word_wrap={}", style_idx, word_wrap_value, style.word_wrap);
         } else { parse_failed = true; }
 
         if !parse_failed && packer.remaining() >= 2 { packer.unpack_num(); } else { parse_failed = true; }
