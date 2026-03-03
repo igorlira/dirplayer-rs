@@ -164,15 +164,22 @@ pub async fn player_invoke_event_to_instances(
         Ok(result)
     })?;
 
+    // In Director D6+, all behaviors on a sprite receive the event.
+    // The `pass` flag only controls whether the event propagates beyond
+    // the sprite to frame/movie scripts — it does NOT stop propagation
+    // between behaviors on the same sprite.
+    // In pre-D6, a handler that doesn't pass stops propagation to
+    // subsequent behaviors.
+    let is_d6_plus = reserve_player_ref(|player| player.movie.dir_version >= 600);
     let mut handled = false;
     for (script_instance_ref, handler_ref) in recv_instance_handlers {
         match player_call_script_handler(Some(script_instance_ref), handler_ref, args).await {
             Ok(scope) => {
                 if !scope.passed {
                     handled = true;
-                    // Don't break — in Director, all behaviors on a sprite
-                    // receive the event. `pass` only controls propagation
-                    // beyond behaviors to cast member/frame/movie scripts.
+                    if !is_d6_plus {
+                        break;
+                    }
                 }
             }
             Err(err) => {
@@ -193,7 +200,7 @@ pub async fn player_invoke_event_to_instances(
             }
         }
     }
-    
+
     Ok(handled)
 }
 
