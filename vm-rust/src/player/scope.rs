@@ -22,7 +22,7 @@ pub struct Scope {
     pub return_value: DatumRef,
     pub stack: Vec<DatumRef>,
     pub passed: bool,
-    pub stale: bool,
+    pub generation: u64,
 }
 
 pub struct ScopeResult {
@@ -52,7 +52,7 @@ impl Scope {
             return_value: DatumRef::Void,
             stack: vec![],
             passed: false,
-            stale: false,
+            generation: 0,
         }
     }
 
@@ -67,6 +67,5 @@ impl Scope {
         self.return_value = DatumRef::Void;
         self.stack.clear();
         self.passed = false;
-        self.stale = false;
     }
 }

@@ -321,6 +321,9 @@ pub async fn player_execute_bytecode<'a>(
 
         let handler = unsafe { &*ctx.handler_def_ptr };
         let script = unsafe { &*ctx.script_ptr };
+        if scope.bytecode_index >= handler.bytecode_array.len() {
+            return Ok(HandlerExecutionResult::Stop);
+        }
         let bytecode = &handler.bytecode_array[scope.bytecode_index];
 
         // Always record to lightweight execution history (minimal overhead - just copying integers)

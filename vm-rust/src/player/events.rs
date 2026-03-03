@@ -68,6 +68,20 @@ pub fn player_dispatch_event_to_sprite(
     sprite_num: u16,
 ) {
     let instance_ids = reserve_player_ref(|player| {
+        // Check the cache first — it may contain extra instances added
+        // via scriptInstanceList.add() (e.g. goal parent scripts).
+        if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite_num as i16)).cloned() {
+            let datum = player.get_datum(&cached_ref).clone();
+            if let Datum::List(_, item_refs, _) = datum {
+                let mut ids = vec![];
+                for item_ref in &item_refs {
+                    if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
+                        ids.push(id.clone());
+                    }
+                }
+                return Some(ids);
+            }
+        }
         let sprite = player.movie.score.get_sprite(sprite_num as i16);
         if let Some(sprite) = sprite {
             let instance_ids = sprite.script_instance_list.clone();
@@ -95,6 +109,20 @@ pub async fn player_dispatch_event_to_sprite_targeted(
     sprite_num: u16,
 ) {
     let instance_ids = reserve_player_ref(|player| {
+        // Check the cache first — it may contain extra instances added
+        // via scriptInstanceList.add() (e.g. goal parent scripts).
+        if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite_num as i16)).cloned() {
+            let datum = player.get_datum(&cached_ref).clone();
+            if let Datum::List(_, item_refs, _) = datum {
+                let mut ids = vec![];
+                for item_ref in &item_refs {
+                    if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
+                        ids.push(id.clone());
+                    }
+                }
+                return Some(ids);
+            }
+        }
         player
             .movie
             .score
@@ -135,14 +163,16 @@ pub async fn player_invoke_event_to_instances(
         }
         Ok(result)
     })?;
-    
+
     let mut handled = false;
     for (script_instance_ref, handler_ref) in recv_instance_handlers {
         match player_call_script_handler(Some(script_instance_ref), handler_ref, args).await {
             Ok(scope) => {
                 if !scope.passed {
                     handled = true;
-                    break;
+                    // Don't break — in Director, all behaviors on a sprite
+                    // receive the event. `pass` only controls propagation
+                    // beyond behaviors to cast member/frame/movie scripts.
                 }
             }
             Err(err) => {
@@ -417,6 +447,15 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
         let item = rx.recv().await.unwrap();
         player_wait_available().await;
         if !player_is_playing().await {
+            continue;
+        }
+        // Skip event processing when a command handler (mouseDown, keyDown, etc.)
+        // is actively executing. The event loop and command loop share the scope
+        // stack, so processing events (which push/pop scopes) during a command
+        // handler's async yield (e.g. nothing()) would corrupt the scope data.
+        // Ephemeral events like mouseWithin will be re-dispatched on the next tick.
+        let skip = reserve_player_ref(|player| player.in_mouse_command || player.command_handler_yielding);
+        if skip {
             continue;
         }
         let result = match item {
