@@ -1104,12 +1104,8 @@ impl Score {
             let max_idx = player.movie.score.sprite_details.keys().max().cloned();
             ((count, max_idx), player.movie.dir_version)
         });
-        debug!(
-            "🔍 begin_sprites: main movie has {} sprite_details, max index: {:?}, score_ref: {:?}",
-            sprite_details_info.0, sprite_details_info.1, score_ref
-        );
-
         let mut spritelistidx_attached_channels: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut spritelistidx_seen_channels: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (span, _channel_index, data) in span_init_data.iter() {
             let sprite_list_idx = data.sprite_list_idx();
             if sprite_list_idx == 0 && !(dir_version < 600 && data.sprite_list_idx_lo != 0) {
