@@ -297,6 +297,7 @@ pub struct ScoreFrameData {
     pub frame_channel_data: Vec<(u32, u16, ScoreFrameChannelData)>,
     pub sound_channel_data: Vec<(u32, u16, SoundChannelData)>,
     pub tempo_channel_data: Vec<(u32, TempoChannelData)>,
+    pub palette_channel_data: Vec<(u32, i16, i16)>,
 }
 
 impl Default for ScoreFrameData {
@@ -307,6 +308,7 @@ impl Default for ScoreFrameData {
             frame_channel_data: Vec::new(),
             sound_channel_data: Vec::new(),
             tempo_channel_data: Vec::new(),
+            palette_channel_data: Vec::new(),
         }
     }
 }
@@ -546,10 +548,11 @@ impl ScoreFrameData {
         let main_channels_size: usize = if header.frames_version <= 7 { 48 } else { 0 };
         let is_d5 = main_channels_size > 0;
 
-        let (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data) = {
+        let (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data, palette_channel_data) = {
             let mut frame_channel_data = vec![];
             let mut sound_channel_data = vec![];
             let mut tempo_channel_data = vec![];
+            let mut palette_channel_data: Vec<(u32, i16, i16)> = vec![];
             let decompressed_data = channel_data;
             let mut channel_reader = BinaryReader::from_vec(&decompressed_data);
             channel_reader.set_endian(Endian::Big);
@@ -636,6 +639,14 @@ impl ScoreFrameData {
                         }));
                     }
 
+                    // Palette: castLib at bytes 24-25, member at bytes 26-27
+                    channel_reader.jmp(frame_start + 24);
+                    let palette_cast_lib = channel_reader.read_i16().unwrap_or(0);
+                    let palette_member = channel_reader.read_i16().unwrap_or(0);
+                    if palette_cast_lib != 0 || palette_member != 0 {
+                        palette_channel_data.push((frame_index, palette_cast_lib, palette_member));
+                    }
+
                     // Sprite channels start at byte 48 within the frame
                     let num_sprites = (frame_size - main_channels_size) / (header.sprite_record_size as usize);
                     for sprite_idx in 0..num_sprites {
@@ -666,7 +677,17 @@ impl ScoreFrameData {
                         let pos = frame_start + (channel_index as usize) * (header.sprite_record_size as usize);
                         channel_reader.jmp(pos);
 
-                        if channel_index == 3 || channel_index == 4 {
+                        if channel_index == 0 || channel_index == 2 {
+                            // Channel 0 = Script, Channel 2 = Transition (skip)
+                        } else if channel_index == 1 {
+                            // Channel 1 = Tempo
+                            let tempo_data = TempoChannelData::read(&mut channel_reader)?;
+                            if !tempo_data.is_default() && !tempo_data.is_empty() {
+                                debug!("Frame {} Tempo: fps={}", frame_index, tempo_data.tempo);
+                                tempo_channel_data.push((frame_index, tempo_data));
+                            }
+                        } else if channel_index == 3 || channel_index == 4 {
+                            // Channel 3 = Sound2, Channel 4 = Sound1
                             let sound_data = SoundChannelData::read(&mut channel_reader)?;
                             if sound_data.cast_member != 0 {
                                 debug!("Sound {} in frame {}: cast_member={}",
@@ -674,10 +695,13 @@ impl ScoreFrameData {
                                 sound_channel_data.push((frame_index, channel_index, sound_data));
                             }
                         } else if channel_index == 5 {
-                            let tempo_data = TempoChannelData::read(&mut channel_reader)?;
-                            if !tempo_data.is_default() && !tempo_data.is_empty() {
-                                debug!("Frame {} Tempo: fps={}", frame_index, tempo_data.tempo);
-                                tempo_channel_data.push((frame_index, tempo_data));
+                            // Channel 5 = Palette: castLib at bytes 0-1, member at bytes 2-3
+                            let palette_cast_lib = channel_reader.read_i16()
+                                .map_err(|e| format!("Failed to read palette castLib: {:?}", e))?;
+                            let palette_member = channel_reader.read_i16()
+                                .map_err(|e| format!("Failed to read palette member: {:?}", e))?;
+                            if palette_cast_lib != 0 || palette_member != 0 {
+                                palette_channel_data.push((frame_index, palette_cast_lib, palette_member));
                             }
                         } else {
                             let data = ScoreFrameChannelData::read_with_size(&mut channel_reader, header.sprite_record_size)?;
@@ -711,11 +735,11 @@ impl ScoreFrameData {
             }
 
             console::log_1(&format!(
-                "🏁 Finished processing {} frames. Sprites: {}, Sounds: {}, Tempo changes: {}",
-                header.frame_count, frame_channel_data.len(), sound_channel_data.len(), tempo_channel_data.len()
+                "🏁 Finished processing {} frames. Sprites: {}, Sounds: {}, Tempo changes: {}, Palette changes: {}",
+                header.frame_count, frame_channel_data.len(), sound_channel_data.len(), tempo_channel_data.len(), palette_channel_data.len()
             ).into());
 
-            (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data)
+            (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data, palette_channel_data)
         };
 
         Ok(ScoreFrameData {
@@ -724,6 +748,7 @@ impl ScoreFrameData {
             frame_channel_data,
             sound_channel_data,
             tempo_channel_data,
+            palette_channel_data,
         })
     }
 
