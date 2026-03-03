@@ -474,6 +474,9 @@ impl Datum {
     pub fn to_rect(&self) -> Result<[DatumRef; 4], ScriptError> {
         match self {
             Datum::Rect(rect) => Ok(rect.clone()),
+            Datum::List(_, items, _) if items.len() == 4 => {
+                Ok([items[0].clone(), items[1].clone(), items[2].clone(), items[3].clone()])
+            }
             _ => Err(ScriptError::new(
                 "Cannot convert datum to rect".to_string(),
             )),
