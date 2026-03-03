@@ -110,6 +110,7 @@ features = [
   'WebGlActiveInfo',
   'MessageChannel',
   'MessagePort',
+  'Storage',
 ]
 
 [dependencies.flate2]
