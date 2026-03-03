@@ -1063,6 +1063,10 @@ impl WebGL2Renderer {
             },
         }
 
+        // Set by filmloop logic: true when the stage sprite dimensions match the
+        // filmloop's sprite-dim rect, meaning the score dimensions are intentional.
+        let mut filmloop_sprite_dims_match = false;
+
         let texture_source = {
             let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
                 Some(m) => m,
@@ -1085,16 +1089,17 @@ impl WebGL2Renderer {
                     }
 
                     let palettes = player.movie.cast_manager.palettes();
+                    let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
                     let fg_rgb = resolve_color_ref(
                         &palettes,
                         &fg_color,
-                        &PaletteRef::BuiltIn(get_system_default_palette()),
+                        &frame_palette,
                         8,
                     );
                     let bg_rgb = resolve_color_ref(
                         &palettes,
                         &bg_color,
-                        &PaletteRef::BuiltIn(get_system_default_palette()),
+                        &frame_palette,
                         8,
                     );
 
@@ -1561,21 +1566,41 @@ impl WebGL2Renderer {
                 }
                 CastMemberType::FilmLoop(film_loop) => {
                     // Film loop: render the film loop's score to an offscreen bitmap.
-                    // Prefer the info rect (authoritative viewport from Director file)
-                    // over the load-time computed initial_rect.
+                    // Prefer info_rect (authoritative viewport from Director file).
                     let info_rect = IntRect::from(
                         film_loop.info.reg_point.0 as i32,
                         film_loop.info.reg_point.1 as i32,
                         film_loop.info.width as i32,
                         film_loop.info.height as i32,
                     );
+
+                    let sprite_dim_rect = &film_loop.initial_rect;
+                    let bitmap_dim_rect = crate::rendering::compute_filmloop_initial_rect_with_members(player, &member_ref);
+
+                    debug!(
+                        "FILMLOOP DIMS: member {}:{} sprite_rect {}x{} sprite_dim_rect ({},{},{},{}) {}x{} bitmap_dim_rect {:?} info_rect ({},{},{},{}) {}x{}",
+                        member_ref.cast_lib, member_ref.cast_member,
+                        sprite_width, sprite_height,
+                        sprite_dim_rect.left, sprite_dim_rect.top, sprite_dim_rect.right, sprite_dim_rect.bottom,
+                        sprite_dim_rect.width(), sprite_dim_rect.height(),
+                        bitmap_dim_rect.as_ref().map(|r| format!("({},{},{},{}) {}x{}", r.left, r.top, r.right, r.bottom, r.width(), r.height())),
+                        info_rect.left, info_rect.top, info_rect.right, info_rect.bottom,
+                        info_rect.width(), info_rect.height(),
+                    );
+
+                    let sprite_dims_match_stage = sprite_width > 0 && sprite_height > 0
+                        && (sprite_width - sprite_dim_rect.width()).abs() <= 1
+                        && (sprite_height - sprite_dim_rect.height()).abs() <= 1;
+                    filmloop_sprite_dims_match = sprite_dims_match_stage;
+
                     let initial_rect = if info_rect.width() > 0 && info_rect.height() > 0 {
-                        info_rect
-                    } else {
+                        info_rect.clone()
+                    } else if sprite_dims_match_stage {
                         film_loop.initial_rect.clone()
+                    } else {
+                        bitmap_dim_rect.unwrap_or_else(|| film_loop.initial_rect.clone())
                     };
 
-                    // Store just the metadata - we'll render after this block ends
                     let width = initial_rect.width().max(1);
                     let height = initial_rect.height().max(1);
 
@@ -1592,20 +1617,21 @@ impl WebGL2Renderer {
             }
         };
 
-        // For filmloops, use info rect (already computed above) as the authoritative viewport.
-        // When the sprite doesn't have explicit dimensions, use center registration
-        // to position the filmloop on the stage.
+        // For filmloops: override sprite_rect when the score has no explicit dimensions,
+        // or when bitmap dims are being used and the score dims don't match the texture.
+        // When sprite dims match the stage (filmloop_sprite_dims_match), the score
+        // dimensions are intentional and must not be overridden.
         let texture_source = match texture_source {
             TextureSource::FilmLoop { initial_rect, width, height } => {
                 let w = width as i32;
                 let h = height as i32;
-
-                // Only override sprite_rect when the sprite doesn't have explicit
-                // dimensions from the score. When the score specifies width/height
-                // (e.g. a filmloop with Scale checked, stretched to a specific size),
-                // those dimensions must be respected — the GPU will scale the texture
-                // from its natural size to the sprite's display rect.
-                if sprite_width <= 0 || sprite_height <= 0 {
+                let should_override = if filmloop_sprite_dims_match {
+                    sprite_width <= 0 || sprite_height <= 0
+                } else {
+                    sprite_width <= 0 || sprite_height <= 0
+                        || (sprite_width - w).abs() > 1 || (sprite_height - h).abs() > 1
+                };
+                if should_override {
                     let reg_x = w / 2;
                     let reg_y = h / 2;
                     sprite_rect = IntRect::from(
@@ -1661,22 +1687,12 @@ impl WebGL2Renderer {
         let palettes = player.movie.cast_manager.palettes();
         // Sprite foreColor/backColor palette indices are resolved against the bitmap's palette,
         // so they work together correctly (e.g., index 248/255 in a custom 256-color palette).
-        // Director behavior: for 32-bit bitmaps without use_alpha and ink != 0,
-        // palette indices are ignored for bgColor and white (255,255,255) is used instead.
-        // This matches Canvas2D behavior in drawing.rs lines 780-795.
-        let bg_color_rgb = if bitmap_bit_depth == 32 && !bitmap_use_alpha && ink != 0 {
-            match &bg_color {
-                ColorRef::Rgb(r, g, b) => (*r, *g, *b),
-                ColorRef::PaletteIndex(_) => (255, 255, 255),
-            }
-        } else {
-            resolve_color_ref(
-                &palettes,
-                &bg_color,
-                &bitmap_palette_ref,
-                bitmap_bit_depth,
-            )
-        };
+        let bg_color_rgb = resolve_color_ref(
+            &palettes,
+            &bg_color,
+            &bitmap_palette_ref,
+            bitmap_bit_depth,
+        );
         let fg_color_rgb = resolve_color_ref(
             &palettes,
             &fg_color,
@@ -1752,13 +1768,12 @@ impl WebGL2Renderer {
 
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref } => {
-                // For inks 7, 8, 9, 40, and 41, pass sprite's bgColor for matte/transparency computation
-                // - Ink 7: uses bgColor for matte (not ghost - skips bgColor pixels)
-                // - Ink 8: always uses bgColor for matte
-                // - Ink 9: uses bgColor for 32-bit bitmaps
-                // - Ink 40: uses bgColor for transparency (lighten - skips bgColor pixels)
-                // - Ink 41: uses bgColor for 32-bit bitmaps, palette index 0 for indexed
-                let sprite_bg_for_matte = if ink == 7 || ink == 8 || ink == 9 || ink == 40 || ink == 41 { Some(bg_color_rgb) } else { None };
+                // Pass sprite's bgColor for matte/transparency computation for inks that need it
+                let sprite_bg_for_matte = if ink == 7 || ink == 8 || ink == 9 || ink == 40 || ink == 41 {
+                    Some(bg_color_rgb)
+                } else {
+                    None
+                };
 
                 match self.get_or_create_texture(player, &member_ref, image_ref, ink, colorize_params, sprite_bg_for_matte) {
                     Some((tex, _w, _h)) => tex,
@@ -1838,7 +1853,7 @@ impl WebGL2Renderer {
                     }
                 }
             }
-            TextureSource::FilmLoop { initial_rect, width, height } => {
+            TextureSource::FilmLoop { initial_rect, width, height, .. } => {
                 // Render the film loop's score to an offscreen bitmap
                 let mut filmloop_bitmap = Bitmap::new(
                     width as u16,
@@ -2484,7 +2499,7 @@ impl WebGL2Renderer {
         // Important: some inks use color-key transparency in the shader instead of matte:
         // - Ink 33 (Add Pin): color-key comparison in shader
         // - Ink 36 (BgTransparent): color-key comparison in shader
-        let should_use_matte_ink0 = bitmap.trim_white_space && ink == 0;
+        let should_use_matte_ink0 = ink == 0 && bitmap.trim_white_space;
         // Ink 7 (Not Ghost) uses matte for indexed and 16-bit bitmaps (flood-fill from edges)
         // This matches Canvas2D's should_matte_sprite which includes ink 7
         let should_use_matte_ink7 = ink == 7 && (is_indexed || is_16bit);
@@ -2598,9 +2613,9 @@ impl WebGL2Renderer {
             } else if is_32bit {
                 // For 32-bit bitmaps without use_alpha:
                 // - Ink 8: use sprite's bgColor for matte (matches Canvas2D behavior)
-                // - Ink 9: use sprite's bgColor for matte (mask ink uses bgColor for transparency)
-                // - Ink 41: use sprite's bgColor for matte (typically white for transparency)
-                // - Other inks: use edge color (matching drawing.rs lines 891-897)
+                // - Ink 9: use sprite's bgColor for matte
+                // - Ink 41: use sprite's bgColor for matte
+                // - Other inks: use edge color
                 let bg_color_for_matte = if ink == 8 || ink == 9 || ink == 41 {
                     sprite_bg_color.unwrap_or_else(|| bitmap.get_pixel_color(palettes, 0, 0))
                 } else {
@@ -2683,9 +2698,17 @@ impl WebGL2Renderer {
                     } else {
                         255
                     }
+                } else if ink == 0 && should_use_matte {
+                    // For ink 0 (Copy) with matte (trim_white_space):
+                    if let Some(ref computed) = computed_matte {
+                        if computed[y * width + x] { 255 } else { 0 }
+                    } else if let Some(ref matte) = bitmap.matte {
+                        if matte.get_bit(x as u16, y as u16) { 255 } else { 0 }
+                    } else {
+                        255
+                    }
                 } else if ink == 0 {
-                    // For ink 0 (Copy) without use_alpha: always fully opaque
-                    // This applies to indexed, 16-bit, and 32-bit with use_alpha=false
+                    // For ink 0 (Copy) without matte: always fully opaque
                     255
                 } else if use_embedded_alpha {
                     // 32-bit with use_alpha (non-ink-0): use embedded alpha directly, ignore any matte
@@ -3063,7 +3086,7 @@ impl WebGL2Renderer {
         // Note: Ink 41 for indexed bitmaps uses palette index 0, not bgColor
         let is_ink_with_bgcolor_matte =
             ((ink == 7 || ink == 8 || ink == 40) && bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8)
-            || (ink == 8 && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
+            || ((ink == 0 || ink == 8) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
             || ((ink == 9 || ink == 41) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha);
         let cache_key_bg_color = if is_ink_with_bgcolor_matte {
             sprite_bg_color
