@@ -523,14 +523,15 @@ impl TypeHandlers {
                 Datum::Int(i) => Datum::Float(*i as f64),
                 Datum::SpriteRef(sprite_num) => Datum::Float(*sprite_num as f64),
                 Datum::String(s) => {
-                    if let Ok(float_value) = s.parse::<f64>() {
+                    // Director's float() trims whitespace before parsing
+                    if let Ok(float_value) = s.trim().parse::<f64>() {
                         Datum::Float(float_value)
                     } else {
                         value.to_owned()
                     }
                 }
                 Datum::StringChunk(_, _, s) => {
-                    if let Ok(float_value) = s.parse::<f64>() {
+                    if let Ok(float_value) = s.trim().parse::<f64>() {
                         Datum::Float(float_value)
                     } else {
                         value.to_owned()
@@ -553,14 +554,18 @@ impl TypeHandlers {
             let symbol_name = player.get_datum(&args[0]);
             let result = if let Datum::Symbol(_) = symbol_name {
                 symbol_name.clone()
+            } else if let Datum::Void = symbol_name {
+                Datum::Symbol("void".to_string())
             } else if symbol_name.is_string() {
                 let str_value = symbol_name.string_value()?;
-                if str_value.is_empty() {
+                // Director's symbol() trims whitespace from the input string
+                let trimmed = str_value.trim();
+                if trimmed.is_empty() {
                     Datum::Symbol("".to_string())
-                } else if str_value.starts_with("#") {
-                    Datum::Symbol("#".to_string())
+                } else if trimmed.starts_with("#") {
+                    Datum::Symbol(trimmed[1..].to_string())
                 } else {
-                    Datum::Symbol(str_value)
+                    Datum::Symbol(trimmed.to_string())
                 }
             } else {
                 return Err(ScriptError::new(format!(
@@ -886,11 +891,15 @@ impl TypeHandlers {
                 }
             }
 
+            // Director's 24-bit images are stored internally as 32-bit RGBA (alpha=0xFF).
+            // Both bit_depth and original_bit_depth are set to 32 so all rendering
+            // paths (matte, ink, colorize) treat this as a standard 32-bit bitmap.
+            let storage_depth = if bit_depth == 24 { 32 } else { bit_depth };
             let bitmap = Bitmap::new(
                 width,
                 height,
-                bit_depth,
-                bit_depth,
+                storage_depth,
+                storage_depth,
                 alpha_depth,
                 palette_ref,
             );

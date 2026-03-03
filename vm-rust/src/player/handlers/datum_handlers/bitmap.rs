@@ -93,8 +93,16 @@ impl BitmapDatumHandlers {
         reserve_player_mut(|player| {
             let bitmap = player.get_datum(datum).to_bitmap_ref()?;
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
-            let x = player.get_datum(&args[0]).int_value()?;
-            let y = player.get_datum(&args[1]).int_value()?;
+            let (x, y) = if args.len() == 1 {
+                let point = player.get_datum(&args[0]).to_point()?;
+                let x = player.get_datum(&point[0]).int_value()?;
+                let y = player.get_datum(&point[1]).int_value()?;
+                (x, y)
+            } else {
+                let x = player.get_datum(&args[0]).int_value()?;
+                let y = player.get_datum(&args[1]).int_value()?;
+                (x, y)
+            };
             let color = bitmap.get_pixel_color_ref(x as u16, y as u16);
             let color_ref = player.alloc_datum(Datum::ColorRef(color));
             Ok(color_ref)
@@ -382,12 +390,22 @@ impl BitmapDatumHandlers {
                 _ => Err(ScriptError::new("Cannot draw non-bitmap".to_string())),
             }?;
 
+            // setPixel supports both (x, y, color) and (point, color) forms
             let (x, y, color_obj_or_int, bit_depth, original_bit_depth, palette_ref) = {
                 let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
 
-                let x = player.get_datum(&args[0]).int_value()?;
-                let y = player.get_datum(&args[1]).int_value()?;
-                let color_obj_or_int = player.get_datum(&args[2]);
+                let first_arg = player.get_datum(&args[0]);
+                let (x, y, color_obj_or_int) = if let Datum::Point(pt) = first_arg {
+                    let px = player.get_datum(&pt[0]).int_value()?;
+                    let py = player.get_datum(&pt[1]).int_value()?;
+                    let color = player.get_datum(&args[1]);
+                    (px, py, color)
+                } else {
+                    let x = first_arg.int_value()?;
+                    let y = player.get_datum(&args[1]).int_value()?;
+                    let color = player.get_datum(&args[2]);
+                    (x, y, color)
+                };
 
                 if x < 0 || y < 0 || x >= bitmap.width as i32 || y >= bitmap.height as i32 {
                     return Ok(player.alloc_datum(datum_bool(false)));

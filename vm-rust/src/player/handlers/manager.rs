@@ -345,9 +345,7 @@ impl BuiltInHandlerManager {
         reserve_player_mut(|player| {
             let max = player.get_datum(&args[0]).int_value()?;
             if max <= 0 {
-                return Err(ScriptError::new(
-                    "random: argument must be greater than 0".to_string(),
-                ));
+                return Ok(player.alloc_datum(Datum::Int(0)));
             }
             
             // Director's random(n) returns a value from 1 to n (inclusive)
@@ -644,6 +642,12 @@ impl BuiltInHandlerManager {
                 return Ok(DatumRef::Void);
             }
             "abort" => Err(ScriptError::new_code(ScriptErrorCode::Abort, "abort".to_string())),
+            "getvariable" | "setvariable" => {
+                // Flash (SWF) member interop stubs — getVariable returns a variable
+                // from a Flash sprite, setVariable sets one. Flash members are not
+                // supported, so return VOID / no-op.
+                Ok(DatumRef::Void)
+            }
             "getaprop" => TypeHandlers::get_a_prop(args),
             "inside" => {
                 let point = &args[0];
@@ -690,6 +694,15 @@ impl BuiltInHandlerManager {
                     Datum::List(..) => ListDatumHandlers::get_one(list, args),
                     Datum::PropList(..) => PropListDatumHandlers::get_one(list, args),
                     _ => Err(ScriptError::new("Cannot get one at non list".to_string())),
+                }
+            }),
+            "findpos" => reserve_player_mut(|player| {
+                let list = &args[0];
+                let args = &args[1..].to_vec();
+                match player.get_datum(list) {
+                    Datum::List(..) => ListDatumHandlers::find_pos(list, &args),
+                    Datum::PropList(..) => PropListDatumHandlers::find_pos(list, &args),
+                    _ => Err(ScriptError::new("Cannot findPos on non-list".to_string())),
                 }
             }),
             "setaprop" => {

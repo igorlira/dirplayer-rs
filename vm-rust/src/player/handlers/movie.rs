@@ -12,7 +12,7 @@ use crate::{
             player_invoke_event_to_instances, player_invoke_static_event,
             player_invoke_global_event, player_wait_available, player_unwrap_result,
             dispatch_event_to_all_behaviors, player_dispatch_event_beginsprite,
-            dispatch_system_event_to_timeouts
+            dispatch_system_event_to_timeouts, player_invoke_targeted_event
         },
     },
     utils::{log_i},
@@ -254,8 +254,8 @@ impl MovieHandlers {
                 });
 
                 // Initialize behavior default properties
-                for (behavior_ref, sprite_num) in behaviors_to_init {
-                    if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
+                for (behavior_ref, sprite_num) in &behaviors_to_init {
+                    if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref.clone(), *sprite_num).await {
                         web_sys::console::warn_1(
                             &format!("Failed to initialize behavior defaults: {}", err.message).into()
                         );
@@ -290,6 +290,39 @@ impl MovieHandlers {
                         }
                     }
                 });
+
+                // Dispatch beginSprite to any remaining behaviors not handled above
+                // (e.g., puppet sprites not in the score's sprite_spans)
+                let remaining_behaviors: Vec<ScriptInstanceRef> = reserve_player_mut(|player| {
+                    behaviors_to_init.iter()
+                        .filter(|(behavior_ref, _)| {
+                            player.allocator.get_script_instance_entry(behavior_ref.id())
+                                .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
+                        })
+                        .map(|(behavior_ref, _)| behavior_ref.clone())
+                        .collect()
+                });
+
+                for behavior_ref in &remaining_behaviors {
+                    let receivers = vec![behavior_ref.clone()];
+                    let _ = player_invoke_targeted_event(
+                        &"beginSprite".to_string(),
+                        &vec![],
+                        Some(&receivers),
+                    ).await;
+                }
+
+                if !remaining_behaviors.is_empty() {
+                    reserve_player_mut(|player| {
+                        for behavior_ref in &remaining_behaviors {
+                            if let Some(entry) =
+                                player.allocator.get_script_instance_entry_mut(behavior_ref.id())
+                            {
+                                entry.script_instance.begin_sprite_called = true;
+                            }
+                        }
+                    });
+                }
 
                 player_wait_available().await;
 
@@ -598,13 +631,31 @@ impl MovieHandlers {
 
     pub fn get_pref(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            // Return empty string - Lingo code handles the fallback
-            Ok(player.alloc_datum(Datum::String("".to_string())))
+            let pref_name = player.get_datum(&args[0]).string_value()?;
+            let storage = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten());
+            if let Some(storage) = storage {
+                let key = format!("dirplayer_pref_{}", pref_name);
+                if let Ok(Some(value)) = storage.get_item(&key) {
+                    return Ok(player.alloc_datum(Datum::String(value)));
+                }
+            }
+            Ok(DatumRef::Void)
         })
     }
 
-    pub fn set_pref(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        Ok(DatumRef::Void)
+    pub fn set_pref(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let pref_name = player.get_datum(&args[0]).string_value()?;
+            let pref_value = player.get_datum(&args[1]).string_value()?;
+            let storage = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten());
+            if let Some(storage) = storage {
+                let key = format!("dirplayer_pref_{}", pref_name);
+                let _ = storage.set_item(&key, &pref_value);
+            }
+            Ok(DatumRef::Void)
+        })
     }
 
     pub fn go_to_net_page(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
