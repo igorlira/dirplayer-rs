@@ -491,6 +491,40 @@ pub fn get_obj_prop(
     prop_name: &String,
 ) -> Result<DatumRef, ScriptError> {
     let obj_clone = player.get_datum(obj_ref).clone();
+
+    // Universal type-check properties (work on any datum type)
+    match prop_name.as_str() {
+        "integerp" => {
+            let is_int = matches!(obj_clone, Datum::Int(_));
+            return Ok(player.alloc_datum(Datum::Int(if is_int { 1 } else { 0 })));
+        }
+        "floatp" => {
+            let is_float = matches!(obj_clone, Datum::Float(_));
+            return Ok(player.alloc_datum(Datum::Int(if is_float { 1 } else { 0 })));
+        }
+        "stringp" => {
+            let is_string = matches!(obj_clone, Datum::String(_) | Datum::StringChunk(..));
+            return Ok(player.alloc_datum(Datum::Int(if is_string { 1 } else { 0 })));
+        }
+        "symbolp" => {
+            let is_symbol = matches!(obj_clone, Datum::Symbol(_));
+            return Ok(player.alloc_datum(Datum::Int(if is_symbol { 1 } else { 0 })));
+        }
+        "listp" => {
+            let is_list = matches!(obj_clone, Datum::List(..) | Datum::PropList(..));
+            return Ok(player.alloc_datum(Datum::Int(if is_list { 1 } else { 0 })));
+        }
+        "objectp" => {
+            let is_obj = matches!(obj_clone, Datum::ScriptInstanceRef(_));
+            return Ok(player.alloc_datum(Datum::Int(if is_obj { 1 } else { 0 })));
+        }
+        "voidp" => {
+            let is_void = matches!(obj_clone, Datum::Void);
+            return Ok(player.alloc_datum(Datum::Int(if is_void { 1 } else { 0 })));
+        }
+        _ => {}
+    }
+
     match obj_clone {
         Datum::CastLib(cast_lib) => {
             let cast_lib = player.movie.cast_manager.get_cast(cast_lib as u32)?;
@@ -524,7 +558,8 @@ pub fn get_obj_prop(
         }
         Datum::SpriteRef(sprite_id) => {
             let result = sprite_get_prop(player, sprite_id, prop_name)?;
-            Ok(player.alloc_datum(result))
+            Ok(player.last_sprite_prop_ref.take()
+                .unwrap_or_else(|| player.alloc_datum(result)))
         }
         Datum::BitmapRef(_) => BitmapDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::String(s) => {

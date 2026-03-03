@@ -124,6 +124,20 @@ pub fn datum_equals(
             }
             Ok(true)
         }
+        // List-Point and Point-List comparison (Director treats 2-element lists and points interchangeably)
+        (Datum::List(_, list, _), Datum::Point(point)) | (Datum::Point(point), Datum::List(_, list, _)) => {
+            if list.len() != 2 {
+                return Ok(false);
+            }
+            for i in 0..2 {
+                let list_val = allocator.get_datum(&list[i]);
+                let point_val = allocator.get_datum(&point[i]);
+                if !datum_equals(list_val, point_val, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
         (Datum::Null, Datum::Int(_)) => Ok(false),
         (Datum::PropList(..), Datum::Void) => Ok(false),
         (Datum::Symbol(_), Datum::Int(_)) => Ok(false),
@@ -243,7 +257,19 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
 
         // String comparisons
         (Datum::String(..), Datum::String(..)) => Ok(false),
-        
+
+        // PropList comparisons - Director compares property lists by their first value.
+        // This is essential for sorted lists used as priority queues (e.g. A* pathfinding).
+        (Datum::PropList(left_pairs, ..), Datum::PropList(right_pairs, ..)) => {
+            if let (Some((_, left_val)), Some((_, right_val))) = (left_pairs.first(), right_pairs.first()) {
+                let left_datum = allocator.get_datum(left_val);
+                let right_datum = allocator.get_datum(right_val);
+                datum_less_than(left_datum, right_datum, allocator)
+            } else {
+                Ok(false)
+            }
+        }
+
         // Catch-all
         _ => {
             warn!(

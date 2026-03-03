@@ -8,7 +8,7 @@ use crate::{
         datum::{Datum, StringChunkType},
     },
     player::{
-        allocator::DatumAllocatorTrait,
+        allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
         handlers::datum_handlers::{
             cast_member_ref::CastMemberRefHandlers,
             string_chunk::StringChunkUtils,
@@ -71,6 +71,31 @@ impl GetSetUtils {
 }
 
 impl GetSetBytecodeHandler {
+    /// Walk the receiver's ancestor chain to find the instance whose script
+    /// matches the handler's script_ref. This is the "handler's owning instance"
+    /// — the correct target for bare property access (getprop/setprop) in
+    /// Director's prototypal inheritance model.
+    fn find_handler_level_instance(
+        player: &DirPlayer,
+        receiver: &crate::player::script_ref::ScriptInstanceRef,
+        script_ref: &crate::player::cast_lib::CastMemberRef,
+    ) -> crate::player::script_ref::ScriptInstanceRef {
+        let mut walk_ref = receiver.clone();
+        for _ in 0..100 {
+            let instance = player.allocator.get_script_instance(&walk_ref);
+            if instance.script == *script_ref {
+                return walk_ref;
+            }
+            let next = instance.ancestor.clone();
+            match next {
+                Some(ancestor_ref) => walk_ref = ancestor_ref,
+                None => break,
+            }
+        }
+        // Fallback to receiver if handler's script not found in chain
+        receiver.clone()
+    }
+
     pub fn get_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let (receiver, script_ref) = {
@@ -81,7 +106,14 @@ impl GetSetBytecodeHandler {
         let prop_name = ctx.get_name(name_id).to_owned();
 
         let result = if let Some(instance_ref) = receiver {
-            script_get_prop(player, &instance_ref, &prop_name)?
+            // In Director, bare property access (getprop) resolves on the
+            // handler's owning instance in the ancestor chain, not on the
+            // top-level receiver. This matters when a handler from an ancestor
+            // script runs with a child instance as receiver — e.g., when
+            // `ancestor.getMember()` is called, `ancestor` should resolve to
+            // the handler's own instance's ancestor, not the receiver's.
+            let handler_instance = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+            script_get_prop(player, &handler_instance, &prop_name)?
         } else {
             script_get_static_prop(player, &script_ref, &prop_name)?
         };
@@ -109,7 +141,9 @@ impl GetSetBytecodeHandler {
                             prop_name
                         )));
                     }
-                    script_set_prop(player, &instance_ref, &prop_name, &value_ref, false)?;
+                    // Resolve on handler's owning instance level (see get_prop comment)
+                    let handler_instance = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+                    script_set_prop(player, &handler_instance, &prop_name, &value_ref, false)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
                 None => {
@@ -512,7 +546,8 @@ impl GetSetBytecodeHandler {
                         &prop_name,
                     ) {
                         Ok(datum) => {
-                            let result = player.alloc_datum(datum);
+                            let result = player.last_sprite_prop_ref.take()
+                                .unwrap_or_else(|| player.alloc_datum(datum));
                             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                             scope.stack.push(result);
                             return Ok(HandlerExecutionResult::Advance);
@@ -708,7 +743,8 @@ impl GetSetBytecodeHandler {
                     };
                     let sprite_num = player.get_datum(&datum_ref).int_value()?;
                     let result = sprite_get_prop(player, sprite_num as i16, prop_name.unwrap())?;
-                    Ok(player.alloc_datum(result))
+                    Ok(player.last_sprite_prop_ref.take()
+                        .unwrap_or_else(|| player.alloc_datum(result)))
                 } else {
                     Err(ScriptError::new(format!(
                         "kOpGet sprite prop {} not implemented",

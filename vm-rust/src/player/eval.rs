@@ -1906,6 +1906,20 @@ pub fn eval_lingo_expr_static(expr: String) -> Result<DatumRef, ScriptError> {
     }
 }
 
+/// Like `eval_lingo_expr_static` but does not log errors on parse failure.
+pub fn try_eval_lingo_expr_static(expr: String) -> Result<DatumRef, ScriptError> {
+    let _tokens = tokenize_lingo(&expr);
+    match LingoParser::parse(Rule::eval_expr, expr.as_str()) {
+        Ok(parse_result) => {
+            let expr_pair = &parse_result.enumerate().next().unwrap();
+            eval_lingo_pair_static(expr_pair.1.clone())
+        }
+        Err(e) => {
+            Err(ScriptError::new(format!("eval_lingo_expr_static parse error: {}", ascii_safe(&e.to_string()))))
+        }
+    }
+}
+
 pub fn parse_lingo_expr_ast_runtime(rule: Rule, expr: String) -> Result<LingoExpr, ScriptError> {
     let pratt = create_lingo_pratt_parser();
     let _tokens = tokenize_lingo(&expr);

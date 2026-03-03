@@ -164,6 +164,23 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
                 )))
             }
         }
+        (Datum::List(_, ref_list, _), Datum::Point(b)) => {
+            if ref_list.len() == 2 {
+                let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
+                for i in 0..2 {
+                    let a_val = player.get_datum(&ref_list[i]).clone();
+                    let b_val = player.get_datum(&b[i]).clone();
+                    let sum = add_datums(a_val, b_val, player)?;
+                    result[i] = player.alloc_datum(sum);
+                }
+                Ok(Datum::Point(result))
+            } else {
+                Err(ScriptError::new(format!(
+                    "Invalid list length for add_datums: {}",
+                    ref_list.len()
+                )))
+            }
+        }
         (Datum::Point(a), Datum::Int(b)) => {
             let b_ref = player.alloc_datum(Datum::Int(*b));
             let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
@@ -325,6 +342,23 @@ pub fn subtract_datums(
                 for i in 0..2 {
                     let a_val = player.get_datum(&a[i]).clone();
                     let b_val = player.get_datum(&ref_list[i]).clone();
+                    let diff = subtract_datums(a_val, b_val, player)?;
+                    result[i] = player.alloc_datum(diff);
+                }
+                Ok(Datum::Point(result))
+            } else {
+                Err(ScriptError::new(format!(
+                    "Invalid list length for subtract_datums: {}",
+                    ref_list.len()
+                )))
+            }
+        }
+        (Datum::List(_, ref_list, _), Datum::Point(b)) => {
+            if ref_list.len() == 2 {
+                let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
+                for i in 0..2 {
+                    let a_val = player.get_datum(&ref_list[i]).clone();
+                    let b_val = player.get_datum(&b[i]).clone();
                     let diff = subtract_datums(a_val, b_val, player)?;
                     result[i] = player.alloc_datum(diff);
                 }
@@ -778,6 +812,20 @@ pub fn divide_datums(
             let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
             for i in 0..2 {
                 let a_val = player.get_datum(&left_ref).clone();
+                let b_val = player.get_datum(&b[i]).clone();
+                let quot = divide_datums(
+                    player.alloc_datum(a_val),
+                    player.alloc_datum(b_val),
+                    player
+                )?;
+                result[i] = player.alloc_datum(quot);
+            }
+            Datum::Point(result)
+        }
+        (Datum::Point(a), Datum::Point(b)) => {
+            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
+            for i in 0..2 {
+                let a_val = player.get_datum(&a[i]).clone();
                 let b_val = player.get_datum(&b[i]).clone();
                 let quot = divide_datums(
                     player.alloc_datum(a_val),
