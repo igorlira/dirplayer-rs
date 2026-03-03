@@ -31,6 +31,9 @@ pub struct SndHeaderChunk {
     pub bytes_per_frame: i32,
     pub sound_header_type: [u8; 16],
     pub bytes_per_block: i32,
+    /// Whether the file that contained this header was big-endian (RIFX/Mac).
+    /// sndS audio data follows the file's byte order.
+    pub file_endian_is_big: bool,
 }
 
 impl SndHeaderChunk {
@@ -73,6 +76,7 @@ impl SndHeaderChunk {
         }
 
         let bytes_per_block = reader.read_i32().unwrap_or(0);
+        let file_endian_is_big = original_endian == Endian::Big;
 
         reader.endian = original_endian;
 
@@ -110,6 +114,7 @@ impl SndHeaderChunk {
             bytes_per_frame,
             sound_header_type,
             bytes_per_block,
+            file_endian_is_big,
         })
     }
 }
@@ -122,7 +127,10 @@ pub struct SoundChunk {
     sample_count: u32,
     codec: String,
     data: Vec<u8>,
-pub version: u16,
+    pub version: u16,
+    /// Whether the audio data is stored in big-endian byte order.
+    /// Mac "snd " resources are always big-endian; sndH/sndS follows the file's byte order.
+    big_endian_data: bool,
 }
 
 impl SoundChunk {
@@ -135,6 +143,7 @@ impl SoundChunk {
             codec: "raw_pcm".into(),
             data,
             version: 0,
+            big_endian_data: true,
         }
     }
 
@@ -160,6 +169,10 @@ impl SoundChunk {
 
     pub fn data(&self) -> Vec<u8> {
         self.data.clone()
+    }
+
+    pub fn big_endian_data(&self) -> bool {
+        self.big_endian_data
     }
 
     pub fn set_metadata(&mut self, sample_rate: u32, channels: u16, bits_per_sample: u16) {
@@ -225,6 +238,7 @@ impl Default for SoundChunk {
             codec: "raw_pcm".to_string(),
             data: Vec::new(),
             version: 0,
+            big_endian_data: true,
         }
     }
 }
@@ -283,6 +297,7 @@ impl SoundChunk {
                     codec: "raw_pcm".to_string(),
                     data: all_bytes,
                     version,
+                    big_endian_data: true,
                 });
             }
         }
@@ -418,6 +433,7 @@ impl SoundChunk {
             codec: codec.to_string(),
             data: audio_data,
             version,
+            big_endian_data: true, // Mac snd resources are always big-endian
         })
     }
 
@@ -448,8 +464,8 @@ impl SoundChunk {
         wav.extend_from_slice(b"data");
         wav.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
 
-        // Audio data - Director stores 16-bit in big-endian, WAV needs little-endian
-        if self.bits_per_sample == 16 {
+        // Audio data - big-endian 16-bit needs byte-swap to little-endian for WAV
+        if self.bits_per_sample == 16 && self.big_endian_data {
             for chunk in self.data.chunks_exact(2) {
                 wav.push(chunk[1]);
                 wav.push(chunk[0]);
@@ -499,6 +515,7 @@ impl SoundChunk {
             codec: codec.to_string(),
             data: media.audio_data.clone(),
             version: 0,
+            big_endian_data: true, // Director media chunks are big-endian
         }
     }
 
@@ -564,6 +581,7 @@ impl SoundChunk {
             codec,
             data: samples.to_vec(),
             version: 0,
+            big_endian_data: header.file_endian_is_big, // sndS data follows file byte order
         }
     }
 }
