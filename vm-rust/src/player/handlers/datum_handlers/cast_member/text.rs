@@ -922,6 +922,21 @@ impl TextMemberHandlers {
                 let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
                 Ok(Datum::BitmapRef(bitmap_ref))
             }
+            "rtf" => {
+                // Return stored RTF source, or generate minimal RTF from plain text
+                if !text_data.rtf_source.is_empty() {
+                    Ok(Datum::String(text_data.rtf_source.clone()))
+                } else {
+                    // Generate minimal RTF wrapper around the plain text
+                    let escaped = text_data.text
+                        .replace('\\', "\\\\")
+                        .replace('{', "\\{")
+                        .replace('}', "\\}")
+                        .replace('\r', "\\par\n")
+                        .replace('\n', "\\par\n");
+                    Ok(Datum::String(format!("{{\\rtf1 {}}}", escaped)))
+                }
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for text",
                 prop
@@ -1688,10 +1703,126 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
+            "rtf" => borrow_member_mut(
+                member_ref,
+                |player| value.string_value(),
+                |cast_member, value| {
+                    let rtf_string = value?;
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    // Store the raw RTF source
+                    text_member.rtf_source = rtf_string.clone();
+                    // Extract plain text from RTF by stripping control words and groups
+                    let plain = Self::extract_text_from_rtf(&rtf_string);
+                    text_member.text = plain.clone();
+                    // Update styled spans to contain a single span with the extracted text
+                    if !text_member.html_styled_spans.is_empty() {
+                        let style = text_member.html_styled_spans[0].style.clone();
+                        text_member.html_styled_spans = vec![
+                            crate::player::handlers::datum_handlers::cast_member::font::StyledSpan {
+                                text: plain,
+                                style,
+                            }
+                        ];
+                    }
+                    Ok(())
+                },
+            ),
             _ => Err(ScriptError::new(format!(
                 "Cannot set castMember prop {} for text",
                 prop
             ))),
         }
+    }
+
+    /// Extract plain text from an RTF string by stripping control words and groups.
+    fn extract_text_from_rtf(rtf: &str) -> String {
+        let mut result = String::new();
+        let mut depth = 0i32;
+        let chars: Vec<char> = rtf.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        // Skip content inside {\fonttbl ...}, {\colortbl ...}, {\stylesheet ...}, etc.
+        let mut skip_depth: Option<i32> = None;
+
+        while i < len {
+            let ch = chars[i];
+            match ch {
+                '{' => {
+                    depth += 1;
+                    // Check if this group starts with a known skip keyword
+                    let rest: String = chars[i+1..len.min(i+20)].iter().collect();
+                    if rest.starts_with("\\fonttbl")
+                        || rest.starts_with("\\colortbl")
+                        || rest.starts_with("\\stylesheet")
+                        || rest.starts_with("\\info")
+                        || rest.starts_with("\\*")
+                    {
+                        skip_depth = Some(depth);
+                    }
+                    i += 1;
+                }
+                '}' => {
+                    if skip_depth == Some(depth) {
+                        skip_depth = None;
+                    }
+                    depth -= 1;
+                    i += 1;
+                }
+                '\\' if skip_depth.is_none() => {
+                    i += 1;
+                    if i >= len { break; }
+                    let next = chars[i];
+                    if next == '\'' && i + 2 < len {
+                        // \'XX hex escape
+                        let hex: String = chars[i+1..i+3].iter().collect();
+                        if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                            result.push(byte as char);
+                        }
+                        i += 3;
+                    } else if next == '\\' || next == '{' || next == '}' {
+                        result.push(next);
+                        i += 1;
+                    } else if next == '\n' || next == '\r' {
+                        // Line break after backslash - skip
+                        i += 1;
+                    } else {
+                        // Control word: read letters, then optional numeric param
+                        let mut word = String::new();
+                        while i < len && chars[i].is_ascii_alphabetic() {
+                            word.push(chars[i]);
+                            i += 1;
+                        }
+                        // Skip optional numeric parameter (including negative sign)
+                        if i < len && (chars[i] == '-' || chars[i].is_ascii_digit()) {
+                            if chars[i] == '-' { i += 1; }
+                            while i < len && chars[i].is_ascii_digit() {
+                                i += 1;
+                            }
+                        }
+                        // Skip single trailing space delimiter
+                        if i < len && chars[i] == ' ' {
+                            i += 1;
+                        }
+                        // Convert known control words to text
+                        match word.as_str() {
+                            "par" | "line" => result.push('\r'),
+                            "tab" => result.push('\t'),
+                            _ => {}
+                        }
+                    }
+                }
+                '\n' | '\r' => {
+                    // Bare newlines in RTF are ignored
+                    i += 1;
+                }
+                _ => {
+                    if skip_depth.is_none() {
+                        result.push(ch);
+                    }
+                    i += 1;
+                }
+            }
+        }
+        result
     }
 }

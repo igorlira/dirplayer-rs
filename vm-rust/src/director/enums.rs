@@ -715,7 +715,7 @@ pub struct TextInfo {
     pub direct_to_stage: bool,       // Offset 28-31: direct to stage flag
     pub anti_alias: bool,            // Offset 32-35: anti-alias flag (0=false, 1=true)
     pub anti_alias_threshold: u32,   // Offset 36-39: anti-alias threshold (default 14)
-    pub reserved_40: u32,            // Offset 40-43
+    pub dont_wrap: bool,             // Offset 40-43: "don't wrap" flag (0=wrap, non-zero=don't wrap)
     pub reserved_44: u32,            // Offset 44-47
     pub height: u32,                 // Offset 48-51: height (17 in example)
     pub width: u32,                  // Offset 52-55: width (98 in example)
@@ -789,7 +789,8 @@ impl From<&[u8]> for TextInfo {
         let anti_alias_raw = reader.read_u32().unwrap_or(0);
         let anti_alias = anti_alias_raw != 0;
         let anti_alias_threshold = reader.read_u32().unwrap_or(0);
-        let reserved_40 = reader.read_u32().unwrap_or(0);
+        let dont_wrap_raw = reader.read_u32().unwrap_or(0);
+        let dont_wrap = dont_wrap_raw != 0;
         let reserved_44 = reader.read_u32().unwrap_or(0);
         let height = reader.read_u32().unwrap_or(0);
         let width = reader.read_u32().unwrap_or(0);
@@ -858,7 +859,7 @@ impl From<&[u8]> for TextInfo {
             direct_to_stage,
             anti_alias,
             anti_alias_threshold,
-            reserved_40,
+            dont_wrap,
             reserved_44,
             height,
             width,
@@ -916,6 +917,11 @@ impl TextInfo {
     /// Get the FourCC as a string
     pub fn fourcc_str(&self) -> String {
         String::from_utf8_lossy(&self.fourcc).to_string()
+    }
+
+    /// Returns true if text should word-wrap (inverted from the "don't wrap" flag)
+    pub fn word_wrap(&self) -> bool {
+        !self.dont_wrap
     }
 
     /// Get the box type as a Lingo symbol string
