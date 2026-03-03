@@ -91,17 +91,29 @@ impl BitmapMemberHandlers {
                     let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
                     let new_width = bitmap.width;
                     let new_height = bitmap.height;
-                    let clone = bitmap.clone();
+                    let mut clone = bitmap.clone();
 
-                    let member_image_ref = {
+                    let (member_image_ref, old_palette) = {
                         let cast_member = player
                             .movie
                             .cast_manager
                             .find_member_by_ref(member_ref)
                             .unwrap();
                         let bitmap_member = cast_member.member_type.as_bitmap().unwrap();
-                        bitmap_member.image_ref
+                        let old_palette = player.bitmap_manager.get_bitmap(bitmap_member.image_ref)
+                            .map(|bm| bm.palette_ref.clone());
+                        (bitmap_member.image_ref, old_palette)
                     };
+
+                    // Inherit the member's existing palette when the new bitmap has
+                    // the default system palette (e.g. from image(w,h,24) with no
+                    // palette arg). This preserves the cast member's original palette.
+                    if let Some(old_pal) = old_palette {
+                        if matches!(clone.palette_ref, PaletteRef::BuiltIn(BuiltInPalette::SystemWin)) {
+                            clone.palette_ref = old_pal;
+                        }
+                    }
+
                     player
                         .bitmap_manager
                         .replace_bitmap(member_image_ref, clone);

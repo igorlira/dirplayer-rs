@@ -127,13 +127,19 @@ impl CastManager {
                         if let PaletteRef::Member(ref member_ref) = bitmap.palette_ref {
                             let target_member = member_ref.cast_member;
                             let current_cast_lib = member_ref.cast_lib;
-                            // Check if the target member exists in the specified castLib
+                            // Check if the target member exists as a Palette in the specified castLib.
+                            // We must check the member TYPE, not just existence — castlib 2 might
+                            // have member #41 as a bitmap, while the actual palette #41 is in castlib 6.
                             let target_cast = self.casts.iter()
                                 .find(|c| c.number == current_cast_lib as u32);
-                            let member_exists = target_cast
+                            let is_palette = target_cast
                                 .and_then(|c| c.find_member_by_number(target_member as u32))
-                                .is_some();
-                            if !member_exists {
+                                .map_or(false, |m| matches!(m.member_type, CastMemberType::Palette(_)));
+                            if !is_palette {
+                                debug!(
+                                    "palette resolve: bitmap #{} in castLib {} refs palette member {} in castLib {} — not a palette, will search other castLibs",
+                                    member.number, cast.number, target_member, current_cast_lib
+                                );
                                 to_resolve.push((bm.image_ref, target_member, current_cast_lib));
                             }
                         }
@@ -142,19 +148,39 @@ impl CastManager {
             }
         }
 
-        // Resolve each unresolved palette ref by searching all cast libraries
+        debug!(
+            "palette resolve: {} bitmaps need palette resolution",
+            to_resolve.len()
+        );
+
+        // Resolve each unresolved palette ref by searching all cast libraries.
+        // Search in reverse order (highest castLib first) — Director resolves
+        // unqualified member references from the last castLib backwards.
         for (bitmap_ref, target_member, _current_cast_lib) in to_resolve {
-            // Search all cast libraries for a member with this number
-            for cast in &self.casts {
-                if cast.find_member_by_number(target_member as u32).is_some() {
+            let mut found = false;
+            for cast in self.casts.iter().rev() {
+                let is_palette = cast.find_member_by_number(target_member as u32)
+                    .map_or(false, |m| matches!(m.member_type, CastMemberType::Palette(_)));
+                if is_palette {
+                    debug!(
+                        "palette resolve: found palette member {} in castLib {}",
+                        target_member, cast.number
+                    );
                     if let Some(bitmap) = bitmap_manager.get_bitmap_mut(bitmap_ref) {
                         bitmap.palette_ref = PaletteRef::Member(CastMemberRef {
                             cast_lib: cast.number as i32,
                             cast_member: target_member,
                         });
                     }
+                    found = true;
                     break;
                 }
+            }
+            if !found {
+                warn!(
+                    "palette resolve: NO palette member {} found in any castLib!",
+                    target_member
+                );
             }
         }
     }

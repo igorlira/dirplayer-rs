@@ -272,6 +272,14 @@ pub fn make_chunk(
             &mut chunk_reader,
             version,
         )?)),
+        "ALFA" => {
+            // Alpha channel data for JPEG bitmaps — store as raw bytes
+            let mut data = Vec::new();
+            while let Ok(byte) = chunk_reader.read_u8() {
+                data.push(byte);
+            }
+            return Ok(Chunk::Raw(data));
+        }
         _ => {
             return Err(
                 format_args!("Could not deserialize '{}' chunk", fourcc_to_string(fourcc))

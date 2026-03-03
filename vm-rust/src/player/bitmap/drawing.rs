@@ -1595,22 +1595,12 @@ impl Bitmap {
         let mask_image = params.mask_image;
         // Sprite foreColor/backColor palette indices are resolved against the bitmap's palette,
         // so they work together correctly (e.g., index 248/255 in a custom 256-color palette).
-        let bg_color_resolved = if src.original_bit_depth == 32 && !src.use_alpha && ink != 0 {
-            match &params.bg_color {
-                ColorRef::Rgb(r, g, b) => (*r, *g, *b),
-                ColorRef::PaletteIndex(_) => {
-                    // Director behavior: palette indices are ignored for 32-bit bgColor
-                    (255, 255, 255)
-                }
-            }
-        } else {
-            resolve_color_ref(
-                palettes,
-                &params.bg_color,
-                &src.palette_ref,
-                src.original_bit_depth,
-            )
-        };
+        let bg_color_resolved = resolve_color_ref(
+            palettes,
+            &params.bg_color,
+            &src.palette_ref,
+            src.original_bit_depth,
+        );
 
         let fg_color_resolved = resolve_color_ref(
             palettes,
@@ -1750,7 +1740,9 @@ impl Bitmap {
         let mut matte_mask: Option<Vec<Vec<bool>>> = None;
 
         // ----------------------------------------------------------
-        // 32-bit matte key: use edge color, NOT backColor
+        // 32-bit matte key color:
+        // - Ink 0: use bgColor (sprite's background color, typically white)
+        // - Other inks (8, etc.): use edge color (pixel 0,0)
         // ----------------------------------------------------------
         let edge_matte_color: Option<(u8, u8, u8)> =
             if src.original_bit_depth == 32 && !src.use_alpha {
@@ -2232,14 +2224,6 @@ impl Bitmap {
                     } else if sa == 0 {
                         continue;
                     }
-
-                    if src.trim_white_space && (sr, sg, sb) == (255, 255, 255) {
-                        if let Some(mask) = &matte_mask {
-                            if mask[sy as usize][sx as usize] {
-                                continue; // This pixel is transparent
-                            }
-                        }
-                    }
                 }
 
                 if src.original_bit_depth == 32 && ink == 8 && !params.is_text_rendering {
@@ -2703,6 +2687,7 @@ impl Bitmap {
         shape_info: &ShapeInfo,
         dst_rect: IntRect,
         palettes: &PaletteMap,
+        palette_ref: &PaletteRef,
     ) {
         let x1 = dst_rect.left;
         let y1 = dst_rect.top;
@@ -2713,7 +2698,7 @@ impl Bitmap {
         let fg_rgb = resolve_color_ref(
             palettes,
             &sprite.color,
-            &PaletteRef::BuiltIn(get_system_default_palette()),
+            palette_ref,
             self.original_bit_depth,
         );
 
@@ -2847,6 +2832,7 @@ impl Bitmap {
         sprite: &crate::player::sprite::Sprite,
         dst_rect: IntRect,
         palettes: &PaletteMap,
+        palette_ref: &PaletteRef,
     ) {
         let w = (dst_rect.right - dst_rect.left).max(1);
         let h = (dst_rect.bottom - dst_rect.top).max(1);
@@ -2864,6 +2850,6 @@ impl Bitmap {
             line_thickness: 0,
             line_direction: 0,
         };
-        self.draw_shape_with_sprite(sprite, &default_shape, dst_rect, palettes);
+        self.draw_shape_with_sprite(sprite, &default_shape, dst_rect, palettes, palette_ref);
     }
 }

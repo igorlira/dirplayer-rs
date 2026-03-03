@@ -282,11 +282,8 @@ fn decode_bitmap_2bit(
         let middle_right_value = (original_value & 0x0C) >> 2;
         let right_value = original_value & 0x03;
 
-        let left_value = ((left_value as f32) / 3.0 * 255.0).to_u8();
-        let middle_left_value = ((middle_left_value as f32) / 3.0 * 255.0).to_u8();
-        let middle_right_value = ((middle_right_value as f32) / 3.0 * 255.0).to_u8();
-        let right_value = ((right_value as f32) / 3.0 * 255.0).to_u8();
-
+        // Keep raw 2-bit palette indices (0-3), like 4-bit decode keeps 0-15.
+        // Color resolution happens later via palette lookup.
         decoded_data.push(left_value);
         decoded_data.push(middle_left_value);
         decoded_data.push(middle_right_value);
@@ -306,7 +303,7 @@ fn decode_bitmap_2bit(
             }
             if x < width {
                 let pixel_index = (y * width + x) as usize;
-                let pixel = decoded_data[compressed_index].unwrap();
+                let pixel = decoded_data[compressed_index];
                 result_bmp[pixel_index] = pixel;
             }
         }
@@ -314,7 +311,7 @@ fn decode_bitmap_2bit(
 
     Ok(Bitmap {
         bit_depth: 8,
-        original_bit_depth: 8,
+        original_bit_depth: 2,
         width,
         height,
         data: result_bmp,
@@ -584,10 +581,19 @@ pub fn decompress_bitmap(
     cast_lib: u32,
     version: u16,
 ) -> Result<Bitmap, String> {
-    // Use clutCastLib from bitmap data if specified (> 0), otherwise use bitmap's own cast_lib.
-    // clutCastLib tells us which cast library contains the palette member.
+    // Check if the BITD data is actually JPEG-compressed
+    if data.len() >= 4 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+        return decode_jpeg_bitd(data, info, cast_lib);
+    }
+
+    // Use clutCastLib from bitmap data if explicitly specified (> 0).
+    // clut_cast_lib == 0 means "search all castLibs" — use 0 as sentinel so
+    // resolve_unresolved_palette_refs can find the correct palette.
+    // clut_cast_lib == -1 means "not set" — use the bitmap's own castLib.
     let palette_cast_lib = if info.clut_cast_lib > 0 {
         info.clut_cast_lib as u32
+    } else if info.clut_cast_lib == 0 && info.palette_id > 0 {
+        0 // sentinel: search all castLibs during resolution
     } else {
         cast_lib
     };
@@ -625,9 +631,9 @@ pub fn decompress_bitmap(
         scan_width as usize * scan_height as usize * num_channels as usize
     };
 
-    let skip_compression = reader.length >= expected_len;
+    let data_was_uncompressed = reader.length >= expected_len;
 
-    if skip_compression {
+    if data_was_uncompressed {
         result.extend_from_slice(&reader.data[..expected_len]);
     } else {
         while result.len() < expected_len {
@@ -723,14 +729,20 @@ pub fn decompress_bitmap(
             scan_height,
             PaletteRef::from(info.palette_id, palette_cast_lib),
             &result,
-            skip_compression,
+            data_was_uncompressed,
         ),
         32 => {
             // For 32-bit bitmaps in Director, the encoding is special:
-            // - In D3 and below: ARGB pixels in a row (skipCompression = true)
-            // - In D4+: RLE encoded, with each line containing A R G B channels separately
+            // - Uncompressed data: direct interleaved ARGB (any version)
+            // - D3 and below: always direct ARGB
+            // - D4+: RLE compressed, with each scanline containing A R G B channels separately (planar)
+            //
+            // When `data_was_uncompressed` is true, the raw data was already the expected size
+            // so no RLE decompression was applied — the data is in direct ARGB format.
 
-            let skip_compression = if version < 300 {
+            let is_direct_format = if data_was_uncompressed {
+                true // Uncompressed data is always interleaved ARGB
+            } else if version < 300 {
                 result.len() >= (info.width as usize * info.height as usize * 4)
             } else if version < 400 {
                 result.len() == (info.width as usize * info.height as usize * 4)
@@ -738,9 +750,9 @@ pub fn decompress_bitmap(
                 false
             };
 
-            if skip_compression {
-                // Direct ARGB format (mainly D3)
-                let result_bitmap = decode_generic_bitmap(
+            if is_direct_format {
+                // Direct ARGB format (uncompressed data, or D3)
+                let mut result_bitmap = decode_generic_bitmap(
                     info.width,
                     info.height,
                     8,
@@ -750,6 +762,21 @@ pub fn decompress_bitmap(
                     PaletteRef::from(info.palette_id, palette_cast_lib),
                     &result,
                 )?;
+
+                // Convert from ARGB (file format) to RGBA (internal format).
+                // The rest of the code reads 32-bit pixels as [R, G, B, A] at each
+                // 4-byte offset, but direct format stores [A, R, G, B].
+                let data = &mut result_bitmap.data;
+                for i in (0..data.len()).step_by(4) {
+                    let a = data[i];
+                    let r = data[i + 1];
+                    let g = data[i + 2];
+                    let b = data[i + 3];
+                    data[i] = r;
+                    data[i + 1] = g;
+                    data[i + 2] = b;
+                    data[i + 3] = a;
+                }
 
                 Ok(Bitmap {
                     width: result_bitmap.width,
@@ -984,7 +1011,138 @@ pub fn resolve_palette_table(
     table
 }
 
-pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo) -> Result<Bitmap, String> {
+/// Decode a JPEG-compressed BITD chunk. The BITD data starts with a JPEG stream (RGB),
+/// optionally followed by a separate alpha channel after the JPEG end marker (FFD9).
+fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bitmap, String> {
+    use image::ImageDecoder;
+    use std::io::Cursor;
+
+    let palette_cast_lib = if info.clut_cast_lib > 0 {
+        info.clut_cast_lib as u32
+    } else if info.clut_cast_lib == 0 && info.palette_id > 0 {
+        0
+    } else {
+        cast_lib
+    };
+
+    // Find the end of the JPEG stream (last FFD9 marker)
+    let mut jpeg_end_pos = data.len();
+    for i in (0..data.len().saturating_sub(1)).rev() {
+        if data[i] == 0xFF && data[i + 1] == 0xD9 {
+            jpeg_end_pos = i + 2;
+            break;
+        }
+    }
+
+    let jpeg_data = &data[..jpeg_end_pos];
+    let alpha_data = &data[jpeg_end_pos..];
+
+    // Decode the JPEG
+    let cursor = Cursor::new(jpeg_data);
+    let decoder = image::codecs::jpeg::JpegDecoder::new(cursor)
+        .map_err(|e| format!("Failed to create JPEG decoder for BITD: {}", e))?;
+
+    let (width, height) = decoder.dimensions();
+    let color_type = decoder.color_type();
+
+    let mut image_data = vec![0u8; decoder.total_bytes() as usize];
+    decoder
+        .read_image(&mut image_data)
+        .map_err(|e| format!("Failed to read JPEG image from BITD: {}", e))?;
+
+    let pixel_count = width as usize * height as usize;
+
+    // Convert to RGBA, incorporating separate alpha channel if available
+    let mut rgba_data = Vec::with_capacity(pixel_count * 4);
+
+    // Decompress alpha data if present (may be PackBits/RLE compressed)
+    let alpha_bytes = if !alpha_data.is_empty() {
+        // Alpha data after JPEG may be RLE compressed (same PackBits as BITD)
+        let mut alpha_result = Vec::new();
+        let mut pos = 0;
+        while alpha_result.len() < pixel_count && pos < alpha_data.len() {
+            let control = alpha_data[pos] as u16;
+            pos += 1;
+
+            if control < 0x80 {
+                let count = (control + 1) as usize;
+                for _ in 0..count {
+                    if alpha_result.len() >= pixel_count || pos >= alpha_data.len() {
+                        break;
+                    }
+                    alpha_result.push(alpha_data[pos]);
+                    pos += 1;
+                }
+            } else if control == 0x80 {
+                continue;
+            } else {
+                let count = (257 - control) as usize;
+                if pos >= alpha_data.len() { break; }
+                let val = alpha_data[pos];
+                pos += 1;
+                for _ in 0..count {
+                    if alpha_result.len() >= pixel_count {
+                        break;
+                    }
+                    alpha_result.push(val);
+                }
+            }
+        }
+
+        // If RLE didn't expand to expected size, try raw
+        if alpha_result.len() < pixel_count && alpha_data.len() >= pixel_count {
+            alpha_result = alpha_data[..pixel_count].to_vec();
+        }
+
+        Some(alpha_result)
+    } else {
+        None
+    };
+
+    match color_type {
+        image::ColorType::Rgb8 => {
+            for (i, chunk) in image_data.chunks(3).enumerate() {
+                rgba_data.push(chunk[0]);
+                rgba_data.push(chunk[1]);
+                rgba_data.push(chunk[2]);
+                let alpha = alpha_bytes.as_ref()
+                    .and_then(|ab| ab.get(i).copied())
+                    .unwrap_or(255);
+                rgba_data.push(alpha);
+            }
+        }
+        image::ColorType::L8 => {
+            for (i, &gray) in image_data.iter().enumerate() {
+                rgba_data.push(gray);
+                rgba_data.push(gray);
+                rgba_data.push(gray);
+                let alpha = alpha_bytes.as_ref()
+                    .and_then(|ab| ab.get(i).copied())
+                    .unwrap_or(255);
+                rgba_data.push(alpha);
+            }
+        }
+        _ => {
+            return Err(format!("Unsupported JPEG color type in BITD: {:?}", color_type));
+        }
+    }
+
+    Ok(Bitmap {
+        width: width as u16,
+        height: height as u16,
+        bit_depth: 32,
+        original_bit_depth: 32,
+        data: rgba_data,
+        palette_ref: PaletteRef::from(info.palette_id, palette_cast_lib),
+        matte: None,
+        use_alpha: info.use_alpha,
+        trim_white_space: info.trim_white_space,
+        was_trimmed: false,
+        version: 0,
+    })
+}
+
+pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo, alfa_data: Option<&Vec<u8>>) -> Result<Bitmap, String> {
     use image::ImageDecoder;
     use std::io::Cursor;
 
@@ -995,48 +1153,83 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo) -> Result<Bitmap, Stri
 
     let (width, height) = decoder.dimensions();
     let color_type = decoder.color_type();
+    let pixel_count = (width * height) as usize;
 
     let mut image_data = vec![0u8; decoder.total_bytes() as usize];
     decoder
         .read_image(&mut image_data)
         .map_err(|e| format!("Failed to read JPEG image: {}", e))?;
 
-    // Convert to RGBA if needed
+    // Decompress ALFA chunk data if present (PackBits/RLE compressed)
+    let alpha_bytes = if let Some(raw_alfa) = alfa_data {
+        let mut alpha_result = Vec::new();
+        let mut pos = 0;
+        while alpha_result.len() < pixel_count && pos < raw_alfa.len() {
+            let control = raw_alfa[pos] as u16;
+            pos += 1;
+
+            if control < 0x80 {
+                let count = (control + 1) as usize;
+                for _ in 0..count {
+                    if alpha_result.len() >= pixel_count || pos >= raw_alfa.len() {
+                        break;
+                    }
+                    alpha_result.push(raw_alfa[pos]);
+                    pos += 1;
+                }
+            } else if control == 0x80 {
+                continue;
+            } else {
+                let count = (257 - control) as usize;
+                if pos >= raw_alfa.len() { break; }
+                let val = raw_alfa[pos];
+                pos += 1;
+                for _ in 0..count {
+                    if alpha_result.len() >= pixel_count {
+                        break;
+                    }
+                    alpha_result.push(val);
+                }
+            }
+        }
+
+        // If RLE didn't produce enough bytes, try treating as raw uncompressed
+        if alpha_result.len() < pixel_count && raw_alfa.len() >= pixel_count {
+            alpha_result = raw_alfa[..pixel_count].to_vec();
+        }
+
+        Some(alpha_result)
+    } else {
+        None
+    };
+
+    let has_alfa = alpha_bytes.is_some();
+
+    // Convert to RGBA, incorporating ALFA channel if available
     let rgba_data = match color_type {
         image::ColorType::Rgb8 => {
-            // Convert RGB to RGBA
-            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-            for chunk in image_data.chunks(3) {
+            let mut rgba = Vec::with_capacity(pixel_count * 4);
+            for (i, chunk) in image_data.chunks(3).enumerate() {
                 rgba.push(chunk[0]); // R
                 rgba.push(chunk[1]); // G
                 rgba.push(chunk[2]); // B
-                rgba.push(255); // A (fully opaque)
+                let alpha = alpha_bytes.as_ref()
+                    .and_then(|ab| ab.get(i).copied())
+                    .unwrap_or(255);
+                rgba.push(alpha);
             }
             rgba
-        }
-        image::ColorType::Rgba8 => {
-            // Already RGBA
-            image_data
         }
         image::ColorType::L8 => {
-            // Grayscale to RGBA
-            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-            for &gray in &image_data {
-                rgba.push(gray); // R
-                rgba.push(gray); // G
-                rgba.push(gray); // B
-                rgba.push(255); // A
-            }
-            rgba
-        }
-        image::ColorType::La8 => {
-            // Grayscale + Alpha to RGBA
-            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-            for chunk in image_data.chunks(2) {
-                rgba.push(chunk[0]); // R
-                rgba.push(chunk[0]); // G
-                rgba.push(chunk[0]); // B
-                rgba.push(chunk[1]); // A
+            let mut rgba = Vec::with_capacity(pixel_count * 4);
+            for (i, &gray) in image_data.iter().enumerate() {
+                rgba.push(gray);
+                rgba.push(gray);
+                rgba.push(gray);
+                let alpha = alpha_bytes.as_ref()
+                    .and_then(|ab| ab.get(i).copied())
+                    .unwrap_or(255);
+                rgba.push(alpha);
             }
             rgba
         }
@@ -1053,7 +1246,7 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo) -> Result<Bitmap, Stri
         data: rgba_data,
         palette_ref: PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
         matte: None,
-        use_alpha: info.use_alpha,
+        use_alpha: if has_alfa { info.use_alpha } else { false },
         trim_white_space: info.trim_white_space,
         was_trimmed: false,
         version: 0,
