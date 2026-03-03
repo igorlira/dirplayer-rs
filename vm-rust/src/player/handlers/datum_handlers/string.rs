@@ -2,7 +2,7 @@ use crate::{
     director::lingo::datum::{
         Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
     },
-    player::{reserve_player_ref, reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{eval::try_eval_lingo_expr_static, reserve_player_ref, reserve_player_mut, DatumRef, DirPlayer, ScriptError},
 };
 
 use super::string_chunk::StringChunkUtils;
@@ -52,6 +52,22 @@ impl StringDatumUtils {
             "length" => Ok(Datum::Int(value.chars().count() as i32)),
             "ilk" => Ok(Datum::Symbol("string".to_owned())),
             "string" => Ok(Datum::String(value.clone())),
+            "value" => {
+                // Strip Lingo comments and fix unbalanced brackets before parsing
+                let cleaned = strip_lingo_comments(value);
+                let cleaned = trim_unbalanced_brackets(cleaned.trim());
+                // Evaluate the string as a Lingo expression (prop lists, lists, numbers, etc.)
+                match try_eval_lingo_expr_static(cleaned) {
+                    Ok(datum_ref) => {
+                        reserve_player_ref(|player| Ok(player.get_datum(&datum_ref).clone()))
+                    }
+                    Err(_) => Ok(Datum::String(value.clone())),
+                }
+            }
+            "charToNum" => {
+                let code = value.chars().next().map_or(0, |c| c as i32);
+                Ok(Datum::Int(code))
+            }
             "marker" => {
                 // Quirky director behavior:
                 // Any string can run .marker on it to get the frame number of the marker, if it does not match a marker name, it returns 0
@@ -82,6 +98,23 @@ impl StringDatumHandlers {
             let delimiter = player.movie.item_delimiter;
             let count = string_get_count(&value, &operand, delimiter)?;
             Ok(player.alloc_datum(Datum::Int(count as i32)))
+        })
+    }
+
+    pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let value = player.get_datum(datum).string_value()?;
+            let index = player.get_datum(&args[0]).int_value()? as usize;
+            // 1-based index
+            let ch = value.chars().nth(index.wrapping_sub(1)).unwrap_or(' ');
+            Ok(player.alloc_datum(Datum::String(ch.to_string())))
+        })
+    }
+
+    pub fn duplicate(datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let value = player.get_datum(datum).string_value()?;
+            Ok(player.alloc_datum(Datum::String(value)))
         })
     }
 
@@ -149,6 +182,8 @@ impl StringDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
             "count" => Self::count(datum, args),
+            "getAt" => Self::get_at(datum, args),
+            "duplicate" => Self::duplicate(datum, args),
             "getPropRef" => Self::get_chunk_prop_ref(datum, args),
             "getProp" => Self::get_chunk_prop(datum, args),
             "split" => Self::split(datum, args),
@@ -197,6 +232,10 @@ pub fn string_get_words(value: &String) -> Vec<String> {
 }
 
 pub fn string_get_lines(value: &String) -> Vec<String> {
+    // In Director, the number of lines in "" returns 0
+    if value.is_empty() {
+        return Vec::new();
+    }
     let line_break = if value.contains("\r\n") {
         "\r\n"
     } else if value.contains("\n") {
@@ -205,4 +244,64 @@ pub fn string_get_lines(value: &String) -> Vec<String> {
         "\r"
     };
     value.split(line_break).map(|s| s.to_string()).collect()
+}
+
+/// Remove trailing unbalanced `]` and `)` from an expression string.
+fn trim_unbalanced_brackets(input: &str) -> String {
+    let mut depth_square: i32 = 0;
+    let mut depth_paren: i32 = 0;
+    let mut in_string = false;
+    let mut last_balanced_end = 0;
+
+    for (i, ch) in input.char_indices() {
+        if in_string {
+            if ch == '"' { in_string = false; }
+        } else {
+            match ch {
+                '"' => in_string = true,
+                '[' => depth_square += 1,
+                ']' => depth_square -= 1,
+                '(' => depth_paren += 1,
+                ')' => depth_paren -= 1,
+                _ => {}
+            }
+        }
+        if depth_square >= 0 && depth_paren >= 0 {
+            last_balanced_end = i + ch.len_utf8();
+        }
+    }
+    input[..last_balanced_end].trim().to_string()
+}
+
+/// Strip Lingo `--` comments from a string, respecting quoted strings.
+fn strip_lingo_comments(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_string {
+            result.push(ch);
+            if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            result.push(ch);
+            in_string = true;
+        } else if ch == '-' {
+            if chars.peek() == Some(&'-') {
+                // Comment: skip rest of line
+                for c in chars.by_ref() {
+                    if c == '\n' || c == '\r' {
+                        result.push(c);
+                        break;
+                    }
+                }
+            } else {
+                result.push(ch);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }

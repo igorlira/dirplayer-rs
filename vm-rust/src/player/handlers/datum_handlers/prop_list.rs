@@ -363,6 +363,7 @@ impl PropListDatumHandlers {
             "getaProp" => Self::get_a_prop(datum, args),
             "deleteProp" => Self::delete_prop(datum, args),
             "deleteAt" => Self::delete_at(datum, args),
+            "deleteOne" => Self::delete_one(datum, args),
             "getOne" => Self::get_one(datum, args),
             "findPos" => Self::find_pos(datum, args),
             "getPos" => Self::get_pos(datum, args),
@@ -703,6 +704,42 @@ impl PropListDatumHandlers {
         })
     }
 
+    pub fn delete_one(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let index = reserve_player_ref(|player| {
+            let search_ref = &args[0];
+            let search_val = player.get_datum(search_ref);
+            let prop_list = player.get_datum(datum);
+            let prop_list = match prop_list {
+                Datum::PropList(list, ..) => list,
+                _ => {
+                    return Err(ScriptError::new(
+                        "Cannot deleteOne on non-prop list".to_string(),
+                    ))
+                }
+            };
+            let index = prop_list.iter().position(|(_, v)| {
+                if v == search_ref {
+                    return true;
+                }
+                datum_equals(player.get_datum(v), search_val, &player.allocator).unwrap_or(false)
+            });
+            Ok(index)
+        })?;
+
+        reserve_player_mut(|player| {
+            if let Some(i) = index {
+                let prop_list = player.get_datum_mut(datum);
+                match prop_list {
+                    Datum::PropList(list, ..) => {
+                        list.remove(i);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn get_prop_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let prop_list = player.get_datum(datum);
@@ -793,10 +830,17 @@ impl PropListDatumHandlers {
                     }
                 }
             } else {
-                Err(ScriptError::new(format!(
-                    "deleteProp: Prop name must be a string, int or symbol (is {})",
-                    prop_name.type_str()
-                )))
+                // Other types (list/point, etc.) — key-based lookup
+                let prop_list = player.get_datum(datum).to_map()?;
+                let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
+
+                if index >= 0 {
+                    let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+                    prop_list.remove(index as usize);
+                    Ok(player.alloc_datum(datum_bool(true)))
+                } else {
+                    Ok(player.alloc_datum(datum_bool(false)))
+                }
             }
         })
     }
