@@ -75,7 +75,16 @@ impl FlowControlBytecodeHandler {
         let (handler_ref, is_no_ret, args, receiver) = reserve_player_mut(|player| {
             let arg_list_id = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                match scope.stack.pop() {
+                    Some(v) => v,
+                    None => {
+                        let current_handler_name = ctx.get_name(scope.handler_name_id);
+                        return Err(ScriptError::new(format!(
+                            "local_call: stack underflow in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
+                            current_handler_name, scope.script_ref.cast_lib, scope.script_ref.cast_member, ctx.scope_ref, scope.bytecode_index
+                        )));
+                    }
+                }
             };
             let script = get_current_script(&player, &ctx).unwrap();
 
@@ -126,8 +135,16 @@ impl FlowControlBytecodeHandler {
         reserve_player_mut(|player| {
             let value_id = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.loop_return_indices.push(scope.bytecode_index);
-                scope.stack.pop().unwrap()
+                match scope.stack.pop() {
+                    Some(v) => v,
+                    None => {
+                        let current_handler_name = ctx.get_name(scope.handler_name_id);
+                        return Err(ScriptError::new(format!(
+                            "jmp_if_zero: stack underflow in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
+                            current_handler_name, scope.script_ref.cast_lib, scope.script_ref.cast_member, ctx.scope_ref, scope.bytecode_index
+                        )));
+                    }
+                }
             };
 
             let datum = player.get_datum(&value_id);
@@ -169,9 +186,26 @@ impl FlowControlBytecodeHandler {
     ) -> Result<HandlerExecutionResult, ScriptError> {
         // let token = start_profiling("_obj_call_prepare".to_string());
         let (obj_ref, handler_name, args, is_no_ret) = reserve_player_mut(|player| {
+            let bytecode = player.get_ctx_current_bytecode(&ctx);
+            let target_handler_name = get_name(
+                &player,
+                &ctx,
+                bytecode.obj as u16,
+            )
+            .map(|s| s.to_owned())
+            .unwrap_or_else(|| "?".to_owned());
             let arg_list_id = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                match scope.stack.pop() {
+                    Some(v) => v,
+                    None => {
+                        let current_handler_name = ctx.get_name(scope.handler_name_id);
+                        return Err(ScriptError::new(format!(
+                            "obj_call '{}': stack underflow in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
+                            target_handler_name, current_handler_name, scope.script_ref.cast_lib, scope.script_ref.cast_member, ctx.scope_ref, scope.bytecode_index
+                        )));
+                    }
+                }
             };
             let arg_list_datum = player.get_datum(&arg_list_id);
             let is_no_ret = match arg_list_datum {
@@ -181,15 +215,8 @@ impl FlowControlBytecodeHandler {
             let arg_list = arg_list_datum.to_list()?;
             let obj = arg_list[0].clone();
             let args = arg_list[1..].to_vec();
-            let handler_name = get_name(
-                &player,
-                &ctx,
-                player.get_ctx_current_bytecode(&ctx).obj as u16,
-            )
-            .unwrap()
-            .to_owned();
 
-            Ok((obj, handler_name, args, is_no_ret))
+            Ok((obj, target_handler_name, args, is_no_ret))
         })?;
         // end_profiling(token);
         // let token = start_profiling(handler_name.clone());
@@ -218,8 +245,8 @@ impl FlowControlBytecodeHandler {
         // Stack: [..., ArgList([receiver, args...]), Symbol(handlerName)]
         let (obj_ref, handler_name, args, is_no_ret) = reserve_player_mut(|player| {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let handler_name_ref = scope.stack.pop().unwrap();
-            let arg_list_ref = scope.stack.pop().unwrap();
+            let handler_name_ref = scope.stack.pop().ok_or_else(|| ScriptError::new("obj_call_v4: stack underflow (handler name)".to_string()))?;
+            let arg_list_ref = scope.stack.pop().ok_or_else(|| ScriptError::new("obj_call_v4: stack underflow (arg list)".to_string()))?;
 
             let handler_name = player.get_datum(&handler_name_ref).symbol_value()?;
 
@@ -256,10 +283,6 @@ impl FlowControlBytecodeHandler {
 
     pub fn end_repeat(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let scope = player.scopes.get(ctx.scope_ref).unwrap();
-            if scope.stale {
-                return Ok(HandlerExecutionResult::Stop);
-            }
             let new_index = {
                 let bytecode = player.get_ctx_current_bytecode(ctx);
                 let handler = get_current_handler_def(player, &ctx);
@@ -277,8 +300,8 @@ impl FlowControlBytecodeHandler {
     ) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let arg1 = scope.stack.pop().unwrap();
-            let arg2 = scope.stack.pop().unwrap();
+            let arg1 = scope.stack.pop().ok_or_else(|| ScriptError::new("call_javascript: stack underflow (arg1)".to_string()))?;
+            let arg2 = scope.stack.pop().ok_or_else(|| ScriptError::new("call_javascript: stack underflow (arg2)".to_string()))?;
             let arg1_formatted = format_datum(&arg1, player);
             let arg2_formatted = format_datum(&arg2, player);
 
