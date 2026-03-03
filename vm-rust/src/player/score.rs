@@ -449,27 +449,38 @@ impl Score {
 
         for sprite_num in sprites_to_finish {
             reserve_player_mut(|player| {
-                let score = match &score_ref {
-                    ScoreRef::Stage => &mut player.movie.score,
-                    ScoreRef::FilmLoop(member_ref) => {
-                        match player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
-                            Some(member) => {
-                                match &mut member.member_type {
-                                    super::cast_member::CastMemberType::FilmLoop(film_loop) => &mut film_loop.score,
-                                    _ => return,
+                let did_reset = {
+                    let score = match &score_ref {
+                        ScoreRef::Stage => &mut player.movie.score,
+                        ScoreRef::FilmLoop(member_ref) => {
+                            match player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                                Some(member) => {
+                                    match &mut member.member_type {
+                                        super::cast_member::CastMemberType::FilmLoop(film_loop) => &mut film_loop.score,
+                                        _ => return,
+                                    }
                                 }
+                                None => return,
                             }
-                            None => return,
                         }
+                    };
+                    let sprite: &mut Sprite = score.get_sprite_mut(sprite_num as i16);
+                    if sprite.puppet {
+                        // Puppeted sprites keep their state across frame transitions.
+                        // Just clear the exited flag so they remain active.
+                        sprite.exited = false;
+                        false
+                    } else if sprite.visible {
+                        sprite.reset();
+                        true
+                    } else {
+                        false
                     }
                 };
-                let sprite: &mut Sprite = score.get_sprite_mut(sprite_num as i16);
-                if sprite.puppet {
-                    // Puppeted sprites keep their state across frame transitions.
-                    // Just clear the exited flag so they remain active.
-                    sprite.exited = false;
-                } else if sprite.visible {
-                    sprite.reset();
+                // Invalidate the cached scriptInstanceList so stale ScriptInstanceRefs
+                // don't prevent deallocation of old script instances.
+                if did_reset {
+                    player.script_instance_list_cache.remove(&(sprite_num as i16));
                 }
             });
         }
@@ -963,6 +974,15 @@ impl Score {
                 self.sound_channel_triggered
                     .insert(*channel_index, frame_num);
             }
+        }
+
+        // Mark ALL entering channels as entered — even those without channel_initialization_data
+        // (e.g., channel 0 / frame scripts). Without this, channels that only appear in
+        // spans_to_enter (not in span_init_data) would never get entered=true and
+        // would re-enter every frame cycle, leaking script instances.
+        for span in &spans_to_enter {
+            let sprite = self.get_sprite_mut(span.channel_number as i16);
+            sprite.entered = true;
         }
 
         // Attach behaviors and set their parameters - GROUP BY CHANNEL
