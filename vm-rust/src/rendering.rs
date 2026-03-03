@@ -635,6 +635,7 @@ fn render_filmloop_from_channel_data(
     parent_ink: u32,
     parent_color: ColorRef,
     parent_bg_color: ColorRef,
+    prefer_bitmap_dims: bool,
 ) {
     use crate::player::bitmap::drawing::CopyPixelsParams;
     use crate::player::score::get_channel_number_from_index;
@@ -801,8 +802,6 @@ fn render_filmloop_from_channel_data(
         };
 
         // Get actual member dimensions and registration point from the cast member.
-        // Must match compute_filmloop_initial_rect_with_members which also uses
-        // actual bitmap reg_point and dimensions for computing the bounding box.
         let (member_width, member_height, reg_x, reg_y) = match &member.member_type {
             CastMemberType::Bitmap(bm) => {
                 let (w, h) = if let Some(bitmap) = player.bitmap_manager.get_bitmap(bm.image_ref) {
@@ -817,24 +816,29 @@ fn render_filmloop_from_channel_data(
             _ => (data.width, data.height, 0, 0),
         };
 
-        // Use channel data dimensions if valid, otherwise fall back to member dimensions
-        let (use_width, use_height) = if data.width > 0 && data.height > 0 {
-            (data.width, data.height)
+        // Choose between channel data dims (sprite dims) and actual bitmap dims.
+        // When the filmloop's info_rect matches the bitmap bounding box, the
+        // filmloop shows full bitmap content and bitmap dims are more accurate.
+        // Otherwise the filmloop is a viewport/crop and sprite dims represent
+        // the intended display size within that viewport.
+        let (use_width, use_height) = if prefer_bitmap_dims {
+            if member_width > 0 && member_height > 0 {
+                (member_width, member_height)
+            } else if data.width > 0 && data.height > 0 {
+                (data.width, data.height)
+            } else {
+                (member_width, member_height)
+            }
         } else {
-            (member_width, member_height)
+            if data.width > 0 && data.height > 0 {
+                (data.width, data.height)
+            } else {
+                (member_width, member_height)
+            }
         };
 
-        // Coordinate transformation: translate sprite position relative to initial_rect origin.
-        // The filmloop content is rendered at its NATURAL size (initial_rect dimensions),
-        // not scaled to the sprite's rect.
-        //
-        // IMPORTANT: pos_x/pos_y are the sprite's loc (registration point position).
-        // We need to subtract the registration point (the bitmap's anchor)
-        // to get the sprite's top-left corner, then translate relative to initial_rect.
-        //
-        // When bitmap dimensions differ from display dimensions (channel data),
+        // When bitmap dimensions differ from display dimensions (scale mode with channel data),
         // scale the registration point proportionally from bitmap space to display space.
-        // This matches how Director handles stretched sprites within filmloops.
         let (scaled_reg_x, scaled_reg_y) = if member_width > 0 && member_height > 0
             && (member_width != use_width || member_height != use_height)
         {
@@ -850,7 +854,6 @@ fn render_filmloop_from_channel_data(
         let rel_x = sprite_left - initial_rect.left;
         let rel_y = sprite_top - initial_rect.top;
 
-        // Keep sprite dimensions at natural size (no scaling)
         let rel_w = use_width as i32;
         let rel_h = use_height as i32;
 
@@ -862,13 +865,13 @@ fn render_filmloop_from_channel_data(
         );
 
         debug!(
-            "  channel {}: member {}:{} type {:?} orig ({}, {}) interp ({}, {}) data_size {}x{} member_size {}x{} reg ({}, {}) sprite_left {} initial_left {} -> rect ({}, {}, {}, {})",
+            "  channel {}: member {}:{} type {:?} orig ({}, {}) interp ({}, {}) data_size {}x{} use_size {}x{} reg ({}, {}) sprite_left {} initial_left {} -> rect ({}, {}, {}, {})",
             channel_num, sprite_member_ref.cast_lib, sprite_member_ref.cast_member,
             member.member_type.member_type_id(),
             data.pos_x, data.pos_y,
             pos_x, pos_y,
             data.width, data.height,
-            member_width, member_height,
+            use_width, use_height,
             reg_x, reg_y,
             sprite_left, initial_rect.left,
             sprite_rect.left, sprite_rect.top, sprite_rect.right, sprite_rect.bottom
@@ -915,10 +918,11 @@ fn render_filmloop_from_channel_data(
                 let sprite_bg_color = parent_bg_color.clone();
                 let ink = parent_ink;
 
-                // In Director, blend=0 means "default" which is fully opaque (100)
-                // Only values 1-99 represent partial transparency
-                // Note: blend is still read from channel data as it may vary per frame
-                let blend = if data.blend == 0 { 100 } else { data.blend as i32 };
+                // Filmloop blend: inverted 0-255 scale (0 → 100%, 127 → ~50%)
+                // 255 is treated as default/opaque (same as shape/vector paths)
+                let blend = if data.blend == 255 { 100 } else {
+                    ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
+                };
 
                 // Only use matte mask for inks that support it:
                 // - Ink 0 (copy): for trimWhiteSpace edge transparency (indexed and 16-bit)
@@ -1031,7 +1035,8 @@ fn render_filmloop_from_channel_data(
                     ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
                 };
 
-                bitmap.draw_shape_with_sprite(&temp_sprite, &shape_member.shape_info, sprite_rect, &palettes);
+                let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                bitmap.draw_shape_with_sprite(&temp_sprite, &shape_member.shape_info, sprite_rect, &palettes, &frame_palette);
             }
             CastMemberType::VectorShape(vector_member) => {
                 if data.width <= 1 || data.height <= 1 {
@@ -1092,11 +1097,13 @@ pub fn render_score_to_bitmap_with_offset(
             dest_rect.bottom,
         );
 
-        // Use the filmloop's info rect (from the Director file) as the authoritative viewport.
-        // This is the rect that Director uses for the filmloop's coordinate space.
-        // Fall back to computed rect if info rect is unavailable.
-        let initial_rect = get_filmloop_info_rect(player, member_ref)
-            .or_else(|| compute_filmloop_initial_rect_with_members(player, member_ref))
+        // Prefer info_rect (authoritative viewport from Director file).
+        // Fall back to computed rect.
+        let info_rect = get_filmloop_info_rect(player, member_ref);
+        let bitmap_dim_rect = compute_filmloop_initial_rect_with_members(player, member_ref);
+
+        let initial_rect = info_rect.clone()
+            .or_else(|| bitmap_dim_rect.clone())
             .unwrap_or_else(|| {
                 // Fall back to load-time computed initial_rect
                 let member = player.movie.cast_manager.find_member_by_ref(member_ref);
@@ -1110,6 +1117,18 @@ pub fn render_score_to_bitmap_with_offset(
                     IntRect::from(0, 0, 1, 1)
                 }
             });
+
+        // When the info_rect matches the bitmap bounding box, the filmloop
+        // shows full bitmap content — use bitmap dims for internal sprites.
+        // When they differ, the filmloop is a viewport/crop — use sprite dims
+        // (channel data) which represent the intended display sizes.
+        let prefer_bitmap_dims = match (&info_rect, &bitmap_dim_rect) {
+            (Some(info), Some(bm)) => {
+                (info.width() - bm.width()).abs() <= 10
+                    && (info.height() - bm.height()).abs() <= 10
+            }
+            _ => false,
+        };
 
         // Get parent sprite properties - use defaults if not provided
         let props = parent_props.unwrap_or(FilmLoopParentProps {
@@ -1127,6 +1146,7 @@ pub fn render_score_to_bitmap_with_offset(
             props.ink,
             props.color,
             props.bg_color,
+            prefer_bitmap_dims,
         );
         return;
     }
@@ -1377,6 +1397,7 @@ pub fn render_score_to_bitmap_with_offset(
                     }
                 }
 
+                let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
                 debug!(
                     "  SHAPE RENDER: channel {} member {:?} type {:?} size {}x{} color {:?} bg {:?} ink {} blend {} filled={} lineThick={}",
                     channel_num, sprite.member, shape_member.shape_info.shape_type,
@@ -1397,9 +1418,9 @@ pub fn render_score_to_bitmap_with_offset(
                     let mut translated_sprite = sprite.clone();
                     translated_sprite.loc_h -= offset.0;
                     translated_sprite.loc_v -= offset.1;
-                    bitmap.draw_shape_with_sprite(&translated_sprite, shape_info, sprite_rect, &palettes);
+                    bitmap.draw_shape_with_sprite(&translated_sprite, shape_info, sprite_rect, &palettes, &frame_palette);
                 } else {
-                    bitmap.draw_shape_with_sprite(sprite, shape_info, sprite_rect, &palettes);
+                    bitmap.draw_shape_with_sprite(sprite, shape_info, sprite_rect, &palettes, &frame_palette);
                 }
             }
             CastMemberType::VectorShape(vector_member) => {
@@ -2016,9 +2037,6 @@ pub fn render_score_to_bitmap_with_offset(
             }
             CastMemberType::FilmLoop(film_loop) => {
                 // ---- 1. Snapshot sprite data ----
-                // Use the computed initial_rect (bounding box of all sprites across all frames)
-                // instead of the info header rect. ScummVM also recomputes the initial rect
-                // from actual sprite data rather than trusting the header values.
                 let computed_initial_rect = film_loop.initial_rect.clone();
 
                 let (
@@ -2052,9 +2070,9 @@ pub fn render_score_to_bitmap_with_offset(
                 };
 
                 // ---- 2. Create filmloop bitmap using INITIAL_RECT dimensions ----
-                // The filmloop is rendered at its natural size (initial_rect).
-                // This bitmap will then be positioned at sprite_rect location on the stage.
-                // The content is NOT scaled even if sprite_rect is larger/smaller.
+                // The filmloop is rendered at its natural size (initial_rect coordinate space).
+                // This bitmap is then composited at sprite_rect, with copy_pixels
+                // handling scaling if sprite_rect differs from initial_rect.
                 let width = initial_rect.width().max(1);
                 let height = initial_rect.height().max(1);
 
@@ -2137,7 +2155,6 @@ pub fn render_score_to_bitmap_with_offset(
                 );
 
                 // Position the filmloop bitmap at sprite_rect location, but keep natural size.
-                // The filmloop is NOT scaled to fill sprite_rect.
                 let dst_rect = IntRect::from_size(sprite_rect.left, sprite_rect.top, width, height);
                 debug!(
                     "    FILMLOOP DST_RECT: ({}, {}, {}, {}) <- sprite_rect.left={} sprite_rect.top={}",
