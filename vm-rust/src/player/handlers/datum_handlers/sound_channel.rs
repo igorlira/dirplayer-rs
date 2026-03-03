@@ -439,6 +439,13 @@ impl SoundChannelDatumHandlers {
         // Get the channel as Rc<RefCell<SoundChannel>> (do NOT borrow)
         let channel_rc = Self::get_sound_channel_mut(player, datum)?;
 
+        // Reset loop_count to play-once (1) so stale loopCount settings don't leak
+        {
+            let mut ch = channel_rc.borrow_mut();
+            ch.loop_count = 1;
+            ch.loops_remaining = 1;
+        }
+
         // Call the associated function with the Rc
         SoundChannel::play_file(Rc::clone(&channel_rc), member.clone());
 
@@ -652,13 +659,20 @@ impl SoundChannelDatumHandlers {
         channel.playlist_segments = segments;
         channel.playlist = playlist;
 
-        channel.current_segment_index = None;
-        if !channel.playlist_segments.is_empty() {
-            channel.current_segment_index = Some(0);
+        if channel.status == SoundStatus::Playing {
+            // Sound is currently playing — don't set current_segment_index.
+            // When the current sound finishes, start_next_segment will discover
+            // the new playlist entries via the "direct playback" fallback path.
+            channel.current_segment_index = None;
+        } else {
+            channel.current_segment_index = None;
+            if !channel.playlist_segments.is_empty() {
+                channel.current_segment_index = Some(0);
+            }
         }
 
         console::log_1(
-            &format!("✅ Built {} valid playlist entries", channel.playlist.len()).into(),
+            &format!("✅ Built {} valid playlist entries (playing={})", channel.playlist.len(), channel.status == SoundStatus::Playing).into(),
         );
         Ok(DatumRef::Void)
     }
@@ -1271,8 +1285,8 @@ impl SoundChannel {
             sound_member: None,
             volume: 255.0,
             pan: 0.0,
-            loop_count: 0,
-            loops_remaining: 0,
+            loop_count: 1,
+            loops_remaining: 1,
             start_time: 0.0,
             end_time: 0.0,
             loop_start_time: 0.0,
@@ -1714,6 +1728,7 @@ impl SoundChannel {
                 sound_member.info.sample_size,
                 &sound_member.sound.codec(),
                 Some(sound_member.info.sample_count),
+                sound_member.sound.big_endian_data(),
             ) {
                 Ok(data) => data,
                 Err(e) => {
@@ -2313,6 +2328,7 @@ impl SoundChannel {
                 sound_member.info.sample_size,
                 "raw_pcm", // ← Force raw_pcm codec to avoid MP3 detection
                 Some(sound_member.info.sample_count),
+                sound_member.sound.big_endian_data(),
             ) {
                 Ok(wav) => wav,
                 Err(e) => {
@@ -2765,6 +2781,7 @@ impl SoundChannel {
         bits_per_sample: u16,
         codec: &str,
         expected_samples: Option<u32>,
+        big_endian: bool,
     ) -> Result<Vec<u8>, String> {
         use web_sys::console;
         if sound_bytes.is_empty() {
@@ -2802,13 +2819,22 @@ impl SoundChannel {
         ).into());
 
         // --- STEP 2: Detect actual format ---
-        // If codec is explicitly 'raw_pcm', don't check for MP3
-        // (This prevents double MP3 detection in the fallback path)
-        let is_mp3 = if codec == "raw_pcm" { false } else { Self::find_mp3_start(data).is_some() };
+        // Check for MP3, but skip when data size matches expected raw PCM size.
+        let bytes_per_sample_est = if bits_per_sample > 0 { bits_per_sample as usize / 8 } else { 2 };
+        let expected_pcm_size = expected_samples
+            .filter(|&s| s > 0)
+            .map(|s| s as usize * channels as usize * bytes_per_sample_est);
+        let data_likely_pcm = expected_pcm_size
+            .map_or(false, |expected| data.len() >= expected * 4 / 5);
+        let is_mp3 = if data_likely_pcm { false } else { Self::find_mp3_start(data).is_some() };
         let is_probably_adpcm = !is_mp3 && codec.contains("ima");
+        // Only use byte-distribution heuristic when bits_per_sample is unknown (0).
+        // When metadata explicitly says 16-bit, trust it — the heuristic can false-positive
+        // on 16-bit big-endian audio where byte values cluster in certain ranges.
         let is_probably_8bit = !is_mp3
             && (bits_per_sample == 8
-                || (data.len() >= 100
+                || (bits_per_sample == 0
+                    && data.len() >= 100
                     && data[0..100]
                         .iter()
                         .filter(|&&b| b >= 0x60 && b <= 0xA0)
@@ -2869,41 +2895,17 @@ impl SoundChannel {
             }
             converted
         } else {
-            console::log_1(&"Assuming PCM16 → normalizing endianness".into());
-            if bits_per_sample == 16 {
+            console::log_1(&format!("Assuming PCM16 → big_endian={}", big_endian).into());
+            if bits_per_sample == 16 && big_endian {
                 let mut converted = Vec::with_capacity(data.len());
 
-                // Check if this looks like 8-bit unsigned samples stored as individual bytes
-                // Pattern: values clustered around 0x7F-0x80 (127-128), which is 8-bit silence
-                let looks_like_8bit_unsigned = data.len() >= 100
-                    && data[0..100]
-                        .iter()
-                        .filter(|&&b| b >= 0x40 && b <= 0xBF)
-                        .count()
-                        > 80;
-
-                if looks_like_8bit_unsigned {
-                    console::log_1(
-                        &"🔍 Detected 8-bit unsigned samples - converting to 16-bit signed".into(),
-                    );
-
-                    // Convert each 8-bit unsigned sample (0-255, centered at 128)
-                    // to 16-bit signed (-32768 to 32767, centered at 0)
-                    for &byte in data {
-                        // Convert: subtract 128 to center at 0, then scale to 16-bit range
-                        let sample_16 = ((byte as i32 - 128) * 256) as i16;
-                        converted.extend_from_slice(&sample_16.to_le_bytes());
-                    }
-                } else {
-                    console::log_1(&"🔄 Standard big-endian 16-bit - swapping bytes".into());
-                    // Director stores 16-bit PCM as BIG-ENDIAN
-                    for chunk in data.chunks_exact(2) {
-                        converted.push(chunk[1]);
-                        converted.push(chunk[0]);
-                    }
-                    if data.len() % 2 == 1 {
-                        converted.push(*data.last().unwrap());
-                    }
+                console::log_1(&"🔄 Big-endian 16-bit → swapping bytes to little-endian".into());
+                for chunk in data.chunks_exact(2) {
+                    converted.push(chunk[1]);
+                    converted.push(chunk[0]);
+                }
+                if data.len() % 2 == 1 {
+                    converted.push(*data.last().unwrap());
                 }
 
                 converted
@@ -3048,17 +3050,30 @@ impl SoundChannel {
         bits_per_sample: u16,
         codec: &str,
         expected_samples: Option<u32>,
+        big_endian: bool,
     ) -> Result<AudioData, String> {
         console::log_1(&format!(
             "=== load_director_audio_data ===\nTotal file size: {} bytes\nChannels: {}, Sample Rate: {} Hz, Bits: {}, Codec: '{}', Expected samples: {:?}",
             sound_bytes.len(), channels, sample_rate, bits_per_sample, codec, expected_samples
         ).into());
         
-        // ALWAYS check for MP3 using ROBUST detection
-        // Director sometimes marks MP3 as 'raw_pcm', so we can't trust the codec field
-        console::log_1(&"🔍 Checking for MP3 data using robust 3-frame validation...".into());
-        
-        if let Some(mp3_start) = Self::find_mp3_start(sound_bytes) {
+        // Check for MP3, but skip when data size matches expected raw PCM.
+        // sndH/sndS headers sometimes claim "raw_pcm" when data is actually MP3-compressed.
+        // We detect this by comparing data size to what raw PCM would need.
+        // If the data is close to expected PCM size, it IS PCM and MP3 patterns are false positives.
+        let bytes_per_sample_est = if bits_per_sample > 0 { bits_per_sample as usize / 8 } else { 2 };
+        let expected_pcm_size = expected_samples
+            .filter(|&s| s > 0)
+            .map(|s| s as usize * channels as usize * bytes_per_sample_est);
+        let data_likely_pcm = expected_pcm_size
+            .map_or(false, |expected| sound_bytes.len() >= expected * 4 / 5);
+        let mp3_start = if data_likely_pcm {
+            None
+        } else {
+            Self::find_mp3_start(sound_bytes)
+        };
+
+        if let Some(mp3_start) = mp3_start {
             console::log_1(
                 &format!(
                     "✅ Valid MP3 sequence found at offset {} (0x{:04X}) - using MP3 decoder (codec was '{}')",
@@ -3084,6 +3099,7 @@ impl SoundChannel {
             bits_per_sample,
             codec,
             expected_samples,
+            big_endian,
         )?;
         AudioData::from_wav_bytes(&wav_bytes)
     }
@@ -3551,7 +3567,15 @@ impl SoundChannel {
     }
 
     pub fn get_playlist(&self) -> Vec<DatumRef> {
-        self.playlist.clone()
+        if self.current_segment_index.is_some() && !self.playlist.is_empty() {
+            // Director's getPlayList() returns entries that haven't started playing yet,
+            // excluding the currently playing segment (always at index 0).
+            // This allows scripts to detect when the playlist is about to run out
+            // and refill it while the last segment is still playing.
+            self.playlist[1..].to_vec()
+        } else {
+            self.playlist.clone()
+        }
     }
 
     pub fn fade_in(&mut self, ticks: i32, to_volume: f64) {
@@ -3668,6 +3692,7 @@ impl SoundChannel {
         let sample_size = sound_member.info.sample_size;
         let codec = sound_member.sound.codec();
         let expected_samples = Some(sound_member.info.sample_count);
+        let big_endian = sound_member.sound.big_endian_data();
 
         let audio_data = Self::load_director_audio_data(
             sound_data,
@@ -3676,6 +3701,7 @@ impl SoundChannel {
             sample_size,
             &codec,
             expected_samples,
+            big_endian,
         )
         .map_err(|e| ScriptError::new(format!("Failed to load sound: {}", e)))?;
 
@@ -4124,18 +4150,20 @@ impl SoundChannel {
                 );
                 self.current_segment_index = Some(0);
 
-                let member_ref = self.playlist_segments[0].member_ref.clone();
-                let channel_num = self.channel_num;
-
-                spawn_local(async move {
-                    if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
-                        if let Some(channel_rc) =
-                            player.sound_manager.get_channel(channel_num as usize)
-                        {
-                            SoundChannel::play_file(channel_rc, member_ref);
+                // Try gapless replay from cached buffer first
+                if !self.replay_cached_buffer() {
+                    let member_ref = self.playlist_segments[0].member_ref.clone();
+                    let channel_num = self.channel_num;
+                    spawn_local(async move {
+                        if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
+                            if let Some(channel_rc) =
+                                player.sound_manager.get_channel(channel_num as usize)
+                            {
+                                SoundChannel::play_file(channel_rc, member_ref);
+                            }
                         }
-                    }
-                });
+                    });
+                }
                 return;
             }
             
@@ -4170,13 +4198,17 @@ impl SoundChannel {
             if segment.loop_count != 0 {
                 segment.loops_remaining -= 1;
             }
+            // Clone member_ref before releasing the borrow on segment
+            let member_ref = segment.member_ref.clone();
             console::log_1(&format!("🔁 Looping segment {}", index).into());
 
-            // Get the member_ref to play
-            let member_ref = segment.member_ref.clone();
-            let channel_num = self.channel_num;
+            // Try gapless replay from cached buffer first
+            if self.replay_cached_buffer() {
+                return;
+            }
 
-            // Spawn async playback for the loop
+            // Fall back to full decode path
+            let channel_num = self.channel_num;
             spawn_local(async move {
                 if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
                     if let Some(channel_rc) = player.sound_manager.get_channel(channel_num as usize)
@@ -4198,29 +4230,76 @@ impl SoundChannel {
         // Play next segment if available
         if index < self.playlist_segments.len() {
             self.current_segment_index = Some(index);
-            let next_segment = &mut self.playlist_segments[index];
-            next_segment.loops_remaining = next_segment.loop_count;
+            self.playlist_segments[index].loops_remaining = self.playlist_segments[index].loop_count;
+            let member_ref = self.playlist_segments[index].member_ref.clone();
 
             console::log_1(&format!("⏭️ Playing next segment at index {}", index).into());
 
-            // Get the member_ref to play
-            let member_ref = next_segment.member_ref.clone();
-            let channel_num = self.channel_num;
-
-            // Spawn async playback for next segment
-            spawn_local(async move {
-                if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
-                    if let Some(channel_rc) = player.sound_manager.get_channel(channel_num as usize)
-                    {
-                        SoundChannel::play_file(channel_rc, member_ref);
+            // Try gapless replay from cached buffer first
+            if !self.replay_cached_buffer() {
+                // Fall back to full decode path
+                let channel_num = self.channel_num;
+                spawn_local(async move {
+                    if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
+                        if let Some(channel_rc) = player.sound_manager.get_channel(channel_num as usize)
+                        {
+                            SoundChannel::play_file(channel_rc, member_ref);
+                        }
                     }
-                }
-            });
+                });
+            }
         } else {
             console::log_1(&"⏸️ Playlist empty, stopped".into());
             self.current_segment_index = None;
             self.status = SoundStatus::Idle;
         }
+    }
+
+    /// Fast path for gapless playlist playback: reuse the already-decoded AudioBuffer
+    /// to create a new source node immediately, without going through the full
+    /// decode/resample pipeline. Returns true if successful.
+    fn replay_cached_buffer(&mut self) -> bool {
+        use web_sys::console;
+
+        let buffer = match self.current_audio_buffer {
+            Some(ref buf) => buf.clone(),
+            None => return false,
+        };
+
+        let source = match self.audio_context.create_buffer_source() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        source.set_buffer(Some(&*buffer));
+
+        let gain = match self.audio_context.create_gain() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        gain.gain().set_value((self.volume / 255.0) as f32);
+
+        // Connect: source -> gain -> destination
+        let _ = source.connect_with_audio_node(&gain);
+        let _ = gain.connect_with_audio_node(&self.audio_context.destination());
+
+        // Set up ended callback
+        let channel_num = self.channel_num;
+        let closure = Closure::<dyn FnMut()>::new(move || {
+            SoundChannel::handle_end_of_sound(channel_num);
+        });
+        let _ = source.add_event_listener_with_callback("ended", closure.as_ref().unchecked_ref());
+        closure.forget();
+
+        let _ = source.start();
+
+        self.source_node = Some(Rc::new(source));
+        self.gain_node = Some(Rc::new(gain));
+        self.status = SoundStatus::Playing;
+
+        console::log_1(
+            &format!("⚡ Channel {} gapless replay from cached buffer", self.channel_num).into(),
+        );
+        true
     }
 
     fn spawn_playback_async(&self) {
@@ -4281,6 +4360,7 @@ impl SoundChannel {
             sound_member.info.sample_size,
             &sound_member.sound.codec(), // Get codec from sound chunk
             Some(sound_member.info.sample_count),
+            sound_member.sound.big_endian_data(),
         )
         .map_err(|e| JsValue::from_str(&format!("WAV creation failed: {}", e)))?;
 
