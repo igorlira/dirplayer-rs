@@ -1784,7 +1784,7 @@ impl WebGL2Renderer {
                 // For inks that make bgColor pixels transparent (7, 8, 36, 40),
                 // if the solid foreground color matches the resolved bgColor,
                 // the entire shape would be invisible — skip rendering.
-                if ink == 7 || ink == 8 || ink == 36 || ink == 40 {
+                if ink == 3 || ink == 7 || ink == 8 || ink == 36 || ink == 40 {
                     if (r, g, b) == bg_color_rgb {
                         return;
                     }
@@ -2379,6 +2379,7 @@ impl WebGL2Renderer {
         // Note: Matte (ink 8) uses flood-fill matte in texture alpha, not color-key
         // (using the already-resolved bg_color_rgb from earlier)
         if effective_ink == InkMode::BackgroundTransparent
+            || effective_ink == InkMode::Ghost
             || effective_ink == InkMode::NotGhost
             || effective_ink == InkMode::Darken
             || effective_ink == InkMode::AddPin
@@ -2534,6 +2535,9 @@ impl WebGL2Renderer {
         // NOT flood-fill matte. See drawing.rs lines 160-163: if src == bg_color { dst }
         // Color-key comparison is handled in the shader, not texture matte.
         // For 16-bit and 32-bit, the shader compares pixel RGB with bgColor uniform.
+        // Ink 3 (Ghost) uses COLOR-KEY transparency (ALL bgColor pixels transparent)
+        // Ghost ink makes background transparent and inverts foreground colors
+        let should_use_colorkey_ink3 = ink == 3 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
         let should_use_colorkey_ink33 = ink == 33 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
         // Ink 35 (Sub Pin) uses COLOR-KEY transparency (ALL bgColor pixels transparent)
         // Same behavior as ink 33 but with subtractive blending
@@ -2735,8 +2739,8 @@ impl WebGL2Renderer {
                     } else {
                         255
                     }
-                } else if should_use_colorkey_ink33 || should_use_colorkey_ink35 || should_use_colorkey_ink36 || should_use_colorkey_ink37 || should_use_colorkey_ink39 {
-                    // Ink 33/35/36/37/39 color-key transparency is handled by shader
+                } else if should_use_colorkey_ink3 || should_use_colorkey_ink33 || should_use_colorkey_ink35 || should_use_colorkey_ink36 || should_use_colorkey_ink37 || should_use_colorkey_ink39 {
+                    // Ink 3/33/35/36/37/39 color-key transparency is handled by shader
                     // The shader compares pixel RGB with bgColor uniform
                     // All pixels are uploaded as opaque, shader discards matching pixels
                     // Works for indexed (2-8 bit), 16-bit, and 32-bit (without use_alpha) bitmaps
@@ -3047,7 +3051,7 @@ impl WebGL2Renderer {
     /// Check if ink mode requires matte computation
     /// Matches Canvas2D's should_matte_sprite function
     fn should_matte_sprite(ink: i32) -> bool {
-        ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
+        ink == 3 || ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
     }
 
     /// Get or create a texture for a bitmap member
@@ -3344,7 +3348,7 @@ impl WebGL2Renderer {
             }
 
             let result = font_opt.or_else(|| player.font_manager.get_system_font());
-            
+
             if DEBUG_WEBGL2_TEXT {
                 if let Some(ref f) = result {
                     web_sys::console::log_1(
@@ -3567,7 +3571,6 @@ impl WebGL2Renderer {
 
         // Render text to the bitmap - use styled spans if available
         // BUT only use native rendering if the font is NOT a PFR bitmap font
-        // PFR fonts can't be used by Canvas2D, so we must use bitmap rendering
         if let Some(spans) = spans_for_native {
             // Parse alignment string to TextAlignment enum
             let text_alignment = match alignment_key.as_str() {
@@ -4315,7 +4318,7 @@ impl WebGL2Renderer {
         // - Ink 36 (BgTransparent): composited with alpha blending
         // Filling background with bg_color at alpha=255 would make the entire
         // text area opaque, producing solid colored rectangles instead of text.
-        let is_transparency_ink = ink == 7 || ink == 8 || ink == 9 || ink == 36;
+        let is_transparency_ink = ink == 3 || ink == 7 || ink == 8 || ink == 9 || ink == 36;
         // For non-transparency inks (e.g. ink 0 Copy), always fill the background
         // with bgColor at alpha=255. This matches Director behavior where ink 0
         // for field/text members renders as an opaque rectangle. Only transparency
