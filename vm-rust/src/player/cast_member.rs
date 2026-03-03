@@ -2062,13 +2062,15 @@ impl CastMember {
                     };
 
                     if is_jpeg && !media.audio_data.is_empty() {
-                        debug!(
-                            "Found JPEG data in Media chunk for bitmap {}, size: {} bytes",
-                            number,
-                            media.audio_data.len()
-                        );
+                        // Look for ALFA chunk in children (Raw data from parsed ALFA chunk)
+                        let alfa_data: Option<&Vec<u8>> = member_def.children.iter().find_map(|c| {
+                            c.as_ref().and_then(|chunk| match chunk {
+                                Chunk::Raw(data) => Some(data),
+                                _ => None,
+                            })
+                        });
 
-                        match decode_jpeg_bitmap(&media.audio_data, &bitmap_info) {
+                        match decode_jpeg_bitmap(&media.audio_data, &bitmap_info, alfa_data) {
                             Ok(new_bitmap) => {
                                 debug!(
                                     "Successfully decoded JPEG: {}x{}, bit_depth: {}",
@@ -2138,21 +2140,6 @@ impl CastMember {
                 })
             }
             MemberType::Shape => {
-                if !member_def.children.is_empty() {
-                    web_sys::console::log_1(&format!(
-                        "(2)CastMember {} has {} children:",
-                        number,
-                        member_def.children.len()
-                    ).into());
-
-                    for (i, c_opt) in member_def.children.iter().enumerate() {
-                        match c_opt {
-                            Some(c) => web_sys::console::log_1(&format!("child[{}] = {}", i, Self::chunk_type_name(c)).into()),
-                            None => web_sys::console::log_1(&format!("child[{}] = None", i).into()),
-                        }
-                    }
-                }
-
                 let script_id = chunk
                     .member_info
                     .as_ref()
