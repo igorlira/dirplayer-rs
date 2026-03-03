@@ -106,8 +106,8 @@ impl CastDef {
                     let child = get_chunk(reader, chunk_container, rifx, x.fourcc, x.section_id);
                     if let Err(err) = &child {
                         debug!(
-                            "❌ Failed to read child chunk of type {} (section_id={}): {}",
-                            fourcc_str, x.section_id, err
+                            "Failed to read child chunk type='{}' section_id={} for member {}: {}",
+                            fourcc_str, x.section_id, member_id, err
                         );
                     }
                     child.ok()
