@@ -30,6 +30,7 @@ public/dcr*
 .vscode
 .claude
 CLAUDE.md
+.mcp.json
 
 /dist-extension
 /dist-extension.zip
