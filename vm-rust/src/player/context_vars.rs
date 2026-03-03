@@ -40,9 +40,13 @@ pub fn player_get_context_var(
     match var_type {
         // global
         0x1 | 0x2 => {
-            let name_index = (id.int_value()? / variable_multiplier as i32) as usize;
-            let name_id = handler.global_name_ids[name_index];
-            let global_name = get_name(player, ctx, name_id).unwrap().to_owned();
+            let global_name = if let Datum::Symbol(name) = id {
+                name.to_owned()
+            } else {
+                let name_index = (id.int_value()? / variable_multiplier as i32) as usize;
+                let name_id = handler.global_name_ids[name_index];
+                get_name(player, ctx, name_id).unwrap().to_owned()
+            };
             let value_ref = player
                 .globals
                 .get(&global_name)
@@ -52,10 +56,15 @@ pub fn player_get_context_var(
         }
         // property/instance
         0x3 => {
-            let name_index = (id.int_value()? / variable_multiplier as i32) as usize;
-            let script = get_current_script(player, ctx).unwrap();
-            let prop_name_id = script.chunk.property_name_ids[name_index];
-            let prop_name = get_name(player, ctx, prop_name_id).unwrap().to_owned();
+            let prop_name = if let Datum::Symbol(name) = id {
+                // PushVarRef pushes a Symbol with the property name
+                name.to_owned()
+            } else {
+                let name_index = (id.int_value()? / variable_multiplier as i32) as usize;
+                let script = get_current_script(player, ctx).unwrap();
+                let prop_name_id = script.chunk.property_name_ids[name_index];
+                get_name(player, ctx, prop_name_id).unwrap().to_owned()
+            };
             let scope = player.scopes.get(ctx.scope_ref).unwrap();
             let receiver = scope.receiver.clone();
             let script_ref = scope.script_ref.clone();
@@ -79,8 +88,19 @@ pub fn player_get_context_var(
         0x5 => {
             // local
             let local_name_ids = &handler.local_name_ids;
-            let local_index = (id.int_value()? / variable_multiplier as i32) as usize;
-            let name_id = local_name_ids[local_index];
+            let name_id = if let Datum::Symbol(name) = id {
+                // Find the name_id matching the symbol name
+                let found = local_name_ids.iter().find(|&&nid| {
+                    get_name(player, ctx, nid).map(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(false)
+                });
+                match found {
+                    Some(&nid) => nid,
+                    None => return Err(ScriptError::new(format!("Local variable '{}' not found", name))),
+                }
+            } else {
+                let local_index = (id.int_value()? / variable_multiplier as i32) as usize;
+                local_name_ids[local_index]
+            };
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             let void = DatumRef::Void;
             let local = scope.locals.get(&name_id).unwrap_or(&void);
@@ -126,18 +146,27 @@ pub fn player_set_context_var(
     match var_type {
         // global
         0x1 | 0x2 => {
-            let name_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
-            let name_id = handler.global_name_ids[name_index];
-            let global_name = get_name(player, ctx, name_id).unwrap().to_owned();
+            let global_name = if let Datum::Symbol(name) = id_datum {
+                name.to_owned()
+            } else {
+                let name_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
+                let name_id = handler.global_name_ids[name_index];
+                get_name(player, ctx, name_id).unwrap().to_owned()
+            };
             player.globals.insert(global_name, value_ref.clone());
             Ok(())
         }
         // property/instance
         0x3 => {
-            let name_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
-            let script = get_current_script(player, ctx).unwrap();
-            let prop_name_id = script.chunk.property_name_ids[name_index];
-            let prop_name = get_name(player, ctx, prop_name_id).unwrap().to_owned();
+            let prop_name = if let Datum::Symbol(name) = id_datum {
+                // PushVarRef pushes a Symbol with the property name
+                name.to_owned()
+            } else {
+                let name_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
+                let script = get_current_script(player, ctx).unwrap();
+                let prop_name_id = script.chunk.property_name_ids[name_index];
+                get_name(player, ctx, prop_name_id).unwrap().to_owned()
+            };
             let scope = player.scopes.get(ctx.scope_ref).unwrap();
             if let Some(instance_ref) = scope.receiver.clone() {
                 script_set_prop(player, &instance_ref, &prop_name, value_ref, true)
@@ -161,8 +190,18 @@ pub fn player_set_context_var(
         0x5 => {
             // local
             let local_name_ids = &handler.local_name_ids;
-            let local_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
-            let name_id = local_name_ids[local_index];
+            let name_id = if let Datum::Symbol(name) = id_datum {
+                let found = local_name_ids.iter().find(|&&nid| {
+                    get_name(player, ctx, nid).map(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(false)
+                });
+                match found {
+                    Some(&nid) => nid,
+                    None => return Err(ScriptError::new(format!("Local variable '{}' not found", name))),
+                }
+            } else {
+                let local_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
+                local_name_ids[local_index]
+            };
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.locals.insert(name_id, value_ref.clone());
             Ok(())

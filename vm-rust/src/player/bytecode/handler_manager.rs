@@ -211,7 +211,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::PushArgListNoRet => StackBytecodeHandler::push_arglist_no_ret(ctx),
             OpCode::PushSymb => StackBytecodeHandler::push_symb(ctx),
             OpCode::Swap => StackBytecodeHandler::swap(ctx),
-            OpCode::PushVarRef => StackBytecodeHandler::push_symb(ctx),
+            OpCode::PushVarRef => StackBytecodeHandler::push_var_ref(ctx),
             OpCode::GetProp => GetSetBytecodeHandler::get_prop(ctx),
             OpCode::GetObjProp => GetSetBytecodeHandler::get_obj_prop(ctx),
             OpCode::GetMovieProp => GetSetBytecodeHandler::get_movie_prop(ctx),
