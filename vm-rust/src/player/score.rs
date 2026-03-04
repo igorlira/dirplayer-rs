@@ -176,14 +176,21 @@ pub fn get_channel_number_from_index(index: u32) -> u32 {
 }
 
 /// Convert raw blend byte from score data to a 0-100 percentage.
-/// Inverted 0-255 scale: 0 → 100% (opaque), 255 → 0% (transparent), 127 → ~50%.
-fn convert_raw_blend(raw: u8, _dir_version: u16) -> i32 {
-    if raw == 0 {
-        100
-    } else if raw == 255 {
-        0
+/// D8+ uses inverted 0-255 scale: 0 → 100% (opaque), 255 → 0% (transparent).
+/// D5-D7 uses direct 0-100 percentage: 0 → 100% (opaque/not set).
+fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
+    if dir_version >= 700 {
+        // D8+: inverted 0-255 scale
+        if raw == 0 {
+            100
+        } else if raw == 255 {
+            0
+        } else {
+            ((255.0 - raw as f32) * 100.0 / 255.0) as i32
+        }
     } else {
-        ((255.0 - raw as f32) * 100.0 / 255.0) as i32
+        // D5-D7: direct percentage, 0 = fully opaque (not set)
+        if raw == 0 { 100 } else { (raw as i32).min(100) }
     }
 }
 
@@ -1399,114 +1406,113 @@ impl Score {
 
         // Always ensure frame script instance exists for current frame
         // This handles looping - frame scripts need to be recreated each time we enter the frame
+        // Frame scripts need instances so that `me` resolves to ScriptInstanceRef (not ScriptRef)
+        // in their handlers — e.g., `me.spriteNum` in beginSprite/enterFrame handlers.
         if let Some(behavior_ref) = self.get_script_in_frame(frame_num) {
-            // ONLY create cached instance if there are parameters!
-            if !behavior_ref.parameter.is_empty() {
-                // Check if we need to create/recreate the frame script instance
-                let needs_creation = reserve_player_ref(|player| {
-                    player.movie.frame_script_instance.is_none()
+            // Check if we need to create/recreate the frame script instance
+            let needs_creation = reserve_player_ref(|player| {
+                player.movie.frame_script_instance.is_none()
+            });
+
+            if needs_creation {
+                debug!(
+                    "🔧 Creating frame script instance from cast {}/{} with {} parameters",
+                    behavior_ref.cast_lib,
+                    behavior_ref.cast_member,
+                    behavior_ref.parameter.len()
+                );
+
+                // Create the script instance
+                let behavior_result = Self::create_behavior(
+                    behavior_ref.cast_lib as i32,
+                    behavior_ref.cast_member as i32,
+                    default_cast_lib,
+                );
+
+                // Skip if creation failed (script not found)
+                let (script_instance_ref, datum_ref) = match behavior_result {
+                    Some(result) => result,
+                    None => {
+                        debug!("Skipping frame script from cast {}/{} - script not found",
+                            behavior_ref.cast_lib, behavior_ref.cast_member);
+                        // Don't cache anything if script not found
+                        return; // Exit early from begin_sprites
+                    }
+                };
+
+                // Extract ScriptInstanceRef
+                let actual_instance_ref = reserve_player_mut(|player| {
+                    match player.get_datum(&datum_ref) {
+                        Datum::ScriptInstanceRef(ref inst) => inst.clone(),
+                        _ => {
+                            web_sys::console::error_1(&"Expected ScriptInstanceRef".into());
+                            panic!("Expected ScriptInstanceRef");
+                        }
+                    }
                 });
-                
-                if needs_creation {
-                    debug!(
-                        "🔧 Creating frame script instance from cast {}/{} with {} parameters",
-                        behavior_ref.cast_lib,
-                        behavior_ref.cast_member,
-                        behavior_ref.parameter.len()
+
+                // Create the CastMemberRef for later use
+                let cast_member_ref = CastMemberRef {
+                    cast_lib: behavior_ref.cast_lib as i32,
+                    cast_member: behavior_ref.cast_member as i32,
+                };
+
+                // Set spriteNum property
+                reserve_player_mut(|player| {
+                    let sprite_num_ref = player.alloc_datum(Datum::Int(0));
+                    let _ = script_set_prop(
+                        player,
+                        &actual_instance_ref,
+                        &"spriteNum".to_string(),
+                        &sprite_num_ref,
+                        false,
                     );
+                });
 
-                    // Create the script instance
-                    let behavior_result = Self::create_behavior(
-                        behavior_ref.cast_lib as i32,
-                        behavior_ref.cast_member as i32,
-                        default_cast_lib,
-                    );
-
-                    // Skip if creation failed (script not found)
-                    let (script_instance_ref, datum_ref) = match behavior_result {
-                        Some(result) => result,
-                        None => {
-                            debug!("Skipping frame script from cast {}/{} - script not found",
-                                behavior_ref.cast_lib, behavior_ref.cast_member);
-                            // Don't cache anything if script not found
-                            return; // Exit early from begin_sprites
-                        }
-                    };
-
-                    // Extract ScriptInstanceRef
-                    let actual_instance_ref = reserve_player_mut(|player| {
-                        match player.get_datum(&datum_ref) {
-                            Datum::ScriptInstanceRef(ref inst) => inst.clone(),
-                            _ => {
-                                web_sys::console::error_1(&"Expected ScriptInstanceRef".into());
-                                panic!("Expected ScriptInstanceRef");
-                            }
-                        }
-                    });
-
-                    // Create the CastMemberRef for later use
-                    let cast_member_ref = CastMemberRef {
-                        cast_lib: behavior_ref.cast_lib as i32,
-                        cast_member: behavior_ref.cast_member as i32,
-                    };
-
-                    // Set spriteNum property
+                // Apply behavior parameters
+                if !behavior_ref.parameter.is_empty() {
                     reserve_player_mut(|player| {
-                        let sprite_num_ref = player.alloc_datum(Datum::Int(0));
-                        let _ = script_set_prop(
-                            player,
-                            &actual_instance_ref,
-                            &"spriteNum".to_string(),
-                            &sprite_num_ref,
-                            false,
-                        );
-                    });
+                        debug!("  Applying {} parameters", behavior_ref.parameter.len());
 
-                    // Apply behavior parameters
-                    if !behavior_ref.parameter.is_empty() {
-                        reserve_player_mut(|player| {
-                            debug!("  Applying {} parameters", behavior_ref.parameter.len());
-                            
-                            for param_ref in &behavior_ref.parameter {
-                                let param_datum = player.get_datum(param_ref);
-                                
-                                if let Datum::PropList(props, _) = param_datum {
-                                    // Collect properties first
-                                    let props_to_set: Vec<(String, DatumRef)> = props.iter()
-                                        .filter_map(|(key_ref, value_ref)| {
-                                            let key = player.get_datum(key_ref);
-                                            if let Datum::Symbol(prop_name) = key {
-                                                Some((prop_name.clone(), value_ref.clone()))
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect();
-                                    
-                                    // Then set them
-                                    for (prop_name, value_ref) in props_to_set {
-                                        debug!("    Setting property: {}", prop_name);
-                                        let _ = script_set_prop(
-                                            player,
-                                            &actual_instance_ref,
-                                            &prop_name,
-                                            &value_ref,
-                                            false,
-                                        );
-                                    }
+                        for param_ref in &behavior_ref.parameter {
+                            let param_datum = player.get_datum(param_ref);
+
+                            if let Datum::PropList(props, _) = param_datum {
+                                // Collect properties first
+                                let props_to_set: Vec<(String, DatumRef)> = props.iter()
+                                    .filter_map(|(key_ref, value_ref)| {
+                                        let key = player.get_datum(key_ref);
+                                        if let Datum::Symbol(prop_name) = key {
+                                            Some((prop_name.clone(), value_ref.clone()))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
+
+                                // Then set them
+                                for (prop_name, value_ref) in props_to_set {
+                                    debug!("    Setting property: {}", prop_name);
+                                    let _ = script_set_prop(
+                                        player,
+                                        &actual_instance_ref,
+                                        &prop_name,
+                                        &value_ref,
+                                        false,
+                                    );
                                 }
                             }
-                        });
-                    }
-
-                    // Cache BOTH the instance and the member ref
-                    reserve_player_mut(|player| {
-                        player.movie.frame_script_instance = Some(actual_instance_ref);
-                        player.movie.frame_script_member = Some(cast_member_ref);
+                        }
                     });
-
-                    debug!("✓ Frame script instance created and cached");
                 }
+
+                // Cache BOTH the instance and the member ref
+                reserve_player_mut(|player| {
+                    player.movie.frame_script_instance = Some(actual_instance_ref);
+                    player.movie.frame_script_member = Some(cast_member_ref);
+                });
+
+                debug!("✓ Frame script instance created and cached");
             }
         }
 
