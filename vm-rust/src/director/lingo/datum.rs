@@ -540,9 +540,18 @@ impl Datum {
     pub fn to_bitmap_ref(&self) -> Result<&BitmapRef, ScriptError> {
         match self {
             Datum::BitmapRef(bitmap_ref) => Ok(bitmap_ref),
-            _ => Err(ScriptError::new(
-                "Cannot convert datum to bitmap ref".to_string(),
-            )),
+            _ => {
+                let detail = match self {
+                    Datum::Int(v) => format!("Int({})", v),
+                    Datum::Float(v) => format!("Float({})", v),
+                    Datum::String(v) => format!("String(\"{}\")", v),
+                    Datum::Void => "Void".to_string(),
+                    _ => format!("{:?}", self.type_enum()),
+                };
+                Err(ScriptError::new(
+                    format!("Cannot convert {} to bitmap ref", detail),
+                ))
+            }
         }
     }
 

@@ -563,6 +563,7 @@ fn test_put_into_char() {
             Box::new(LingoExpr::ChunkExpr(
                 "char".to_string(),
                 Box::new(LingoExpr::IntLiteral(1)),
+                None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
             ))
         )
@@ -573,7 +574,7 @@ fn test_put_into_char() {
 fn test_put_into_word() {
     let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, "put \"goodbye\" into word 1 of myStr".to_string());
     assert!(result.is_ok());
-    
+
     let ast = result.unwrap();
     assert_eq!(
         ast,
@@ -582,6 +583,7 @@ fn test_put_into_word() {
             Box::new(LingoExpr::ChunkExpr(
                 "word".to_string(),
                 Box::new(LingoExpr::IntLiteral(1)),
+                None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
             ))
         )
@@ -592,7 +594,7 @@ fn test_put_into_word() {
 fn test_put_into_line() {
     let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, "put \"newline\" into line 1 of myText".to_string());
     assert!(result.is_ok());
-    
+
     let ast = result.unwrap();
     assert_eq!(
         ast,
@@ -601,6 +603,7 @@ fn test_put_into_line() {
             Box::new(LingoExpr::ChunkExpr(
                 "line".to_string(),
                 Box::new(LingoExpr::IntLiteral(1)),
+                None,
                 Box::new(LingoExpr::Identifier("myText".to_string()))
             ))
         )
@@ -611,7 +614,7 @@ fn test_put_into_line() {
 fn test_put_into_item() {
     let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, "put \"X\" into item 2 of myList".to_string());
     assert!(result.is_ok());
-    
+
     let ast = result.unwrap();
     assert_eq!(
         ast,
@@ -620,6 +623,7 @@ fn test_put_into_item() {
             Box::new(LingoExpr::ChunkExpr(
                 "item".to_string(),
                 Box::new(LingoExpr::IntLiteral(2)),
+                None,
                 Box::new(LingoExpr::Identifier("myList".to_string()))
             ))
         )
@@ -630,7 +634,7 @@ fn test_put_into_item() {
 fn test_put_before_char() {
     let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, "put \"X\" before char 1 of myStr".to_string());
     assert!(result.is_ok());
-    
+
     let ast = result.unwrap();
     assert_eq!(
         ast,
@@ -639,6 +643,7 @@ fn test_put_before_char() {
             Box::new(LingoExpr::ChunkExpr(
                 "char".to_string(),
                 Box::new(LingoExpr::IntLiteral(1)),
+                None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
             ))
         )
@@ -649,7 +654,7 @@ fn test_put_before_char() {
 fn test_put_after_char() {
     let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, "put \"X\" after char 5 of myStr".to_string());
     assert!(result.is_ok());
-    
+
     let ast = result.unwrap();
     assert_eq!(
         ast,
@@ -658,6 +663,7 @@ fn test_put_after_char() {
             Box::new(LingoExpr::ChunkExpr(
                 "char".to_string(),
                 Box::new(LingoExpr::IntLiteral(5)),
+                None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
             ))
         )
@@ -668,7 +674,7 @@ fn test_put_after_char() {
 fn test_put_before_word() {
     let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, "put \"beautiful \" before word 2 of myStr".to_string());
     assert!(result.is_ok());
-    
+
     let ast = result.unwrap();
     assert_eq!(
         ast,
@@ -677,6 +683,7 @@ fn test_put_before_word() {
             Box::new(LingoExpr::ChunkExpr(
                 "word".to_string(),
                 Box::new(LingoExpr::IntLiteral(2)),
+                None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
             ))
         )
@@ -687,7 +694,7 @@ fn test_put_before_word() {
 fn test_put_after_word() {
     let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, "put \"!\" after word 2 of myStr".to_string());
     assert!(result.is_ok());
-    
+
     let ast = result.unwrap();
     assert_eq!(
         ast,
@@ -696,6 +703,7 @@ fn test_put_after_word() {
             Box::new(LingoExpr::ChunkExpr(
                 "word".to_string(),
                 Box::new(LingoExpr::IntLiteral(2)),
+                None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
             ))
         )
