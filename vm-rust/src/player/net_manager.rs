@@ -65,7 +65,13 @@ impl NetManager {
     }
 
     pub fn find_task_by_url(&self, url: &str) -> Option<u32> {
-        find_task_with_url(&self.tasks, &url.to_string()).map(|task| task.id)
+        // Try original URL first, then resolved URL
+        find_task_with_url(&self.tasks, &url.to_string())
+            .or_else(|| {
+                let resolved = normalize_task_url(&url.to_string(), self.base_path.as_ref());
+                find_task_with_resolved_url(&self.tasks, &resolved)
+            })
+            .map(|task| task.id)
     }
 
     pub fn get_task_state(&self, task_id: Option<u32>) -> Option<NetTaskState> {
@@ -87,6 +93,14 @@ impl NetManager {
 
     pub fn get_task(&self, task_id: u32) -> Option<&NetTask> {
         return self.tasks.get(&task_id);
+    }
+
+    pub fn get_last_task_id(&self) -> Option<u32> {
+        if self.tasks.is_empty() {
+            None
+        } else {
+            Some(self.tasks.len() as u32)
+        }
     }
 
     pub fn create_task_future(&mut self, task_id: u32) -> ManualFuture<()> {
@@ -126,7 +140,7 @@ impl NetManager {
             .map(|s| s.to_string())
             .unwrap_or(url);
 
-        // Check if the task already exists and return it if found
+        // Check if the task already exists (by original URL) and return it if found
         if let Some(existing_task) = find_task_with_url(&self.tasks, &url) {
             return existing_task.id;
         }
@@ -140,6 +154,11 @@ impl NetManager {
                 &normalize_task_url(&url, self.base_path.as_ref()),
             )
         };
+
+        // Also check by resolved URL to catch relative vs absolute URL duplicates
+        if let Some(existing_task) = find_task_with_resolved_url(&self.tasks, &net_task.resolved_url) {
+            return existing_task.id;
+        }
         let task_id = net_task.id;
         let resolved_url_str = net_task.resolved_url.to_string();
         let is_file_url = resolved_url_str.starts_with("file://");
@@ -255,6 +274,16 @@ pub fn find_task_with_url<'a>(
     tasks
         .iter()
         .find(|(_, x)| x.url == decoded_url)
+        .map(|x| x.1)
+}
+
+pub fn find_task_with_resolved_url<'a>(
+    tasks: &'a HashMap<u32, NetTask>,
+    resolved_url: &Url,
+) -> Option<&'a NetTask> {
+    tasks
+        .iter()
+        .find(|(_, x)| x.resolved_url == *resolved_url)
         .map(|x| x.1)
 }
 

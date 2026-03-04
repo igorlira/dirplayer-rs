@@ -2622,6 +2622,11 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
             scope.reset();
         }
         player.scope_count = 0;
+
+        // Temporarily set is_playing = false so that begin_all_sprites (called inside
+        // load_movie_from_dir) resets entered flags and clears script instance lists,
+        // matching the behavior of the initial movie load path.
+        player.is_playing = false;
     });
 
     reserve_player_mut_async(|player| {
@@ -2630,7 +2635,7 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
         })
     }).await;
 
-    // Apply frame target if specified
+    // Apply frame target if specified, restore is_playing before init sequence
     reserve_player_mut(|player| {
         match &target {
             MovieFrameTarget::Label(label) => {
@@ -2648,6 +2653,7 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
             MovieFrameTarget::Default => {}
         }
         player.pending_goto_net_movie = None;
+        player.is_playing = true;
     });
 
     // 4. Run new movie initialization sequence
