@@ -86,9 +86,12 @@ impl BitmapMemberHandlers {
     ) -> Result<(), ScriptError> {
         match prop.as_str() {
             "image" | "picture" => {
-                let bitmap_ref = value.to_bitmap_ref()?;
+                if value.is_void() {
+                    return Ok(()); // Setting image to VOID is a no-op in Director
+                }
                 reserve_player_mut(|player| {
-                    let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
+                    let bitmap_ref = player.resolve_bitmap_ref(&value)?;
+                    let bitmap = player.bitmap_manager.get_bitmap(bitmap_ref).unwrap();
                     let new_width = bitmap.width;
                     let new_height = bitmap.height;
                     let mut clone = bitmap.clone();
