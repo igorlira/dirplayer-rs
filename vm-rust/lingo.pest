@@ -84,9 +84,10 @@ member_ref = { ^"member" ~ term_arg ~ (^"of" ~ castlib_ref)? }
 // Sprite references: "sprite 17"
 sprite_ref = { ^"sprite" ~ term_arg }
 
-// Chunk expressions for "char 1 of myStr", etc.
-chunk_type = { ^"char" | ^"word" | ^"line" | ^"item" }
-chunk_expr = { chunk_type ~ expr ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | lang_ident) }
+// Chunk expressions for "char 1 of myStr", "line 1 to 3 of myStr", etc.
+chunk_type  = { ^"char" | ^"word" | ^"line" | ^"item" }
+chunk_range = { ^"to" ~ expr }
+chunk_expr  = { chunk_type ~ expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | handler_call | lang_ident) }
 
 parens_expr = _{ "(" ~ expr ~ ")" }
 parens_list = { "(" ~ expr ~ ("," ~ expr)+ ~ ")" }

@@ -28,7 +28,7 @@ fn tokenize_lingo(_expr: &String) -> Vec<String> {
     [].to_vec()
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LingoExpr {
     SymbolLiteral(String),
     StringLiteral(String),
@@ -68,7 +68,7 @@ pub enum LingoExpr {
     PutInto(Box<LingoExpr>, Box<LingoExpr>),
     PutDisplay(Box<LingoExpr>),
     ThePropOf(Box<LingoExpr>, String), // "the X of Y" constructs
-    ChunkExpr(String, Box<LingoExpr>, Box<LingoExpr>),
+    ChunkExpr(String, Box<LingoExpr>, Option<Box<LingoExpr>>, Box<LingoExpr>),
     DeleteChunk(Box<LingoExpr>), // delete <chunk_expr>
 }
 
@@ -948,7 +948,17 @@ pub fn parse_lingo_rule_runtime(
             let chunk_type = chunk_type_pair.as_str().to_lowercase();
             let index_pair = inner.next().ok_or_else(|| ScriptError::new("Expected index expression".to_string()))?;
             let index_expr = parse_lingo_expr_runtime(index_pair.into_inner(), pratt)?;
-            let source_pair = inner.next().ok_or_else(|| ScriptError::new("Expected source expression".to_string()))?;
+            // Check for optional range: "to <expr>"
+            let next_pair = inner.next().ok_or_else(|| ScriptError::new("Expected source expression".to_string()))?;
+            let (range_end_expr, source_pair) = if next_pair.as_rule() == Rule::chunk_range {
+                let range_inner = next_pair.into_inner().next()
+                    .ok_or_else(|| ScriptError::new("Expected range end expression".to_string()))?;
+                let range_expr = parse_lingo_expr_runtime(range_inner.into_inner(), pratt)?;
+                let src = inner.next().ok_or_else(|| ScriptError::new("Expected source expression after range".to_string()))?;
+                (Some(range_expr), src)
+            } else {
+                (None, next_pair)
+            };
             let source_expr = match source_pair.as_rule() {
                 Rule::ident | Rule::lang_ident => {
                     // Regular identifier - just use it as-is
@@ -968,7 +978,7 @@ pub fn parse_lingo_rule_runtime(
                 },
                 _ => parse_lingo_rule_runtime(source_pair, pratt)?,
             };
-            Ok(LingoExpr::ChunkExpr(chunk_type, Box::new(index_expr), Box::new(source_expr)))
+            Ok(LingoExpr::ChunkExpr(chunk_type, Box::new(index_expr), range_end_expr.map(Box::new), Box::new(source_expr)))
         }
         Rule::the_prop => {
             // For multi-word properties like "the long time", we need to get the full text
@@ -1024,65 +1034,113 @@ pub fn parse_lingo_rule_runtime(
     }
 }
 
+/// Evaluate common chunk expression components: chunk_type, start index, end index, value string.
+async fn eval_chunk_components(
+    value_ref: &DatumRef,
+    target: &LingoExpr,
+) -> Result<(StringChunkType, i32, i32, String, LingoExpr), ScriptError> {
+    let (chunk_type_str, index_expr, range_end_expr, source_expr) = match target {
+        LingoExpr::ChunkExpr(chunk_type, index, range_end, source) => (chunk_type, index, range_end, source),
+        _ => return Err(ScriptError::new("Expected chunk expression".to_string())),
+    };
+
+    let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr)).await?;
+    let index = reserve_player_mut(|player| player.get_datum(&index_ref).int_value())?;
+
+    let end_index = if let Some(range_end) = range_end_expr {
+        let end_ref = Box::pin(eval_lingo_expr_ast_runtime(range_end)).await?;
+        reserve_player_mut(|player| player.get_datum(&end_ref).int_value())?
+    } else {
+        index
+    };
+
+    let chunk_type = StringChunkType::from(chunk_type_str);
+
+    let value_str = reserve_player_mut(|player| {
+        use crate::player::datum_formatting::datum_to_string_for_concat;
+        let value_datum = player.get_datum(value_ref);
+        Ok(datum_to_string_for_concat(value_datum, player))
+    })?;
+
+    Ok((chunk_type, index, end_index, value_str, *source_expr.clone()))
+}
+
+/// Read the current string from a chunk source expression.
+async fn read_chunk_source(source_expr: &LingoExpr) -> Result<String, ScriptError> {
+    match source_expr {
+        LingoExpr::Identifier(name) => {
+            reserve_player_mut(|player| {
+                let current_ref = player.globals.get(name)
+                    .cloned()
+                    .unwrap_or_else(|| player.alloc_datum(Datum::String(String::new())));
+                player.get_datum(&current_ref).string_value()
+            })
+        },
+        _ => {
+            // General expression: evaluate it to get a string
+            let source_ref = Box::pin(eval_lingo_expr_ast_runtime(source_expr)).await?;
+            reserve_player_mut(|player| {
+                player.get_datum(&source_ref).string_value()
+            })
+        }
+    }
+}
+
+/// Write the modified string back to the chunk source.
+fn write_chunk_source(player: &mut DirPlayer, source_expr: &LingoExpr, new_string: String) {
+    match source_expr {
+        LingoExpr::Identifier(name) => {
+            let new_ref = player.alloc_datum(Datum::String(new_string));
+            player.globals.insert(name.clone(), new_ref);
+        },
+        LingoExpr::HandlerCall(handler_name, args) if handler_name.eq_ignore_ascii_case("field") => {
+            // field(name_or_num) or field(name_or_num, castLib_num)
+            let member_name_or_num = args.first().and_then(|arg| match arg {
+                LingoExpr::StringLiteral(s) => Some(Datum::String(s.clone())),
+                LingoExpr::IntLiteral(n) => Some(Datum::Int(*n)),
+                _ => None,
+            });
+            let cast_id = args.get(1).and_then(|arg| match arg {
+                LingoExpr::IntLiteral(n) => Some(Datum::Int(*n)),
+                _ => None,
+            });
+            if let Some(member_id) = member_name_or_num {
+                let member_ref = player.movie.cast_manager
+                    .find_member_ref_by_identifiers(&member_id, cast_id.as_ref(), &player.allocator);
+                if let Ok(Some(member_ref)) = member_ref {
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        use crate::player::cast_member::CastMemberType;
+                        match &mut member.member_type {
+                            CastMemberType::Field(field) => { field.text = new_string; },
+                            CastMemberType::Text(text) => { text.text = new_string; },
+                            _ => { log::warn!("put into chunk: source is not a field/text member"); }
+                        }
+                    }
+                }
+            }
+        },
+        _ => {
+            log::warn!("put into chunk: cannot write back to non-identifier, non-field source");
+        }
+    }
+}
+
 async fn handle_put_into_chunk(
     value_ref: DatumRef,
     target: &LingoExpr,
 ) -> Result<DatumRef, ScriptError> {
-    // Extract chunk expression components (type, index, source variable)
-    let (chunk_type_str, index_expr, source_expr) = match target {
-        LingoExpr::ChunkExpr(chunk_type, index, source) => (chunk_type, index, source),
-        _ => return Err(ScriptError::new("Expected chunk expression".to_string())),
-    };
+    let (chunk_type, index, end_index, value_str, source_expr) = eval_chunk_components(&value_ref, target).await?;
+    let current_str = read_chunk_source(&source_expr).await?;
 
-    // Evaluate the index expression to get the numeric index
-    let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr)).await?;
-    let index = reserve_player_mut(|player| {
-        player.get_datum(&index_ref).int_value()
-    })?;
-
-    let chunk_type = StringChunkType::from(chunk_type_str);
-
-    // Get the source variable name (e.g., "myStr")
-    let source_name = match source_expr.as_ref() {
-        LingoExpr::Identifier(name) => name.clone(),
-        _ => return Err(ScriptError::new("Expected identifier as chunk source".to_string())),
-    };
-
-    // Convert the value to insert into a string
-    let value_str = reserve_player_mut(|player| {
-        use crate::player::datum_formatting::datum_to_string_for_concat;
-        let value_datum = player.get_datum(&value_ref);
-        Ok(datum_to_string_for_concat(value_datum, player))
-    })?;
-
-    // Perform the chunk replacement operation
     reserve_player_mut(|player| {
-        // Get current value of the variable (or empty string if undefined)
-        let current_ref = player.globals.get(&source_name)
-            .cloned()
-            .unwrap_or_else(|| player.alloc_datum(Datum::String(String::new())));
-        
-        let current_str = player.get_datum(&current_ref).string_value()?;
-
-        // Build chunk expression with start/end at same index for single chunk
         let chunk_expr = StringChunkExpr {
             chunk_type,
             start: index,
-            end: index,
+            end: end_index,
             item_delimiter: player.movie.item_delimiter,
         };
-
-        // Use the existing string utility to perform the replacement
-        let new_string = StringChunkUtils::string_by_putting_into_chunk(
-            &current_str,
-            &chunk_expr,
-            &value_str
-        )?;
-
-        // Update the variable with the modified string
-        let new_string_ref = player.alloc_datum(Datum::String(new_string));
-        player.globals.insert(source_name, new_string_ref);
-
+        let new_string = StringChunkUtils::string_by_putting_into_chunk(&current_str, &chunk_expr, &value_str)?;
+        write_chunk_source(player, &source_expr, new_string);
         Ok(DatumRef::Void)
     })
 }
@@ -1091,58 +1149,18 @@ async fn handle_put_before_chunk(
     value_ref: DatumRef,
     target: &LingoExpr,
 ) -> Result<DatumRef, ScriptError> {
-    // Extract chunk expression components
-    let (chunk_type_str, index_expr, source_expr) = match target {
-        LingoExpr::ChunkExpr(chunk_type, index, source) => (chunk_type, index, source),
-        _ => return Err(ScriptError::new("Expected chunk expression".to_string())),
-    };
+    let (chunk_type, index, end_index, value_str, source_expr) = eval_chunk_components(&value_ref, target).await?;
+    let current_str = read_chunk_source(&source_expr).await?;
 
-    // Evaluate the index
-    let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr)).await?;
-    let index = reserve_player_mut(|player| {
-        player.get_datum(&index_ref).int_value()
-    })?;
-
-    let chunk_type = StringChunkType::from(chunk_type_str);
-
-    // Get source variable name
-    let source_name = match source_expr.as_ref() {
-        LingoExpr::Identifier(name) => name.clone(),
-        _ => return Err(ScriptError::new("Expected identifier as chunk source".to_string())),
-    };
-
-    // Convert value to string
-    let value_str = reserve_player_mut(|player| {
-        use crate::player::datum_formatting::datum_to_string_for_concat;
-        let value_datum = player.get_datum(&value_ref);
-        Ok(datum_to_string_for_concat(value_datum, player))
-    })?;
-
-    // Perform the insertion operation
     reserve_player_mut(|player| {
-        let current_ref = player.globals.get(&source_name)
-            .cloned()
-            .unwrap_or_else(|| player.alloc_datum(Datum::String(String::new())));
-        
-        let current_str = player.get_datum(&current_ref).string_value()?;
-
         let chunk_expr = StringChunkExpr {
             chunk_type,
             start: index,
-            end: index,
+            end: end_index,
             item_delimiter: player.movie.item_delimiter,
         };
-
-        // Use the before insertion utility
-        let new_string = StringChunkUtils::string_by_putting_before_chunk(
-            &current_str,
-            &chunk_expr,
-            &value_str
-        )?;
-
-        let new_string_ref = player.alloc_datum(Datum::String(new_string));
-        player.globals.insert(source_name, new_string_ref);
-
+        let new_string = StringChunkUtils::string_by_putting_before_chunk(&current_str, &chunk_expr, &value_str)?;
+        write_chunk_source(player, &source_expr, new_string);
         Ok(DatumRef::Void)
     })
 }
@@ -1151,58 +1169,18 @@ async fn handle_put_after_chunk(
     value_ref: DatumRef,
     target: &LingoExpr,
 ) -> Result<DatumRef, ScriptError> {
-    // Extract chunk expression components
-    let (chunk_type_str, index_expr, source_expr) = match target {
-        LingoExpr::ChunkExpr(chunk_type, index, source) => (chunk_type, index, source),
-        _ => return Err(ScriptError::new("Expected chunk expression".to_string())),
-    };
+    let (chunk_type, index, end_index, value_str, source_expr) = eval_chunk_components(&value_ref, target).await?;
+    let current_str = read_chunk_source(&source_expr).await?;
 
-    // Evaluate the index
-    let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr)).await?;
-    let index = reserve_player_mut(|player| {
-        player.get_datum(&index_ref).int_value()
-    })?;
-
-    let chunk_type = StringChunkType::from(chunk_type_str);
-
-    // Get source variable name
-    let source_name = match source_expr.as_ref() {
-        LingoExpr::Identifier(name) => name.clone(),
-        _ => return Err(ScriptError::new("Expected identifier as chunk source".to_string())),
-    };
-
-    // Convert value to string
-    let value_str = reserve_player_mut(|player| {
-        use crate::player::datum_formatting::datum_to_string_for_concat;
-        let value_datum = player.get_datum(&value_ref);
-        Ok(datum_to_string_for_concat(value_datum, player))
-    })?;
-
-    // Perform the insertion operation
     reserve_player_mut(|player| {
-        let current_ref = player.globals.get(&source_name)
-            .cloned()
-            .unwrap_or_else(|| player.alloc_datum(Datum::String(String::new())));
-        
-        let current_str = player.get_datum(&current_ref).string_value()?;
-
         let chunk_expr = StringChunkExpr {
             chunk_type,
             start: index,
-            end: index,
+            end: end_index,
             item_delimiter: player.movie.item_delimiter,
         };
-
-        // Use the after insertion utility
-        let new_string = StringChunkUtils::string_by_putting_after_chunk(
-            &current_str,
-            &chunk_expr,
-            &value_str
-        )?;
-
-        let new_string_ref = player.alloc_datum(Datum::String(new_string));
-        player.globals.insert(source_name, new_string_ref);
-
+        let new_string = StringChunkUtils::string_by_putting_after_chunk(&current_str, &chunk_expr, &value_str)?;
+        write_chunk_source(player, &source_expr, new_string);
         Ok(DatumRef::Void)
     })
 }
@@ -1690,8 +1668,8 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
         },
         LingoExpr::DeleteChunk(chunk_target) => {
             // "delete char 1 of s" - delete a chunk from a variable
-            let (chunk_type_str, index_expr, source_expr) = match chunk_target.as_ref() {
-                LingoExpr::ChunkExpr(chunk_type, index, source) => (chunk_type, index, source),
+            let (chunk_type_str, index_expr, range_end_expr, source_expr) = match chunk_target.as_ref() {
+                LingoExpr::ChunkExpr(chunk_type, index, range_end, source) => (chunk_type, index, range_end, source),
                 _ => return Err(ScriptError::new("Expected chunk expression after delete".to_string())),
             };
 
@@ -1700,24 +1678,21 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 player.get_datum(&index_ref).int_value()
             })?;
 
-            let chunk_type = StringChunkType::from(chunk_type_str);
-
-            let source_name = match source_expr.as_ref() {
-                LingoExpr::Identifier(name) => name.clone(),
-                _ => return Err(ScriptError::new("Expected identifier as chunk source for delete".to_string())),
+            let end_index = if let Some(range_end) = range_end_expr {
+                let end_ref = Box::pin(eval_lingo_expr_ast_runtime(range_end)).await?;
+                reserve_player_mut(|player| player.get_datum(&end_ref).int_value())?
+            } else {
+                0
             };
 
+            let chunk_type = StringChunkType::from(chunk_type_str);
+            let current_str = read_chunk_source(source_expr).await?;
+
             reserve_player_mut(|player| {
-                let current_ref = player.globals.get(&source_name)
-                    .cloned()
-                    .unwrap_or_else(|| player.alloc_datum(Datum::String(String::new())));
-
-                let current_str = player.get_datum(&current_ref).string_value()?;
-
                 let chunk_expr = StringChunkExpr {
                     chunk_type,
                     start: index,
-                    end: 0,
+                    end: end_index,
                     item_delimiter: player.movie.item_delimiter,
                 };
 
@@ -1726,9 +1701,7 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                     &chunk_expr,
                 )?;
 
-                let new_string_ref = player.alloc_datum(Datum::String(new_string));
-                player.globals.insert(source_name, new_string_ref);
-
+                write_chunk_source(player, source_expr, new_string);
                 Ok(DatumRef::Void)
             })
         },
@@ -1760,28 +1733,36 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 Ok(player.alloc_datum(Datum::Int(result)))
             })
         }
-        LingoExpr::ChunkExpr(chunk_type, index_expr, source_expr) => {
+        LingoExpr::ChunkExpr(chunk_type, index_expr, range_end_expr, source_expr) => {
             // Evaluate the source expression to get a string
             let source_ref = Box::pin(eval_lingo_expr_ast_runtime(source_expr)).await?;
             let source_string = reserve_player_mut(|player| {
                 player.get_datum(&source_ref).string_value()
             })?;
-            
+
             // Evaluate the index expression
             let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr)).await?;
             let index = reserve_player_mut(|player| {
                 player.get_datum(&index_ref).int_value()
             })?;
-            
+
+            // Evaluate optional range end
+            let end_index = if let Some(range_end) = range_end_expr {
+                let end_ref = Box::pin(eval_lingo_expr_ast_runtime(range_end)).await?;
+                reserve_player_mut(|player| player.get_datum(&end_ref).int_value())?
+            } else {
+                index
+            };
+
             // Convert chunk type string to StringChunkType
             let chunk_type_enum = StringChunkType::from(chunk_type);
-            
+
             // Create chunk expression
             let chunk_expr = reserve_player_mut(|player| {
                 Ok(StringChunkExpr {
                     chunk_type: chunk_type_enum,
                     start: index,
-                    end: index,
+                    end: end_index,
                     item_delimiter: player.movie.item_delimiter,
                 })
             })?;
