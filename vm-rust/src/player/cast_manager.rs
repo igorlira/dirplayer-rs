@@ -76,8 +76,18 @@ impl CastManager {
 
             let mut cast = CastLib {
                 name: cast_entry.name.to_owned(),
-                file_name: normalize_cast_lib_path(&net_manager.base_path, &cast_entry.file_path)
-                    .map_or("".to_string(), |it| it.to_string()),
+                file_name: if cast_def.is_some() {
+                    // Embedded casts: fileName should reference the parent movie (like real Shockwave player).
+                    // This ensures Lingo scripts checking fileName.char[end-2..end] = "dcr" work correctly.
+                    match &net_manager.base_path {
+                        Some(base) => base.join(&dir.file_name).map_or("".to_string(), |u| u.to_string()),
+                        None => dir.file_name.to_string(),
+                    }
+                } else {
+                    // External casts: normalize to .cct path
+                    normalize_cast_lib_path(&net_manager.base_path, &cast_entry.file_path)
+                        .map_or("".to_string(), |it| it.to_string())
+                },
                 number: (index + 1) as u32,
                 is_external: cast_def.is_none(),
                 state: if cast_def.is_some() {

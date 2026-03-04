@@ -43,21 +43,24 @@ impl NetHandlers {
     pub fn get_stream_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let (state, error, url, is_ok) = {
-                let arg = player.get_datum(&args[0]);
-                
-                // Support both task ID (int) and URL (string)
-                let task_id = match arg {
-                    Datum::Int(id) => *id as u32,
-                    Datum::String(url) => {
-                        // Look up task by URL
-                        player.net_manager.find_task_by_url(url)
-                            .ok_or_else(|| ScriptError::new(format!("Network task not found for URL: {}", url)))?
-                    },
-                    _ => return Err(ScriptError::new(
-                        "getStreamStatus requires an integer task ID or URL string".to_string()
-                    ))
+                // Support: no args (last task), int task ID, or URL string
+                let task_id = if args.is_empty() {
+                    player.net_manager.get_last_task_id()
+                        .ok_or_else(|| ScriptError::new("No network tasks exist".to_string()))?
+                } else {
+                    let arg = player.get_datum(&args[0]);
+                    match arg {
+                        Datum::Int(id) => *id as u32,
+                        Datum::String(url) => {
+                            player.net_manager.find_task_by_url(url)
+                                .ok_or_else(|| ScriptError::new(format!("Network task not found for URL: {}", url)))?
+                        },
+                        _ => return Err(ScriptError::new(
+                            "getStreamStatus requires an integer task ID or URL string".to_string()
+                        ))
+                    }
                 };
-                
+
                 let task = player.net_manager.get_task(task_id)
                     .ok_or_else(|| ScriptError::new(format!("Network task {} not found", task_id)))?;
                 let task_state = player.net_manager.get_task_state(Some(task_id))
