@@ -95,6 +95,7 @@ use crate::{
 };
 
 use self::{
+    bitmap::manager::BitmapRef,
     bytecode::handler_manager::StaticBytecodeHandlerManager,
     cast_lib::CastMemberRef,
     cast_manager::CastManager,
@@ -685,6 +686,36 @@ impl DirPlayer {
 
     pub fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
         self.allocator.get_datum_mut(id)
+    }
+
+    /// Resolve a datum to a BitmapRef.  Accepts:
+    ///  - `Datum::BitmapRef(n)` → direct handle
+    ///  - `Datum::Int(n)` where n > 0 → treated as a member slot number;
+    ///    the member is looked up and its bitmap image_ref is returned.
+    pub fn resolve_bitmap_ref(&self, datum: &Datum) -> Result<BitmapRef, ScriptError> {
+        match datum {
+            Datum::BitmapRef(br) => Ok(*br),
+            Datum::Int(n) if *n > 0 => {
+                let member_ref = handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers
+                    ::member_ref_from_slot_number(*n as u32);
+                if let Some(member) = self.movie.cast_manager.find_member_by_ref(&member_ref) {
+                    if let Some(bitmap_member) = member.member_type.as_bitmap() {
+                        Ok(bitmap_member.image_ref)
+                    } else {
+                        Err(ScriptError::new(format!(
+                            "Cannot convert Int({}) to bitmap ref: member {}:{} is not a bitmap",
+                            n, member_ref.cast_lib, member_ref.cast_member
+                        )))
+                    }
+                } else {
+                    Err(ScriptError::new(format!(
+                        "Cannot convert Int({}) to bitmap ref: no member found for slot number",
+                        n
+                    )))
+                }
+            }
+            _ => datum.to_bitmap_ref().map(|br| *br),
+        }
     }
 
     pub fn get_fps(&self) -> u32 {
