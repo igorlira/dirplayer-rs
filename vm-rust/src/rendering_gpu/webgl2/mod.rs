@@ -2573,8 +2573,7 @@ impl WebGL2Renderer {
                 || (is_16bit && ink == 8)
                 // 16-bit bitmaps ink 41: ALWAYS use matte (background shouldn't darken)
                 || (is_16bit && ink == 41)
-                // 32-bit bitmaps WITHOUT use_alpha ink 0: matte only when trim_white_space
-                || (is_32bit && !bitmap.use_alpha && is_matte_bitmap && ink == 0)
+                // 32-bit bitmaps: no matte for ink 0 (Director doesn't use matte on 32-bit ink 0)
                 // 32-bit bitmaps WITHOUT use_alpha ink 8: ALWAYS use matte (flood-fill transparency)
                 || (is_32bit && !bitmap.use_alpha && ink == 8)
                 // 32-bit bitmaps WITHOUT use_alpha ink 9: ALWAYS use matte (embedded alpha)

@@ -1733,9 +1733,9 @@ impl Bitmap {
 
         let needs_matte_mask =
             !params.is_text_rendering
-            && (ink == 8 || ink == 0)
             && is_matte_bitmap
-            && (src.original_bit_depth <= 8 || src.original_bit_depth == 32);
+            && ((ink == 0 && src.original_bit_depth <= 8)
+                || (ink == 8 && (src.original_bit_depth <= 8 || (src.original_bit_depth == 32 && !src.use_alpha))));
 
         let mut matte_mask: Option<Vec<Vec<bool>>> = None;
 
