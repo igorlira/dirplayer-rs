@@ -28,7 +28,7 @@ use super::{
     keyboard_events::{player_key_down, player_key_up},
     player_alloc_datum, player_call_script_handler, player_dispatch_global_event,
     player_is_playing, reserve_player_mut, reserve_player_ref,
-    score::{concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at},
+    score::{concrete_sprite_hit_test, get_concrete_sprite_rect, get_interactable_sprite_at, get_sprite_at},
     script_ref::ScriptInstanceRef,
     PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX,
 };
@@ -319,9 +319,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     player.click_on_sprite = 0;
                 }
 
-                // For event dispatch targeting, use scripted lookup —
-                // only sprites with behaviors or cast member scripts receive mouseDown.
-                let scripted_sprite = get_sprite_at(player, x, y, true);
+                let scripted_sprite = get_interactable_sprite_at(player, x, y);
                 if let Some(sprite_number) = scripted_sprite {
                     debug!("MouseDown on sprite #{}", sprite_number);
                     player.mouse_down_sprite = sprite_number as i16;
@@ -693,20 +691,18 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
 
                 let hovered_sprite = player.hovered_sprite;
-                let sprite_num = get_sprite_at(player, x, y, false);
-                if let Some(sprite_num) = sprite_num {
-                    player.hovered_sprite = Some(sprite_num as i16);
-                }
+                let sprite_num = get_interactable_sprite_at(player, x, y);
+                player.hovered_sprite = sprite_num.map(|n| n as i16);
                 (sprite_num, hovered_sprite)
             });
+            let prev = hovered_sprite.unwrap_or(-1);
             if let Some(sprite_num) = sprite_num {
-                let hovered_sprite = hovered_sprite.unwrap_or(-1);
-                if hovered_sprite != sprite_num as i16 {
-                    if hovered_sprite != -1 {
+                if prev != sprite_num as i16 {
+                    if prev != -1 {
                         player_dispatch_event_to_sprite(
                             &"mouseLeave".to_string(),
                             &vec![],
-                            hovered_sprite as u16,
+                            prev as u16,
                         )
                     }
                     player_dispatch_event_to_sprite(
@@ -721,6 +717,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                         sprite_num as u16,
                     );
                 }
+            } else if prev != -1 {
+                player_dispatch_event_to_sprite(
+                    &"mouseLeave".to_string(),
+                    &vec![],
+                    prev as u16,
+                );
             }
         }
         PlayerVMCommand::KeyDown(key, code) => {

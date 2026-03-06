@@ -31,6 +31,7 @@ use crate::{
 use super::{
     allocator::ScriptInstanceAllocatorTrait,
     cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF},
+    ci_string::CiString,
     cast_member::CastMemberType,
     datum_ref::DatumRef,
     geometry::{IntRect, IntRectTuple},
@@ -3625,6 +3626,7 @@ fn is_active_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
     false
 }
 
+
 /// Non-editable text/field members are transparent to mouse events.
 /// Clicks pass through them to the sprite underneath (e.g. a button).
 /// Only sprite behavior scripts that actually define mouse handlers
@@ -3671,6 +3673,50 @@ fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
         }
     }
     true
+}
+
+const MOUSE_EVENT_NAMES: &[&str] = &["mouseEnter", "mouseLeave", "mouseWithin", "mouseDown", "mouseUp", "mouseUpOutSide"];
+
+fn sprite_is_interactable(player: &DirPlayer, sprite: &Sprite) -> bool {
+    if sprite.moveable {
+        return true;
+    }
+    for instance_ref in &sprite.script_instance_list {
+        if let Some(instance) = player.allocator.get_script_instance_opt(instance_ref) {
+            if let Some(script) = player.movie.cast_manager.get_script_by_ref(&instance.script) {
+                for name in MOUSE_EVENT_NAMES {
+                    if script.handlers.contains_key(&CiString::from(name.to_string())) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(member_ref) = sprite.member.as_ref() {
+        if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+            if let Some(script_ref) = member.get_member_script_ref() {
+                if let Some(script) = player.movie.cast_manager.get_script_by_ref(&script_ref) {
+                    for name in MOUSE_EVENT_NAMES {
+                        if script.handlers.contains_key(&CiString::from(name.to_string())) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn get_interactable_sprite_at(player: &DirPlayer, x: i32, y: i32) -> Option<u32> {
+    for channel in player.movie.score.get_sorted_channels(player.movie.current_frame).iter().rev() {
+        if concrete_sprite_hit_test(player, &channel.sprite, x, y)
+            && sprite_is_interactable(player, &channel.sprite)
+        {
+            return Some(channel.sprite.number as u32);
+        }
+    }
+    None
 }
 
 pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Option<u32> {
