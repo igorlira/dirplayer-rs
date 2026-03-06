@@ -643,6 +643,12 @@ pub fn parse_lingo_rule_runtime(
             let sprite_num_expr = parse_lingo_expr_runtime(sprite_num_pair.into_inner(), pratt)?;
             Ok(LingoExpr::HandlerCall("sprite".to_string(), vec![sprite_num_expr]))
         }
+        Rule::field_ref => {
+            let mut inner = pair.into_inner();
+            let field_arg_pair = inner.next().ok_or_else(|| ScriptError::new("Expected field name or number".to_string()))?;
+            let field_arg_expr = parse_lingo_expr_runtime(field_arg_pair.into_inner(), pratt)?;
+            Ok(LingoExpr::HandlerCall("field".to_string(), vec![field_arg_expr]))
+        }
         Rule::sprite_of_expr => {
             let mut inner = pair.into_inner();
             let prop_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected property name".to_string()))?;
