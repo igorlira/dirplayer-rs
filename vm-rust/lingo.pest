@@ -6,7 +6,7 @@ ident = @{ !digit ~ (alpha | digit | "_")+ }
 lang_ident = { !reserved_keyword ~ ident }
 
 reserved_keyword = @{
-    ("sprite" | "castLib" | "set" | "to" | "into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item" | "delete") ~ !(alpha | digit | "_")
+    ("sprite" | "castLib" | "set" | "to" | "into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item" | "delete" | "field") ~ !(alpha | digit | "_")
 }
 
 void_keyword = _{ ("void" | "VOID" | "Void") ~ !(alpha | digit | "_") }
@@ -84,10 +84,13 @@ member_ref = { ^"member" ~ term_arg ~ (^"of" ~ castlib_ref)? }
 // Sprite references: "sprite 17"
 sprite_ref = { ^"sprite" ~ term_arg }
 
+// Field references: "field 5" or "field "myField""
+field_ref = { ^"field" ~ term_arg }
+
 // Chunk expressions for "char 1 of myStr", "line 1 to 3 of myStr", etc.
 chunk_type  = { ^"char" | ^"word" | ^"line" | ^"item" }
 chunk_range = { ^"to" ~ expr }
-chunk_expr  = { chunk_type ~ expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | handler_call | lang_ident) }
+chunk_expr  = { chunk_type ~ expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
 
 parens_expr = _{ "(" ~ expr ~ ")" }
 parens_list = { "(" ~ expr ~ ("," ~ expr)+ ~ ")" }
@@ -112,7 +115,7 @@ ge_op = { ">=" }
 // Property name after dot - can be any identifier including reserved keywords
 prop_name  =  { ident }
 
-primitive       = _{ put_handler_call | sprite_ref | castlib_ref | member_ref | handler_call | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
+primitive       = _{ put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | handler_call | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
 eval_expr       = _{ SOI ~ expr ~ EOI }
 ident_list      = _{ !digit ~ ident ~ (" " ~ ident)+ }
 
