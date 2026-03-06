@@ -1592,13 +1592,29 @@ impl TypeHandlers {
             let channel = channel_rc.borrow();
             
             // soundBusy returns true (1) if the channel is Playing, Loading, or Queued
-            let is_busy = matches!(
-                channel.status, 
+            let mut is_busy = matches!(
+                channel.status,
                 SoundStatus::Playing | SoundStatus::Loading | SoundStatus::Queued
             );
-            debug!("🔍 soundBusy({}) = {} (status: {:?})", 
-                channel_num, is_busy, channel.status);
-            
+
+            // Check if sound has actually finished by comparing AudioContext time
+            // against the source node's buffer duration. The onended callback can
+            // fire late due to async decode/resampling, leaving status stuck at Playing.
+            if is_busy && channel.status == SoundStatus::Playing {
+                if let Some(ref source) = channel.source_node {
+                    if let Some(buffer) = source.buffer() {
+                        let elapsed = channel.audio_context.current_time() - channel.playback_start_context_time;
+                        if elapsed > buffer.duration() && channel.loop_count <= 1 {
+                            is_busy = false;
+                            drop(channel);
+                            let mut channel = channel_rc.borrow_mut();
+                            channel.status = SoundStatus::Idle;
+                            channel.source_node = None;
+                        }
+                    }
+                }
+            }
+
             Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })))
         })
     }

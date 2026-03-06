@@ -412,6 +412,7 @@ impl SoundChannelDatumHandlers {
         if !ch.playlist_segments.is_empty() {
             ch.current_segment_index = Some(0);
             ch.status = SoundStatus::Playing;
+            ch.playback_start_context_time = ch.audio_context.current_time();
 
             console::log_1(&"▶️ Starting async playlist playback".into());
 
@@ -1104,6 +1105,7 @@ pub struct SoundChannel {
     pub expected_sample_rate: Option<u32>,
     pub is_decoding: Rc<RefCell<bool>>,
     pub decode_generation: Rc<RefCell<u32>>, // Incremented each time a new decode starts
+    pub playback_start_context_time: f64, // AudioContext.currentTime when playback started
 }
 
 impl SoundChannel {
@@ -1274,6 +1276,7 @@ impl SoundChannel {
 
         self.start_segment_playback(&sound_member, loop_count)?;
         self.status = SoundStatus::Playing;
+        self.playback_start_context_time = self.audio_context.current_time();
 
         Ok(())
     }
@@ -1313,6 +1316,7 @@ impl SoundChannel {
             expected_sample_rate: None,
             is_decoding: Rc::new(RefCell::new(false)),
             decode_generation: Rc::new(RefCell::new(0)),
+            playback_start_context_time: 0.0,
         }
     }
 
@@ -1464,6 +1468,7 @@ impl SoundChannel {
 
         // Set playing status
         self.status = SoundStatus::Playing;
+        self.playback_start_context_time = self.audio_context.current_time();
         self.elapsed_time = 0.0;
 
         Ok(())
@@ -1914,6 +1919,7 @@ impl SoundChannel {
                 ch.gain_node = Some(Rc::new(gain));
                 ch.pan_node = Some(Rc::new(pan));
                 ch.status = SoundStatus::Playing;
+                ch.playback_start_context_time = ch.audio_context.current_time();
                 *ch.is_decoding.borrow_mut() = false;
 
                 drop(ch);
@@ -2284,6 +2290,7 @@ impl SoundChannel {
             ch.source_node = Some(Rc::new(source));
             ch.gain_node = Some(Rc::new(gain));
             ch.status = SoundStatus::Playing;
+            ch.playback_start_context_time = ch.audio_context.current_time();
             *ch.is_decoding.borrow_mut() = false;
         }
 
@@ -2493,6 +2500,7 @@ impl SoundChannel {
             this.gain_node = Some(Rc::new(gain));
             this.pan_node = Some(Rc::new(pan));
             this.status = SoundStatus::Playing;
+            this.playback_start_context_time = this.audio_context.current_time();
         } else {
             web_sys::console::log_1(&"❌ Could not resolve sound member".into());
             this.status = SoundStatus::Idle;
@@ -2618,6 +2626,7 @@ impl SoundChannel {
     pub fn resume(&mut self) {
         if self.status == SoundStatus::Paused {
             self.status = SoundStatus::Playing;
+            // Don't reset playback_start_context_time on resume - original start is still valid
 
             if let Some(ref source) = self.source_node {
                 // Resume the AudioContext
@@ -3266,6 +3275,7 @@ impl SoundChannel {
         web_sys::console::log_1(&"called source.start()".into());
         self.source_node = Some(Rc::new(source));
         self.status = SoundStatus::Playing;
+        self.playback_start_context_time = self.audio_context.current_time();
 
         console::log_1(&format!("✅ MP3 playback started on channel {}", self.channel_num).into());
 
@@ -3643,7 +3653,17 @@ impl SoundChannel {
 
         self.elapsed_time += delta_time;
 
-        // That's it! The onended callback handles everything else
+        // Safety net: if elapsed time exceeds the sound duration, force status
+        // to Idle. The onended callback should handle this, but it can fire late
+        // due to async decode/resampling overhead.
+        if self.sample_rate > 0 && self.sample_count > 0 && self.loop_count != 0 {
+            let duration_secs = self.sample_count as f64 / self.sample_rate as f64;
+            if self.elapsed_time > duration_secs + 0.1 {
+                self.status = SoundStatus::Idle;
+                self.source_node = None;
+            }
+        }
+
         Ok(())
     }
 
@@ -3787,6 +3807,7 @@ impl SoundChannel {
         self.gain_node = Some(Rc::new(gain));
         self.pan_node = pan.map(Rc::new);
         self.status = SoundStatus::Playing;
+        self.playback_start_context_time = self.audio_context.current_time();
 
         Ok(())
     }
@@ -3824,6 +3845,7 @@ impl SoundChannel {
 
                     self.start_segment_playback(sound_member, loop_count)?;
                     self.status = SoundStatus::Playing;
+                    self.playback_start_context_time = self.audio_context.current_time();
                 } else {
                     return Err(ScriptError::new("Member is not a sound".to_string()));
                 }
@@ -3941,6 +3963,7 @@ impl SoundChannel {
 
         // Set status to Playing BEFORE starting the source
         self.status = SoundStatus::Playing;
+        self.playback_start_context_time = self.audio_context.current_time();
 
         source.start()?;
         web_sys::console::log_1(&"called source.start()".into());
@@ -4295,6 +4318,7 @@ impl SoundChannel {
         self.source_node = Some(Rc::new(source));
         self.gain_node = Some(Rc::new(gain));
         self.status = SoundStatus::Playing;
+        self.playback_start_context_time = self.audio_context.current_time();
 
         console::log_1(
             &format!("⚡ Channel {} gapless replay from cached buffer", self.channel_num).into(),
