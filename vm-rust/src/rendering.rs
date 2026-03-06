@@ -120,18 +120,19 @@ fn get_or_load_font_with_id(
         return font_manager.get_system_font();
     }
 
-    let cache_key = format!(
+    let cache_key = FontManager::cache_key(&format!(
         "{}_{}_{}",
         font_name,
         font_size.unwrap_or(0),
         font_style.unwrap_or(0)
-    );
+    ));
 
     if let Some(font) = font_manager.font_cache.get(&cache_key) {
         return Some(Rc::clone(font));
     }
 
-    if let Some(font) = font_manager.font_cache.get(font_name) {
+    let name_key = FontManager::cache_key(font_name);
+    if let Some(font) = font_manager.font_cache.get(&name_key) {
         return Some(Rc::clone(font));
     }
 
