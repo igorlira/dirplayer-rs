@@ -441,18 +441,18 @@ impl StringBytecodeHandler {
             let put_type = PutType::from(((bytecode.obj >> 4) & 0xF) as u8);
             let var_type = (bytecode.obj & 0xF) as u32;
             
-            // Read the target variable
+            // Read the target variable (top of stack: cast_id if field type, then id)
             let (id_ref, cast_id_ref) = read_context_var_args(player, var_type, ctx.scope_ref);
-            
-            // Pop the value to put from the stack
+
+            // Read the chunk expression from the stack (8 values: last_line..first_char)
+            let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
+
+            // Pop the value to put from the stack (pushed before chunk params)
             let value_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.pop().unwrap()
             };
-            
-            // Read the chunk expression from the stack
-            let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
-            
+
             // Get the current value of the variable
             let string_ref = player_get_context_var(
                 player,
@@ -460,11 +460,26 @@ impl StringBytecodeHandler {
                 cast_id_ref.as_ref(),
                 var_type,
                 ctx,
-            )?;
-            
+            );
+
+            // For field variables (var_type 0x6), Director silently ignores errors
+            // (e.g. when a frame script accesses sprite(0).member which is invalid).
+            let string_ref = match string_ref {
+                Ok(r) => r,
+                Err(err) => {
+                    if var_type == 0x6 {
+                        web_sys::console::warn_1(&format!(
+                            "putchunk: field lookup failed (ignored): {}", err.message
+                        ).into());
+                        return Ok(HandlerExecutionResult::Advance);
+                    }
+                    return Err(err);
+                }
+            };
+
             let current_string = player.get_datum(&string_ref).string_value()?;
             let value_string = player.get_datum(&value_ref).string_value()?;
-            
+
             // Apply the chunk operation based on put type
             let new_string = match put_type {
                 PutType::Into => {
@@ -477,11 +492,11 @@ impl StringBytecodeHandler {
                     StringChunkUtils::string_by_putting_after_chunk(&current_string, &chunk_expr, &value_string)?
                 }
             };
-            
+
             let new_string_ref = player.alloc_datum(Datum::String(new_string));
             // The chunk operation already built the complete result string,
             // so always use Into to replace rather than append/prepend again.
-            player_set_context_var(
+            let set_result = player_set_context_var(
                 player,
                 &id_ref,
                 cast_id_ref.as_ref(),
@@ -489,7 +504,17 @@ impl StringBytecodeHandler {
                 &new_string_ref,
                 PutType::Into,
                 ctx,
-            )?;
+            );
+            // For field variables, silently ignore set failures too
+            if let Err(err) = set_result {
+                if var_type == 0x6 {
+                    web_sys::console::warn_1(&format!(
+                        "putchunk: field set failed (ignored): {}", err.message
+                    ).into());
+                    return Ok(HandlerExecutionResult::Advance);
+                }
+                return Err(err);
+            }
             
             Ok(HandlerExecutionResult::Advance)
         })
