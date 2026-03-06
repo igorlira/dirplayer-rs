@@ -277,40 +277,56 @@ fn parse_font_table(
     chunk_container: &mut ChunkContainer,
     rifx: &mut RIFXReaderContext,
 ) -> HashMap<u16, String> {
-    // Try Fmap first (Director 4+), then VWFM (Director 3)
+    // Merge ALL Fmap/VWFM chunks in the file. Director files with multiple internal
+    // casts can have multiple Fmap chunks (one per cast). HashMap iteration is
+    // non-deterministic, so picking just the "first" Fmap is a bug — different runs
+    // would select different chunks, producing different font_id→name mappings.
     let fmap_fourcc = FOURCC("Fmap");
     let vwfm_fourcc = FOURCC("VWFM");
 
-    let (fourcc, chunk_id) = if let Some(info) = get_first_chunk_info(&chunk_container.chunk_info, fmap_fourcc) {
-        (info.fourcc, info.id)
-    } else if let Some(info) = get_first_chunk_info(&chunk_container.chunk_info, vwfm_fourcc) {
-        (info.fourcc, info.id)
-    } else {
+    // Collect all Fmap and VWFM chunk ids
+    let chunk_ids: Vec<(u32, u32)> = chunk_container.chunk_info
+        .iter()
+        .filter(|(_, info)| info.fourcc == fmap_fourcc || info.fourcc == vwfm_fourcc)
+        .map(|(_, info)| (info.fourcc, info.id))
+        .collect();
+
+    if chunk_ids.is_empty() {
         debug!("No Fmap or VWFM font table chunk found");
         return HashMap::new();
-    };
+    }
 
-    let raw = match get_chunk_data(reader, chunk_container, rifx, fourcc, chunk_id) {
-        Ok(data) => data,
-        Err(e) => {
-            warn!("Failed to read font table chunk: {}", e);
-            return HashMap::new();
+    let mut merged_table: HashMap<u16, String> = HashMap::new();
+
+    for (fourcc, chunk_id) in &chunk_ids {
+        let raw = match get_chunk_data(reader, chunk_container, rifx, *fourcc, *chunk_id) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!("Failed to read font table chunk {}: {}", chunk_id, e);
+                continue;
+            }
+        };
+
+        let table = if *fourcc == fmap_fourcc {
+            parse_fmap_v4(&raw)
+        } else {
+            parse_vwfm(&raw)
+        };
+
+        // Merge: later entries don't overwrite earlier ones for the same font_id
+        for (id, name) in table {
+            merged_table.entry(id).or_insert(name);
         }
-    };
-
-    let table = if fourcc == fmap_fourcc {
-        parse_fmap_v4(&raw)
-    } else {
-        parse_vwfm(&raw)
-    };
+    }
 
     web_sys::console::log_1(&format!(
-        "[Fmap] {} entries: {:?}",
-        table.len(),
-        table.iter().map(|(id, name)| format!("{}='{}'", id, name)).collect::<Vec<_>>()
+        "[Fmap] {} entries (from {} chunks): {:?}",
+        merged_table.len(),
+        chunk_ids.len(),
+        merged_table.iter().map(|(id, name)| format!("{}='{}'", id, name)).collect::<Vec<_>>()
     ).into());
 
-    table
+    merged_table
 }
 
 fn read_casts(
