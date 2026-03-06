@@ -546,21 +546,7 @@ impl BuiltInHandlerManager {
             "do" => Self::do_command(args).await,
             "updateStage" => MovieHandlers::update_stage(args).await,
             "go" => MovieHandlers::go(args).await,
-            "nothing" => {
-                // Yield to the browser event loop. In Director, nothing() is
-                // a no-op, but in WASM we use it to yield in busy-wait loops
-                // like waitABit() so the browser can repaint the canvas.
-                // We use MessageChannel.postMessage() which fires as a macrotask
-                // (yields to the browser event loop) but with near-zero delay,
-                // unlike setTimeout(0) which has a browser-imposed ~4ms minimum.
-                let promise = js_sys::Promise::new(&mut |resolve, _| {
-                    let channel = web_sys::MessageChannel::new().unwrap();
-                    channel.port2().set_onmessage(Some(&resolve));
-                    channel.port1().post_message(&wasm_bindgen::JsValue::NULL).unwrap();
-                });
-                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-                Ok(DatumRef::Void)
-            }
+            "nothing" => MovieHandlers::nothing_async(args).await,
             _ => {
                 let msg = format!("No built-in async handler: {}", name);
                 return Err(ScriptError::new(msg));
@@ -637,10 +623,6 @@ impl BuiltInHandlerManager {
             "bitxor" => TypeHandlers::bit_xor(args),
             "power" => TypeHandlers::power(args),
             "add" => TypeHandlers::add(args),
-            "nothing" => {
-                // nothing() is handled as async to yield in busy-wait loops
-                return Ok(DatumRef::Void);
-            }
             "abort" => Err(ScriptError::new_code(ScriptErrorCode::Abort, "abort".to_string())),
             "getvariable" | "setvariable" => {
                 // Flash (SWF) member interop stubs — getVariable returns a variable

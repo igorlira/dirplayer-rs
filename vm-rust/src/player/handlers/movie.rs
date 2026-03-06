@@ -789,6 +789,19 @@ impl MovieHandlers {
 
         player_wait_available().await;
 
+        // Render the frame between prepareFrame and enterFrame, matching
+        // Director's frame cycle where rendering occurs after scripts have
+        // updated sprite properties but before enterFrame fires.
+        {
+            use crate::rendering_gpu::Renderer;
+            crate::rendering::with_renderer_mut(|renderer_lock| {
+                if let Some(renderer) = renderer_lock {
+                    let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
+                    renderer.draw_frame(player);
+                }
+            });
+        }
+
         reserve_player_mut(|player| {
             player.in_enter_frame = true;
         });
@@ -830,6 +843,43 @@ impl MovieHandlers {
             // immediately via reserve_player_mut, so the state is correct when
             // the script resumes. The MouseUp command stays queued and won't
             // dispatch until the current handler finishes.
+            async_std::task::sleep(std::time::Duration::from_millis(2)).await;
+        }
+
+        Ok(DatumRef::Void)
+    }
+
+    pub async fn nothing_async(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let now = js_sys::Date::now();
+        let should_yield = reserve_player_mut(|player| {
+            // Only count calls inside frame scripts (busy-wait like waitABit).
+            // Reset counter when not in a frame script to prevent accumulation
+            // across unrelated nothing() calls (catalogue items, downloads, etc.)
+            if player.in_frame_script {
+                player.nothing_call_count += 1;
+            } else {
+                player.nothing_call_count = 0;
+                return false;
+            }
+            let many_calls = player.nothing_call_count >= 50;
+            let yield_due = now - player.last_nothing_yield_ms >= 16.0;
+            many_calls && yield_due
+        });
+
+        if should_yield {
+            reserve_player_mut(|player| {
+                player.nothing_call_count = 0;
+                player.last_nothing_yield_ms = now;
+            });
+
+            use crate::rendering_gpu::Renderer;
+            crate::rendering::with_renderer_mut(|renderer_lock| {
+                if let Some(renderer) = renderer_lock {
+                    let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
+                    renderer.draw_frame(player);
+                }
+            });
+
             async_std::task::sleep(std::time::Duration::from_millis(2)).await;
         }
 
