@@ -2072,6 +2072,10 @@ impl Score {
     ) {
         self.set_channel_count(score_chunk.frame_data.header.num_channels as usize);
 
+        // Clear previous sprite_spans so they don't accumulate across movie transitions
+        self.sprite_spans.clear();
+        self.sprite_details.clear();
+
         self.channel_initialization_data = score_chunk.frame_data.frame_channel_data.clone();
         self.sound_channel_data = score_chunk.frame_data.sound_channel_data.clone();
         self.tempo_channel_data = score_chunk.frame_data.tempo_channel_data.clone();

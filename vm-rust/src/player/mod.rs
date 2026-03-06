@@ -223,6 +223,8 @@ pub struct DirPlayer {
     pub in_event_dispatch: bool,
     pub command_handler_yielding: bool, // Pauses frame loop when a command handler (keyDown) needs updateStage to yield
     pub in_mouse_command: bool, // Pauses frame loop during mouse handlers; updateStage renders without yielding
+    pub nothing_call_count: u32,    // Consecutive nothing() calls, reset after yield
+    pub last_nothing_yield_ms: f64, // Timestamp of last nothing() yield for time-throttled rendering
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub has_frame_changed_in_go: bool,
@@ -240,6 +242,9 @@ pub struct DirPlayer {
     /// Pending gotoNetMovie operation: (task_id, frame_destination).
     /// Overwritten by subsequent gotoNetMovie/go-to-movie calls (cancels previous).
     pub pending_goto_net_movie: Option<(u32, MovieFrameTarget)>,
+    /// True while a net movie transition is in progress.
+    /// Prevents the event loop from dispatching external events during the transition.
+    pub is_in_transition: bool,
     /// Cache of allocated scriptInstanceList datums per sprite.
     /// Ensures that `sprite.scriptInstanceList.add(x)` modifies the live list
     /// rather than a copy. Keyed by sprite number.
@@ -363,6 +368,8 @@ impl DirPlayer {
             in_event_dispatch: false,
             command_handler_yielding: false,
             in_mouse_command: false,
+            nothing_call_count: 0,
+            last_nothing_yield_ms: 0.0,
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             has_frame_changed_in_go: false,
@@ -375,6 +382,7 @@ impl DirPlayer {
             eval_scope_index: None,
             delay_until: None,
             pending_goto_net_movie: None,
+            is_in_transition: false,
             script_instance_list_cache: FxHashMap::default(),
             last_sprite_prop_ref: None,
         };
@@ -2638,6 +2646,15 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     };
 
     // 2. Shutdown current movie
+    // Block the event loop for the entire transition: set is_playing = false and
+    // is_in_transition = true. Direct calls to player_invoke_global_event (for
+    // stopMovie, prepareMovie, beginSprite, etc.) are unaffected because they
+    // execute inline from the frame loop task, not through the event loop channel.
+    reserve_player_mut(|player| {
+        player.is_playing = false;
+        player.is_in_transition = true;
+    });
+
     stop_movie_sequence().await;
 
     // 3. Load the new movie data (preserving globals and allocator)
@@ -2689,6 +2706,10 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
 
     // 4. Run new movie initialization sequence
     run_movie_init_sequence().await;
+
+    reserve_player_mut(|player| {
+        player.is_in_transition = false;
+    });
 }
 
 pub async fn run_frame_loop() {
