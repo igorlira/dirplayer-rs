@@ -135,11 +135,10 @@ impl FontManager {
 
         // Fast path: exact size/style cache hit to avoid reparsing/rerasterizing PFR fonts.
         if requested_size > 0 {
+            let lc = font_name.to_ascii_lowercase();
             let mut exact_keys = vec![
-                format!("{}_{}_{}", font_name, requested_size, requested_style),
-                format!("{}_{}_0", font_name, requested_size),
-                format!("{}_{}_{}", font_name.to_ascii_lowercase(), requested_size, requested_style),
-                format!("{}_{}_0", font_name.to_ascii_lowercase(), requested_size),
+                format!("{}_{}_{}", lc, requested_size, requested_style),
+                format!("{}_{}_0", lc, requested_size),
             ];
             let canon = Self::canonical_font_name(font_name);
             if !canon.is_empty() {
@@ -245,10 +244,10 @@ impl FontManager {
                         };
 
                         let rc_font = Rc::new(font);
-                        let cache_key = format!("{}_{}_{}", font_name, requested_size, style.unwrap_or(0));
+                        let cache_key = Self::cache_key(&format!("{}_{}_{}", font_name, requested_size, style.unwrap_or(0)));
                         self.font_cache.insert(cache_key, Rc::clone(&rc_font));
-                        self.font_cache.insert(font_name.to_string(), Rc::clone(&rc_font));
-                        self.font_cache.insert(member.name.clone(), Rc::clone(&rc_font));
+                        self.font_cache.insert(Self::cache_key(font_name), Rc::clone(&rc_font));
+                        self.font_cache.insert(Self::cache_key(&member.name), Rc::clone(&rc_font));
 
                         let font_ref = self.font_counter;
                         self.font_counter += 1;
@@ -331,10 +330,10 @@ impl FontManager {
                             };
 
                             let rc_font = Rc::new(font);
-                            let cache_key = format!("{}_{}_{}", font_name, requested_size, style.unwrap_or(0));
+                            let cache_key = Self::cache_key(&format!("{}_{}_{}", font_name, requested_size, style.unwrap_or(0)));
                             self.font_cache.insert(cache_key, Rc::clone(&rc_font));
-                            self.font_cache.insert(font_name.to_string(), Rc::clone(&rc_font));
-                            self.font_cache.insert(key.clone(), Rc::clone(&rc_font));
+                            self.font_cache.insert(Self::cache_key(font_name), Rc::clone(&rc_font));
+                            self.font_cache.insert(Self::cache_key(&key), Rc::clone(&rc_font));
 
                             let font_ref = self.font_counter;
                             self.font_counter += 1;
@@ -371,6 +370,12 @@ impl FontManager {
         };
     }
 
+    /// Normalize a font cache key to lowercase for case-insensitive lookups.
+    #[inline]
+    pub fn cache_key(s: &str) -> String {
+        s.to_ascii_lowercase()
+    }
+
     pub fn get_system_font(&self) -> Option<Rc<BitmapFont>> {
         self.system_font.clone()
     }
@@ -387,9 +392,10 @@ impl FontManager {
 
     /// Get a font by name, loading it if necessary
     pub fn get_font(&mut self, font_name: &str) -> Option<&BitmapFont> {
-        // Check cache first
-        if self.font_cache.contains_key(font_name) {
-            return self.font_cache.get(font_name).map(|v| &**v);
+        // Check cache first (case-insensitive)
+        let key = Self::cache_key(font_name);
+        if self.font_cache.contains_key(&key) {
+            return self.font_cache.get(&key).map(|v| &**v);
         }
 
         // Font not in cache, cannot load here (would need cast_manager)
@@ -418,7 +424,8 @@ impl FontManager {
 
     /// Get a font by name (immutable version)
     pub fn get_font_immutable(&self, font_name: &str) -> Option<&BitmapFont> {
-        self.font_cache.get(font_name).map(|v| &**v)
+        let key = Self::cache_key(font_name);
+        self.font_cache.get(&key).map(|v| &**v)
     }
 
     /// Load a font from cast members by searching the cast manager
@@ -429,7 +436,7 @@ impl FontManager {
         size: Option<u16>,
         style: Option<u8>,
     ) -> Option<Rc<BitmapFont>> {
-        let cache_key = format!("{}_{}_{}", font_name, size.unwrap_or(0), style.unwrap_or(0));
+        let cache_key = Self::cache_key(&format!("{}_{}_{}", font_name, size.unwrap_or(0), style.unwrap_or(0)));
 
         for cast_lib in &cast_manager.casts {
             for member in cast_lib.members.values() {
@@ -497,15 +504,15 @@ impl FontManager {
                             self.font_cache
                                 .insert(cache_key.clone(), Rc::clone(&rc_font));
                             self.font_cache
-                                .insert(font_name.to_string(), Rc::clone(&rc_font));
+                                .insert(Self::cache_key(font_name), Rc::clone(&rc_font));
                             self.font_cache
-                                .insert(member.name.clone(), Rc::clone(&rc_font));
+                                .insert(Self::cache_key(&member.name), Rc::clone(&rc_font));
 
                             if font_data.font_info.name != member.name
                                 && font_data.font_info.name != font_name
                             {
                                 self.font_cache
-                                    .insert(font_data.font_info.name.clone(), Rc::clone(&rc_font));
+                                    .insert(Self::cache_key(&font_data.font_info.name), Rc::clone(&rc_font));
                             }
 
                             let font_ref = self.font_counter;
@@ -534,9 +541,10 @@ impl FontManager {
                             let rc_font = Rc::new(new_font);
                             self.font_cache
                                 .insert(cache_key.clone(), Rc::clone(&rc_font));
-                            if !self.font_cache.contains_key(font_name) {
+                            let name_key = Self::cache_key(font_name);
+                            if !self.font_cache.contains_key(&name_key) {
                                 self.font_cache
-                                    .insert(font_name.to_string(), Rc::clone(&rc_font));
+                                    .insert(name_key, Rc::clone(&rc_font));
                             }
 
                             let font_ref = self.font_counter;
@@ -617,9 +625,9 @@ impl FontManager {
             push_candidate(&mut candidates, e);
         }
 
-        // Cache lookup (case-sensitive) for all candidates
+        // Cache lookup (case-insensitive) for all candidates
         for c in &candidates {
-            if let Some(font) = self.font_cache.get(c) {
+            if let Some(font) = self.font_cache.get(&Self::cache_key(c)) {
                 return Some(Rc::clone(font));
             }
         }
@@ -646,8 +654,8 @@ impl FontManager {
     }
 
     pub fn get_best_font(&mut self, font_name: &str) -> Option<&BitmapFont> {
-        // Just use get directly - no lifetime conflicts
-        self.font_cache.get(font_name).map(|v| &**v)
+        let key = Self::cache_key(font_name);
+        self.font_cache.get(&key).map(|v| &**v)
     }
 
     /// Rasterize a specific font member's PFR data at the given size.
@@ -811,7 +819,7 @@ pub async fn player_load_system_font(path: &str) {
                 player
                     .font_manager
                     .font_cache
-                    .insert("System".to_string(), font.into());
+                    .insert("system".to_string(), font.into());
 
                 web_sys::console::log_1(&"System font loaded successfully".into());
             });

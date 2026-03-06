@@ -498,7 +498,10 @@ impl CastManager {
                 } else if let CastMemberType::Text(text) = &member.member_type {
                     Ok(text.text.to_owned())
                 } else {
-                    Err(ScriptError::new(format!("Cast member is not a field or text member")))
+                    Err(ScriptError::new(format!(
+                        "Cast member '{}' is not a field or text member (type: {:?})",
+                        member.name, member.member_type.member_type_id()
+                    )))
                 }
             }
             None => Err(ScriptError::new(format!("Cast member not found"))),
@@ -672,11 +675,11 @@ impl CastManager {
                             }
                         }
 
-                        // Store all aliases in cache
+                        // Store all aliases in cache (lowercase for case-insensitive lookup)
                         for alias in &aliases {
                             font_manager
                                 .font_cache
-                                .entry(alias.clone())
+                                .entry(alias.to_ascii_lowercase())
                                 .or_insert_with(|| Rc::clone(&rc_font));
                         }
 
