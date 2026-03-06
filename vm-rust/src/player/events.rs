@@ -454,7 +454,7 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
         // stack, so processing events (which push/pop scopes) during a command
         // handler's async yield (e.g. nothing()) would corrupt the scope data.
         // Ephemeral events like mouseWithin will be re-dispatched on the next tick.
-        let skip = reserve_player_ref(|player| player.in_mouse_command || player.command_handler_yielding);
+        let skip = reserve_player_ref(|player| player.in_mouse_command || player.command_handler_yielding || player.is_in_transition);
         if skip {
             continue;
         }
