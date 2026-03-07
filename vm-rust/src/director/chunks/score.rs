@@ -349,19 +349,21 @@ impl SoundChannelData {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TempoChannelData {
-    pub tempo: u8,        // Frames per second (e.g., 30 = 30 fps)
-    pub flags1: u8,       // Unknown flags at byte 0
-    pub flags2: u8,       // Unknown flags at byte 1
-    pub unk3: u8,         // Byte 2
-    pub unk4: u8,         // Byte 3 (often 0x5b = 91)
-    pub wait_flags: u16,  // Bytes 8-9 - may control wait states
-    pub channel_flags: u16, // Bytes 10-11 - additional flags
-    pub frame_data: u16,  // Bytes 18-19 - varies between frames
+    pub tempo: u8,            // Byte 6: tempo mode/value (D6+: 246=FPS, 247=delay, 248=wait click, etc.)
+    pub tempo_cue_point: u16, // Bytes 4-5: FPS value or delay (when tempo==246 or 247)
+    pub flags1: u8,           // Byte 0
+    pub flags2: u8,           // Byte 1
+    pub unk3: u8,             // Byte 2
+    pub unk4: u8,             // Byte 3
+    pub color_tempo: u8,      // Byte 7
+    pub wait_flags: u16,      // Bytes 8-9
+    pub channel_flags: u16,   // Bytes 10-11
+    pub frame_data: u16,      // Bytes 18-19
 }
 
 impl TempoChannelData {
     pub fn read(reader: &mut BinaryReader) -> Result<TempoChannelData, String> {
-        // Read first 4 bytes
+        // Bytes 0-3: tempoSpriteListIdx (u32) - split into individual bytes for compatibility
         let flags1 = reader
             .read_u8()
             .map_err(|e| format!("Failed to read tempo flags1: {:?}", e))?;
@@ -374,22 +376,21 @@ impl TempoChannelData {
         let unk4 = reader
             .read_u8()
             .map_err(|e| format!("Failed to read tempo unk4: {:?}", e))?;
-        
-        // Byte 4 - The tempo in FPS
+
+        // Bytes 4-5: tempoCuePoint (u16) - FPS value when tempo==246, delay when tempo==247
+        let tempo_cue_point = reader
+            .read_u16()
+            .map_err(|e| format!("Failed to read tempo_cue_point: {:?}", e))?;
+
+        // Byte 6: tempo mode byte (D6+: 246=FPS, 247=delay, 248=wait click, etc.)
         let tempo = reader
             .read_u8()
             .map_err(|e| format!("Failed to read tempo: {:?}", e))?;
-        
-        // Skip bytes 5-7 (usually zeros)
-        let _skip1 = reader
+
+        // Byte 7: colorTempo
+        let color_tempo = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read tempo skip1: {:?}", e))?;
-        let _skip2 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo skip2: {:?}", e))?;
-        let _skip3 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo skip3: {:?}", e))?;
+            .map_err(|e| format!("Failed to read color_tempo: {:?}", e))?;
         
         // Bytes 8-9 - Wait flags
         let wait_flags = reader
@@ -415,10 +416,12 @@ impl TempoChannelData {
         
         Ok(TempoChannelData {
             tempo,
+            tempo_cue_point,
             flags1,
             flags2,
             unk3,
             unk4,
+            color_tempo,
             wait_flags,
             channel_flags,
             frame_data,
@@ -609,10 +612,12 @@ impl ScoreFrameData {
                     if tempo_val > 0 {
                         tempo_channel_data.push((frame_index, TempoChannelData {
                             tempo: tempo_val,
+                            tempo_cue_point: 0,
                             flags1: 0,
                             flags2: 0,
                             unk3: 0,
                             unk4: 0,
+                            color_tempo: 0,
                             wait_flags: 0,
                             channel_flags: 0,
                             frame_data: 0,
@@ -1003,6 +1008,7 @@ impl ScoreChunkHeader {
 pub struct SpriteBehavior {
     pub cast_lib: u16,
     pub cast_member: u16,
+    pub parameter: Vec<DatumRef>,
 }
 
 /// Sprite detail info parsed from sprite detail offset (D6+)
@@ -1118,7 +1124,7 @@ impl ScoreChunk {
             };
 
             let frame_intervals = Self::analyze_behavior_attachment_entries(&entries)?;
-            let sprite_details = std::collections::HashMap::new();
+            let sprite_details = Self::parse_sprite_details_from_entries(&entries);
 
             Ok(ScoreChunk {
                 header: ScoreChunkHeader::default(),
@@ -1146,6 +1152,114 @@ impl ScoreChunk {
         } else {
             Err(format!("Unsupported Director version for VWSC: {}", dir_version))
         }
+    }
+
+    /// Parse sprite details directly from extracted VWSC entries.
+    /// For spriteListIdx = N, entries[N] is the 44-byte sprite info,
+    /// and entries[N+1] contains behaviors (8 bytes each: cast_lib u16, cast_member u16, initializer_idx u32).
+    fn parse_sprite_details_from_entries(entries: &[Vec<u8>]) -> std::collections::HashMap<u32, SpriteDetailInfo> {
+        let mut details = std::collections::HashMap::new();
+        let mut behavior_count = 0;
+
+        // For spriteListIdx = N, behaviors are at entries[N+1].
+        // We try every possible N and parse entries[N+1] as behavior data.
+        for idx in 1..entries.len().saturating_sub(1) {
+            let behavior_data = &entries[idx + 1];
+
+            // Behaviors are 8 bytes each, need at least one
+            if behavior_data.len() < 8 || behavior_data.len() % 8 != 0 {
+                continue;
+            }
+
+            let mut reader = BinaryReader::from_u8(behavior_data);
+            reader.set_endian(Endian::Big);
+
+            let mut info = SpriteDetailInfo::default();
+            while reader.pos + 8 <= behavior_data.len() {
+                let cast_lib = match reader.read_u16() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let cast_member = match reader.read_u16() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let initializer_idx = match reader.read_u32() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+
+                if cast_lib == 0 && cast_member == 0 {
+                    break;
+                }
+
+                if cast_member > 0 && cast_member < 10000 {
+                    let mut parameter = Vec::new();
+                    // Parse initializer data from entries[initializer_idx]
+                    if initializer_idx > 0 && (initializer_idx as usize) < entries.len() {
+                        if let Ok(proplist_string) = String::from_utf8(entries[initializer_idx as usize].clone()) {
+                            let clean = proplist_string.trim_end_matches('\0');
+                            if clean.starts_with('[') {
+                                match eval_lingo_expr_static(clean.to_owned()) {
+                                    Ok(proplist) => {
+                                        parameter.push(proplist);
+                                    }
+                                    Err(e) => {
+                                        console::warn_1(&format!(
+                                            "Failed to parse sprite detail initializer: {}", e.message
+                                        ).into());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    info.behaviors.push(SpriteBehavior { cast_lib, cast_member, parameter });
+                }
+            }
+
+            if !info.behaviors.is_empty() {
+                behavior_count += info.behaviors.len();
+                if details.len() < 30 {
+                    let behavior_strs: Vec<String> = info.behaviors.iter()
+                        .map(|b| if b.cast_lib == 65535 { format!("(-1)/{}", b.cast_member) } else { format!("{}/{}", b.cast_lib, b.cast_member) })
+                        .collect();
+                    console::log_1(&format!(
+                        "sprite_details: spriteListIdx {} -> {} behaviors [{}]",
+                        idx, info.behaviors.len(), behavior_strs.join(", ")
+                    ).into());
+                }
+                details.insert(idx as u32, info);
+            }
+        }
+
+        if !details.is_empty() {
+            console::log_1(&format!(
+                "Parsed {} sprite details with {} total behaviors from entries",
+                details.len(), behavior_count
+            ).into());
+        }
+
+        // Find all sprite detail entries for channel 40 (0x28)
+        for i in 2..entries.len() {
+            let e = &entries[i];
+            if e.len() >= 40 {
+                let channel = u32::from_be_bytes([e[16], e[17], e[18], e[19]]);
+                if channel == 40 {
+                    let sf = u32::from_be_bytes([e[0], e[1], e[2], e[3]]);
+                    let ef = u32::from_be_bytes([e[4], e[5], e[6], e[7]]);
+                    let next_size = if i + 1 < entries.len() { entries[i+1].len() } else { 0 };
+                    let next_hex: String = if i + 1 < entries.len() {
+                        entries[i+1].iter().take(16).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+                    } else { String::new() };
+                    console::log_1(&format!(
+                        "CH40_ENTRY {}: size={} frames={}-{} next_size={} next_hex: {}",
+                        i, e.len(), sf, ef, next_size, next_hex
+                    ).into());
+                }
+            }
+        }
+
+        details
     }
 
     /// Parse sprite detail offsets from Entry[0] (D6+)
@@ -1364,7 +1478,7 @@ impl ScoreChunk {
                 // cast_lib can be 65535 (-1 as u16) meaning "use parent cast lib"
                 // cast_member should be > 0 for a valid reference
                 if cast_member > 0 && cast_member < 10000 {
-                    info.behaviors.push(SpriteBehavior { cast_lib, cast_member });
+                    info.behaviors.push(SpriteBehavior { cast_lib, cast_member, parameter: Vec::new() });
                 }
             }
 
@@ -1443,7 +1557,9 @@ impl ScoreChunk {
             }
 
             match entry_bytes.len() {
-                44 | 48 => {
+                // Primary entries: 40 bytes base (10 x u32) + optional trailing data.
+                // D6/D7 typically produce 44 bytes, D8+ may produce 40 or 48.
+                40 | 44 | 48 => {
                     // Primary entry
                     let mut reader = BinaryReader::from_u8(entry_bytes);
                     reader.set_endian(Endian::Big);
@@ -1490,7 +1606,21 @@ impl ScoreChunk {
 
                             // Check if this could be a behavior entry
                             // Pattern: 8 bytes per behavior (cast_lib u16, cast_member u16, unk0 u32)
-                            if next_size >= 8 && next_size % 8 == 0 {
+                            // Disambiguate from primary entries (40/44/48 bytes): peek at the
+                            // content — a primary's first two u32s are start_frame/end_frame
+                            // (small sequential numbers), while a behavior's first two u16s are
+                            // cast_lib/cast_member.  If the first u32 looks like a valid
+                            // start_frame (1–10000) and the second u32 >= first, treat it as a
+                            // primary rather than a behavior list.
+                            let looks_like_primary = if (next_size == 40 || next_size == 44 || next_size == 48) && next_size >= 8 {
+                                let b = &entries[j];
+                                let first_u32 = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+                                let second_u32 = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
+                                first_u32 >= 1 && first_u32 <= 10000 && second_u32 >= first_u32
+                            } else {
+                                false
+                            };
+                            if next_size >= 8 && next_size % 8 == 0 && !looks_like_primary {
                                 let behavior_count = next_size / 8;
                                 let mut sec_reader = BinaryReader::from_u8(&entries[j]);
                                 sec_reader.set_endian(Endian::Big);
@@ -1615,7 +1745,7 @@ impl ScoreChunk {
                     // Skip other entry types
                     if entry_bytes.len() > 0 {
                         warn!(
-                            "⚠️ Skipping entry {} with unexpected size {} bytes (expected 44 or 48 for primary). First bytes: {}",
+                            "⚠️ Skipping entry {} with unexpected size {} bytes (expected 40/44/48 for primary). First bytes: {}",
                             i,
                             entry_bytes.len(),
                             entry_bytes.iter()
