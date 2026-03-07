@@ -1051,6 +1051,121 @@ fn render_filmloop_from_channel_data(
                 let alpha = (temp_sprite.blend as f32 / 100.0).clamp(0.0, 1.0);
                 bitmap.draw_vector_shape(vector_member, sprite_rect, &palettes, alpha);
             }
+            CastMemberType::Field(field_member) => {
+                let font_opt = get_or_load_font_with_id(
+                    &mut player.font_manager,
+                    &player.movie.cast_manager,
+                    &field_member.font,
+                    Some(field_member.font_size),
+                    None,
+                    field_member.font_id,
+                );
+
+                if let Some(font) = font_opt {
+                    let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+                    let ink = ((data.ink & 0x7F) / 5) as u32;
+                    let blend = if data.blend == 255 { 100 } else {
+                        ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
+                    };
+
+                    let params = CopyPixelsParams {
+                        blend,
+                        ink,
+                        color: parent_color.clone(),
+                        bg_color: parent_bg_color.clone(),
+                        mask_image: None,
+                        is_text_rendering: true,
+                        rotation: 0.0,
+                        skew: 0.0,
+                        sprite: None,
+                        original_dst_rect: None,
+                    };
+
+                    bitmap.draw_text(
+                        &field_member.text,
+                        &font,
+                        font_bitmap,
+                        sprite_rect.left,
+                        sprite_rect.top,
+                        params,
+                        &palettes,
+                        field_member.fixed_line_space,
+                        field_member.top_spacing,
+                    );
+                }
+            }
+            CastMemberType::Text(text_member) => {
+                let (font_name, font_size, font_style) = if !text_member.html_styled_spans.is_empty() {
+                    let first_style = &text_member.html_styled_spans[0].style;
+                    let name = first_style.font_face.clone().unwrap_or_else(|| text_member.font.clone());
+                    let size = first_style.font_size.map(|s| s as u16).unwrap_or(text_member.font_size);
+                    let style = (if first_style.bold { 1u8 } else { 0 })
+                        | (if first_style.italic { 2u8 } else { 0 })
+                        | (if first_style.underline { 4u8 } else { 0 });
+                    (name, size, Some(style))
+                } else {
+                    (text_member.font.clone(), text_member.font_size, None)
+                };
+
+                let mut font_opt = get_or_load_font(
+                    &mut player.font_manager,
+                    &player.movie.cast_manager,
+                    &font_name,
+                    Some(font_size),
+                    font_style,
+                );
+                if font_opt.is_none() && font_style.is_some() {
+                    font_opt = get_or_load_font(
+                        &mut player.font_manager,
+                        &player.movie.cast_manager,
+                        &font_name,
+                        Some(font_size),
+                        None,
+                    );
+                }
+                if font_opt.is_none() {
+                    font_opt = get_or_load_font(
+                        &mut player.font_manager,
+                        &player.movie.cast_manager,
+                        &font_name,
+                        None,
+                        None,
+                    );
+                }
+
+                if let Some(font) = font_opt {
+                    let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+                    let ink = ((data.ink & 0x7F) / 5) as u32;
+                    let blend = if data.blend == 255 { 100 } else {
+                        ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
+                    };
+
+                    let params = CopyPixelsParams {
+                        blend,
+                        ink,
+                        color: parent_color.clone(),
+                        bg_color: parent_bg_color.clone(),
+                        mask_image: None,
+                        is_text_rendering: true,
+                        rotation: 0.0,
+                        skew: 0.0,
+                        sprite: None,
+                        original_dst_rect: None,
+                    };
+
+                    bitmap.draw_text(
+                        &text_member.text,
+                        &font,
+                        font_bitmap,
+                        sprite_rect.left,
+                        sprite_rect.top,
+                        params,
+                        &palettes,
+                        text_member.fixed_line_space,
+                        text_member.top_spacing,
+                    );
+                }
+            }
             _ => {
                 // Other member types not yet supported in filmloop rendering
                 web_sys::console::log_1(&format!(
