@@ -1,6 +1,6 @@
 use std::{
     borrow::{Borrow, BorrowMut},
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
 };
@@ -12,7 +12,7 @@ use log::debug;
 use wasm_bindgen::{prelude::*, Clamped};
 use web_sys::console;
 
-use crate::js_api::safe_js_string;
+use crate::{js_api::safe_js_string, player::reserve_player_mut};
 use crate::{
     console_warn,
     js_api::JsApi,
@@ -2698,6 +2698,15 @@ impl Renderer for PlayerCanvasRenderer {
 
 thread_local! {
     pub static RENDERER_LOCK: RefCell<Option<DynamicRenderer>> = RefCell::new(None);
+    pub static LAST_DRAW_MS: Cell<i64> = Cell::new(0);
+}
+
+pub fn mark_frame_drawn() {
+    LAST_DRAW_MS.with(|ts| ts.set(Local::now().timestamp_millis()));
+}
+
+fn was_frame_drawn_recently(interval_ms: i64) -> bool {
+    LAST_DRAW_MS.with(|ts| Local::now().timestamp_millis() - ts.get() < interval_ms)
 }
 
 #[allow(dead_code)]
@@ -2716,6 +2725,24 @@ where
     F: FnOnce(&mut Option<DynamicRenderer>) -> R,
 {
     RENDERER_LOCK.with_borrow_mut(|renderer_lock| f(renderer_lock))
+}
+
+pub fn draw_frame_immediate() {
+    use crate::rendering_gpu::Renderer;
+    let tempo = reserve_player_ref(|player| player.current_frame_tempo as f64);
+    let interval = if tempo > 0.0 {
+        (60000.0 / tempo) as i64
+    } else {
+        1000 // Default to 1 second interval if tempo is invalid
+    };
+    if !was_frame_drawn_recently(interval) {
+        with_renderer_mut(|renderer_lock| {
+            if let Some(renderer) = renderer_lock {
+                reserve_player_mut(|player| renderer.draw_frame(player));
+            }
+            mark_frame_drawn();
+        });
+    }
 }
 
 /// Helper to access Canvas2D renderer for Canvas2D-specific operations
@@ -3043,11 +3070,14 @@ async fn run_draw_loop() {
         let mut player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let draw_fps = 24;
 
-        if Local::now().timestamp_millis() - last_frame_ms >= 1000 / draw_fps as i64 {
+        let frame_interval = 1000 / draw_fps as i64;
+        if Local::now().timestamp_millis() - last_frame_ms >= frame_interval {
             last_frame_ms = Local::now().timestamp_millis();
             with_renderer_mut(|renderer_lock| {
                 if let Some(renderer) = renderer_lock {
-                    renderer.draw_frame(&mut player);
+                    if !was_frame_drawn_recently(frame_interval) {
+                        renderer.draw_frame(&mut player);
+                    }
                     renderer.draw_preview_frame(&mut player);
                 }
             });

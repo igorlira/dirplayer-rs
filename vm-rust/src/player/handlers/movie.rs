@@ -792,15 +792,7 @@ impl MovieHandlers {
         // Render the frame between prepareFrame and enterFrame, matching
         // Director's frame cycle where rendering occurs after scripts have
         // updated sprite properties but before enterFrame fires.
-        {
-            use crate::rendering_gpu::Renderer;
-            crate::rendering::with_renderer_mut(|renderer_lock| {
-                if let Some(renderer) = renderer_lock {
-                    let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
-                    renderer.draw_frame(player);
-                }
-            });
-        }
+        crate::rendering::draw_frame_immediate();
 
         reserve_player_mut(|player| {
             player.in_enter_frame = true;
@@ -827,14 +819,7 @@ impl MovieHandlers {
         })?;
 
         if should_yield {
-            // Render using whatever renderer is active (Canvas2D or WebGL)
-            use crate::rendering_gpu::Renderer;
-            crate::rendering::with_renderer_mut(|renderer_lock| {
-                if let Some(renderer) = renderer_lock {
-                    let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
-                    renderer.draw_frame(player);
-                }
-            });
+            crate::rendering::draw_frame_immediate();
 
             // Yield to allow the browser event loop to process pending events
             // (mouse up/move, keyboard, etc.). This is essential for scripts
@@ -872,13 +857,7 @@ impl MovieHandlers {
                 player.last_nothing_yield_ms = now;
             });
 
-            use crate::rendering_gpu::Renderer;
-            crate::rendering::with_renderer_mut(|renderer_lock| {
-                if let Some(renderer) = renderer_lock {
-                    let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
-                    renderer.draw_frame(player);
-                }
-            });
+            crate::rendering::draw_frame_immediate();
 
             async_std::task::sleep(std::time::Duration::from_millis(2)).await;
         }
