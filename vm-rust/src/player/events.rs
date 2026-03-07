@@ -503,17 +503,12 @@ pub async fn player_dispatch_event_beginsprite(
             let mut frame_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
             let mut all_channels = Vec::new();
 
-            // Collect stage sprites
-            let active_channel_numbers: HashSet<u32> = player.movie.score.sprite_spans
-                .iter()
-                .filter(|span| Score::is_span_in_frame(span, player.movie.current_frame))
-                .map(|span| span.channel_number as u32)
-                .collect();
-          
+            // Collect stage sprites - include all entered sprites with behaviors,
+            // not just those in sprite_spans. Sprites initialized from channel_initialization_data
+            // (D6+ path) also need beginSprite dispatched.
             let filtered_channels: Vec<_> = player.movie.score.channels.iter()
                 .filter(|channel| !channel.sprite.script_instance_list.is_empty())
                 .filter(|channel| channel.sprite.entered)
-                .filter(|channel| active_channel_numbers.contains(&(channel.number as u32)))
                 .filter(|channel| {
                     channel.sprite.script_instance_list.iter().all(|script_ref| {
                         player
@@ -768,15 +763,11 @@ pub async fn dispatch_event_to_all_behaviors(
         let mut sprites: Vec<(ScoreRef, usize, Vec<ScriptInstanceRef>)> = Vec::new();
         let mut frames = Vec::new();
 
-        // Collect stage sprites
-        let active_channel_numbers: HashSet<u32> = player.movie.score.sprite_spans
-            .iter()
-            .filter(|span| Score::is_span_in_frame(span, player.movie.current_frame))
-            .map(|span| span.channel_number as u32)
-            .collect();
+        // Collect stage sprites - include all entered sprites with behaviors,
+        // not just those in sprite_spans. Sprites initialized from channel_initialization_data
+        // (D6+ path) also need event dispatch.
         for channel in player.movie.score.channels.iter() {
-            if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered ||
-                !active_channel_numbers.contains(&(channel.number as u32)) {
+            if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered {
                 continue;
             }
             let behaviors = channel.sprite.script_instance_list.clone();
