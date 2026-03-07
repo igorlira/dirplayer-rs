@@ -1723,6 +1723,9 @@ impl SoundChannel {
             {
                 let mut this = self_rc.borrow_mut();
                 this.expected_sample_rate = Some(sound_member.info.sample_rate);
+                this.sample_rate = sound_member.info.sample_rate;
+                this.sample_count = sound_member.info.sample_count;
+                this.channel_count = sound_member.info.channels;
             }
 
             // Load audio data
@@ -1920,6 +1923,7 @@ impl SoundChannel {
                 ch.pan_node = Some(Rc::new(pan));
                 ch.status = SoundStatus::Playing;
                 ch.playback_start_context_time = ch.audio_context.current_time();
+                ch.elapsed_time = 0.0;
                 *ch.is_decoding.borrow_mut() = false;
 
                 drop(ch);
@@ -2291,6 +2295,7 @@ impl SoundChannel {
             ch.gain_node = Some(Rc::new(gain));
             ch.status = SoundStatus::Playing;
             ch.playback_start_context_time = ch.audio_context.current_time();
+            ch.elapsed_time = 0.0;
             *ch.is_decoding.borrow_mut() = false;
         }
 

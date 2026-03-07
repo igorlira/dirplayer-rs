@@ -1592,26 +1592,75 @@ impl TypeHandlers {
             let channel = channel_rc.borrow();
             
             // soundBusy returns true (1) if the channel is Playing, Loading, or Queued
+            let status = channel.status.clone();
+            let has_source = channel.source_node.is_some();
+            let sample_rate = channel.sample_rate;
+            let sample_count = channel.sample_count;
+            let elapsed_time = channel.elapsed_time;
+            let ctx_time = channel.audio_context.current_time();
+            let start_time = channel.playback_start_context_time;
+            let loop_count = channel.loop_count;
+
+            // Check buffer duration for the Playing+source case
+            let buffer_duration = if status == SoundStatus::Playing {
+                channel.source_node.as_ref()
+                    .and_then(|s| s.buffer())
+                    .map(|b| b.duration())
+            } else {
+                None
+            };
+
+            // Drop the immutable borrow so we can mutably borrow if needed
+            drop(channel);
+
             let mut is_busy = matches!(
-                channel.status,
+                status,
                 SoundStatus::Playing | SoundStatus::Loading | SoundStatus::Queued
             );
 
+            if is_busy {
+                debug!(
+                    "🔍 soundBusy({}) = true, status={:?}, has_source={}, sample_rate={}, sample_count={}, elapsed={:.3}, ctx_time={:.3}, start_time={:.3}, buf_dur={:?}",
+                    channel_num, status, has_source, sample_rate, sample_count,
+                    elapsed_time, ctx_time, start_time, buffer_duration,
+                );
+            }
+
             // Check if sound has actually finished by comparing AudioContext time
-            // against the source node's buffer duration. The onended callback can
-            // fire late due to async decode/resampling, leaving status stuck at Playing.
-            if is_busy && channel.status == SoundStatus::Playing {
-                if let Some(ref source) = channel.source_node {
-                    if let Some(buffer) = source.buffer() {
-                        let elapsed = channel.audio_context.current_time() - channel.playback_start_context_time;
-                        if elapsed > buffer.duration() && channel.loop_count <= 1 {
-                            is_busy = false;
-                            drop(channel);
-                            let mut channel = channel_rc.borrow_mut();
-                            channel.status = SoundStatus::Idle;
-                            channel.source_node = None;
-                        }
+            // against the source node's buffer duration.
+            if is_busy && status == SoundStatus::Playing {
+                if let Some(duration) = buffer_duration {
+                    let elapsed = ctx_time - start_time;
+                    if elapsed > duration && loop_count != 0 {
+                        debug!(
+                            "⏱️ soundBusy({}) forcing Idle: elapsed={:.3} > duration={:.3}",
+                            channel_num, elapsed, duration
+                        );
+                        is_busy = false;
+                        let mut ch = channel_rc.borrow_mut();
+                        ch.status = SoundStatus::Idle;
+                        ch.source_node = None;
                     }
+                } else if !has_source {
+                    // Playing but no source node - stuck state, force idle
+                    debug!(
+                        "⚠️ soundBusy({}) Playing with no source_node, forcing Idle",
+                        channel_num
+                    );
+                    is_busy = false;
+                    channel_rc.borrow_mut().status = SoundStatus::Idle;
+                }
+            }
+
+            // Also catch Loading state that's been stuck too long (>5 seconds)
+            if is_busy && status == SoundStatus::Loading {
+                if start_time > 0.0 && ctx_time - start_time > 5.0 {
+                    debug!(
+                        "⚠️ soundBusy({}) stuck in Loading for {:.1}s, forcing Idle",
+                        channel_num, ctx_time - start_time
+                    );
+                    is_busy = false;
+                    channel_rc.borrow_mut().status = SoundStatus::Idle;
                 }
             }
 
