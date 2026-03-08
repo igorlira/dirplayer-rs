@@ -20,7 +20,7 @@ Alongside the emulator, DirPlayer comes with a standalone application that provi
 
 Pre-built binaries can be found at https://github.com/igorlira/dirplayer-rs/releases
 
-![./app-screenshot.png](./app-screenshot.png)
+![./app-screenshot.gif](./app-screenshot.gif)
 
 ## Polyfill
 
