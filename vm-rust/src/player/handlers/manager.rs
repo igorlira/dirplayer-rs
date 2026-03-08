@@ -687,6 +687,18 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new("Cannot findPos on non-list".to_string())),
                 }
             }),
+            "setprop" => {
+                let datum = &args[0];
+                let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
+                let args = &args[1..].to_vec();
+                match datum_type {
+                    DatumType::PropList => PropListDatumHandlers::set_opt_prop(datum, args),
+                    DatumType::ScriptInstanceRef => ScriptInstanceDatumHandlers::set_prop(datum, args),
+                    _ => Err(ScriptError::new(
+                        "Cannot setProp on non-prop list or child object".to_string(),
+                    )),
+                }
+            }
             "setaprop" => {
                 let datum = &args[0];
                 let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
