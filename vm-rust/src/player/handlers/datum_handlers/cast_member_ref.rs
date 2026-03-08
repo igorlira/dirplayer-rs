@@ -2,7 +2,7 @@ use log::{warn, debug};
 
 use crate::{
     director::{
-        enums::ShapeType,
+        enums::{ScriptType, ShapeType},
         lingo::datum::{datum_bool, Datum, DatumType},
     },
     js_api::JsApi,
@@ -304,24 +304,28 @@ impl CastMemberRefHandlers {
             CastMemberTypeId::Font => FontMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Palette => PaletteMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Script => {
-                if prop == "text" {
-                    let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
-                        .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-
-                    if let CastMemberType::Script(script_data) = &cast_member.member_type {
-                        // Scripts in Director typically don't have editable text
-                        // This member might be misclassified
-                        web_sys::console::log_1(&format!("⚠️ Trying to get .text from Script member #{}", cast_member.number).into());
-
-                        // Return empty string for now, but this suggests the member type is wrong
-                        Ok(Datum::String("".to_string()))
-                    } else {
-                        Err(ScriptError::new("Script member has no text".to_string()))
+                let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+                let script_data = match &cast_member.member_type {
+                    CastMemberType::Script(s) => s,
+                    _ => return Err(ScriptError::new("Cast member is not a script".to_string())),
+                };
+                match prop.as_str() {
+                    "text" => Ok(Datum::String("".to_string())),
+                    "script" => Ok(Datum::ScriptRef(cast_member_ref.clone())),
+                    "scriptText" => Ok(Datum::String("".to_string())),
+                    "scriptType" => {
+                        let symbol = match script_data.script_type {
+                            ScriptType::Movie => "movie",
+                            ScriptType::Parent => "parent",
+                            ScriptType::Score => "score",
+                            ScriptType::Member => "member",
+                            _ => "unknown",
+                        };
+                        Ok(Datum::Symbol(symbol.to_string()))
                     }
-                } else if prop == "script" {
-                    Ok(Datum::ScriptRef(cast_member_ref.clone()))
-                } else {
-                    Err(ScriptError::new(format!("Script members don't support property {}", prop)))
+                    "ilk" => Ok(Datum::Symbol("script".to_string())),
+                    _ => Err(ScriptError::new(format!("Script members don't support property {}", prop))),
                 }
             }
             CastMemberTypeId::Shape => {
@@ -490,6 +494,35 @@ impl CastMemberRefHandlers {
         };
 
         match member_type {
+            CastMemberTypeId::Script => {
+                match prop.as_str() {
+                    "scriptText" => Ok(()), // No-op: no lingo compiler
+                    "scriptType" => {
+                        let type_str = value.string_value()?;
+                        let script_type = match type_str.to_lowercase().as_str() {
+                            "movie" => ScriptType::Movie,
+                            "parent" => ScriptType::Parent,
+                            "score" => ScriptType::Score,
+                            "member" => ScriptType::Member,
+                            _ => return Err(ScriptError::new(format!("Unknown scriptType: {}", type_str))),
+                        };
+                        borrow_member_mut(
+                            member_ref,
+                            |_| {},
+                            |cast_member, _| {
+                                if let CastMemberType::Script(ref mut s) = cast_member.member_type {
+                                    s.script_type = script_type;
+                                }
+                                Ok(())
+                            },
+                        )
+                    }
+                    _ => Err(ScriptError::new(format!(
+                        "Cannot set castMember prop {} for member of type Script",
+                        prop
+                    ))),
+                }
+            }
             CastMemberTypeId::Field => FieldMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Text => TextMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Button => ButtonMemberHandlers::set_prop(member_ref, prop, value),
