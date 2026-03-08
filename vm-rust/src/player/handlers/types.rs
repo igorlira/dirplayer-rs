@@ -703,23 +703,25 @@ impl TypeHandlers {
         });
         let result = match obj_type {
             DatumType::Symbol => reserve_player_mut(|player| {
-                let location = player.get_datum(&args[1]);
-                match location {
-                    Datum::CastLib(cast_num) => {
-                        let s = player.get_datum(&args[0]).string_value()?;
-                        let cast = player.movie.cast_manager.get_cast_mut(*cast_num);
-                        let member_ref = cast.create_member_at(
-                            cast.first_free_member_id(),
-                            &s,
-                            &mut player.bitmap_manager,
-                        )?;
-                        Ok(player.alloc_datum(Datum::CastMember(member_ref)))
+                let s = player.get_datum(&args[0]).string_value()?;
+                let cast_num = if args.len() > 1 {
+                    match player.get_datum(&args[1]) {
+                        Datum::CastLib(cast_num) => *cast_num,
+                        other => Err(ScriptError::new(format!(
+                            "Unsupported call location type: {}",
+                            other.type_str()
+                        )))?,
                     }
-                    _ => Err(ScriptError::new(format!(
-                        "Unsupported call location type: {}",
-                        location.type_str()
-                    )))?,
-                }
+                } else {
+                    1
+                };
+                let cast = player.movie.cast_manager.get_cast_mut(cast_num);
+                let member_ref = cast.create_member_at(
+                    cast.first_free_member_id(),
+                    &s,
+                    &mut player.bitmap_manager,
+                )?;
+                Ok(player.alloc_datum(Datum::CastMember(member_ref)))
             }),
             DatumType::ScriptRef => {
                 Ok(

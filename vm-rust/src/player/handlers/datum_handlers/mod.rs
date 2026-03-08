@@ -159,6 +159,17 @@ pub async fn player_call_datum_handler(
             SoundChannelDatumHandlers::call(player, obj_ref, handler_name, args)
         }),
         DatumType::CastLibRef => CastLibDatumHandlers::call(obj_ref, handler_name, args),
+        DatumType::MovieRef => {
+            match handler_name.as_str() {
+                "newMember" => {
+                    Box::pin(crate::player::handlers::types::TypeHandlers::new(&args.clone())).await
+                }
+                _ => Err(ScriptError::new_code(
+                    ScriptErrorCode::HandlerNotFound,
+                    format!("No handler {handler_name} for datum <_movie>"),
+                )),
+            }
+        }
         DatumType::Void => {
             // Try VoidDatumHandlers first for specific methods that should return VOID gracefully
             match VoidDatumHandlers::call(obj_ref.clone(), handler_name, args) {
