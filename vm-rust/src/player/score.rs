@@ -2988,6 +2988,7 @@ pub fn sprite_get_prop(
         "castLibNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| y.cast_lib)
         }))),
+        "editable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.editable))),
         prop_name => {
             let datum_ref = sprite.and_then(|sprite| {
                 reserve_player_mut(|player| {
