@@ -45,9 +45,7 @@ pub fn get_glyph_preference() -> GlyphPreference {
 
 pub fn set_glyph_preference(pref: GlyphPreference) {
     GLYPH_PREFERENCE.with(|p| p.set(pref));
-    web_sys::console::log_1(
-        &format!("[GlyphPreference] Set to {:?}", pref).into(),
-    );
+    debug!("[GlyphPreference] Set to {:?}", pref);
 }
 
 pub type FontRef = u32;
@@ -339,18 +337,18 @@ impl FontManager {
                             self.font_counter += 1;
                             self.fonts.insert(font_ref, Rc::clone(&rc_font));
 
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "Loaded default PFR font '{}' at size {}",
                                 key, requested_size
-                            ).into());
+                            );
 
                             return Some(rc_font);
                         }
                         Err(e) => {
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "Failed to parse default PFR font '{}': {}",
                                 key, e
-                            ).into());
+                            );
                         }
                     }
                 }
@@ -821,7 +819,7 @@ pub async fn player_load_system_font(path: &str) {
                     .font_cache
                     .insert("system".to_string(), font.into());
 
-                web_sys::console::log_1(&"System font loaded successfully".into());
+                debug!("System font loaded successfully");
             });
 
             warn!("Loaded system font image data: {:?}", image_data);

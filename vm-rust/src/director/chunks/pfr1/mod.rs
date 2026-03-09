@@ -12,13 +12,14 @@ pub mod glyph;
 pub mod rasterizer;
 pub mod stroke_builder;
 
+use log::debug;
 use types::*;
 
 const PFR1_VERBOSE_LOGS: bool = false;
 
 fn log(msg: &str) {
     if PFR1_VERBOSE_LOGS {
-        web_sys::console::log_1(&msg.into());
+        debug!("{}", msg);
     }
 }
 

@@ -256,10 +256,8 @@ impl Score {
 
         // Update script_ref if we found the script in a different cast library
         if let Some(found_cast_lib) = found_in_other_lib {
-            web_sys::console::log_1(
-                &format!("create_behavior: script member {} not found in cast_lib {}, found in cast_lib {} instead",
-                    cast_member, resolved_cast_lib, found_cast_lib).into(),
-            );
+            debug!("create_behavior: script member {} not found in cast_lib {}, found in cast_lib {} instead", 
+                cast_member, resolved_cast_lib, found_cast_lib);
             script_ref.cast_lib = found_cast_lib;
         }
 
@@ -3915,16 +3913,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             } else if sprite.bitmap_size_owned_by_sprite
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose BITMAP_SIZE_OWNED_BY_SPRITE (sprite {}x{}, bitmap {}x{})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height).into());
+                    debug!("Sprite {}: chose BITMAP_SIZE_OWNED_BY_SPRITE (sprite {}x{}, bitmap {}x{})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height);
                 }
                 // Sprite size is owned by bitmap, and bitmap is not tiny
                 (bitmap_width, bitmap_height)
             } else if !aspect_ratio_matches
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose ASPECT_RATIO_MISMATCH (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
+                    debug!("Sprite {}: chose ASPECT_RATIO_MISMATCH (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched);
                 }
                 if intentionally_stretched {
                     (sprite.width, sprite.height)
@@ -3938,8 +3936,8 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 && (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose NO_SIZE_CHANGE_BITMAP_LARGER (sprite {}x{}, bitmap {}x{}, has_size_changed={})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, sprite.has_size_changed).into());
+                    debug!("Sprite {}: chose NO_SIZE_CHANGE_BITMAP_LARGER (sprite {}x{}, bitmap {}x{}, has_size_changed={})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, sprite.has_size_changed);
                 }
                 // Sprite hasn't been explicitly resized and bitmap is larger (by sum).
                 (bitmap_width, bitmap_height)
@@ -3947,16 +3945,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 && (sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose NON_PROPORTIONAL_SCALE (sprite {}x{}, bitmap {}x{})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height).into());
+                    debug!("Sprite {}: chose NON_PROPORTIONAL_SCALE (sprite {}x{}, bitmap {}x{})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height);
                 }
                 // Score dimensions differ from bitmap AND are not a clean proportional
                 // scale - they are an approximate bounding box. Use bitmap's natural size.
                 (bitmap_width, bitmap_height)
             } else if sprite.has_size_changed && sprite.width != bitmap_width ||  sprite.has_size_changed && sprite.height != bitmap_height {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
+                    debug!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched);
                 }
                 // Sprite dimensions differ from base — something (Lingo script,
                 // member change) has explicitly modified the size at runtime.

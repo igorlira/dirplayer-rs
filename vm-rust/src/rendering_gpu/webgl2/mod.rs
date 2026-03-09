@@ -11,7 +11,7 @@ mod geometry;
 mod shaders;
 mod texture_cache;
 
-use log::debug;
+use log::{debug, warn};
 use itertools::Itertools;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{HtmlCanvasElement, WebGl2RenderingContext};
@@ -2117,7 +2117,7 @@ impl WebGL2Renderer {
                         0,
                         0,
                     ) {
-                        web_sys::console::warn_1(&format!("Native text render error for Button (WebGL2): {:?}", e).into());
+                        warn!("Native text render error for Button (WebGL2): {:?}", e);
                     }
                 }
 
@@ -3241,7 +3241,7 @@ impl WebGL2Renderer {
         // at the wrong size (e.g. 15 instead of 12), producing wrong glyph shapes.
         let requested_font_size = font_size;
         if DEBUG_WEBGL2_TEXT {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "[webgl2.text] text_len={} spans={} font='{}' in_size={} req={} box={}x{} wrap={} align='{}'",
                 text.len(),
                 styled_span_count,
@@ -3252,7 +3252,7 @@ impl WebGL2Renderer {
                 height,
                 word_wrap,
                 alignment
-            ).into());
+            );
         }
 
         // Get or load the font
@@ -3352,7 +3352,7 @@ impl WebGL2Renderer {
 
         let is_pfr_font = font.char_widths.is_some();
         if DEBUG_WEBGL2_TEXT {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "[webgl2.text] selected font='{}' pfr={} font_size={} char={}x{} bitmap_ref={}",
                 font.font_name,
                 is_pfr_font,
@@ -3360,7 +3360,7 @@ impl WebGL2Renderer {
                 font.char_width,
                 font.char_height,
                 font.bitmap_ref
-            ).into());
+            );
         }
         let style_bits = font_style.unwrap_or(font.font_style);
         let bold = (style_bits & 1) != 0;
@@ -3539,11 +3539,11 @@ impl WebGL2Renderer {
             } else { "no spans".to_string() };
 
             if DEBUG_WEBGL2_TEXT {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "[render_text] font='{}' pfr={} native={} fg={:?} text='{}' spans=[{}]",
                     font_name, is_pfr_font, spans_for_native.is_some(), fg_color,
                     &text[..text.len().min(30)], span_info,
-                ).into());
+                );
             }
         }
 
@@ -3582,10 +3582,10 @@ impl WebGL2Renderer {
             }
         } else {
             if DEBUG_WEBGL2_TEXT {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "[render_text] Using BITMAP rendering path for font='{}' text_len={}",
                     font.font_name, text.len()
-                ).into());
+                );
             }
 
             use crate::player::font::{
@@ -3665,10 +3665,10 @@ impl WebGL2Renderer {
                     }
                     let force_uppercase_fallback = is_pfr_font && caps_only_missing >= 8;
                     if DEBUG_WEBGL2_TEXT && force_uppercase_fallback {
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[webgl2.text.pfr.char] caps-only fallback enabled missing_lowercase={}",
                             caps_only_missing
-                        ).into());
+                        );
                     }
 
                     let mut x = start_x;
@@ -3688,13 +3688,13 @@ impl WebGL2Renderer {
                             if cell_has_ink(upper) {
                                 glyph_code = upper;
                                 if DEBUG_WEBGL2_TEXT {
-                                    web_sys::console::log_1(&format!(
+                                    debug!(
                                         "[webgl2.text.pfr.char] fallback '{}' ({}) -> '{}' ({})",
                                         ch,
                                         lower,
                                         upper as char,
                                         upper
-                                    ).into());
+                                    );
                                 }
                             }
                         } else if is_pfr_font && ch.is_ascii_lowercase() {
@@ -3703,13 +3703,13 @@ impl WebGL2Renderer {
                             if !cell_has_ink(lower) && cell_has_ink(upper) {
                                 glyph_code = upper;
                                 if DEBUG_WEBGL2_TEXT {
-                                    web_sys::console::log_1(&format!(
+                                    debug!(
                                         "[webgl2.text.pfr.char] fallback '{}' ({}) -> '{}' ({})",
                                         ch,
                                         lower,
                                         upper as char,
                                         upper
-                                    ).into());
+                                    );
                                 }
                             }
                         }
@@ -3724,7 +3724,7 @@ impl WebGL2Renderer {
                                     (char_x * font.grid_cell_width + font.char_offset_x) as i32;
                                 let src_y =
                                     (char_y * font.grid_cell_height + font.char_offset_y) as i32;
-                                web_sys::console::log_1(&format!(
+                                debug!(
                                     "[webgl2.text.pfr.char] i={} ch='{}' code={} adv={} dst=({}, {}) src=({}, {}) cell={}x{} glyph={}x{} first={} grid_cols={}",
                                     char_i,
                                     ch,
@@ -3740,15 +3740,15 @@ impl WebGL2Renderer {
                                     font.char_height,
                                     font.first_char_num,
                                     font.grid_columns
-                                ).into());
+                                );
                                 if use_tight_pfr {
-                                    web_sys::console::log_1(&format!(
+                                    debug!(
                                         "[webgl2.text.pfr.char] i={} code={} using tight copy (adv={}, glyph_w={})",
                                         char_i,
                                         glyph_code as u32,
                                         adv,
                                         font.char_width
-                                    ).into());
+                                    );
                                 }
                                 // Debug source glyph occupancy/bounds in the atlas cell.
                                 // This helps detect glyphs that are effectively empty or very thin.
@@ -3790,18 +3790,18 @@ impl WebGL2Renderer {
                                 }
                                 let bbox_w = if max_ix >= min_ix { max_ix - min_ix + 1 } else { 0 };
                                 let bbox_h = if max_iy >= min_iy { max_iy - min_iy + 1 } else { 0 };
-                                web_sys::console::log_1(&format!(
+                                debug!(
                                     "[webgl2.text.pfr.char.metrics] i={} code={} ink_px={} bbox={}x{}",
                                     char_i, glyph_code as u32, ink_px, bbox_w, bbox_h
-                                ).into());
+                                );
                             } else {
-                                web_sys::console::log_1(&format!(
+                                debug!(
                                     "[webgl2.text.pfr.char] i={} ch='{}' code={} below first_char_num={} -> skipped",
                                     char_i,
                                     ch,
                                     glyph_code as u32,
                                     font.first_char_num
-                                ).into());
+                                );
                             }
                         }
                         if use_tight_pfr {
@@ -3898,12 +3898,12 @@ impl WebGL2Renderer {
 
             if pfr_multi_span_styled {
                 if DEBUG_WEBGL2_TEXT {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[webgl2.text] PFR styled path spans={} line_spacing={} top_spacing={}",
                         styled_span_count,
                         render_line_spacing,
                         top_spacing
-                    ).into());
+                    );
                 }
                 #[derive(Clone)]
                 struct PfrRunStyle {
@@ -4065,7 +4065,7 @@ impl WebGL2Renderer {
                 if DEBUG_WEBGL2_TEXT {
                     let line_count = lines.len();
                     let max_line_width = lines.iter().map(|l| l.width).max().unwrap_or(0);
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[webgl2.text.pfr.styled] lines={} max_line_width={} box={}x{} y_start={} line_h={} spacing={} wrap={}",
                         line_count,
                         max_line_width,
@@ -4075,7 +4075,7 @@ impl WebGL2Renderer {
                         line_height,
                         render_line_spacing,
                         word_wrap
-                    ).into());
+                    );
                 }
 
                 for line in lines {
@@ -4179,14 +4179,14 @@ impl WebGL2Renderer {
                     let effective_lh = if render_line_spacing > 0 { render_line_spacing as i32 } else { line_height };
                     let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
                     if DEBUG_WEBGL2_TEXT {
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[webgl2.text.pfr.styled] line width={} start_x={} y={} step={} next_y={}",
                             line.width,
                             start_x,
                             y,
                             line_step,
                             y + line_step
-                        ).into());
+                        );
                     }
                     y += line_step;
                 }
@@ -4240,7 +4240,7 @@ impl WebGL2Renderer {
                         })
                         .max()
                         .unwrap_or(0);
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[webgl2.text.bitmap] lines={} max_line_width={} box={}x{} y_start={} line_h={} spacing={} wrap={} align='{}'",
                         lines_to_draw.len(),
                         max_line_width,
@@ -4251,29 +4251,29 @@ impl WebGL2Renderer {
                         render_line_spacing,
                         word_wrap,
                         alignment_key
-                    ).into());
+                    );
                 }
 
                 for line in lines_to_draw {
                     if DEBUG_WEBGL2_TEXT {
                         let line_width: i32 = line.chars().map(|c| font.get_char_advance(c as u8) as i32).sum();
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[webgl2.text.bitmap] draw line_w={} y={} text='{}'",
                             line_width,
                             y,
                             line.chars().take(60).collect::<String>()
-                        ).into());
+                        );
                     }
                     render_line(&line, y, &mut text_bitmap);
                     let effective_lh = if render_line_spacing > 0 { render_line_spacing as i32 } else { line_height };
                     let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
                     if DEBUG_WEBGL2_TEXT && is_pfr_font {
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[webgl2.text.pfr.simple] step={} next_y={} h={}",
                             line_step,
                             y + line_step,
                             render_height
-                        ).into());
+                        );
                     }
                     y += line_step;
                 }
