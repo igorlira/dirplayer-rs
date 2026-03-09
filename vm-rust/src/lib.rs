@@ -6,6 +6,7 @@ pub mod rendering_gpu;
 pub mod utils;
 
 use async_std::task::spawn_local;
+use log::debug;
 use js_api::JsApi;
 use num::ToPrimitive;
 use utils::set_panic_hook;
@@ -464,9 +465,7 @@ pub fn clear_font_cache() {
         player.font_manager.fonts.clear();
         player.font_manager.font_by_id.clear();
         player.font_manager.font_counter = 0;
-        web_sys::console::log_1(
-            &format!("[clear_font_cache] Cleared {} cached fonts. Reload movie to re-rasterize.", count).into()
-        );
+        debug!("[clear_font_cache] Cleared {} cached fonts. Reload movie to re-rasterize.", count);
     });
 }
 

@@ -56,7 +56,7 @@ use cast_member::{CastMemberType, CastMemberTypeId};
 use datum_ref::DatumRef;
 use fxhash::FxHashMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use net_manager::NetManager;
 use profiling::{end_profiling, start_profiling};
@@ -457,7 +457,7 @@ impl DirPlayer {
         self.is_script_paused = false;
 
         use crate::js_api::safe_string;
-        web_sys::console::log_1(&format!("Loading Movie: {} (version: {})", safe_string(&self.movie.file_name), self.movie.dir_version).into());
+        debug!("Loading Movie: {} (version: {})", safe_string(&self.movie.file_name), self.movie.dir_version);
 
         async_std::task::spawn_local(async move {
             run_movie_init_sequence().await;
@@ -1215,7 +1215,7 @@ impl DirPlayer {
             }
             "datumSnapshot" => {
                 self.allocator.take_datum_snapshot();
-                web_sys::console::log_1(&"Datum snapshot taken. Use 'put the datumStats' to see new datums since snapshot.".into());
+                debug!("Datum snapshot taken. Use 'put the datumStats' to see new datums since snapshot.");
                 Ok(DatumRef::Void)
             }
             "datumLeakScan" => {
@@ -2555,9 +2555,7 @@ async fn run_movie_init_sequence() {
                     });
                     return;
                 }
-                web_sys::console::log_1(
-                    &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
-                );
+                error!("⚠ stepFrame[{}] error: {}", idx, err.message);
                 reserve_player_mut(|player| {
                     player.on_script_error(&err);
                     player.is_in_frame_update = false;
