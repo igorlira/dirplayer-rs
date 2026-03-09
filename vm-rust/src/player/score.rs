@@ -356,9 +356,19 @@ impl Score {
                             script_get_prop_opt(player, &script_instance_ref, &prop_name)
                         {
                             let existing_datum = player.get_datum(&existing);
-
-                            matches!(existing_datum, Datum::Void)
+                            let is_void = matches!(existing_datum, Datum::Void);
+                            debug!("  [getPropertyDescriptionList] Property '{}' exists with type {:?}, is_void: {}", 
+                                prop_name, existing_datum.type_enum(), is_void);
+                            if !is_void {
+                                match existing_datum {
+                                    Datum::String(s) => debug!("    Existing value: {:?}", s),
+                                    Datum::Int(n) => debug!("    Existing value: {}", n),
+                                    _ => {}
+                                }
+                            }
+                            is_void
                         } else {
+                            debug!("  [getPropertyDescriptionList] Property '{}' does not exist, will set default", prop_name);
                             true
                         };
 
@@ -366,23 +376,34 @@ impl Score {
                             // Find the default value
                             for (key_name, default_value_ref) in desc_props {
                                 if key_name == "default" {
+                                    let default_value = player.get_datum(&default_value_ref);
+                                    debug!("    [getPropertyDescriptionList] Will set default for '{}' to {:?}", 
+                                        prop_name, default_value.type_enum());
                                     defaults_to_set.push((prop_name.clone(), default_value_ref));
 
                                     break;
                                 }
                             }
+                        } else {
+                            debug!("    [getPropertyDescriptionList] Skipping default for '{}' (already has value)", prop_name);
                         }
                     }
 
                     // Third pass: set all defaults
+                    debug!("  [getPropertyDescriptionList] Setting {} default values", defaults_to_set.len());
                     for (prop_name, default_value_ref) in defaults_to_set {
-                        let _ = script_set_prop(
+                        let default_value = player.get_datum(&default_value_ref);
+                        debug!("    [getPropertyDescriptionList] Setting '{}' = {:?}", prop_name, default_value.type_enum());
+                        let result = script_set_prop(
                             player,
                             &script_instance_ref,
                             &prop_name,
                             &default_value_ref,
                             false,
                         );
+                        if let Err(e) = result {
+                            debug!("      ⚠️ Failed: {}", e.message);
+                        }
                     }
                 }
 
@@ -1357,14 +1378,24 @@ impl Score {
 
                         // Apply behavior parameters from initializer data
                         if !behavior.parameter.is_empty() {
+                            debug!("🔧 [sprite_details] Applying {} saved parameters for behavior cast {}/{}", 
+                                behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
                             reserve_player_mut(|player| {
                                 for param_ref in &behavior.parameter {
                                     let param_datum = player.get_datum(param_ref);
+                                    debug!("  [sprite_details] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
                                         let props_to_set: Vec<(String, DatumRef)> = props.iter()
                                             .filter_map(|(key_ref, value_ref)| {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
+                                                    let value = player.get_datum(value_ref);
+                                                    debug!("    [sprite_details] prop: {} type: {:?}", key_name, value.type_enum());
+                                                    match value {
+                                                        Datum::String(s) => debug!("      [sprite_details] value: {:?}", s),
+                                                        Datum::Int(n) => debug!("      [sprite_details] value: {}", n),
+                                                        _ => debug!("      [sprite_details] value: <{:?}>", value.type_enum()),
+                                                    }
                                                     Some((key_name.clone(), value_ref.clone()))
                                                 } else {
                                                     None
@@ -1372,18 +1403,27 @@ impl Score {
                                             })
                                             .collect();
                                         for (prop_name, value_ref) in props_to_set {
-                                            let _ = script_set_prop(
+                                            debug!("      [sprite_details] Setting property {} on script instance", prop_name);
+                                            let result = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
                                                 &prop_name,
                                                 &value_ref,
                                                 false,
                                             );
+                                            if let Err(e) = result {
+                                                debug!("      [sprite_details] ⚠️ Failed to set property {}: {}", prop_name, e.message);
+                                            } else {
+                                                debug!("      [sprite_details] ✅ Successfully set property {}", prop_name);
+                                            }
                                         }
                                     }
                                 }
                                 Ok::<(), ScriptError>(())
                             }).expect("Failed to set sprite detail behavior parameters");
+                        } else {
+                            debug!("⚠️ [sprite_details] No parameters to apply for behavior cast {}/{}", 
+                                behavior.cast_lib, behavior.cast_member);
                         }
 
                         // Attach behavior to sprite
@@ -1609,14 +1649,24 @@ impl Score {
 
                         // Apply behavior parameters
                         if !behavior.parameter.is_empty() {
+                            debug!("🔧 [delta-data] Applying {} saved parameters for behavior cast {}/{}", 
+                                behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
                             reserve_player_mut(|player| {
                                 for param_ref in &behavior.parameter {
                                     let param_datum = player.get_datum(param_ref);
+                                    debug!("  [delta-data] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
                                         let props_to_set: Vec<(String, DatumRef)> = props.iter()
                                             .filter_map(|(key_ref, value_ref)| {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
+                                                    let value = player.get_datum(value_ref);
+                                                    debug!("    [delta-data] prop: {} type: {:?}", key_name, value.type_enum());
+                                                    match value {
+                                                        Datum::String(s) => debug!("      [delta-data] value: {:?}", s),
+                                                        Datum::Int(n) => debug!("      [delta-data] value: {}", n),
+                                                        _ => debug!("      [delta-data] value: <{:?}>", value.type_enum()),
+                                                    }
                                                     Some((key_name.clone(), value_ref.clone()))
                                                 } else {
                                                     None
@@ -1624,18 +1674,27 @@ impl Score {
                                             })
                                             .collect();
                                         for (prop_name, value_ref) in props_to_set {
-                                            let _ = script_set_prop(
+                                            debug!("      [delta-data] Setting property {} on script instance", prop_name);
+                                            let result = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
                                                 &prop_name,
                                                 &value_ref,
                                                 false,
                                             );
+                                            if let Err(e) = result {
+                                                debug!("      [delta-data] ⚠️ Failed to set property {}: {}", prop_name, e.message);
+                                            } else {
+                                                debug!("      [delta-data] ✅ Successfully set property {}", prop_name);
+                                            }
                                         }
                                     }
                                 }
                                 Ok::<(), ScriptError>(())
                             }).expect("Failed to set behavior parameters");
+                        } else {
+                            debug!("⚠️ [delta-data] No parameters to apply for behavior cast {}/{}", 
+                                behavior.cast_lib, behavior.cast_member);
                         }
 
                         let score_ref_clone = score_ref.clone();

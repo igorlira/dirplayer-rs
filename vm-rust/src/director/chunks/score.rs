@@ -1196,12 +1196,16 @@ impl ScoreChunk {
                 if cast_member > 0 && cast_member < 10000 {
                     let mut parameter = Vec::new();
                     // Parse initializer data from entries[initializer_idx]
+                    debug!("Behavior cast={}/{} initializer_idx={}", cast_lib, cast_member, initializer_idx);
                     if initializer_idx > 0 && (initializer_idx as usize) < entries.len() {
+                        debug!("  Found initializer entry at index {}, size: {} bytes", initializer_idx, entries[initializer_idx as usize].len());
                         if let Ok(proplist_string) = String::from_utf8(entries[initializer_idx as usize].clone()) {
                             let clean = proplist_string.trim_end_matches('\0');
+                            debug!("  Initializer string: {:?}", clean);
                             if clean.starts_with('[') {
                                 match eval_lingo_expr_static(clean.to_owned()) {
                                     Ok(proplist) => {
+                                        debug!("  ✅ Successfully parsed initializer proplist");
                                         parameter.push(proplist);
                                     }
                                     Err(e) => {
@@ -1210,8 +1214,16 @@ impl ScoreChunk {
                                         );
                                     }
                                 }
+                            } else {
+                                debug!("  ⚠️ Initializer string doesn't start with '[': {:?}", &clean[..clean.len().min(50)]);
                             }
+                        } else {
+                            debug!("  ⚠️ Initializer entry is not valid UTF-8");
                         }
+                    } else if initializer_idx > 0 {
+                        warn!("  ⚠️ initializer_idx {} is out of range (entries.len = {})", initializer_idx, entries.len());
+                    } else {
+                        debug!("  No initializer data (initializer_idx=0)");
                     }
                     info.behaviors.push(SpriteBehavior { cast_lib, cast_member, parameter });
                 }
