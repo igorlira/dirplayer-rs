@@ -1432,11 +1432,11 @@ impl Score {
                     cast_lib: sprite_cast_lib,
                     cast_member: data.cast_member as i32,
                 };
-                web_sys::console::log_1(&format!(
+                debug!(
                     "D5 sprite ch={}: scriptId=({},{}), sprite_member=({},{})",
                     channel_num, resolved_cast_lib, script_member,
                     sprite_cast_lib, data.cast_member
-                ).into());
+                );
 
                 let behavior_result = Self::create_behavior(
                     resolved_cast_lib,
@@ -3962,9 +3962,9 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 (sprite.width, sprite.height)
             } else {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose DEFAULT (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned={})",
+                    debug!("Sprite {}: chose DEFAULT (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned={})",
                         sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height,
-                        aspect_ratio_matches, sprite.has_size_changed, sprite.bitmap_size_owned_by_sprite).into());
+                        aspect_ratio_matches, sprite.has_size_changed, sprite.bitmap_size_owned_by_sprite);
                 }
                 // Use sprite's explicit dimensions (default case)
                 (sprite.width, sprite.height)

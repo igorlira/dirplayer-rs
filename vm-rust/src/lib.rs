@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 #[macro_use]
 extern crate pest_derive;
 
-mod director;
+pub mod director;
 
 use player::{
     cast_lib::{cast_member_ref, CastMemberRef},
