@@ -1,3 +1,4 @@
+use log::error;
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType},
     player::{
@@ -244,9 +245,7 @@ impl ScriptDatumHandlers {
                 {
                     Ok(scope) => scope,
                     Err(err) => {
-                        web_sys::console::log_1(
-                            &format!("❌ Error in {}.new(): {}", script_name, err.message).into(),
-                        );
+                        error!("❌ Error in {}.new(): {}", script_name, err.message);
                         return Err(err);
                     }
                 };

@@ -1397,17 +1397,17 @@ impl CastMember {
             let Some(Chunk::XMedia(xm)) = opt_child else { continue };
 
             let member_name = chunk.member_info.as_ref().map(|i| i.name.as_str()).unwrap_or("");
-            web_sys::console::log_1(&format!("Checking XMedia child (member #{}, name='{}', {} bytes)", number, member_name, xm.raw_data.len()).into());
+            debug!("Checking XMedia child (member #{}, name='{}', {} bytes)", number, member_name, xm.raw_data.len());
 
             // 1) If SWF: return SWF
             if let Some(cm) = Self::try_parse_swf(xm.raw_data.to_vec(), number, chunk) {
-                web_sys::console::log_1(&"Detected as SWF".into());
+                debug!("Detected as SWF");
                 return Some(cm);
             }
 
             // 2) Check if styled text (XMED format)
             if let Some(styled_text) = xm.parse_styled_text() {
-                web_sys::console::log_1(&"Detected as XMED styled text".into());
+                debug!("Detected as XMED styled text");
                 return Some(Self::create_text_member_from_xmed(
                     number,
                     chunk,
@@ -1416,7 +1416,7 @@ impl CastMember {
             }
 
             // 3) Font logic
-            web_sys::console::log_1(&"Falling through to font parsing".into());
+            debug!("Falling through to font parsing");
             return Some(Self::parse_xmedia_font(member_def, number, chunk, xm, bitmap_manager));
         }
         None
@@ -2160,7 +2160,7 @@ impl CastMember {
                     None
                 };
 
-                web_sys::console::log_1(&format!("Shape member {} script_id={}", number, script_id).into());
+                debug!("Shape member {} script_id={}", number, script_id);
 
                 CastMemberType::Shape(ShapeMember {
                     shape_info: chunk.specific_data.shape_info().unwrap().clone(),
