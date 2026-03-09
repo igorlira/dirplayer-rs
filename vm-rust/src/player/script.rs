@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
-
+use log::warn;
 use crate::director::{
     chunks::{handler::HandlerDef, script::ScriptChunk},
     enums::ScriptType,
@@ -221,15 +221,16 @@ pub fn script_get_prop(
     } else {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         let valid_props = script_instance.properties.keys().collect_vec();
-        Err(ScriptError::new(format!(
-            "Cannot get property {} found on script instance {}. Valid properties are: {}",
+        warn!("Cannot get property {} found on script instance {}. Valid properties are: {}",
             prop_name,
             format_concrete_datum(
                 &Datum::ScriptInstanceRef(script_instance_ref.clone()),
                 player
             ),
             valid_props.iter().join(", ")
-        )))
+        );
+        // documentation says getaProp should return VOID for nonexistent properties
+        Ok(DatumRef::Void)
     }
 }
 
