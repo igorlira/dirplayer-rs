@@ -2,6 +2,7 @@ use std::{collections::HashMap, iter::FromIterator};
 
 use itertools::Itertools;
 use js_sys::{Array, Object};
+use log::debug;
 use wasm_bindgen::prelude::*;
 
 use crate::{
@@ -1281,10 +1282,10 @@ impl JsApi {
 
         let member_ref = &channel.sprite.member.as_ref();
         if member_ref.is_none() || !member_ref.unwrap().is_valid() {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "get_channel_snapshot: ch{} member_ref is None or invalid, puppet={}",
                 channel_num, channel.sprite.puppet
-            ).into());
+            );
             return result;
         }
         let member_ref = member_ref.unwrap();
