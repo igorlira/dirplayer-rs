@@ -34,7 +34,7 @@ where
             .movie
             .cast_manager
             .find_mut_member_by_ref(&member_ref)
-            .unwrap();
+            .expect("cast member ref should be valid in borrow_member_mut");
         f(member, arg)
     })
 }
@@ -77,8 +77,8 @@ impl CastMemberRefHandlers {
                         .movie
                         .cast_manager
                         .find_member_by_ref(&cast_member_ref)
-                        .unwrap();
-                    let text_data = cast_member.member_type.as_text().unwrap();
+                        .expect("cast member ref should be valid in charPosToLoc");
+                    let text_data = cast_member.member_type.as_text().expect("charPosToLoc only works on text members");
                     let char_pos = player.get_datum(&args[0]).int_value()? as u16;
                     let char_width: i32 = 7;
                     let line_height: i32 = get_text_member_line_height(&text_data) as i32;
@@ -183,7 +183,7 @@ impl CastMemberRefHandlers {
                 .movie
                 .cast_manager
                 .find_member_by_ref(&member_ref)
-                .unwrap();
+                .expect("cast member ref should be valid in call_member_type");
             match &cast_member.member_type {
                 CastMemberType::Field(_) => {
                     FieldMemberHandlers::call(player, datum, handler_name, args)
@@ -225,14 +225,14 @@ impl CastMemberRefHandlers {
                     ))
                 }
             };
-            let dest_slot_number = args.get(0).map(|x| player.get_datum(x).int_value());
-
-            if dest_slot_number.is_none() {
+            let Some(dest_slot_number) = args.get(0).map(|x| player.get_datum(x).int_value()) else {
                 return Err(ScriptError::new(
                     "Cannot duplicate cast member without destination slot number".to_string(),
                 ));
-            }
-            let dest_slot_number = dest_slot_number.unwrap()?;
+            };
+
+            let dest_slot_number = dest_slot_number?;
+            
             let dest_ref = Self::member_ref_from_slot_number(dest_slot_number as u32);
 
             let mut new_member = {
@@ -240,12 +240,15 @@ impl CastMemberRefHandlers {
                     .movie
                     .cast_manager
                     .find_member_by_ref(&cast_member_ref);
-                if src_member.is_none() {
-                    return Err(ScriptError::new(
-                        "Cannot duplicate non-existent cast member reference".to_string(),
-                    ));
+                match src_member {
+                    Some(m) => m.clone(),
+                    None => {
+                        return Err(ScriptError::new(format!(
+                            "Cannot duplicate cast member: source member not found (castLib {}, member {})",
+                            cast_member_ref.cast_lib, cast_member_ref.cast_member
+                        )));
+                    }
                 }
-                src_member.unwrap().clone()
             };
             new_member.number = dest_ref.cast_member as u32;
 
@@ -547,7 +550,7 @@ impl CastMemberRefHandlers {
                             .movie
                             .cast_manager
                             .find_mut_member_by_ref(member_ref)
-                            .unwrap();
+                            .expect("cast member ref should be valid in set_member_type_prop");
 
                         // If not already a bitmap, convert it
                         if cast_member.member_type.as_bitmap().is_none() {
