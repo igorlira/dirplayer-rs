@@ -6,7 +6,7 @@ use crate::player::sprite::ColorRef;
 
 use super::{bitmap::Bitmap, palette_map::PaletteMap};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BitmapMask {
     pub width: u16,
     pub height: u16,

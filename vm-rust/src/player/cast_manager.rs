@@ -343,7 +343,7 @@ impl CastManager {
                 "Cast number or name invalid: {}",
                 cast_name_or_num
                     .map(|x| x.type_str())
-                    .unwrap_or("None".to_string())
+                    .unwrap_or("None")
             );
             None
         };
