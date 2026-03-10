@@ -742,7 +742,7 @@ impl DirPlayer {
     }
 
     #[allow(dead_code)]
-    pub fn get_global(&self, name: &String) -> Option<&Datum> {
+    pub fn get_global(&self, name: &str) -> Option<&Datum> {
         self.globals
             .get(name)
             .map(|datum_ref| self.get_datum(datum_ref))
@@ -1399,16 +1399,16 @@ impl DirPlayer {
         }
     }
 
-    fn get_player_prop(&mut self, prop: &String) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+    fn get_player_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
+        match prop {
             "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
             "productVersion" => Ok(self.alloc_datum(Datum::String("10.1".to_string()))), // TODO
             _ => Err(ScriptError::new(format!("Unknown player prop {}", prop))),
         }
     }
 
-    fn set_player_prop(&mut self, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
-        match prop.as_str() {
+    fn set_player_prop(&mut self, prop: &str, value: &DatumRef) -> Result<(), ScriptError> {
+        match prop {
             "itemDelimiter" => {
                 let value = self.get_datum(value);
                 self.movie.item_delimiter = (value.string_value()?).chars().next().unwrap();
@@ -1907,7 +1907,7 @@ pub fn player_handle_scope_return(scope: &ScopeResult) {
 }
 
 pub async fn player_call_global_handler(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     let receiver_handler = unsafe {

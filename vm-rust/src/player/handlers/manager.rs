@@ -514,8 +514,8 @@ impl BuiltInHandlerManager {
         result
     }
 
-    pub fn has_async_handler(name: &String) -> bool {
-        match name.as_str() {
+    pub fn has_async_handler(name: &str) -> bool {
+        match name {
             "call" => true,
             "new" => true,
             "newObject" => true,
@@ -532,10 +532,10 @@ impl BuiltInHandlerManager {
     }
 
     pub async fn call_async_handler(
-        name: &String,
+        name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match name.as_str() {
+        match name {
             "call" => Self::call(args).await,
             "new" => TypeHandlers::new(args).await,
             "newObject" => TypeHandlers::new_object(args).await,
@@ -554,8 +554,8 @@ impl BuiltInHandlerManager {
         }
     }
 
-    pub fn call_handler(name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        match name.as_str().to_lowercase().as_str() {
+    pub fn call_handler(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        match name.to_lowercase().as_str() {
             "castlib" => CastHandlers::cast_lib(args),
             "preloadnetthing" => NetHandlers::preload_net_thing(args),
             "netdone" => NetHandlers::net_done(args),
@@ -896,12 +896,14 @@ impl BuiltInHandlerManager {
             _ => {
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
                 if !args.is_empty() {
-                    let xtra_info = reserve_player_ref(|player| {
-                        player.get_datum(&args[0]).to_xtra_instance().map(|(n, id)| (n.clone(), *id)).ok()
-                    });
-                    if let Some((xtra_name, instance_id)) = xtra_info {
-                        let remaining_args = args[1..].to_vec();
-                        return call_xtra_instance_handler(&xtra_name, instance_id, &name.to_string(), &remaining_args);
+                    if let Some(res) = reserve_player_ref(|player| {
+                        if let Ok((xtra_name, instance_id)) = player.get_datum(&args[0]).to_xtra_instance() {
+                            let remaining_args = args[1..].to_vec();
+                            return Some(call_xtra_instance_handler(&xtra_name, *instance_id, &name.to_string(), &remaining_args));
+                        }
+                        None
+                    }) {
+                        return res;
                     }
                 }
                 let formatted_args = reserve_player_ref(|player| {

@@ -12,10 +12,10 @@ impl TimeoutDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "forget" => Self::forget(datum, args),
             "setAt" => Self::set_at(datum, args),
             _ => Err(ScriptError::new(format!(
@@ -41,8 +41,8 @@ impl TimeoutDatumHandlers {
         })
     }
 
-    pub fn has_async_handler(name: &String) -> bool {
-        match name.as_str() {
+    pub fn has_async_handler(name: &str) -> bool {
+        match name {
             "new" => true,
             _ => false,
         }
@@ -50,10 +50,10 @@ impl TimeoutDatumHandlers {
 
     pub async fn call_async(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "new" => Self::new(datum, args).await,
             "forget" => Self::forget_async(datum).await,
             _ => Err(ScriptError::new(format!(
@@ -276,13 +276,13 @@ impl TimeoutDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let timeout_datum = player.get_datum(datum);
         match timeout_datum {
             Datum::TimeoutRef(timeout_name) => {
                 let timeout = player.timeout_manager.get_timeout(timeout_name);
-                match prop.as_str() {
+                match prop {
                     "name" => Ok(player.alloc_datum(Datum::String(timeout_name.to_owned()))),
                     "target" => Ok(timeout.map_or(DatumRef::Void, |x| x.target_ref.clone())),
                     _ => Err(ScriptError::new(format!(
@@ -292,7 +292,7 @@ impl TimeoutDatumHandlers {
                 }
             }
             Datum::TimeoutInstance { name, target, .. } => {
-                match prop.as_str() {
+                match prop {
                     "name" => Ok(player.alloc_datum(Datum::String(name.to_owned()))),
                     "target" => Ok(target.clone()),
                     _ => Err(ScriptError::new(format!(
@@ -310,7 +310,7 @@ impl TimeoutDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
         let timeout_datum = player.get_datum(datum);
@@ -323,7 +323,7 @@ impl TimeoutDatumHandlers {
         };
         
         let timeout = player.timeout_manager.get_timeout_mut(&timeout_name);
-        match prop.as_str() {
+        match prop {
             "target" => {
                 let new_target = value;
                 if let Some(timeout) = timeout {

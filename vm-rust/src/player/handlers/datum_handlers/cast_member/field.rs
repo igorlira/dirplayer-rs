@@ -15,10 +15,10 @@ impl FieldMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "count" => {
                 let member_ref = player.get_datum(datum).to_member_ref()?;
                 let member = player
@@ -97,7 +97,7 @@ impl FieldMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -106,7 +106,7 @@ impl FieldMemberHandlers {
             .unwrap();
         let field = member.member_type.as_field().unwrap();
 
-        match prop.as_str() {
+        match prop {
             "text" => Ok(Datum::String(field.text.to_owned())),
             "font" => Ok(Datum::String(field.font.to_owned())),
             "fontSize" => Ok(Datum::Int(field.font_size as i32)),
@@ -235,7 +235,7 @@ impl FieldMemberHandlers {
                     measured_h
                 };
 
-                match prop.as_str() {
+                match prop {
                     "rect" => Ok(Datum::Rect([
                         player.alloc_datum(Datum::Int(0)),
                         player.alloc_datum(Datum::Int(0)),
@@ -314,10 +314,10 @@ impl FieldMemberHandlers {
 
     pub fn set_prop(
         member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop {
             "text" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),

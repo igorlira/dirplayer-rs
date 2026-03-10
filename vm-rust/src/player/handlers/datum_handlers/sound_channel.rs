@@ -138,7 +138,7 @@ impl SoundChannelDatumHandlers {
     pub fn call(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         let handler_name_lower = handler_name.to_lowercase();
@@ -248,7 +248,7 @@ impl SoundChannelDatumHandlers {
     pub fn get_prop(
         player: &DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         // Get the Rc<RefCell<SoundChannel>>
         let channel_rc = Self::get_sound_channel(player, datum)?;
@@ -256,7 +256,7 @@ impl SoundChannelDatumHandlers {
         // Borrow the inner SoundChannel
         let channel = channel_rc.borrow();
 
-        match prop.as_str() {
+        match prop {
             "volume" => Ok(Datum::Float(channel.volume as f64)),
             "duration" => Ok(Datum::Float(channel.get_duration() as f64)),
             "pan" => Ok(Datum::Float(channel.pan as f64)),
@@ -281,10 +281,10 @@ impl SoundChannelDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop {
             "volume" => {
                 let vol = player.get_datum(value_ref).float_value()?;
                 Self::set_sound_volume(player, datum, vol)?;
