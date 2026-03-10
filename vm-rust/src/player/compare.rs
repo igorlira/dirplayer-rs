@@ -1,7 +1,10 @@
 use log::warn;
 
 use crate::{console_warn, director::lingo::datum::{Datum, DatumType}};
-
+use crate::director::lingo::datum;
+use crate::director::lingo::datum::Datum::{Null, Void};
+use crate::player::bitmap::bitmap;
+use crate::player::bitmap::manager::INVALID_BITMAP_REF;
 use super::{
     allocator::{DatumAllocator, DatumAllocatorTrait},
     bitmap::bitmap::PaletteRef,
@@ -9,51 +12,90 @@ use super::{
     DatumRef, ScriptError,
 };
 
+#[inline]
+fn seq_equals(left_seq: &[DatumRef], right_seq: &[DatumRef], allocator: &DatumAllocator) -> Result<bool, ScriptError> {
+    if left_seq.len() != right_seq.len() {
+        return Ok(false);
+    }
+    for (left_item, right_item) in left_seq.iter().zip(right_seq.iter()) {
+        let left_item = allocator.get_datum(left_item);
+        let right_item = allocator.get_datum(right_item);
+        if !datum_equals(left_item, right_item, allocator)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub fn datum_equals(
     left: &Datum,
     right: &Datum,
     allocator: &DatumAllocator,
 ) -> Result<bool, ScriptError> {
+    use Datum::*;
     match (left, right) {
-        (Datum::Int(left), Datum::Int(right)) => Ok(*left == *right),
-        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) == *right), // TODO: is this correct? Flutter compares ints instead
-        (Datum::Int(left), Datum::Void) => Ok(*left == 0),
-        // Handle string-to-int comparison (e.g., "2" should match key 2)
-        (Datum::String(s), Datum::Int(i)) | (Datum::Int(i), Datum::String(s)) => {
-            Ok(s.parse::<i32>().ok() == Some(*i))
-        }
-        (Datum::Float(left), Datum::Int(right)) => Ok(*left == (*right as f64)),
-        (Datum::Float(left), Datum::Float(right)) => Ok(*left == *right),
+        (Int(i), other) | (other, Int(i)) => Ok(match other {
+            Int(other_i) => *i == *other_i,
+            Float(f) => (*i as f64) == *f, // TODO: is this correct? Flutter compares ints instead
+            String(s) => s.parse::<i32>().ok() == Some(*i), // Handle string-to-int comparison (e.g., "2" should match key 2)
+            sc @ StringChunk(..) => sc.string_value()?.parse::<i32>().ok() == Some(*i),
+            Void | Null => *i == 0,
+            _ => false,
+        }),
+
+        (Float(f), other) | (other, Float(f)) => Ok(match other {
+            Float(other_f) => *f == *other_f,
+            Void | Null => *f == 0.0,
+            _ => false,
+        }),
+
         // String equality: case-insensitive (like Director `=` operator)
-        (Datum::String(l), Datum::String(r)) => Ok(l.eq_ignore_ascii_case(r)),
-        // StringChunk comparison for equality: case-insensitive too
-        (Datum::StringChunk(..), Datum::String(right)) => {
-            let left_val = left.string_value()?;
-            Ok(left_val.eq_ignore_ascii_case(right))
-        }
-        (Datum::String(left), Datum::StringChunk(..)) => {
-            let right_val = right.string_value()?;
-            Ok(left.eq_ignore_ascii_case(&right_val))
-        }
-        (Datum::StringChunk(..), Datum::StringChunk(..)) => {
-            let left_val = left.string_value()?;
-            let right_val = right.string_value()?;
-            Ok(left_val.eq_ignore_ascii_case(&right_val))
-        }
-        (Datum::ScriptInstanceRef(left), Datum::ScriptInstanceRef(right)) => Ok(**left == **right),
-        (Datum::Symbol(left), Datum::Symbol(right)) => Ok(left.eq_ignore_ascii_case(right)),
-        (Datum::Void, Datum::Void) => Ok(true),
-        (Datum::ColorRef(left), Datum::ColorRef(right)) => Ok(*left == *right),
-        (Datum::Int(_), Datum::Symbol(_)) => Ok(false),
-        (Datum::Void, Datum::Int(right)) => Ok(*right == 0),
-        (Datum::String(_), Datum::ScriptInstanceRef(_)) => Ok(false),
-        (Datum::CastMember(member_ref), Datum::Void) => Ok(!member_ref.is_valid()), // TODO return true if member is empty?
-        (Datum::ScriptInstanceRef(_), Datum::Int(_)) => Ok(false),
-        (Datum::Point(_), Datum::Int(_)) 
-        | (Datum::Int(_), Datum::Point(_))
-        | (Datum::Rect(_), Datum::Int(_))
-        | (Datum::Int(_), Datum::Rect(_)) => Ok(false),
-        (Datum::PropList(pairs_a, _), Datum::PropList(pairs_b, _)) => {
+        (s @ (String(_) | StringChunk(..)), other) | (other, s @ (String(_) | StringChunk(..))) => Ok({
+            let sstr = s.string_value_cow().expect("cannot fail");
+            match other {
+                String(_) | StringChunk(..) => sstr.eq_ignore_ascii_case(&other.string_value_cow().expect("cannot fail")), // Case-insensitive comparison for String and StringChunk
+                _ => false,
+            }
+        }),
+
+        (Void | Null, x) | (x, Void | Null) => Ok(match x {
+            Void | Null => true,
+            VarRef(datum::VarRef::Script(var_ref)) => !var_ref.is_valid(),
+            CastMember(member_ref) => !member_ref.is_valid(), // TODO return true if member is empty?
+            BitmapRef(b) => *b == INVALID_BITMAP_REF,
+            _ => false,
+        }),
+
+        (VarRef(a), o) | (o, VarRef(a)) => Ok(match o {
+            VarRef(b) => match (a, b) {
+                (datum::VarRef::Script(va), datum::VarRef::Script(vb)) => {
+                    !va.is_valid() && !vb.is_valid() || // Both invalid = equal
+                        CastMemberRefHandlers::get_cast_slot_number(
+                            va.cast_lib as u32,
+                            va.cast_member as u32,
+                        ) == CastMemberRefHandlers::get_cast_slot_number(
+                            vb.cast_lib as u32,
+                            vb.cast_member as u32,
+                        )
+                },
+                (datum::VarRef::ScriptInstance(va), datum::VarRef::ScriptInstance(vb)) => {
+                    **va == **vb
+                },
+                _ => false
+            },
+            _ => false
+        }),
+
+        (List(_, l, _), other) | (other, List(_, l, _)) => Ok({
+            match other {
+                List(_, r, _) => seq_equals(l, r, allocator)?,
+                Point(point) => seq_equals(l, point, allocator)?, // Director treats 2-element lists and points interchangeably
+                Rect(rect) => seq_equals(l, rect, allocator)?, // Director treats 4-element lists and rects interchangeably
+                _ => false
+            }
+        }),
+
+        (PropList(pairs_a, _), PropList(pairs_b, _)) => {
             // Fast path: same datum in memory (same DatumRef)
             if std::ptr::eq(left, right) {
                 return Ok(true);
@@ -76,105 +118,155 @@ pub fn datum_equals(
             }
             Ok(true)
         }
-        (Datum::PropList(..), Datum::Int(_)) => Ok(false),
-        (Datum::BitmapRef(_), Datum::Void) => Ok(false),
-        (Datum::Symbol(_), Datum::CastMember(_)) => Ok(false),
-        (Datum::PaletteRef(_), Datum::CastMember(_)) => Ok(false), // TODO should we compare the cast member?
-        (Datum::Void, Datum::String(_)) => Ok(false),
-        (Datum::SpriteRef(_), Datum::Int(_)) => Ok(false),
-        (Datum::Symbol(_), Datum::StringChunk(..)) => Ok(false),
-        (Datum::Symbol(_), Datum::String(_)) => Ok(false),
-        (Datum::Symbol(_), Datum::Void) => Ok(false),
-        (Datum::String(_), Datum::Symbol(_)) => Ok(false),
-        (Datum::String(left), Datum::Int(right)) => Ok(right.to_string().eq(left)),
-        (Datum::List(_, left, _), Datum::List(_, right, _)) => {
-            if left.len() != right.len() {
-                return Ok(false);
-            }
-            for (left_item, right_item) in left.iter().zip(right.iter()) {
-                let left_item = allocator.get_datum(left_item);
-                let right_item = allocator.get_datum(right_item);
-                if !datum_equals(left_item, right_item, allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        (Datum::TimeoutRef(left), Datum::TimeoutRef(right)) => {
-            // TODO: they're only equal if the timeout has been scheduled
-            Ok(left == right)
-        }
-        (Datum::SpriteRef(left), Datum::SpriteRef(right)) => Ok(left == right),
-        (Datum::CastMember(left), Datum::CastMember(right)) => {
-            Ok(CastMemberRefHandlers::get_cast_slot_number(
-                left.cast_lib as u32,
-                left.cast_member as u32,
+
+        (Symbol(s), o) | (o, Symbol(s)) => Ok(match o {
+            Symbol(other) => s.eq_ignore_ascii_case(other),
+            _ => false
+        }),
+
+        (CastLib(a), o) | (o, CastLib(a)) => Ok(match o {
+            CastLib(b) => a == b,
+            _ => false
+        }),
+
+        (Stage, o) | (o, Stage) => Ok(matches!(o, Stage)),
+
+        (ScriptRef(a), o) | (o, ScriptRef(a)) => Ok(match o {
+            ScriptRef(b) => a == b,
+            _ => false
+        }),
+
+        (ScriptInstanceRef(a), o) | (o, ScriptInstanceRef(a)) => Ok(match o {
+            ScriptInstanceRef(b) => **a == **b,
+            _ => false
+        }),
+
+        (CastMember(a), o) | (o, CastMember(a)) => Ok(match o {
+            CastMember(b) => CastMemberRefHandlers::get_cast_slot_number(
+                a.cast_lib as u32,
+                a.cast_member as u32,
             ) == CastMemberRefHandlers::get_cast_slot_number(
-                right.cast_lib as u32,
-                right.cast_member as u32,
-            ))
-        }
-        (Datum::Point(left), Datum::Point(right)) => {
-            for i in 0..2 {
-                let left_val = allocator.get_datum(&left[i]);
-                let right_val = allocator.get_datum(&right[i]);
-                if !datum_equals(left_val, right_val, allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        // List-Point and Point-List comparison (Director treats 2-element lists and points interchangeably)
-        (Datum::List(_, list, _), Datum::Point(point)) | (Datum::Point(point), Datum::List(_, list, _)) => {
-            if list.len() != 2 {
-                return Ok(false);
-            }
-            for i in 0..2 {
-                let list_val = allocator.get_datum(&list[i]);
-                let point_val = allocator.get_datum(&point[i]);
-                if !datum_equals(list_val, point_val, allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        (Datum::Null, Datum::Int(_)) => Ok(false),
-        (Datum::PropList(..), Datum::Void) => Ok(false),
-        (Datum::Symbol(_), Datum::Int(_)) => Ok(false),
-        (Datum::PaletteRef(palette_ref), Datum::Symbol(symbol)) => match palette_ref {
-            PaletteRef::BuiltIn(palette) => {
-                Ok(palette.symbol_string().eq_ignore_ascii_case(&symbol))
-            }
-            _ => Ok(false),
-        },
-        (Datum::String(_), Datum::Void) => Ok(false),
-        (Datum::Void, Datum::Symbol(_)) => Ok(false),
-        (Datum::Rect(left), Datum::Rect(right)) => {
-            for i in 0..4 {
-                let left_val = allocator.get_datum(&left[i]);
-                let right_val = allocator.get_datum(&right[i]);
-                if !datum_equals(left_val, right_val, allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        (Datum::ColorRef(color_ref), Datum::String(string)) => {
-            warn!(
-                "Datum equals not supported for ColorRef and String: {:?} and {}",
-                color_ref, string
-            );
-            Ok(false)
-        }
-        (Datum::ScriptRef(a_ref), Datum::ScriptRef(b_ref)) => Ok(a_ref == b_ref),
-        _ => {
+                b.cast_lib as u32,
+                b.cast_member as u32,
+            ),
+            _ => false
+        }),
+
+        (SpriteRef(a), o) | (o, SpriteRef(a)) => Ok(match o {
+            SpriteRef(b) => a == b,
+            _ => false
+        }),
+
+        (Rect(a), o) | (o, Rect(a)) => Ok(match o {
+            Rect(b) => seq_equals(a, b, allocator)?,
+            _ => false
+        }),
+
+        (Point(a), o) | (o, Point(a)) => Ok(match o {
+            Point(b) => seq_equals(a, b, allocator)?,
+            List(_, list, _) if list.len() == 2 => seq_equals(a, list, allocator)?, // Director treats 2-element lists and points interchangeably
+            _ => false
+        }),
+
+        (SoundChannel(a), o) | (o, SoundChannel(a)) => Ok(match o {
+            SoundChannel(b) => a == b,
+            _ => false
+        }),
+
+        (CursorRef(a), o) | (o, CursorRef(a)) => Ok(match o {
+            // TODO: is equality based on value?
+            _ => false
+        }),
+
+        (TimeoutRef(a), o) | (o, TimeoutRef(a)) => Ok(match o {
+            TimeoutRef(b) => a == b,
+            _ => false
+        }),
+
+        (TimeoutFactory, o) | (o, TimeoutFactory) => Ok(matches!(o, TimeoutFactory)),
+
+        (TimeoutInstance { .. }, o) | (o, TimeoutInstance { .. }) => Ok(match o {
+            // TODO: is equality based on value?
+            _ => false
+        }),
+
+        (ColorRef(a), o) | (o, ColorRef(a)) => Ok(match o {
+            ColorRef(b) => a == b,
+            _ => false
+        }),
+
+        (BitmapRef(a), o) | (o, BitmapRef(a)) => Ok(match o {
+            BitmapRef(b) => a == b,
+            _ => false
+        }),
+
+        (PaletteRef(a), o) | (o, PaletteRef(a)) => Ok(match o {
+            PaletteRef(b) => a == b,
+            _ => false
+        }),
+
+        (SoundRef(a), o) | (o, SoundRef(a)) => Ok(match o {
+            SoundRef(b) => a == b,
+            _ => false
+        }),
+
+        (Xtra(a), o) | (o, Xtra(a)) => Ok(match o {
+            Xtra(b) => a == b,
+            _ => false
+        }),
+
+        (XtraInstance(a, ai), o) | (o, XtraInstance(a, ai)) => Ok(match o {
+            XtraInstance(b, bi) => a == b && ai == bi,
+            _ => false
+        }),
+
+        (Matte(a), o) | (o, Matte(a)) => Ok(match o {
+            Matte(b) => a == b,
+            _ => false
+        }),
+
+        (PlayerRef, o) | (o, PlayerRef) => Ok(matches!(o, PlayerRef)),
+
+        (MovieRef, o) | (o, MovieRef) => Ok(matches!(o, MovieRef)),
+
+        (XmlRef(a), o) | (o, XmlRef(a)) => Ok(match o {
+            XmlRef(b) => a == b,
+            _ => false
+        }),
+
+        (DateRef(a), o) | (o, DateRef(a)) => Ok(match o {
+            DateRef(b) => a == b,
+            _ => false
+        }),
+
+        (MathRef(a), o) | (o, MathRef(a)) => Ok(match o {
+            MathRef(b) => a == b,
+            _ => false
+        }),
+
+        (Vector(v), o) | (o, Vector(v)) => Ok(match o {
+            Vector(other_v) => v == other_v,
+            _ => false
+        }),
+
+        (Media(a), o) | (o, Media(a)) => Ok(match o {
+            // TODO: is equality based on value?
+            _ => false
+        }),
+
+        (JavaScript(a), o) | (o, JavaScript(a)) => Ok(match o {
+            JavaScript(b) => a == b,
+            _ => false
+        }),
+
+        /*_ => {
             warn!(
                 "datum_equals not supported for types: {} and {}",
                 left.type_str(),
                 right.type_str()
             );
             Ok(false)
-        }
+        }*/
     }
 }
 

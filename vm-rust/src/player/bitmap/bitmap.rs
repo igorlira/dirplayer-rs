@@ -27,7 +27,7 @@ use super::{
     palette_map::PaletteMap,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteRef {
     BuiltIn(BuiltInPalette),
     Member(CastMemberRef),
