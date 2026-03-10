@@ -1014,7 +1014,7 @@ impl DirPlayer {
                 if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
                     let sn = self.movie.cast_manager.get_script_by_ref(&entry.script_instance.script)
                         .map(|s| s.name.clone()).unwrap_or_else(|| format!("si#{}", si_id));
-                    let dtype = self.allocator.datums.get(id).map(|e| e.datum.type_str()).unwrap_or("?".to_string());
+                    let dtype = self.allocator.datums.get(id).map(|e| e.datum.type_str()).unwrap_or("?");
                     *si_new.entry(format!("si({}).{} [{}]", sn, prop_name.as_str(), dtype)).or_insert(0) += 1;
                     accounted.insert(id);
                 }
