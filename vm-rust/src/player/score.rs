@@ -25,7 +25,6 @@ use crate::{
         KeyframeTrack,
     },
     player::handlers::datum_handlers::player_call_datum_handler,
-    utils::log_i,
 };
 
 use super::{
@@ -45,7 +44,7 @@ use super::{
     reserve_player_mut, reserve_player_ref,
     script::{script_get_prop_opt, script_set_prop},
     script_ref::ScriptInstanceRef,
-    sprite::{ColorRef, CursorRef, Sprite},
+    sprite::{ColorRef, CursorRef, Sprite, AP_BLEND, AP_WIDTH, AP_HEIGHT, AP_LOC, AP_MEMBER, AP_INK, AP_FORE_COLOR, AP_BACK_COLOR, AP_MOVEABLE, AP_EDITABLE},
     DirPlayer, ScriptError, PLAYER_OPT,
 };
 
@@ -477,9 +476,10 @@ impl Score {
                         }
                     };
                     let sprite: &mut Sprite = score.get_sprite_mut(sprite_num as i16);
-                    if sprite.puppet {
-                        // Puppeted sprites keep their state across frame transitions.
-                        // Just clear the exited flag so they remain active.
+                    if sprite.puppet || (sprite.auto_puppet != 0 && !sprite.exited) {
+                        // Puppeted or auto-puppeted sprites keep their state across
+                        // frame transitions. Auto-puppeted sprites are only preserved
+                        // while their span is active (not exited).
                         sprite.exited = false;
                         false
                     } else if sprite.visible {
@@ -815,37 +815,48 @@ impl Score {
                     cast_member: data.cast_member as i32,
                 };
 
-                // Update member if changed
+                // Update member if changed (skip if auto-puppeted)
                 let current_member = self.get_sprite(sprite_num).and_then(|s| s.member.clone());
-                match &score_ref {
-                    ScoreRef::Stage => {
-                        if current_member.as_ref() != Some(&member) {
-                            let _ = sprite_set_prop(sprite_num, "member", Datum::CastMember(member.clone()));
+                let ap = self.get_sprite(sprite_num).map_or(0, |s| s.auto_puppet);
+                if ap & AP_MEMBER == 0 {
+                    match &score_ref {
+                        ScoreRef::Stage => {
+                            if current_member.as_ref() != Some(&member) {
+                                let _ = sprite_set_prop(sprite_num, "member", Datum::CastMember(member.clone()));
+                            }
                         }
-                    }
-                    ScoreRef::FilmLoop(_) => {
-                        let sprite = self.get_sprite_mut(sprite_num);
-                        sprite.member = Some(member.clone());
+                        ScoreRef::FilmLoop(_) => {
+                            let sprite = self.get_sprite_mut(sprite_num);
+                            sprite.member = Some(member.clone());
+                        }
                     }
                 }
                 let sprite = self.get_sprite_mut(sprite_num);
-                sprite.loc_h = data.pos_x as i32;
-                sprite.loc_v = data.pos_y as i32;
+                if ap & AP_LOC == 0 {
+                    sprite.loc_h = data.pos_x as i32;
+                    sprite.loc_v = data.pos_y as i32;
+                }
                 // Only update width/height when non-zero (0 means "use member's natural size").
-                if data.width != 0 {
+                if ap & AP_WIDTH == 0 && data.width != 0 {
                     sprite.width = data.width as i32;
                     sprite.has_size_changed = true;
                 }
-                if data.height != 0 {
+                if ap & AP_HEIGHT == 0 && data.height != 0 {
                     sprite.height = data.height as i32;
                     sprite.has_size_changed = true;
                 }
                 sprite.skew = data.skew as f64;
                 sprite.rotation = data.rotation as f64;
-                sprite.moveable = data.moveable;
+                if ap & AP_MOVEABLE == 0 {
+                    sprite.moveable = data.moveable;
+                }
                 sprite.trails = data.trails;
-                sprite.ink = (data.ink & 0x7F) as i32;
-                sprite.blend = convert_raw_blend(data.blend, dir_version);
+                if ap & AP_INK == 0 {
+                    sprite.ink = (data.ink & 0x7F) as i32;
+                }
+                if ap & AP_BLEND == 0 {
+                    sprite.blend = convert_raw_blend(data.blend, dir_version);
+                }
             }
         }
 
@@ -880,9 +891,6 @@ impl Score {
                     .map_or(false, |s| s.entered);
 
                 if !already_entered && !channels_with_any_span.contains(&channel_number) {
-                    // Only enter from delta data if the channel has NO spans at all.
-                    // Channels with spans (frame_intervals or extended) have their
-                    // lifecycle managed by the span system.
                     let resolved_cast_lib = if data.cast_lib == 65535 && matches!(score_ref, ScoreRef::Stage) {
                         1
                     } else if data.cast_lib == 0 {
@@ -916,7 +924,6 @@ impl Score {
                     sprite.trails = data.trails;
                     sprite.ink = (data.ink & 0x7F) as i32;
                     sprite.blend = convert_raw_blend(data.blend, dir_version);
-                    // Set base_* values so tweens can work
                     sprite.base_loc_h = sprite.loc_h;
                     sprite.base_loc_v = sprite.loc_v;
                     sprite.base_width = sprite.width;
@@ -1100,11 +1107,6 @@ impl Score {
         // Attach behaviors from spriteListIdx (D6+ sprite detail mechanism).
         // This runs FIRST so we know which channels are covered by sprite details,
         // allowing the frame_interval fallback below to skip those channels.
-        let (sprite_details_info, _) = reserve_player_ref(|player| {
-            let count = player.movie.score.sprite_details.len();
-            let max_idx = player.movie.score.sprite_details.keys().max().cloned();
-            ((count, max_idx), player.movie.dir_version)
-        });
         let mut spritelistidx_attached_channels: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut spritelistidx_seen_channels: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (span, _channel_index, data) in span_init_data.iter() {
@@ -1905,9 +1907,9 @@ impl Score {
             let sprite = &mut channel.sprite;
             let sprite_num = sprite.number as u16;
 
-            // In Director, puppeted sprites are controlled by Lingo and
-            // score tweens do NOT apply to them.
-            if sprite.puppet {
+            // In Director, puppeted and auto-puppeted sprites are controlled
+            // by Lingo and score tweens do NOT apply to them.
+            if sprite.puppet || sprite.auto_puppet != 0 {
                 continue;
             }
 
@@ -2523,7 +2525,7 @@ impl Score {
             // This prevents stale ScriptInstanceRef objects from pointing to deleted instances
             channel.sprite.script_instance_list.clear();
 
-            if channel.sprite.puppet {
+            if channel.sprite.puppet || channel.sprite.auto_puppet != 0 {
                 channel.sprite.reset();
             }
         }
@@ -2548,8 +2550,8 @@ impl Score {
                 if x.number == 0 {
                     return false;
                 }
-                // Render if: in active span OR is puppeted
-                let is_active = active_channels.contains(&(x.number as u32)) || x.sprite.puppet;
+                // Render if: in active span OR is puppeted/auto-puppeted
+                let is_active = active_channels.contains(&(x.number as u32)) || x.sprite.puppet || x.sprite.auto_puppet != 0;
                 if !is_active {
                     return false;
                 }
@@ -3507,6 +3509,37 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
     };
     if result.is_ok() {
         JsApi::dispatch_channel_changed(sprite_id);
+    }
+    result
+}
+
+/// Wrapper for sprite_set_prop that also sets auto-puppet flags.
+/// Call this when setting sprite properties from Lingo script context.
+/// Auto-puppeting (D6+) prevents the score from overwriting Lingo-set properties
+/// on frame transitions (e.g. `go to the frame` loops).
+pub fn sprite_set_prop_from_lingo(sprite_id: i16, prop_name: &str, value: Datum) -> Result<(), ScriptError> {
+    let result = sprite_set_prop(sprite_id, prop_name, value);
+    if result.is_ok() {
+        let ap_flag = match prop_name {
+            "blend" => AP_BLEND,
+            "width" => AP_WIDTH,
+            "height" => AP_HEIGHT,
+            "locH" | "locV" | "loc" => AP_LOC,
+            "member" | "memberNum" | "castNum" => AP_MEMBER,
+            "ink" => AP_INK,
+            "foreColor" | "forecolor" | "color" => AP_FORE_COLOR,
+            "backColor" | "backcolor" | "bgColor" => AP_BACK_COLOR,
+            "moveable" => AP_MOVEABLE,
+            "editable" => AP_EDITABLE,
+            "rect" => AP_LOC | AP_WIDTH | AP_HEIGHT,
+            _ => 0,
+        };
+        if ap_flag != 0 {
+            reserve_player_mut(|player| {
+                let sprite = player.movie.score.get_sprite_mut(sprite_id);
+                sprite.auto_puppet |= ap_flag;
+            });
+        }
     }
     result
 }
