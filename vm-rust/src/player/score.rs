@@ -3849,6 +3849,15 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     // Use bitmap's natural dimensions.
                     (bitmap_width, bitmap_height)
                 }
+            } else if sprite.has_size_changed && (sprite.width != bitmap_width || sprite.height != bitmap_height) {
+                if is_debug_sprite {
+                    web_sys::console::log_1(&format!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
+                }
+                // Sprite dimensions were explicitly modified at runtime (by Lingo script,
+                // tween, etc.). Trust the current dimensions directly — they take priority
+                // over bitmap-vs-score heuristics.
+                (sprite.width, sprite.height)
             } else if !sprite.has_size_changed
                 && (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
@@ -3868,15 +3877,6 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // Score dimensions differ from bitmap AND are not a clean proportional
                 // scale - they are an approximate bounding box. Use bitmap's natural size.
                 (bitmap_width, bitmap_height)
-            } else if sprite.has_size_changed && sprite.width != bitmap_width ||  sprite.has_size_changed && sprite.height != bitmap_height {
-                if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
-                }
-                // Sprite dimensions differ from base — something (Lingo script,
-                // member change) has explicitly modified the size at runtime.
-                // Use the current dimensions directly.
-                (sprite.width, sprite.height)
             } else {
                 if is_debug_sprite {
                     web_sys::console::log_1(&format!("Sprite {}: chose DEFAULT (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned={})",
