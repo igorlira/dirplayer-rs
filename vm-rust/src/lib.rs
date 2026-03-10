@@ -1,3 +1,4 @@
+#![allow(static_mut_ref)]
 pub mod io;
 pub mod js_api;
 pub mod player;

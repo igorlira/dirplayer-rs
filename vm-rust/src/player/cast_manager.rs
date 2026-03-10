@@ -242,7 +242,15 @@ impl CastManager {
     }
 
     pub fn get_cast_mut(&mut self, number: u32) -> &mut CastLib {
-        return self.casts.get_mut(number as usize - 1).unwrap();
+        let n_casts = self.casts.len();
+        match self.casts.get_mut(number as usize - 1) {
+            Some(cast) => cast,
+            None => panic!(
+                "Cast index out of bounds: {} (# casts={})",
+                number,
+                n_casts
+            ),
+        }
     }
 
     pub fn get_cast_by_name(&self, name: &str) -> Option<&CastLib> {

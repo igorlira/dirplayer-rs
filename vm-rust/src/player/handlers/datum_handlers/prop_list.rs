@@ -498,7 +498,7 @@ impl PropListDatumHandlers {
             );
 
             match prop_list {
-                Datum::PropList(ref entries, ..) => {
+                Datum::PropList(entries, ..) => {
                     debug!(
                         "PropList has {} entries", 
                         entries.len()

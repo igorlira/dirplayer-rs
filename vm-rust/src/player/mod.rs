@@ -1622,7 +1622,7 @@ impl DirPlayer {
         // Get the loop setting from the cast member
         let loop_count = {
             let member_datum = self.get_datum(&member_ref);
-            if let Datum::CastMember(ref cast_member_ref) = member_datum {
+            if let Datum::CastMember(cast_member_ref) = member_datum {
                 if let Some(cast_member) = self.movie.cast_manager.find_member_by_ref(cast_member_ref) {
                     if let CastMemberType::Sound(sound_member) = &cast_member.member_type {
                         if sound_member.info.loop_enabled {
