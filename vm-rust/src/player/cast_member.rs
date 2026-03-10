@@ -959,7 +959,7 @@ impl CastMember {
             return name;
         }
 
-        if let Some(ref pfr) = pfr {
+        if let Some(pfr) = pfr {
             if !pfr.font_name.is_empty() {
                 return pfr.font_name.clone();
             }

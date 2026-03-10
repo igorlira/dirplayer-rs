@@ -224,7 +224,7 @@ impl TimeoutDatumHandlers {
         let script_instance_ref = reserve_player_ref(|player| {
             let timeout_datum = player.get_datum(datum);
             match timeout_datum {
-                Datum::TimeoutInstance { script_instance: Some(ref si), .. } => Some(si.clone()),
+                Datum::TimeoutInstance { script_instance: Some(si), .. } => Some(si.clone()),
                 _ => None,
             }
         });

@@ -262,7 +262,7 @@ impl FlowControlBytecodeHandler {
             // In Director 4 calling convention, the receiver is often passed as a
             // symbol (e.g. #oTrackControl). Resolve it by looking up the symbol
             // name in globals to get the actual script instance.
-            if let Datum::Symbol(ref sym_name) = player.get_datum(&obj) {
+            if let Datum::Symbol(sym_name) = player.get_datum(&obj) {
                 if let Some(global_ref) = player.globals.get(sym_name) {
                     obj = global_ref.clone();
                 }
