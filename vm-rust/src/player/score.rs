@@ -1001,7 +1001,7 @@ impl Score {
                                     if let Some(ref current_member_ref) = channel.member {
                                         let current_datum = player.get_datum(current_member_ref);
 
-                                        if let Datum::CastMember(ref current_cast_ref) =
+                                        if let Datum::CastMember(current_cast_ref) =
                                             current_datum
                                         {
                                             return current_cast_ref.cast_member
@@ -1016,7 +1016,7 @@ impl Score {
                                     if let Some(ref current_member_ref) = channel.member {
                                         let current_datum = player.get_datum(current_member_ref);
 
-                                        if let Datum::CastMember(ref current_cast_ref) =
+                                        if let Datum::CastMember(current_cast_ref) =
                                             current_datum
                                         {
                                             return current_cast_ref.cast_member
@@ -1172,7 +1172,7 @@ impl Score {
                     let actual_instance_ref = reserve_player_mut(|player| {
                         let datum = player.get_datum(&datum_ref);
                         match datum {
-                            Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
+                            Datum::ScriptInstanceRef(instance_ref) => Ok(instance_ref.clone()),
                             _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
                         }
                     })
@@ -1212,7 +1212,7 @@ impl Score {
                                                 // Try to format value safely
                                                 match value {
                                                     Datum::Int(n) => debug!("      value: {}", n),
-                                                    Datum::CastMember(ref m) => debug!("      value: member {} of castLib {}", m.cast_member, m.cast_lib),
+                                                    Datum::CastMember(m) => debug!("      value: member {} of castLib {}", m.cast_member, m.cast_lib),
                                                     _ => debug!("      value: <{:?}>", value.type_enum()),
                                                 }
 
@@ -1359,7 +1359,7 @@ impl Score {
                         let actual_instance_ref = reserve_player_mut(|player| {
                             let datum = player.get_datum(&datum_ref);
                             match datum {
-                                Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
+                                Datum::ScriptInstanceRef(instance_ref) => Ok(instance_ref.clone()),
                                 _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
                             }
                         })
@@ -1489,7 +1489,7 @@ impl Score {
                         let actual_instance_ref = reserve_player_mut(|player| {
                             let datum = player.get_datum(&datum_ref);
                             match datum {
-                                Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
+                                Datum::ScriptInstanceRef(instance_ref) => Ok(instance_ref.clone()),
                                 _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
                             }
                         })
@@ -1630,7 +1630,7 @@ impl Score {
                         let actual_instance_ref = reserve_player_mut(|player| {
                             let datum = player.get_datum(&datum_ref);
                             match datum {
-                                Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
+                                Datum::ScriptInstanceRef(instance_ref) => Ok(instance_ref.clone()),
                                 _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
                             }
                         })
@@ -1761,7 +1761,7 @@ impl Score {
                 // Extract ScriptInstanceRef
                 let actual_instance_ref = reserve_player_mut(|player| {
                     match player.get_datum(&datum_ref) {
-                        Datum::ScriptInstanceRef(ref inst) => inst.clone(),
+                        Datum::ScriptInstanceRef(inst) => inst.clone(),
                         _ => {
                             web_sys::console::error_1(&"Expected ScriptInstanceRef".into());
                             panic!("Expected ScriptInstanceRef");

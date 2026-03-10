@@ -211,7 +211,7 @@ impl ScriptInstanceDatumHandlers {
     /// Find a non-ScriptInstance ancestor (like TimeoutInstance) in the properties
     fn find_non_script_ancestor(datum: &DatumRef, player: &DirPlayer) -> Option<DatumRef> {
         let instance_ref = match player.get_datum(datum) {
-            Datum::ScriptInstanceRef(ref r) => r.clone(),
+            Datum::ScriptInstanceRef(r) => r.clone(),
             _ => return None,
         };
 
@@ -231,7 +231,7 @@ impl ScriptInstanceDatumHandlers {
                 let ancestor_datum = player.get_datum(ancestor_prop_ref);
                 match ancestor_datum {
                     // If ancestor is not a ScriptInstanceRef, return it for delegation
-                    Datum::ScriptInstanceRef(ref next_ref) => {
+                    Datum::ScriptInstanceRef(next_ref) => {
                         current_instance_ref = Some(next_ref.clone());
                         continue;
                     }
@@ -258,7 +258,7 @@ impl ScriptInstanceDatumHandlers {
 
     pub fn has_async_handler(datum: &DatumRef, name: &str) -> Result<bool, ScriptError> {
         return reserve_player_ref(|player| {
-            if let Datum::ScriptInstanceRef(ref instance_ref) = player.get_datum(datum) {
+            if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(datum) {
                 if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, instance_ref, name) {
                     return Ok(true);
                 }
@@ -568,7 +568,7 @@ impl ScriptInstanceDatumHandlers {
                 // Check for virtual script handler
                 let virtual_result = reserve_player_mut(|player| {
                     let instance_ref = match player.get_datum(datum) {
-                        Datum::ScriptInstanceRef(ref r) => r.clone(),
+                        Datum::ScriptInstanceRef(r) => r.clone(),
                         _ => return Ok(None),
                     };
                     VirtualScriptRegistry::try_call_instance_handler(player, &instance_ref, handler_name, args)
@@ -581,7 +581,7 @@ impl ScriptInstanceDatumHandlers {
 
                 // Check for non-ScriptInstance ancestor to delegate to (e.g., TimeoutInstance)
                 let (ancestor_ref, ancestor_type, script_name, script_missing) = reserve_player_ref(|player| {
-                    let (script_name, script_missing) = if let Datum::ScriptInstanceRef(ref inst_ref) = player.get_datum(datum) {
+                    let (script_name, script_missing) = if let Datum::ScriptInstanceRef(inst_ref) = player.get_datum(datum) {
                         let instance = player.allocator.get_script_instance(inst_ref);
                         let script = player.movie.cast_manager.get_script_by_ref(&instance.script);
                         match script {
@@ -642,7 +642,7 @@ impl ScriptInstanceDatumHandlers {
                 if let Datum::List(dtype, items, sorted) = actor_list {
                     // Get the instance ID we're looking for
                     let target_id = match player.get_datum(datum) {
-                        Datum::ScriptInstanceRef(ref instance_ref) => Some(**instance_ref),
+                        Datum::ScriptInstanceRef(instance_ref) => Some(**instance_ref),
                         _ => None,
                     };
 
@@ -651,7 +651,7 @@ impl ScriptInstanceDatumHandlers {
                         let new_items: Vec<DatumRef> = items.iter()
                             .filter(|item| {
                                 match player.get_datum(item) {
-                                    Datum::ScriptInstanceRef(ref item_ref) => **item_ref != target_id,
+                                    Datum::ScriptInstanceRef(item_ref) => **item_ref != target_id,
                                     _ => true, // Keep non-script-instance items
                                 }
                             })

@@ -217,7 +217,7 @@ impl BuiltInHandlerManager {
 
                     Ok(())
                 }
-                Datum::List(_, ref mut list, ..) => {
+                Datum::List(_, list, ..) => {
                     if index < list.len() {
                         list[index] = new_value;
                         
@@ -234,7 +234,7 @@ impl BuiltInHandlerManager {
                         Err(ScriptError::new(format!("Index {} out of bounds", position)))
                     }
                 }
-                Datum::PropList(ref mut prop_list, ..) => {
+                Datum::PropList(prop_list, ..) => {
                     if index < prop_list.len() {
                         prop_list[index].1 = new_value;
                         Ok(())
