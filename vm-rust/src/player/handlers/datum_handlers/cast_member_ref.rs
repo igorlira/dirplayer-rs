@@ -267,7 +267,7 @@ impl CastMemberRefHandlers {
         match prop {
             "name" => Ok(Datum::String("".to_string())),
             "number" => Ok(Datum::Int(-1)),
-            "type" => Ok(Datum::String("empty".to_string())),
+            "type" => Ok(Datum::Symbol("empty".to_string())),
             "castLibNum" => Ok(Datum::Int(-1)),
             "memberNum" => Ok(Datum::Int(-1)),
             "width" | "height" | "rect" | "duration" => Ok(Datum::Void),
