@@ -2858,7 +2858,7 @@ impl Score {
             .map(|(_, cast_lib, member)| {
                 if *member < 0 {
                     // Negative member = built-in palette
-                    PaletteRef::from(*member, *cast_lib as u32)
+                    PaletteRef::from(*member, *cast_lib, 0)
                 } else if *member > 0 {
                     // Positive member = cast member palette
                     PaletteRef::Member(CastMemberRef {
