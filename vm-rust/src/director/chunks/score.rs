@@ -4,8 +4,7 @@ use log::{debug, error, warn};
 
 use crate::{io::reader::DirectorExt, utils::log_i};
 
-use crate::player::datum_ref::DatumRef;
-use crate::player::eval::eval_lingo_expr_static;
+
 
 use web_sys;
 use web_sys::console;
@@ -943,7 +942,7 @@ pub struct FrameIntervalSecondary {
     pub cast_lib: u16,
     pub cast_member: u16,
     pub unk0: u32,
-    pub parameter: Vec<DatumRef>,
+    pub parameter: Vec<String>,
 }
 
 impl FrameIntervalSecondary {
@@ -1009,7 +1008,8 @@ impl ScoreChunkHeader {
 pub struct SpriteBehavior {
     pub cast_lib: u16,
     pub cast_member: u16,
-    pub parameter: Vec<DatumRef>,
+    /// Raw Lingo expression strings (e.g. "[#pName: \"bg\"]") evaluated fresh at attachment time.
+    pub parameter: Vec<String>,
 }
 
 /// Sprite detail info parsed from sprite detail offset (D6+)
@@ -1204,17 +1204,10 @@ impl ScoreChunk {
                             let clean = proplist_string.trim_end_matches('\0');
                             debug!("  Initializer string: {:?}", clean);
                             if clean.starts_with('[') {
-                                match eval_lingo_expr_static(clean.to_owned()) {
-                                    Ok(proplist) => {
-                                        debug!("  ✅ Successfully parsed initializer proplist");
-                                        parameter.push(proplist);
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "Failed to parse sprite detail initializer: {}", e.message
-                                        );
-                                    }
-                                }
+                                // Store the raw expression; evaluate fresh at attachment time to avoid
+                                // stale DatumRef indices after a movie rewind/restart.
+                                debug!("  ✅ Storing initializer expression for lazy evaluation");
+                                parameter.push(clean.to_owned());
                             } else {
                                 debug!("  ⚠️ Initializer string doesn't start with '[': {:?}", &clean[..clean.len().min(50)]);
                             }
@@ -1673,17 +1666,9 @@ impl ScoreChunk {
                                                                 .trim_end_matches('\0');
                                                             debug!("parsed param string: {}", clean);
                                                             if clean.starts_with('[') {
-                                                                // TODO: Replace `eval_lingo` with a parser
-                                                                match eval_lingo_expr_static(clean.to_owned()) {
-                                                                    Ok(proplist) => {
-                                                                        debug!("eval_lingo_expr_static succeeded");
-                                                                        secondary.parameter.push(proplist);
-                                                                        debug!("parameter vector now has {} items", secondary.parameter.len());
-                                                                    }
-                                                                    Err(e) => {
-                                                                        error!("eval_lingo_expr_static ERROR: {}", e.message);
-                                                                    }
-                                                                }
+                                                                // Store raw expression; evaluate fresh at attachment
+                                                                // time to avoid stale DatumRef after a movie rewind.
+                                                                secondary.parameter.push(clean.to_owned());
                                                             }
                                                         }
                                                     }
