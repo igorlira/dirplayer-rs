@@ -6,6 +6,7 @@ use num_derive::FromPrimitive;
 use crate::player::{
     DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}
 };
+use crate::player::handlers::manager::BuiltInHandlerManager;
 
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, Debug)]
@@ -271,6 +272,11 @@ impl Datum {
     }
 
     // TODO(zdimension): this should really return a Cow<str> instead of allocating a String
+    // also.. this seems to be used for many things:
+    // - stringification
+    // - string operators (starts) which should only work in strings (i.e. "123" starts "12" should return false, it currently returns true)
+    // - ?
+    // it should be replace by repr() in some places
     pub fn string_value(&self) -> Result<String, ScriptError> {
         match self {
             Datum::String(s) => Ok(s.clone()),
@@ -303,6 +309,10 @@ impl Datum {
                 self.type_str()
             ))),
         }
+    }
+
+    pub fn repr(&self, player: &DirPlayer) -> String {
+        BuiltInHandlerManager::format_for_put(self, player)
     }
 
     pub fn symbol_value(&self) -> Result<String, ScriptError> {

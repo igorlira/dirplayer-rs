@@ -269,7 +269,7 @@ impl BuiltInHandlerManager {
         Ok(DatumRef::Void)
     }
 
-    fn format_for_put(datum: &Datum, player: &DirPlayer) -> String {
+    pub fn format_for_put(datum: &Datum, player: &DirPlayer) -> String {
         match datum {
             // Strings are output with quotes
             Datum::String(s) => format!("\"{}\"", s),
