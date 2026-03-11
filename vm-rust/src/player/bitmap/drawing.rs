@@ -71,7 +71,7 @@ fn blend_color_alpha(dst: (u8, u8, u8), src: (u8, u8, u8), alpha: f32) -> (u8, u
 }
 
 pub fn should_matte_sprite(ink: u32) -> bool {
-    ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
+    ink == 2 || ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
 }
 
 fn director_blend_ink0(
@@ -1953,7 +1953,7 @@ impl Bitmap {
                 }
 
                 // Indexed bitmap (1-8 bit) ink 36 color-key transparency
-                if ink == 36 && is_indexed {
+                if (ink == 2 || ink == 36) && is_indexed {
                     let ColorRef::PaletteIndex(i) = src.get_pixel_color_ref(sx, sy) else {
                         unreachable!("indexed bitmap returned non-index color");
                     };
@@ -2030,7 +2030,7 @@ impl Bitmap {
 
                 // 16-bit bitmap ink 36 color-key transparency
                 // 16-bit is stored as 32-bit RGB, so compare RGB values directly
-                if ink == 36 && src.original_bit_depth == 16 {
+                if (ink == 2 || ink == 36) && src.original_bit_depth == 16 {
                     let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     // Skip pixel if it matches the sprite's bgColor
@@ -2053,7 +2053,7 @@ impl Bitmap {
 
                 // 32-bit bitmap ink 36 color-key transparency
                 // PFR font bitmaps are decoded to 32-bit RGBA; background is white, glyphs are black.
-                if ink == 36 && src.original_bit_depth == 32 {
+                if (ink == 2 || ink == 36) && src.original_bit_depth == 32 {
                     let (r, g, b, a) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     // Skip fully transparent pixels (use_alpha bitmaps like text member images)
@@ -2300,7 +2300,7 @@ impl Bitmap {
                 // ----------------------------------------------------------
                 // Director ink 36 (Blend) alpha semantics
                 // ----------------------------------------------------------
-                if ink == 36 && sa == 0 && src.original_bit_depth == 32 {
+                if (ink == 2 || ink == 36) && sa == 0 && src.original_bit_depth == 32 {
                     if (sr, sg, sb) == bg_color_resolved {
                         continue;
                     }
@@ -2313,7 +2313,7 @@ impl Bitmap {
                 // ----------------------------------------------------------
                 if !params.is_text_rendering
                     && sa == 255
-                    && ink == 36
+                    && (ink == 2 || ink == 36)
                     && (sr, sg, sb) == bg_color_resolved
                 {
                     continue; // This pixel is background → transparent
