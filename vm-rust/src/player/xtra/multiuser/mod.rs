@@ -131,7 +131,15 @@ impl MultiuserXtraManager {
                     Ok((username, password, host, port, movie_id))
                 })?;
 
-                let ws_url = format!("ws://{}:{}", host, port);
+                let ws_scheme = if web_sys::window()
+                    .and_then(|w| w.location().protocol().ok())
+                    .map_or(false, |p| p == "https:")
+                {
+                    "wss"
+                } else {
+                    "ws"
+                };
+                let ws_url = format!("{}://{}:{}", ws_scheme, host, port);
                 multiuser_log!("Multiuser: Connecting to WebSocket URL: {} (user={}, movie={})", ws_url, username, movie_id);
 
                 let socket = match WebSocket::new(&ws_url) {
