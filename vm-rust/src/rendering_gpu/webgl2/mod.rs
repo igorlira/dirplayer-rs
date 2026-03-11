@@ -1708,9 +1708,9 @@ impl WebGL2Renderer {
         // - For indexed bitmaps with ink 36: foreColor tinting for monochrome-style bitmaps
         // Note: Ink 40 does NOT use foreColor tinting - it just uses color-key transparency
         let is_indexed = bitmap_bit_depth >= 1 && bitmap_bit_depth <= 8;
-        let is_ink36_indexed = is_indexed && ink == 36;
+        let is_ink36_indexed = is_indexed && (ink == 2 || ink == 36);
 
-        let colorize_params = if bitmap_bit_depth == 1 && (ink == 0 || ink == 36) {
+        let colorize_params = if bitmap_bit_depth == 1 && (ink == 0 || (ink == 2 || ink == 36)) {
             // 1-bit bitmaps with ink 0: ALWAYS apply foreColor/bgColor
             // This is Director behavior - 1-bit bitmaps always use sprite colors
             Some((
@@ -1764,7 +1764,7 @@ impl WebGL2Renderer {
         // Colorize is also baked into the texture when has_fore_color or has_back_color is set
 
         let is_rendered_text = matches!(texture_source, TextureSource::RenderedText { .. });
-        let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 36 || i == 8 || i == 7);
+        let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 2 || i == 36 || i == 8 || i == 7);
 
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref } => {
@@ -1784,7 +1784,7 @@ impl WebGL2Renderer {
                 // For inks that make bgColor pixels transparent (7, 8, 36, 40),
                 // if the solid foreground color matches the resolved bgColor,
                 // the entire shape would be invisible — skip rendering.
-                if ink == 3 || ink == 7 || ink == 8 || ink == 36 || ink == 40 {
+                if ink == 3 || ink == 7 || ink == 8 || (ink == 2 || ink == 36) || ink == 40 {
                     if (r, g, b) == bg_color_rgb {
                         return;
                     }
@@ -1933,7 +1933,7 @@ impl WebGL2Renderer {
                 // For matte-like inks (bgTransparent 36, Matte 8, Not Ghost 7),
                 // skip the fill and rely on the alpha channel instead of color-keying.
                 // The shader will use alpha-based compositing for these inks.
-                let use_alpha_matte = button_ink == 36 || button_ink == 8 || button_ink == 7;
+                let use_alpha_matte = button_ink == 2 || button_ink == 36 || button_ink == 8 || button_ink == 7;
 
                 match button_type {
                     ButtonType::PushButton => {
@@ -2244,7 +2244,7 @@ impl WebGL2Renderer {
         // For rendered text with ink 36: the text bitmap already has alpha=0 for background
         // and alpha>0 for text pixels (bg fill is suppressed for ink 36). Use Copy (alpha
         // blending) so the shader doesn't color-key text pixels that match bgColor.
-        let ink_mode = if is_rendered_text && ink == 36 {
+        let ink_mode = if is_rendered_text && (ink == 2 || ink == 36) {
             InkMode::Copy
         } else if is_button_alpha_matte {
             // Button bitmap with matte-like ink: fill was omitted, alpha channel
@@ -2468,7 +2468,7 @@ impl WebGL2Renderer {
 
         // Special flag for ink 36 indexed foreColor tinting
         // For ink 36 indexed, ALWAYS tint foreground pixels with foreColor (has_fore is always true)
-        let ink36_indexed_tint = bitmap.original_bit_depth <= 8 && ink == 36;
+        let ink36_indexed_tint = bitmap.original_bit_depth <= 8 && (ink == 2 || ink == 36);
 
         // Check if backColor should be used (for interpolation)
         let use_back_color = match (bitmap.original_bit_depth, ink as u32) {
@@ -2548,7 +2548,7 @@ impl WebGL2Renderer {
         // See drawing.rs lines 1210-1231 for 16-bit ink 36 handling
         // See drawing.rs lines 1421-1437 for 32-bit ink 36 handling
         let is_indexed_not_1bit = bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8;
-        let should_use_colorkey_ink36 = ink == 36 && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
+        let should_use_colorkey_ink36 = (ink == 2 || ink == 36) && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
         // Ink 37 (Light) uses color-key transparency: skip bgColor pixels
         // For indexed bitmaps: bake transparency based on palette index
         // For 16-bit and 32-bit: use RGB color-key in shader
@@ -3051,7 +3051,7 @@ impl WebGL2Renderer {
     /// Check if ink mode requires matte computation
     /// Matches Canvas2D's should_matte_sprite function
     fn should_matte_sprite(ink: i32) -> bool {
-        ink == 3 || ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
+        ink == 3 || (ink == 2 || ink == 36) || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
     }
 
     /// Get or create a texture for a bitmap member
@@ -4318,7 +4318,7 @@ impl WebGL2Renderer {
         // - Ink 36 (BgTransparent): composited with alpha blending
         // Filling background with bg_color at alpha=255 would make the entire
         // text area opaque, producing solid colored rectangles instead of text.
-        let is_transparency_ink = ink == 3 || ink == 7 || ink == 8 || ink == 9 || ink == 36;
+        let is_transparency_ink = ink == 3 || ink == 7 || ink == 8 || ink == 9 || (ink == 2 || ink == 36);
         // For non-transparency inks (e.g. ink 0 Copy), always fill the background
         // with bgColor at alpha=255. This matches Director behavior where ink 0
         // for field/text members renders as an opaque rectangle. Only transparency
