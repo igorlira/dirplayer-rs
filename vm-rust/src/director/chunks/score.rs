@@ -1154,7 +1154,6 @@ impl ScoreChunk {
         }
     }
 
-<<<<<<< HEAD
     /// Parse sprite details directly from extracted VWSC entries.
     /// For spriteListIdx = N, entries[N] is the 44-byte sprite info,
     /// and entries[N+1] contains behaviors (8 bytes each: cast_lib u16, cast_member u16, initializer_idx u32).
