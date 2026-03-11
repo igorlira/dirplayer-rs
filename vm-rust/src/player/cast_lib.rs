@@ -213,7 +213,8 @@ impl CastLib {
             "name" => Ok(Datum::String(self.name.clone())),
             "number of castMembers" | "number of members" => {
                 Ok(Datum::Int(self.members.len() as i32))
-            }
+            },
+            "member" => Ok(Datum::CastMember(cast_member_ref(self.number as i32, -1))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castLib property {}",
                 prop
