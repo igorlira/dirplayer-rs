@@ -17,7 +17,7 @@ use crate::{
         DirPlayer,
     },
 };
-
+use crate::player::cast_lib::CastMemberRef;
 use super::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, sprite::ColorRef, DatumRef, ScriptError};
 
 #[derive(Parser)]
@@ -1307,6 +1307,15 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                         } else {
                             Ok(rect_arr[(index_num - 1) as usize].clone())
                         }
+                    }
+                    // Cast lib member list
+                    Datum::CastMember(CastMemberRef { cast_lib, cast_member }) if *cast_member == -1 => {
+                        let index_num = index_datum.int_value()? as i16;
+                        Ok(reserve_player_mut(|p| p.alloc_datum(if index_num < 0 {
+                            Datum::Void
+                        } else {
+                            Datum::CastMember(CastMemberRef { cast_lib: *cast_lib, cast_member: index_num as i32 })
+                        })))
                     }
                     _ => Err(ScriptError::new(format!(
                         "Cannot index non-list type: {:?}",
