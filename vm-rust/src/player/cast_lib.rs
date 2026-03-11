@@ -464,6 +464,9 @@ pub const NULL_CAST_MEMBER_REF: CastMemberRef = CastMemberRef {
 };
 
 pub fn cast_member_ref(cast_lib: i32, cast_member: i32) -> CastMemberRef {
+    if cast_lib == 65535 {
+        panic!("cast_lib cannot be 65535 (treated as -1)");
+    }
     CastMemberRef {
         cast_lib,
         cast_member,

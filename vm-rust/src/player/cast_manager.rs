@@ -16,7 +16,7 @@ use crate::{
     js_api::JsApi,
     player::cast_lib::CastLib,
 };
-
+use crate::player::cast_lib::cast_member_ref;
 use crate::player::FontManager;
 use crate::player::font::FontRef;
 
@@ -177,10 +177,7 @@ impl CastManager {
                         target_member, cast.number
                     );
                     if let Some(bitmap) = bitmap_manager.get_bitmap_mut(bitmap_ref) {
-                        bitmap.palette_ref = PaletteRef::Member(CastMemberRef {
-                            cast_lib: cast.number as i32,
-                            cast_member: target_member,
-                        });
+                        bitmap.palette_ref = PaletteRef::Member(cast_member_ref(cast.number as i32, target_member));
                     }
                     found = true;
                     break;
@@ -263,10 +260,7 @@ impl CastManager {
                     || CastMemberRefHandlers::get_cast_slot_number(cast.number, member.number)
                         == number
                 {
-                    return Some(CastMemberRef {
-                        cast_lib: cast.number as i32,
-                        cast_member: member.number as i32,
-                    });
+                    return Some(cast_member_ref(cast.number as i32, member.number as i32));
                 }
             }
         }
@@ -305,10 +299,7 @@ impl CastManager {
     pub fn find_member_ref_by_name(&self, name: &str) -> Option<CastMemberRef> {
         for cast in &self.casts {
             if let Some(member) = cast.find_member_by_name(name) {
-                return Some(CastMemberRef {
-                    cast_lib: cast.number as i32,
-                    cast_member: member.number as i32,
-                });
+                return Some(cast_member_ref(cast.number as i32, member.number as i32));
             }
         }
         None
@@ -357,10 +348,7 @@ impl CastManager {
         let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
             (Datum::String(name), Some(cast_lib)) => {
                 cast_lib.find_member_by_name(name).map(|member| {
-                    Ok(Some(CastMemberRef {
-                        cast_lib: cast_lib.number as i32,
-                        cast_member: member.number as i32,
-                    }))
+                    Ok(Some(cast_member_ref(cast_lib.number as i32, member.number as i32)))
                 })
             }
             (Datum::String(name), None) => self
@@ -368,10 +356,7 @@ impl CastManager {
                 .map(|member_ref| Ok(Some(member_ref))),
             (Datum::Int(num), Some(cast_lib)) => {
                 cast_lib.find_member_by_number(*num as u32).map(|member| {
-                    Ok(Some(CastMemberRef {
-                        cast_lib: cast_lib.number as i32,
-                        cast_member: member.number as i32,
-                    }))
+                    Ok(Some(cast_member_ref(cast_lib.number as i32, member.number as i32)))
                 })
             }
             (Datum::Int(num), None) => self
@@ -379,10 +364,7 @@ impl CastManager {
                 .map(|member_ref| Ok(Some(member_ref))),
             (Datum::Float(num), Some(cast_lib)) => {
                 cast_lib.find_member_by_number(*num as u32).map(|member| {
-                    Ok(Some(CastMemberRef {
-                        cast_lib: cast_lib.number as i32,
-                        cast_member: member.number as i32,
-                    }))
+                    Ok(Some(cast_member_ref(cast_lib.number as i32, member.number as i32)))
                 })
             }
             (Datum::Float(num), None) => self

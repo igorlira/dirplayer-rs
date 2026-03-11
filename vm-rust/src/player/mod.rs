@@ -112,7 +112,7 @@ use crate::{
     rendering::with_renderer_mut,
     utils::{get_base_url, get_elapsed_ticks},
 };
-
+use crate::player::cast_lib::cast_member_ref;
 use self::{
     bitmap::manager::BitmapRef,
     bytecode::handler_manager::StaticBytecodeHandlerManager,
@@ -2142,10 +2142,7 @@ pub async fn player_call_script_handler_raw_args(
     let is_frame_script = reserve_player_ref(|player| {
         let frame_script = player.movie.score.get_script_in_frame(player.movie.current_frame);
         if let Some(fs) = frame_script {
-            let frame_script_ref = CastMemberRef {
-                cast_lib: fs.cast_lib.into(),
-                cast_member: fs.cast_member.into(),
-            };
+            let frame_script_ref = cast_member_ref(fs.cast_lib.into(), fs.cast_member.into());
             script_member_ref == &frame_script_ref
         } else {
             false
@@ -3331,10 +3328,7 @@ fn get_active_static_script_refs<'a>(
         active_script_refs.push(script.member_ref.clone());
     }
     if let Some(frame_script) = frame_script {
-        active_script_refs.push(CastMemberRef {
-            cast_lib: frame_script.cast_lib.into(),
-            cast_member: frame_script.cast_member.into(),
-        });
+        active_script_refs.push(cast_member_ref(frame_script.cast_lib.into(), frame_script.cast_member.into()));
     }
     for global in globals.values() {
         if let Datum::VarRef(VarRef::Script(script_ref)) = global {

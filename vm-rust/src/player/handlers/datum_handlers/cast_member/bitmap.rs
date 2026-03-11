@@ -43,10 +43,7 @@ impl BitmapMemberHandlers {
                 match palette {
                     PaletteRef::BuiltIn(builtin) => Ok(Datum::Symbol(builtin.symbol_string())),
                     PaletteRef::Member(member_ref) => {
-                        let member_ref = CastMemberRef {
-                            cast_member: member_ref.cast_member,
-                            cast_lib: member_ref.cast_lib,
-                        };
+                        let member_ref = crate::cast_member_ref(member_ref.cast_lib, member_ref.cast_member);
                         Ok(Datum::CastMember(member_ref))
                     }
                     PaletteRef::Default => Ok(Datum::PaletteRef(PaletteRef::Default)),

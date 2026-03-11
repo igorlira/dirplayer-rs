@@ -14,7 +14,7 @@ use crate::{
         sprite::ColorRef,
     },
 };
-
+use crate::player::cast_lib::cast_member_ref;
 use super::cast_member::{
     bitmap::BitmapMemberHandlers, button::ButtonMemberHandlers, field::FieldMemberHandlers,
     film_loop::FilmLoopMemberHandlers, font::FontMemberHandlers, sound::SoundMemberHandlers,
@@ -49,10 +49,7 @@ impl CastMemberRefHandlers {
     }
 
     pub fn member_ref_from_slot_number(slot_number: u32) -> CastMemberRef {
-        CastMemberRef {
-            cast_lib: (slot_number >> 16) as i32,
-            cast_member: (slot_number & 0xFFFF) as i32,
-        }
+        cast_member_ref((slot_number >> 16) as i16 as i32, (slot_number & 0xFFFF) as i16 as i32)
     }
 
     pub fn call(

@@ -14,7 +14,7 @@ use crate::{
     },
 };
 use num::FromPrimitive;
-
+use crate::player::cast_lib::cast_member_ref;
 use super::{
     mask::BitmapMask,
     palette::{
