@@ -485,7 +485,7 @@ pub async fn player_cast_lib_set_prop(
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
 
     let cast_manager = &mut player.movie.cast_manager;
-    let cast_lib_obj = cast_manager.get_cast_mut(cast_lib as u32);
+    let cast_lib_obj = cast_manager.get_cast_mut(cast_lib as u32)?;
 
     if prop_name == "fileName" {
         log_i(

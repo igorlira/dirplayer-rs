@@ -720,7 +720,7 @@ impl TypeHandlers {
                 } else {
                     (1, None)
                 };
-                let cast = player.movie.cast_manager.get_cast_mut(cast_num);
+                let cast = player.movie.cast_manager.get_cast_mut(cast_num)?;
                 let member_slot = slot.unwrap_or_else(|| cast.first_free_member_id());
                 let member_ref = cast.create_member_at(
                     member_slot,

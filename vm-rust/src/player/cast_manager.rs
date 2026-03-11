@@ -241,16 +241,14 @@ impl CastManager {
         return self.casts.get(number as usize - 1);
     }
 
-    pub fn get_cast_mut(&mut self, number: u32) -> &mut CastLib {
-        let n_casts = self.casts.len();
-        match self.casts.get_mut(number as usize - 1) {
-            Some(cast) => cast,
-            None => panic!(
-                "Cast index out of bounds: {} (# casts={})",
-                number,
-                n_casts
-            ),
-        }
+    pub fn get_cast_mut(&mut self, number: u32) -> Result<&mut CastLib, ScriptError> {
+        return self
+            .get_cast_mut_or_null(number)
+            .ok_or_else(|| ScriptError::new(format!("Cast not found: {}", number)));
+    }
+
+    pub fn get_cast_mut_or_null(&mut self, number: u32) -> Option<&mut CastLib> {
+        self.casts.get_mut(number as usize - 1)
     }
 
     pub fn get_cast_by_name(&self, name: &str) -> Option<&CastLib> {
@@ -464,7 +462,7 @@ impl CastManager {
         if member_ref.cast_lib <= 0 || member_ref.cast_lib > self.casts.len() as i32 {
             return None;
         }
-        self.get_cast_mut(member_ref.cast_lib as u32)
+        self.get_cast_mut_or_null(member_ref.cast_lib as u32)?
             .find_mut_member_by_number(member_ref.cast_member as u32)
     }
 
@@ -526,7 +524,7 @@ impl CastManager {
                 "Cannot remove member with invalid cast lib".to_string(),
             ));
         }
-        let cast = self.get_cast_mut(member_ref.cast_lib as u32);
+        let cast = self.get_cast_mut(member_ref.cast_lib as u32)?;
         cast.remove_member(member_ref.cast_member as u32);
         Ok(())
     }
