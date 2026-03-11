@@ -17,7 +17,7 @@ use crate::{
     player::cast_lib::CastLib,
 };
 use crate::player::cast_lib::cast_member_ref;
-use crate::player::FontManager;
+use crate::player::{reserve_player_ref, FontManager};
 use crate::player::font::FontRef;
 
 use super::{
@@ -312,6 +312,54 @@ impl CastManager {
         datums: &DatumAllocator,
     ) -> Result<Option<CastMemberRef>, ScriptError> {
         // --- Determine cast library ---
+        let cast_lib = self.find_cast_lib_by_identifier(cast_name_or_num);
+
+        self.find_member_ref_in_cast_by_identifier(member_name_or_num, cast_lib)
+    }
+
+    pub fn find_member_ref_in_cast_by_identifier(&self, member_name_or_num: &Datum, cast_lib: Option<&CastLib>) -> Result<Option<CastMemberRef>, ScriptError> {
+        let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
+            (Datum::String(name), Some(cast_lib)) => {
+                cast_lib.find_member_by_name(name).map(|member| {
+                    Ok(Some(cast_member_ref(cast_lib.number as i32, member.number as i32)))
+                })
+            }
+            (Datum::String(name), None) => self
+                .find_member_ref_by_name(name)
+                .map(|member_ref| Ok(Some(member_ref))),
+            (Datum::Int(num), Some(cast_lib)) => {
+                cast_lib.find_member_by_number(*num as u32).map(|member| {
+                    Ok(Some(cast_member_ref(cast_lib.number as i32, member.number as i32)))
+                })
+            }
+            (Datum::Int(num), None) => self
+                .find_member_ref_by_number(*num as u32)
+                .map(|member_ref| Ok(Some(member_ref))),
+            (Datum::Float(num), Some(cast_lib)) => {
+                cast_lib.find_member_by_number(*num as u32).map(|member| {
+                    Ok(Some(cast_member_ref(cast_lib.number as i32, member.number as i32)))
+                })
+            }
+            (Datum::Float(num), None) => self
+                .find_member_ref_by_number(*num as u32)
+                .map(|member_ref| Ok(Some(member_ref))),
+            (Datum::CastMember(member_ref), _) => Some(Ok(Some(member_ref.clone()))),
+            _ => Some(Err(ScriptError::new(format!(
+                "Member number or name type invalid: {} ({})",
+                member_name_or_num.type_str(),
+                reserve_player_ref(|p| member_name_or_num.repr(p))
+            )))),
+        };
+
+        match member_ref {
+            None => Ok(None),
+            Some(Ok(None)) => Ok(None),
+            Some(Ok(Some(member_ref))) => Ok(Some(member_ref)),
+            Some(Err(err)) => Err(err),
+        }
+    }
+
+    pub(crate) fn find_cast_lib_by_identifier(&self, cast_name_or_num: Option<&Datum>) -> Option<&CastLib> {
         let cast_lib = if cast_name_or_num.is_none()
             || cast_name_or_num.is_some_and(|x| matches!(x, Datum::Void))
         {
@@ -344,45 +392,7 @@ impl CastManager {
             );
             None
         };
-
-        let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
-            (Datum::String(name), Some(cast_lib)) => {
-                cast_lib.find_member_by_name(name).map(|member| {
-                    Ok(Some(cast_member_ref(cast_lib.number as i32, member.number as i32)))
-                })
-            }
-            (Datum::String(name), None) => self
-                .find_member_ref_by_name(name)
-                .map(|member_ref| Ok(Some(member_ref))),
-            (Datum::Int(num), Some(cast_lib)) => {
-                cast_lib.find_member_by_number(*num as u32).map(|member| {
-                    Ok(Some(cast_member_ref(cast_lib.number as i32, member.number as i32)))
-                })
-            }
-            (Datum::Int(num), None) => self
-                .find_member_ref_by_number(*num as u32)
-                .map(|member_ref| Ok(Some(member_ref))),
-            (Datum::Float(num), Some(cast_lib)) => {
-                cast_lib.find_member_by_number(*num as u32).map(|member| {
-                    Ok(Some(cast_member_ref(cast_lib.number as i32, member.number as i32)))
-                })
-            }
-            (Datum::Float(num), None) => self
-                .find_member_ref_by_number(*num as u32)
-                .map(|member_ref| Ok(Some(member_ref))),
-            (Datum::CastMember(member_ref), _) => Some(Ok(Some(member_ref.clone()))),
-            _ => Some(Err(ScriptError::new(format!(
-                "Member number or name type invalid: {}",
-                member_name_or_num.type_str()
-            )))),
-        };
-
-        match member_ref {
-            None => Ok(None),
-            Some(Ok(None)) => Ok(None),
-            Some(Ok(Some(member_ref))) => Ok(Some(member_ref)),
-            Some(Err(err)) => Err(err),
-        }
+        cast_lib
     }
 
     pub fn find_member_by_identifiers(
