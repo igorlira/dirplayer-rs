@@ -1,4 +1,5 @@
 use binary_reader::BinaryReader;
+use anyhow::Result;
 
 use crate::utils::log_i;
 
@@ -13,11 +14,11 @@ impl KeyTableEntry {
     pub fn from_reader(
         reader: &mut BinaryReader,
         _dir_version: u16,
-    ) -> Result<KeyTableEntry, String> {
+    ) -> Result<KeyTableEntry> {
         return Ok(KeyTableEntry {
-            section_id: reader.read_u32().unwrap(),
-            cast_id: reader.read_u32().unwrap(),
-            fourcc: reader.read_u32().unwrap(),
+            section_id: reader.read_u32()?,
+            cast_id: reader.read_u32()?,
+            fourcc: reader.read_u32()?,
         });
     }
 }
@@ -35,11 +36,11 @@ impl KeyTableChunk {
     pub fn from_reader(
         reader: &mut BinaryReader,
         dir_version: u16,
-    ) -> Result<KeyTableChunk, String> {
-        let entry_size = reader.read_u16().unwrap();
-        let entry_size2 = reader.read_u16().unwrap();
-        let entry_count = reader.read_u32().unwrap();
-        let used_count = reader.read_u32().unwrap();
+    ) -> Result<KeyTableChunk> {
+        let entry_size = reader.read_u16()?;
+        let entry_size2 = reader.read_u16()?;
+        let entry_count = reader.read_u32()?;
+        let used_count = reader.read_u32()?;
 
         return Ok(KeyTableChunk {
             entry_size: entry_size,
@@ -47,8 +48,8 @@ impl KeyTableChunk {
             entry_count: entry_count,
             used_count: used_count,
             entries: (0..entry_count)
-                .map(|_| KeyTableEntry::from_reader(reader, dir_version).unwrap())
-                .collect(),
+                .map(|_| KeyTableEntry::from_reader(reader, dir_version))
+                .collect::<Result<_, _>>()?,
         });
     }
 }

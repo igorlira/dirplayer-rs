@@ -1,8 +1,9 @@
 use binary_reader::BinaryReader;
 use fxhash::FxHashMap;
 use std::convert::TryInto;
-
+use std::io::Error;
 use crate::director::lingo::{constants::opcode_names, opcode::OpCode, script::ScriptContext};
+use crate::io::reader::DirectorExt;
 
 #[allow(dead_code)]
 pub struct HandlerRecord {
@@ -45,7 +46,7 @@ impl Bytecode {
         multiplier: u32,
         annotation: &str,
     ) -> String {
-        let op_id = num::ToPrimitive::to_u16(&self.opcode).unwrap();
+        let op_id = self.opcode as u16;
         let opcode_name = get_opcode_name(op_id);
 
         let mut writer = String::new();
@@ -90,7 +91,7 @@ impl Bytecode {
     }
 
     pub fn to_bytecode_text(&self, lctx: &ScriptContext, handler: &HandlerDef, multiplier: u32) -> String {
-        let op_id = num::ToPrimitive::to_u16(&self.opcode).unwrap();
+        let op_id = self.opcode as u16;
         let opcode_name = get_opcode_name(op_id);
 
         let mut writer = String::new();
@@ -115,7 +116,7 @@ impl Bytecode {
             | OpCode::GetChainedProp
             | OpCode::GetGlobal
             | OpCode::SetGlobal => {
-                let name = lctx.names.get(self.obj as usize).unwrap();
+                let name = lctx.names.get(self.obj as usize).map(String::as_str).unwrap_or("UNKNOWN_NAME");
                 writer.push(' ');
                 writer.push_str(name);
             }
@@ -182,24 +183,24 @@ impl HandlerRecord {
         reader: &mut BinaryReader,
         dir_version: u16,
         capital_x: bool,
-    ) -> Result<HandlerRecord, String> {
-        let name_id = reader.read_u16().unwrap();
-        let vector_pos = reader.read_u16().unwrap();
-        let compiled_len = reader.read_u32().unwrap() as usize;
-        let compiled_offset = reader.read_u32().unwrap() as usize;
-        let argument_count = reader.read_u16().unwrap();
-        let argument_offset = reader.read_u32().unwrap() as usize;
-        let locals_count = reader.read_u16().unwrap();
-        let locals_offset = reader.read_u32().unwrap() as usize;
-        let globals_count = reader.read_u16().unwrap();
-        let globals_offset = reader.read_u32().unwrap() as usize;
-        let unknown1 = reader.read_u32().unwrap();
-        let unknown2 = reader.read_u16().unwrap();
-        let line_count = reader.read_u16().unwrap();
-        let line_offset = reader.read_u32().unwrap();
+    ) -> Result<HandlerRecord, Error> {
+        let name_id = reader.read_u16()?;
+        let vector_pos = reader.read_u16()?;
+        let compiled_len = reader.read_usize32()?;
+        let compiled_offset = reader.read_usize32()?;
+        let argument_count = reader.read_u16()?;
+        let argument_offset = reader.read_usize32()?;
+        let locals_count = reader.read_u16()?;
+        let locals_offset = reader.read_usize32()?;
+        let globals_count = reader.read_u16()?;
+        let globals_offset = reader.read_usize32()?;
+        let unknown1 = reader.read_u32()?;
+        let unknown2 = reader.read_u16()?;
+        let line_count = reader.read_u16()?;
+        let line_offset = reader.read_u32()?;
         // yet to implement
         if capital_x {
-            let stack_height = reader.read_u32().unwrap();
+            let stack_height = reader.read_u32()?;
         }
 
         // log_i(format_args!("Handler_record name_id: {name_id} compiled_len: {compiled_len} compiled_offset: {compiled_offset} globals_count: {globals_count} argument_count: {argument_count}").to_string().as_str());
@@ -225,7 +226,7 @@ impl HandlerRecord {
     pub fn read_data(
         reader: &mut BinaryReader,
         record: &HandlerRecord,
-    ) -> Result<HandlerDef, String> {
+    ) -> Result<HandlerDef, Error> {
         let mut bytecode_array: Vec<Bytecode> = Vec::new();
         let mut bytecode_index_map: FxHashMap<usize, usize> = FxHashMap::default();
 
@@ -233,30 +234,30 @@ impl HandlerRecord {
 
         while reader.pos < record.compiled_offset + record.compiled_len {
             let pos = reader.pos - record.compiled_offset;
-            let op = reader.read_u8().unwrap() as u16;
+            let op = reader.read_u8()? as u16;
             let opcode = OpCode::from(if op >= 0x40 { 0x40 + op % 0x40 } else { op });
             // argument can be one, two or four bytes
             let mut obj: i64 = 0;
             if op >= 0xc0 {
                 // four bytes
-                obj = reader.read_i32().unwrap() as i64;
+                obj = reader.read_i32()? as i64;
             } else if op >= 0x80 {
                 // two bytes
                 obj = match opcode {
                     OpCode::PushInt16 | OpCode::PushInt8 => {
                         // treat pushint's arg as signed
                         // pushint8 may be used to push a 16-bit int in older Lingo
-                        reader.read_i16().unwrap() as i64
+                        reader.read_i16()? as i64
                     }
-                    _ => reader.read_u16().unwrap() as i64,
+                    _ => reader.read_u16()? as i64,
                 };
             } else if op >= 0x40 {
                 // one byte
                 if let OpCode::PushInt8 = opcode {
                     // treat pushint's arg as signed
-                    obj = reader.read_i8().unwrap() as i64;
+                    obj = reader.read_i8()? as i64;
                 } else {
-                    obj = reader.read_u8().unwrap() as i64;
+                    obj = reader.read_u8()? as i64;
                 }
             }
 
@@ -277,11 +278,11 @@ impl HandlerRecord {
             reader,
             record.argument_count as usize,
             record.argument_offset,
-        );
+        )?;
         let local_name_ids =
-            read_varnames_table(reader, record.locals_count as usize, record.locals_offset);
+            read_varnames_table(reader, record.locals_count as usize, record.locals_offset)?;
         let global_name_ids =
-            read_varnames_table(reader, record.globals_count as usize, record.globals_offset);
+            read_varnames_table(reader, record.globals_count as usize, record.globals_offset)?;
 
         return Ok(HandlerDef {
             name_id: record.name_id,
@@ -294,7 +295,7 @@ impl HandlerRecord {
     }
 }
 
-fn read_varnames_table(reader: &mut BinaryReader, count: usize, offset: usize) -> Vec<u16> {
+fn read_varnames_table(reader: &mut BinaryReader, count: usize, offset: usize) -> Result<Vec<u16>, Error> {
     reader.jmp(offset);
-    return (0..count).map(|_| reader.read_u16().unwrap()).collect();
+    return (0..count).map(|_| reader.read_u16()).collect();
 }

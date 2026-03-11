@@ -1,5 +1,5 @@
 use std::fmt::Display;
-
+use std::io::Error;
 use binary_reader::BinaryReader;
 
 #[derive(Clone, Copy)]
@@ -22,14 +22,14 @@ impl MoaID {
         };
     }
 
-    pub fn from_reader(reader: &mut BinaryReader) -> MoaID {
-        return MoaID {
-            data1: reader.read_u32().unwrap(),
-            data2: reader.read_u16().unwrap(),
-            data3: reader.read_u16().unwrap(),
-            data4: reader.read_u32().unwrap(),
-            data5: reader.read_u32().unwrap(),
-        };
+    pub fn from_reader(reader: &mut BinaryReader) -> Result<MoaID, Error> {
+        return Ok(MoaID {
+            data1: reader.read_u32()?,
+            data2: reader.read_u16()?,
+            data3: reader.read_u16()?,
+            data4: reader.read_u32()?,
+            data5: reader.read_u32()?,
+        });
     }
 }
 

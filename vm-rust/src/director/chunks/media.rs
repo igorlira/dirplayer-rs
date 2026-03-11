@@ -1,8 +1,10 @@
 use binary_reader::{BinaryReader, Endian};
+use anyhow::{bail, Result};
 use std::convert::TryInto;
 use web_sys::console;
 
 use log::{debug};
+use crate::io::reader::DirectorExt;
 
 #[derive(Debug, Clone)]
 pub struct MediaChunk {
@@ -14,7 +16,7 @@ pub struct MediaChunk {
 }
 
 impl MediaChunk {
-    pub fn from_reader(reader: &mut BinaryReader) -> Result<Self, String> {
+    pub fn from_reader(reader: &mut BinaryReader) -> Result<Self> {
         let mut data_test = Vec::new();
 
         let r_begin = reader.pos;
@@ -54,20 +56,19 @@ impl MediaChunk {
         let original_endian = reader.endian;
         reader.endian = Endian::Big;
 
-        let header_size = reader.read_u32().map_err(|e| e.to_string())?;
-        let _unknown1 = reader.read_u32().map_err(|e| e.to_string())?;
-        let sample_rate = reader.read_u32().map_err(|e| e.to_string())?;
-        let _sample_rate2 = reader.read_u32().map_err(|e| e.to_string())?;
-        let _unknown2 = reader.read_u32().map_err(|e| e.to_string())?;
-        let data_size_field = reader.read_u32().map_err(|e| e.to_string())?;
+        let header_size = reader.read_u32()?;
+        let _unknown1 = reader.read_u32()?;
+        let sample_rate = reader.read_u32()?;
+        let _sample_rate2 = reader.read_u32()?;
+        let _unknown2 = reader.read_u32()?;
+        let data_size_field = reader.read_u32()?;
 
         let bytes_read = 24;
         let skip_bytes = (header_size as usize).saturating_sub(bytes_read);
 
         // Read GUID if present
         let guid = if skip_bytes >= 16 {
-            let b = reader.read_bytes(16).map_err(|e| e.to_string())?;
-            Some(b.try_into().unwrap())
+            Some(reader.read_n_bytes()?)
         } else {
             None
         };

@@ -27,7 +27,7 @@ pub mod xmedia;
 pub mod xmedia_styled_text;
 
 use std::collections::HashMap;
-
+use anyhow::bail;
 use binary_reader::{BinaryReader, Endian};
 use config::ConfigChunk;
 use imap::InitialMapChunk;
@@ -157,7 +157,7 @@ pub fn make_chunk(
     rifx: &mut RIFXReaderContext,
     fourcc: u32,
     view: &Vec<u8>,
-) -> Result<Chunk, String> {
+) -> Result<Chunk, anyhow::Error> {
     let version = rifx.dir_version;
     let mut chunk_reader = BinaryReader::from_vec(view);
     chunk_reader.set_endian(endian);
@@ -273,10 +273,7 @@ pub fn make_chunk(
             return Ok(Chunk::Raw(view.clone()));
         }
         _ => {
-            return Err(
-                format_args!("Could not deserialize '{}' chunk", fourcc_to_string(fourcc))
-                    .to_string(),
-            );
+            bail!("Could not deserialize '{}' chunk", fourcc_to_string(fourcc))
         }
     }
 }

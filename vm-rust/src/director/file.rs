@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::io::{Error, ErrorKind};
 use std::str::FromStr;
-
+use anyhow::bail;
 use crate::console_warn;
 use crate::director::chunks::config::ConfigChunk;
 use crate::director::chunks::key_table::KeyTableChunk;
@@ -73,7 +74,7 @@ impl DirectorFile {
         file_name: String,
         base_path: Url,
         reader: &mut BinaryReader,
-    ) -> Result<DirectorFile, String> {
+    ) -> Result<DirectorFile, anyhow::Error> {
         reader.set_endian(binary_reader::Endian::Big);
 
         let mut chunk_container = ChunkContainer {
@@ -82,7 +83,7 @@ impl DirectorFile {
             deserialized_chunks: HashMap::new(),
         };
 
-        let meta_fourcc = reader.read_u32().unwrap();
+        let meta_fourcc = reader.read_u32()?;
         let endian = if meta_fourcc == FOURCC("XFIR") {
             reader.set_endian(binary_reader::Endian::Little);
             binary_reader::Endian::Little
@@ -90,8 +91,8 @@ impl DirectorFile {
             binary_reader::Endian::Big
         };
 
-        let _ = reader.read_u32().unwrap(); // meta length
-        let codec = reader.read_u32().unwrap();
+        let _ = reader.read_u32()?; // meta length
+        let codec = reader.read_u32()?;
         let mut after_burned = false;
         let mut ils_body_offset: usize = 0;
 
@@ -104,9 +105,9 @@ impl DirectorFile {
                 &mut chunk_container.cached_chunk_views,
                 &mut chunk_container.chunk_info,
             )
-            .unwrap();
+                ?;
         } else {
-            return Err("Invalid codec".to_owned());
+            bail!("Invalid codec");
         }
 
         let mut rifx = RIFXReaderContext {
@@ -116,9 +117,9 @@ impl DirectorFile {
             lctx_capital_x: false,
         };
 
-        let key_table = read_key_table(reader, &mut chunk_container, &mut rifx).unwrap();
+        let key_table = read_key_table(reader, &mut chunk_container, &mut rifx)?;
 
-        let config = read_config(reader, &mut chunk_container, &mut rifx).unwrap();
+        let config = read_config(reader, &mut chunk_container, &mut rifx)?;
 
         rifx.dir_version = human_version(config.director_version);
         let dot_syntax = rifx.dir_version >= 700;
@@ -126,7 +127,7 @@ impl DirectorFile {
         // info!("width={}, height={}", config.movie_right - config.movie_left, config.movie_bottom - config.movie_top);
 
         let (cast_entries, casts) =
-            read_casts(reader, &mut chunk_container, &mut rifx, &key_table, &config).unwrap();
+            read_casts(reader, &mut chunk_container, &mut rifx, &key_table, &config)?;
 
         let font_table = parse_font_table(reader, &mut chunk_container, &mut rifx);
 
@@ -335,14 +336,13 @@ fn read_casts(
     rifx: &mut RIFXReaderContext,
     key_table: &KeyTableChunk,
     config: &ConfigChunk,
-) -> Result<(Vec<CastListEntry>, Vec<CastDef>), String> {
+) -> Result<(Vec<CastListEntry>, Vec<CastDef>), anyhow::Error> {
     let mut internal = true;
     let mut casts: Vec<CastDef> = Vec::new();
 
     if rifx.dir_version >= 500 {
         let cast_list = get_cast_list_chunk(reader, chunk_container, rifx);
-        if cast_list.is_some() {
-            let cast_list = cast_list.unwrap();
+        if let Some(cast_list) = cast_list {
             for cast_entry in &cast_list.entries {
                 let cast = get_cast_chunk_for_cast(
                     reader,
@@ -375,8 +375,7 @@ fn read_casts(
                             rifx,
                             key_table,
                             palette_id_offset,
-                        )
-                        .unwrap(),
+                        )?,
                     );
                     // TODO populate
                 }
@@ -401,8 +400,7 @@ fn read_casts(
                 rifx,
                 key_table,
                 0, // No offset needed: Config.min_member is used directly
-            )
-            .unwrap(),
+            )?,
         );
 
         return Ok((Vec::new(), casts));
@@ -685,7 +683,7 @@ fn read_config(
     reader: &mut BinaryReader,
     chunk_container: &mut ChunkContainer,
     rifx: &mut RIFXReaderContext,
-) -> Result<ConfigChunk, String> {
+) -> Result<ConfigChunk, anyhow::Error> {
     let info = get_first_chunk_info(&chunk_container.chunk_info, FOURCC("DRCF")).or(
         get_first_chunk_info(&chunk_container.chunk_info, FOURCC("VWCF")),
     );
@@ -693,7 +691,7 @@ fn read_config(
     match info {
         Some(info) => {
             if let Chunk::Config(config) =
-                get_chunk(reader, chunk_container, rifx, info.fourcc, info.id).unwrap()
+                get_chunk(reader, chunk_container, rifx, info.fourcc, info.id)?
             {
                 return Ok(config);
             } else {
@@ -701,7 +699,7 @@ fn read_config(
             }
         }
         None => {
-            return Err("No config chunk!".to_owned());
+            bail!("No config chunk!");
         }
     }
 }
@@ -710,13 +708,13 @@ fn read_after_burner_map(
     reader: &mut BinaryReader,
     cached_chunk_views: &mut HashMap<u32, Vec<u8>>,
     chunk_info: &mut HashMap<u32, ChunkInfo>,
-) -> Result<usize, String> {
+) -> Result<usize, anyhow::Error> {
     let start: usize;
     let end: usize;
 
     // File version
-    if reader.read_u32().unwrap() != FOURCC("Fver") {
-        return Err("readAfterburnerMap(): Fver expected but not found".to_owned());
+    if reader.read_u32()? != FOURCC("Fver") {
+        bail!("readAfterburnerMap(): Fver expected but not found".to_owned());
     }
 
     let fver_length = reader.read_var_int().unwrap();
@@ -732,11 +730,9 @@ fn read_after_burner_map(
         let version_string_len = reader.read_u8().unwrap();
         let _fver_version_string = String::from_utf8(
             reader
-                .read_bytes(version_string_len as usize)
-                .unwrap()
+                .read_bytes(version_string_len as usize)?
                 .to_vec(),
-        )
-        .unwrap();
+        )?;
         // info!("Fver: versionString: {}", fver_version_string);
     }
     end = reader.pos;
@@ -748,22 +744,22 @@ fn read_after_burner_map(
 
     // Compression types
     if reader.read_u32().unwrap() != FOURCC("Fcdr") {
-        return Err("readAfterburnerMap(): Fcdr expected but not found".to_owned());
+        bail!("readAfterburnerMap(): Fcdr expected but not found");
     }
 
-    let fcdr_length = reader.read_var_int().unwrap();
-    let fcdr_uncomp = reader.read_zlib_bytes(fcdr_length as usize).unwrap();
+    let fcdr_length = reader.read_var_int()?;
+    let fcdr_uncomp = reader.read_zlib_bytes(fcdr_length as usize)?;
 
     let mut fcdr_reader = BinaryReader::from_vec(&fcdr_uncomp);
     fcdr_reader.set_endian(reader.endian);
 
-    let compression_type_count = fcdr_reader.read_u16().unwrap();
+    let compression_type_count = fcdr_reader.read_u16()?;
     let compression_ids: Vec<MoaID> = (0..compression_type_count)
         .map(|_| MoaID::from_reader(&mut fcdr_reader))
-        .collect();
+        .collect::<Result<_, _>>()?;
     let compression_descs: Vec<String> = (0..compression_type_count)
-        .map(|_| fcdr_reader.read_cstr().unwrap())
-        .collect();
+        .map(|_| fcdr_reader.read_cstr())
+        .collect::<Result<_, _>>()?;
 
     // for desc in &compression_descs {
     //   info!("{}", desc);
@@ -785,16 +781,16 @@ fn read_after_burner_map(
     }
 
     if reader.read_u32().unwrap() != FOURCC("ABMP") {
-        return Err("RIFXArchive::readAfterburnerMap(): ABMP expected but not found".to_owned());
+        bail!("RIFXArchive::readAfterburnerMap(): ABMP expected but not found");
     }
 
-    let abmp_length = reader.read_var_int().unwrap();
+    let abmp_length = reader.read_var_int()?;
     let abmp_end = reader.pos + abmp_length as usize;
-    let _abmp_compression_type = reader.read_var_int().unwrap();
-    let abmp_uncomp_length = reader.read_var_int().unwrap();
+    let _abmp_compression_type = reader.read_var_int()?;
+    let abmp_uncomp_length = reader.read_var_int()?;
     // info!("ABMP: length: {} compressionType: {} uncompressedLength: {}", abmp_length, abmp_compression_type, abmp_uncomp_length);
 
-    let abmp_uncomp = reader.read_zlib_bytes(abmp_end - reader.pos).unwrap();
+    let abmp_uncomp = reader.read_zlib_bytes(abmp_end - reader.pos)?;
     if abmp_uncomp.len() != abmp_uncomp_length as usize {
         warn!(
             "ABMP: Expected uncompressed length {} but got length {}",
@@ -805,18 +801,18 @@ fn read_after_burner_map(
     let mut abmp_reader = BinaryReader::from_vec(&abmp_uncomp);
     abmp_reader.set_endian(reader.endian);
 
-    let _abmp_unk1 = abmp_reader.read_var_int().unwrap();
-    let _abmp_unk2 = abmp_reader.read_var_int().unwrap();
-    let res_count = abmp_reader.read_var_int().unwrap();
+    let _abmp_unk1 = abmp_reader.read_var_int()?;
+    let _abmp_unk2 = abmp_reader.read_var_int()?;
+    let res_count = abmp_reader.read_var_int()?;
     // info!("ABMP: unk1: {} unk2: {} resCount: {}", abmp_unk1, abmp_unk2, res_count);
 
     for _ in 0..res_count {
-        let res_id = abmp_reader.read_var_int().unwrap() as u32;
-        let offset = abmp_reader.read_var_int().unwrap() as usize;
-        let comp_size = abmp_reader.read_var_int().unwrap() as usize;
-        let uncomp_size = abmp_reader.read_var_int().unwrap() as usize;
-        let compression_type = abmp_reader.read_var_int().unwrap() as u32;
-        let tag = abmp_reader.read_u32().unwrap();
+        let res_id = abmp_reader.read_var_int()? as u32;
+        let offset = abmp_reader.read_var_int()? as usize;
+        let comp_size = abmp_reader.read_var_int()? as usize;
+        let uncomp_size = abmp_reader.read_var_int()? as usize;
+        let compression_type = abmp_reader.read_var_int()? as u32;
+        let tag = abmp_reader.read_u32()?;
 
         // info!(
         //   "Found RIFX resource index {}: '{}', {} bytes ({} uncompressed) @ pos {}, compressionType: {}",
@@ -840,19 +836,18 @@ fn read_after_burner_map(
     }
 
     // Initial load segment
-    if !chunk_info.contains_key(&2) {
-        return Err("readAfterburnerMap(): Map has no entry for ILS".to_owned());
-    }
-    if reader.read_u32().unwrap() != FOURCC("FGEI") {
-        return Err("readAfterburnerMap(): FGEI expected but not found".to_owned());
+    let Some(ils_info) = chunk_info.get(&2) else {
+        bail!("readAfterburnerMap(): Map has no entry for ILS");
+    };
+    if reader.read_u32()? != FOURCC("FGEI") {
+        bail!("readAfterburnerMap(): FGEI expected but not found");
     }
 
-    let ils_info = chunk_info.get(&2).unwrap();
-    let _ils_unk1 = reader.read_var_int().unwrap();
+    let _ils_unk1 = reader.read_var_int()?;
     // info!("ILS: length: {} unk1: {}", ils_info.len, ils_unk1);
     let ils_body_offset = reader.pos;
 
-    let ils_uncomp = reader.read_zlib_bytes(ils_info.len).unwrap();
+    let ils_uncomp = reader.read_zlib_bytes(ils_info.len)?;
     if ils_uncomp.len() != ils_info.uncompressed_len {
         warn!(
             "ILS: Expected uncompressed length {} but got length {}",
@@ -865,11 +860,13 @@ fn read_after_burner_map(
     ils_reader.set_endian(reader.endian);
 
     while !ils_reader.eof() {
-        let res_id = ils_reader.read_var_int().unwrap() as u32;
-        let info = chunk_info.get(&res_id).unwrap();
+        let res_id = ils_reader.read_var_int()? as u32;
+        let Some(info) = chunk_info.get(&res_id) else {
+            bail!("readAfterburnerMap(): ILS references resource id {} which is not in the map", res_id);
+        };
 
         // info!("Loading ILS resource {}: '{}', {} bytes", res_id, fourcc_to_string(info.fourcc), info.len);
-        cached_chunk_views.insert(res_id, ils_reader.read_bytes(info.len).unwrap().to_vec());
+        cached_chunk_views.insert(res_id, ils_reader.read_bytes(info.len)?.to_vec());
     }
     return Ok(ils_body_offset);
 }
@@ -877,20 +874,20 @@ fn read_after_burner_map(
 fn read_memory_map(
     reader: &mut BinaryReader,
     chunk_info: &mut HashMap<u32, ChunkInfo>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // Read imap chunk header
-    let imap_fourcc = reader.read_u32().unwrap();
+    let imap_fourcc = reader.read_u32()?;
     if imap_fourcc != FOURCC("imap") {
-        return Err(format!(
+        return Err(Error::new(ErrorKind::InvalidData, format!(
             "read_memory_map: Expected 'imap' but got '{}'",
             fourcc_to_string(imap_fourcc)
-        ));
+        )));
     }
-    let _imap_length = reader.read_u32().unwrap();
+    let _imap_length = reader.read_u32()?;
 
     // imap body: count (u32), mmapOffset (u32)
-    let imap_count = reader.read_u32().unwrap();
-    let mmap_offset = reader.read_u32().unwrap() as usize;
+    let imap_count = reader.read_u32()?;
+    let mmap_offset = reader.read_usize32()?;
 
     console_warn!(
         "read_memory_map: imap count={} mmapOffset=0x{:x}",
@@ -900,23 +897,23 @@ fn read_memory_map(
     // Seek to mmap
     reader.jmp(mmap_offset);
 
-    let mmap_fourcc = reader.read_u32().unwrap();
+    let mmap_fourcc = reader.read_u32()?;
     if mmap_fourcc != FOURCC("mmap") {
-        return Err(format!(
+        return Err(Error::new(ErrorKind::InvalidData, format!(
             "read_memory_map: Expected 'mmap' at offset 0x{:x} but got '{}'",
             mmap_offset, fourcc_to_string(mmap_fourcc)
-        ));
+        )));
     }
-    let _mmap_length = reader.read_u32().unwrap();
+    let _mmap_length = reader.read_u32()?;
 
     // mmap header
-    let header_size = reader.read_u16().unwrap();
-    let entry_size = reader.read_u16().unwrap();
-    let _chunk_count_max = reader.read_u32().unwrap();
-    let chunk_count_used = reader.read_u32().unwrap();
-    let _junk_head_a = reader.read_u32().unwrap(); // 0xFFFFFFFF
-    let _junk_head_b = reader.read_u32().unwrap(); // 0xFFFFFFFF
-    let _free_head = reader.read_u32().unwrap();
+    let header_size = reader.read_u16()?;
+    let entry_size = reader.read_u16()?;
+    let _chunk_count_max = reader.read_u32()?;
+    let chunk_count_used = reader.read_u32()?;
+    let _junk_head_a = reader.read_u32()?; // 0xFFFFFFFF
+    let _junk_head_b = reader.read_u32()?; // 0xFFFFFFFF
+    let _free_head = reader.read_u32()?;
 
     console_warn!(
         "read_memory_map: mmap headerSize={} entrySize={} chunkCountUsed={} chunkCountMax={}",
@@ -927,18 +924,18 @@ fn read_memory_map(
     let header_bytes_read: u16 = 24; // 2+2+4+4+4+4+4
     if header_size > header_bytes_read {
         let extra = (header_size - header_bytes_read) as usize;
-        reader.read_bytes(extra).unwrap();
+        reader.read_bytes(extra)?;
     }
 
     // Read mmap entries
     for i in 0..chunk_count_used {
         let entry_start = reader.pos;
-        let fourcc = reader.read_u32().unwrap();
-        let size = reader.read_u32().unwrap();
-        let offset = reader.read_u32().unwrap() as usize;
-        let _flags = reader.read_u16().unwrap();
-        let _unknown = reader.read_u16().unwrap();
-        let _next = reader.read_u32().unwrap();
+        let fourcc = reader.read_u32()?;
+        let size = reader.read_u32()?;
+        let offset = reader.read_usize32()?;
+        let _flags = reader.read_u16()?;
+        let _unknown = reader.read_u16()?;
+        let _next = reader.read_u32()?;
 
         // Skip any extra entry bytes beyond the 20 we already read
         let entry_bytes_read: u16 = 20; // 4+4+4+2+2+4
@@ -970,13 +967,13 @@ fn read_key_table(
     reader: &mut BinaryReader,
     chunk_container: &mut ChunkContainer,
     rifx: &mut RIFXReaderContext,
-) -> Result<KeyTableChunk, String> {
+) -> Result<KeyTableChunk, anyhow::Error> {
     let info = get_first_chunk_info(&chunk_container.chunk_info, FOURCC("KEY*"));
 
     match info {
         Some(info) => {
             let key_table = if let Chunk::KeyTable(key_table) =
-                get_chunk(reader, chunk_container, rifx, info.fourcc, info.id).unwrap()
+                get_chunk(reader, chunk_container, rifx, info.fourcc, info.id)?
             {
                 key_table
             } else {
@@ -986,18 +983,14 @@ fn read_key_table(
             for i in 0..key_table.used_count {
                 let entry = &key_table.entries[i as usize];
                 let mut _owner_tag = FOURCC("????");
-                if chunk_container.chunk_info.contains_key(&entry.cast_id) {
-                    _owner_tag = chunk_container
-                        .chunk_info
-                        .get(&entry.cast_id)
-                        .unwrap()
-                        .fourcc;
+                if let Some(chunk) = chunk_container.chunk_info.get(&entry.cast_id) {
+                    _owner_tag = chunk.fourcc;
                 }
                 // info!("KEY* entry ${i}: '{}' @ {} owned by '{}' @ {}", fourcc_to_string(entry.fourcc), entry.section_id, fourcc_to_string(owner_tag), entry.cast_id);
             }
             return Ok(key_table);
         }
-        None => return Err("No key chunk!".to_owned()),
+        None => bail!("No key chunk!"),
     }
 }
 
@@ -1030,7 +1023,7 @@ fn get_first_chunk(
     }
 }
 
-fn read_chunk_data(reader: &mut BinaryReader, fourcc: u32, len: u32) -> Result<Vec<u8>, String> {
+fn read_chunk_data(reader: &mut BinaryReader, fourcc: u32, len: u32) -> Result<Vec<u8>, Error> {
     let offset = reader.pos;
 
     let valid_fourcc = reader.read_u32().unwrap();
@@ -1044,12 +1037,12 @@ fn read_chunk_data(reader: &mut BinaryReader, fourcc: u32, len: u32) -> Result<V
 
     // validate chunk
     if fourcc != valid_fourcc {
-        return Err(format!(
+        return Err(Error::new(ErrorKind::InvalidData, format!(
             "At offset 0x{:x} expected '{}' chunk but got '{}'",
             offset,
             fourcc_to_string(fourcc),
             fourcc_to_string(valid_fourcc),
-        ));
+        )));
     }
 
     if use_len != valid_len {
@@ -1063,21 +1056,21 @@ fn read_chunk_data(reader: &mut BinaryReader, fourcc: u32, len: u32) -> Result<V
         use_len = valid_len;
     }
 
-    return Ok(reader.read_bytes(use_len as usize).unwrap().to_vec());
+    return Ok(reader.read_bytes(use_len as usize)?.to_vec());
 }
 
 pub fn read_director_file_bytes(
     bytes: &Vec<u8>,
     file_name: &str,
     base_path: &str,
-) -> Result<DirectorFile, String> {
+) -> Result<DirectorFile, anyhow::Error> {
     let mut reader = binary_reader::BinaryReader::from_vec(bytes);
 
-    return DirectorFile::read(
+    Ok(DirectorFile::read(
         file_name.to_owned(),
-        Url::from_str(base_path).unwrap(),
+        Url::from_str(base_path)?,
         &mut reader,
-    );
+    )?)
 }
 
 fn get_chunk_data(
@@ -1086,7 +1079,7 @@ fn get_chunk_data(
     rifx: &RIFXReaderContext,
     fourcc: u32,
     id: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     // let chunk_info = &mut self.chunk_info;
     // let cached_chunk_views = &self.cached_chunk_views;
     // let ils_body_offset = self.ils_body_offset;
@@ -1094,12 +1087,11 @@ fn get_chunk_data(
     match chunk_container.chunk_info.get(&id) {
         Some(info) => {
             if fourcc != info.fourcc {
-                return Err(format_args!(
+                return Err(Error::new(ErrorKind::InvalidData, format!(
                     "Expected chunk ${id} to be '{}', but is actually '{}'",
                     fourcc_to_string(fourcc),
                     fourcc_to_string(info.fourcc)
-                )
-                .to_string());
+                )));
             }
 
             if chunk_container.cached_chunk_views.contains_key(&id) {
@@ -1114,7 +1106,7 @@ fn get_chunk_data(
                     chunk_container
                         .cached_chunk_views
                         .insert(id, reader.read_bytes(info.len)
-                            .map_err(|e| format!("Chunk {}: failed to read empty chunk: {}", id, e))?
+                            .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Chunk {}: failed to read empty chunk: {}", id, e)))?
                             .to_vec());
                 } else if compression_implemented(&info.compression_id) {
                     let mut uncomp_buf: Option<Vec<u8>> = None;
@@ -1122,7 +1114,7 @@ fn get_chunk_data(
                         || info.compression_id == ZLIB_COMPRESSION_GUID2
                     {
                         uncomp_buf = Some(reader.read_zlib_bytes(info.len)
-                            .map_err(|e| format!("Chunk {}: zlib decompression failed: {}", id, e))?);
+                            .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Chunk {}: zlib decompression failed: {}", id, e)))?);
                     } else if info.compression_id == SND_COMPRESSION_GUID {
                         // Handle Director SND compressed chunk
                         reader.jmp(info.offset + rifx.ils_body_offset);
@@ -1130,7 +1122,7 @@ fn get_chunk_data(
                         // Read raw bytes for this chunk
                         let snd_bytes = reader
                             .read_bytes(info.len)
-                            .map_err(|e| format!("Failed to read SND chunk bytes: {}", e))?
+                            .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Failed to read SND chunk bytes: {}", e)))?
                             .to_vec();
 
                         // Create a temporary BinaryReader over those bytes
@@ -1157,16 +1149,15 @@ fn get_chunk_data(
                         }
                     }
                     if uncomp_buf.is_none() {
-                        return Err(format!("Chunk ${id}: Could not decompress").to_string());
+                        return Err(Error::new(ErrorKind::InvalidData, format!("Chunk ${id}: Could not decompress")));
                     }
                     let uncomp_buf = uncomp_buf.unwrap();
                     if uncomp_buf.len() != info.uncompressed_len {
-                        return Err(format_args!(
+                        return Err(Error::new(ErrorKind::InvalidData, format!(
                             "Chunk ${id}: Expected uncompressed length {} but got length {}",
                             info.uncompressed_len,
                             uncomp_buf.len()
-                        )
-                        .to_string());
+                        )));
                     }
                     chunk_container
                         .cached_chunk_views
@@ -1180,7 +1171,7 @@ fn get_chunk_data(
                     // Read and store raw bytes instead of panicking
                     let raw = reader
                         .read_bytes(info.len)
-                        .map_err(|e| format!("Failed to read FONTMAP chunk {}: {}", id, e))?
+                        .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Failed to read FONTMAP chunk {}: {}", id, e)))?
                         .to_vec();
 
                     chunk_container.cached_chunk_views.insert(id, raw.clone());
@@ -1192,7 +1183,7 @@ fn get_chunk_data(
                     chunk_container
                         .cached_chunk_views
                         .insert(id, reader.read_bytes(info.len)
-                            .map_err(|e| format!("Chunk {}: failed to read bytes: {}", id, e))?
+                            .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Chunk {}: failed to read bytes: {}", id, e)))?
                             .to_vec());
                 }
             } else {
@@ -1210,7 +1201,7 @@ fn get_chunk_data(
                 .to_vec());
         }
         None => {
-            Err(format_args!("Could not find chunk {} ${id}", fourcc_to_string(fourcc)).to_string())
+            Err(Error::new(ErrorKind::InvalidData, format!("Could not find chunk {} ${id}", fourcc_to_string(fourcc))))
         }
     }
 }
@@ -1222,18 +1213,21 @@ pub fn get_chunk(
     rifx: &mut RIFXReaderContext,
     fourcc: u32,
     id: u32,
-) -> Result<Chunk, String> {
+) -> Result<Chunk, anyhow::Error> {
     // if deserialized_chunks.contains_key(&id) {
     //   return deserialized_chunks.get(&id).unwrap();
     // }
 
     let chunk_view = get_chunk_data(reader, chunk_container, rifx, fourcc, id);
-    if let Ok(chunk_view) = chunk_view {
-        let chunk = make_chunk(reader.endian, rifx, fourcc, &chunk_view);
-        return chunk;
-    } else {
-        // warn!("Could not find chunk data for chunk {} of id {}", fourcc_to_string(fourcc), id);
-        Err(chunk_view.unwrap_err())
+    match chunk_view {
+        Ok(chunk_view) => {
+            let chunk = make_chunk(reader.endian, rifx, fourcc, &chunk_view);
+            return chunk;
+        }
+        Err(e) => {
+            // warn!("Could not find chunk data for chunk {} of id {}", fourcc_to_string(fourcc), id);
+            Err(e.into())
+        }
     }
     // deserialized_chunks.insert(id, chunk);
     // return deserialized_chunks.get(&id).unwrap();

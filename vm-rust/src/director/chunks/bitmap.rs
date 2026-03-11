@@ -1,3 +1,4 @@
+use anyhow::Result;
 use binary_reader::BinaryReader;
 
 pub struct BitmapChunk {
@@ -6,7 +7,7 @@ pub struct BitmapChunk {
 }
 
 impl BitmapChunk {
-    pub fn read(reader: &mut BinaryReader, dir_version: u16) -> Result<BitmapChunk, String> {
+    pub fn read(reader: &mut BinaryReader, dir_version: u16) -> Result<BitmapChunk> {
         Ok(BitmapChunk {
             data: reader.data.clone(),
             version: dir_version,

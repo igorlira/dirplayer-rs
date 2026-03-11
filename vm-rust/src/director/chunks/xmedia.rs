@@ -1,4 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
+use anyhow::Result;
 use log::{debug, warn};
 
 // Import the new PFR1 parser
@@ -19,9 +20,9 @@ pub struct PfrFont {
 }
 
 impl XMediaChunk {
-    pub fn from_reader(reader: &mut BinaryReader) -> Result<XMediaChunk, String> {
+    pub fn from_reader(reader: &mut BinaryReader) -> Result<XMediaChunk> {
         let original_endian = reader.endian;
-        reader.endian = Endian::Big;
+        reader.endian = Endian::Big; // TODO: why, if we only read u8?
 
         let mut raw_data = Vec::new();
         while let Ok(byte) = reader.read_u8() {

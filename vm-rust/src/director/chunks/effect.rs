@@ -1,4 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
+use anyhow::Result;
 use log::debug;
 use web_sys::console;
 
@@ -7,9 +8,9 @@ pub struct EffectChunk {
 }
 
 impl EffectChunk {
-    pub fn from_reader(reader: &mut BinaryReader) -> Result<EffectChunk, String> {
+    pub fn from_reader(reader: &mut BinaryReader) -> Result<EffectChunk> {
         let original_endian = reader.endian;
-        reader.endian = Endian::Big;
+        reader.endian = Endian::Big; // TODO: why, if we only read u8?
 
         let mut raw_data = Vec::new();
         while let Ok(byte) = reader.read_u8() {

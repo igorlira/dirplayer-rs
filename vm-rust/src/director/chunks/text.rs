@@ -1,4 +1,5 @@
 use binary_reader::BinaryReader;
+use anyhow::{bail, Result};
 
 use crate::io::reader::DirectorExt;
 
@@ -25,23 +26,23 @@ pub struct StxtFormattingRun {
 }
 
 impl TextChunk {
-    pub fn read(reader: &mut BinaryReader) -> Result<TextChunk, String> {
+    pub fn read(reader: &mut BinaryReader) -> Result<TextChunk> {
         reader.set_endian(binary_reader::Endian::Big);
 
-        let offset = reader.read_u32().unwrap() as usize;
+        let offset = reader.read_usize32()?;
         if offset != 12 {
-            return Err("Stxt init: unhandled offset".to_owned());
+            bail!("Stxt init: unhandled offset");
         }
 
-        let text_length = reader.read_u32().unwrap() as usize;
-        let data_length = reader.read_u32().unwrap() as usize;
+        let text_length = reader.read_usize32()?;
+        let data_length = reader.read_usize32()?;
 
         Ok(TextChunk {
             offset,
             text_length,
             data_length,
-            text: reader.read_string(text_length).unwrap(),
-            data: reader.read_bytes(data_length).unwrap().to_vec(),
+            text: reader.read_string(text_length)?,
+            data: reader.read_bytes(data_length)?.to_vec(),
         })
     }
 

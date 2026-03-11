@@ -1,4 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
+use anyhow::Result;
 use web_sys::console;
 
 pub struct ThumChunk {
@@ -6,9 +7,9 @@ pub struct ThumChunk {
 }
 
 impl ThumChunk {
-    pub fn from_reader(reader: &mut BinaryReader) -> Result<ThumChunk, String> {
+    pub fn from_reader(reader: &mut BinaryReader) -> Result<ThumChunk> {
         let original_endian = reader.endian;
-        reader.endian = Endian::Big;
+        reader.endian = Endian::Big; // TODO: why, if we only read u8?
 
         let mut raw_data = Vec::new();
         while let Ok(byte) = reader.read_u8() {

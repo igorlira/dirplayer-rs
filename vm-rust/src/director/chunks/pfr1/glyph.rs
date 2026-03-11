@@ -1045,14 +1045,12 @@ impl<'a> Pfr1HeaderParser<'a> {
 
         // POST-PROCESSING
         // If bit 2 of flags is set, insert first Y value at beginning
-        if (flags & 4) != 0 && !self.ctrl_y.is_empty() {
-            let first_y = self.ctrl_y[0];
+        if (flags & 4) != 0 && let Some(&first_y) = self.ctrl_y.first() {
             self.ctrl_y.insert(0, first_y);
         }
 
         // If odd Y count, duplicate last value
-        if (self.ctrl_y.len() & 1) != 0 && !self.ctrl_y.is_empty() {
-            let last_y = *self.ctrl_y.last().unwrap();
+        if (self.ctrl_y.len() & 1) != 0 && let Some(&last_y) = self.ctrl_y.last() {
             self.ctrl_y.push(last_y);
         }
 
@@ -2906,12 +2904,11 @@ impl<'a> Pfr1HeaderParser<'a> {
 
     fn close_contours(&mut self) {
         for contour in &mut self.contours {
-            if contour.commands.is_empty() { continue; }
+            let ([first @ last] | [first, .., last]) = &contour.commands[..] else {
+                continue;
+            };
 
-            let first = &contour.commands[0];
             if first.cmd_type != PfrCmdType::MoveTo { continue; }
-
-            let last = contour.commands.last().unwrap();
             if last.cmd_type == PfrCmdType::Close { continue; }
 
             let start_x = first.x;

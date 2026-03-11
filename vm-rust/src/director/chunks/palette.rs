@@ -1,11 +1,12 @@
 use binary_reader::BinaryReader;
+use anyhow::Result;
 
 pub struct PaletteChunk {
     pub colors: Vec<(u8, u8, u8)>,
 }
 
 impl PaletteChunk {
-    pub fn from_reader(reader: &mut BinaryReader, _: u16) -> Result<PaletteChunk, String> {
+    pub fn from_reader(reader: &mut BinaryReader, _: u16) -> Result<PaletteChunk> {
         reader.set_endian(binary_reader::Endian::Big);
 
         let mut colors = Vec::new();

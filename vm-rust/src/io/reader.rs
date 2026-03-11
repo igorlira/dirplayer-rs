@@ -7,9 +7,11 @@ pub trait DirectorExt {
     fn read_zlib_bytes(&mut self, length: usize) -> Result<Vec<u8>, std::io::Error>;
     fn read_pascal_string(&mut self) -> Result<String, std::io::Error>;
     fn read_string(&mut self, len: usize) -> Result<String, std::io::Error>;
-    fn read_apple_float_80(&mut self) -> Result<f64, String>;
+    fn read_apple_float_80(&mut self) -> Result<f64, std::io::Error>;
     fn eof(&self) -> bool;
     fn bytes_left(&self) -> usize;
+    fn read_n_bytes<const N: usize>(&mut self) -> Result<[u8; N], std::io::Error>;
+    fn read_usize32(&mut self) -> Result<usize, std::io::Error>;
 }
 
 impl DirectorExt for BinaryReader {
@@ -18,7 +20,7 @@ impl DirectorExt for BinaryReader {
         let mut val: i32 = 0;
         let mut b: u8;
         loop {
-            b = self.read_u8().unwrap();
+            b = self.read_u8()?;
             val = (val << 7) | ((b & 0x7f) as i32); // The 7 least significant bits are appended to the result
             if b >> 7 == 0 {
                 // If the most significant bit is 1, there's another byte after
@@ -43,21 +45,21 @@ impl DirectorExt for BinaryReader {
     }
 
     fn read_pascal_string(&mut self) -> Result<String, std::io::Error> {
-        let len = self.read_u8().unwrap() as usize;
+        let len = self.read_u8()? as usize;
         return self.read_string(len);
     }
 
     fn read_string(&mut self, len: usize) -> Result<String, std::io::Error> {
-        let bytes = self.read_bytes(len).unwrap();
+        let bytes = self.read_bytes(len)?;
         return Ok(String::from_utf8_lossy(&bytes).into_owned());
     }
 
-    fn read_apple_float_80(&mut self) -> Result<f64, String> {
+    fn read_apple_float_80(&mut self) -> Result<f64, std::io::Error> {
         // Floats are stored as an "80 bit IEEE Standard 754 floating
         // point number (Standard Apple Numeric Environment [SANE] data type
         // Extended).
 
-        let data = self.read_bytes(10).unwrap();
+        let data = self.read_bytes(10)?;
         let exponent = u16::from_be_bytes([data[0], data[1]]);
         let f64sign: u64 = ((exponent & 0x8000) as u64) << 48;
         let exponent = exponent & 0x7fff;
@@ -76,7 +78,10 @@ impl DirectorExt for BinaryReader {
         } else {
             let normexp = exponent as i64 - 0x3fff;
             if normexp < -0x3fe || normexp >= 0x3ff {
-                panic!("Constant float exponent too big for a double");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Constant float exponent too big for a double",
+                ));
             }
             f64exp = (normexp + 0x3ff) as u64;
         }
@@ -90,5 +95,16 @@ impl DirectorExt for BinaryReader {
 
     fn eof(&self) -> bool {
         return self.pos >= self.length;
+    }
+
+    fn read_n_bytes<const N: usize>(&mut self) -> Result<[u8; N], std::io::Error> {
+        let bytes = self.read_bytes(N)?;
+        let mut arr = [0u8; N];
+        arr.copy_from_slice(&bytes);
+        return Ok(arr);
+    }
+
+    fn read_usize32(&mut self) -> Result<usize, std::io::Error> {
+        Ok(self.read_u32()? as usize)
     }
 }

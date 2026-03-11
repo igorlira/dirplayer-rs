@@ -1,3 +1,4 @@
+use std::io::Error;
 use crate::{
     director::utils::{human_version, FOURCC},
     utils::log_i,
@@ -57,64 +58,64 @@ impl ConfigChunk {
         reader: &mut BinaryReader,
         _dir_version: u16,
         dir_endian: Endian,
-    ) -> Result<ConfigChunk, String> {
+    ) -> Result<ConfigChunk, Error> {
         reader.set_endian(binary_reader::Endian::Big);
         reader.jmp(36);
 
-        let raw_version = reader.read_u16().unwrap();
+        let raw_version = reader.read_u16()?;
         let dir_version = human_version(raw_version);
 
         reader.jmp(0);
 
-        let len = reader.read_u16().unwrap();
-        let file_version = reader.read_u16().unwrap();
-        let movie_top = reader.read_u16().unwrap();
-        let movie_left = reader.read_u16().unwrap();
-        let movie_bottom = reader.read_u16().unwrap();
-        let movie_right = reader.read_u16().unwrap();
-        let min_member = reader.read_u16().unwrap();
-        let max_member = reader.read_u16().unwrap();
-        let field9 = reader.read_u8().unwrap();
-        let field10 = reader.read_u8().unwrap();
+        let len = reader.read_u16()?;
+        let file_version = reader.read_u16()?;
+        let movie_top = reader.read_u16()?;
+        let movie_left = reader.read_u16()?;
+        let movie_bottom = reader.read_u16()?;
+        let movie_right = reader.read_u16()?;
+        let min_member = reader.read_u16()?;
+        let max_member = reader.read_u16()?;
+        let field9 = reader.read_u8()?;
+        let field10 = reader.read_u8()?;
         let mut pre_d7_field11 = 0;
         let mut d7_stage_color_r: u8 = 0;
         let mut d7_stage_color_g: u8 = 0;
         let mut d7_stage_color_b: u8 = 0;
         if dir_version < 700 {
-            pre_d7_field11 = reader.read_u16().unwrap();
+            pre_d7_field11 = reader.read_u16()?;
         } else {
-            d7_stage_color_g = reader.read_u8().unwrap();
-            d7_stage_color_b = reader.read_u8().unwrap();
+            d7_stage_color_g = reader.read_u8()?;
+            d7_stage_color_b = reader.read_u8()?;
         }
-        let comment_font = reader.read_u16().unwrap();
-        let comment_size = reader.read_u16().unwrap();
-        let comment_style = reader.read_u16().unwrap();
+        let comment_font = reader.read_u16()?;
+        let comment_size = reader.read_u16()?;
+        let comment_style = reader.read_u16()?;
         let mut pre_d7_stage_color: u16 = 0;
         let mut d7_stage_color_is_rgb: u8 = 0;
         if dir_version < 700 {
-            pre_d7_stage_color = reader.read_u16().unwrap();
+            pre_d7_stage_color = reader.read_u16()?;
         } else {
-            d7_stage_color_is_rgb = reader.read_u8().unwrap();
-            d7_stage_color_r = reader.read_u8().unwrap();
+            d7_stage_color_is_rgb = reader.read_u8()?;
+            d7_stage_color_r = reader.read_u8()?;
         }
-        let bit_depth = reader.read_u16().unwrap();
-        let field17 = reader.read_u8().unwrap();
-        let field18 = reader.read_u8().unwrap();
-        let field19 = reader.read_u32().unwrap();
+        let bit_depth = reader.read_u16()?;
+        let field17 = reader.read_u8()?;
+        let field18 = reader.read_u8()?;
+        let field19 = reader.read_u32()?;
         /* directorVersion = */
-        reader.read_u16().unwrap();
-        let field21 = reader.read_u16().unwrap();
-        let field22 = reader.read_u32().unwrap();
-        let field23 = reader.read_u32().unwrap();
-        let field24 = reader.read_u32().unwrap();
-        let field25 = reader.read_u8().unwrap();
-        let field26 = reader.read_u8().unwrap();
-        let frame_rate = reader.read_u16().unwrap();
-        let platform = reader.read_u16().unwrap();
-        let protection = reader.read_u16().unwrap();
-        let field29 = reader.read_u32().unwrap();
-        let checksum = reader.read_u32().unwrap();
-        let remnants = reader.read_bytes(len as usize - reader.pos).unwrap();
+        reader.read_u16()?;
+        let field21 = reader.read_u16()?;
+        let field22 = reader.read_u32()?;
+        let field23 = reader.read_u32()?;
+        let field24 = reader.read_u32()?;
+        let field25 = reader.read_u8()?;
+        let field26 = reader.read_u8()?;
+        let frame_rate = reader.read_u16()?;
+        let platform = reader.read_u16()?;
+        let protection = reader.read_u16()?;
+        let field29 = reader.read_u32()?;
+        let checksum = reader.read_u32()?;
+        let remnants = reader.read_bytes(len as usize - reader.pos)?;
 
         let config = ConfigChunk {
             len: len,

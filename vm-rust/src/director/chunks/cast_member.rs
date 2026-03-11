@@ -1,3 +1,4 @@
+use std::io::Error;
 use binary_reader::{BinaryReader, Endian};
 
 use log::debug;
@@ -6,7 +7,7 @@ use crate::director::{
     chunks::cast_member_info::CastMemberInfoChunk,
     enums::{BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, SoundInfo, FieldInfo, TextInfo},
 };
-
+use crate::io::reader::DirectorExt;
 use super::Chunk;
 
 pub struct CastMemberChunk {
@@ -36,7 +37,7 @@ impl CastMemberChunk {
     pub fn from_reader(
         reader: &mut BinaryReader,
         dir_version: u16,
-    ) -> Result<CastMemberChunk, String> {
+    ) -> Result<CastMemberChunk, Error> {
         reader.endian = Endian::Big;
 
         let mut data_test = Vec::new();
@@ -69,45 +70,45 @@ impl CastMemberChunk {
         let specific_data_parsed;
 
         if dir_version >= 500 {
-            member_type = MemberType::from(reader.read_u32().unwrap());
-            info_len = reader.read_u32().unwrap() as usize;
-            specific_data_len = reader.read_u32().unwrap() as usize;
+            member_type = MemberType::from(reader.read_u32()?);
+            info_len = reader.read_usize32()?;
+            specific_data_len = reader.read_usize32()?;
 
             // info
             if info_len != 0 {
-                let mut info_reader = BinaryReader::from_u8(reader.read_bytes(info_len).unwrap());
+                let mut info_reader = BinaryReader::from_u8(reader.read_bytes(info_len)?);
                 info_reader.set_endian(reader.endian);
 
-                info = Some(CastMemberInfoChunk::read(&mut info_reader, dir_version).unwrap());
+                info = Some(CastMemberInfoChunk::read(&mut info_reader, dir_version)?);
             }
 
             // specific data
             let has_flags1 = false;
-            specific_data = reader.read_bytes(specific_data_len).unwrap().to_vec();
+            specific_data = reader.read_bytes(specific_data_len)?.to_vec();
         } else {
-            specific_data_len = reader.read_u16().unwrap() as usize;
-            info_len = reader.read_u32().unwrap() as usize;
+            specific_data_len = reader.read_u16()? as usize;
+            info_len = reader.read_usize32()?;
 
             // these bytes are common but stored in the specific data
             let mut specific_data_left = specific_data_len;
-            member_type = MemberType::from(reader.read_u8().unwrap() as u32);
+            member_type = MemberType::from(reader.read_u8()? as u32);
             specific_data_left -= 1;
             if specific_data_left != 0 {
                 has_flags1 = true;
-                flags1 = reader.read_u8().unwrap();
+                flags1 = reader.read_u8()?;
                 specific_data_left -= 1;
             } else {
                 has_flags1 = false;
             }
 
             // specific data
-            specific_data = reader.read_bytes(specific_data_left).unwrap().to_vec();
+            specific_data = reader.read_bytes(specific_data_left)?.to_vec();
 
             // info
-            let mut info_reader = BinaryReader::from_u8(reader.read_bytes(info_len).unwrap());
+            let mut info_reader = BinaryReader::from_u8(reader.read_bytes(info_len)?);
             info_reader.set_endian(reader.endian);
             if info_len != 0 {
-                info = Some(CastMemberInfoChunk::read(&mut info_reader, dir_version).unwrap());
+                info = Some(CastMemberInfoChunk::read(&mut info_reader, dir_version)?);
             }
         }
 
@@ -117,7 +118,7 @@ impl CastMemberChunk {
         match member_type {
             MemberType::Script => {
                 specific_data_parsed = CastMemberSpecificData::Script(ScriptType::from(
-                    specific_reader.read_u16().unwrap(),
+                    specific_reader.read_u16()?,
                 ));
             }
             MemberType::Bitmap => {

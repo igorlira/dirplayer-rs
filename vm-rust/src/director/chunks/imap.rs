@@ -1,3 +1,4 @@
+use anyhow::bail;
 use binary_reader::BinaryReader;
 
 #[allow(dead_code)]
@@ -11,7 +12,7 @@ pub struct InitialMapChunk {
 }
 
 impl InitialMapChunk {
-    pub fn from_reader(_: &mut BinaryReader, _: u16) -> Result<InitialMapChunk, String> {
-        return Err("TODO".to_owned());
+    pub fn from_reader(_: &mut BinaryReader, _: u16) -> Result<InitialMapChunk, anyhow::Error> {
+        bail!("TODO");
     }
 }

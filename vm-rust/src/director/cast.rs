@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use binary_reader::BinaryReader;
 use itertools::Itertools;
-use log::debug;
+use log::{debug, error};
 
 use crate::{
     director::{file::get_children_of_chunk, utils::fourcc_to_string},
@@ -53,7 +53,7 @@ impl CastDef {
         rifx: &mut RIFXReaderContext,
         key_table: &KeyTableChunk,
         palette_id_offset: i16,
-    ) -> Result<CastDef, String> {
+    ) -> Result<CastDef, anyhow::Error> {
         // TODO script names, scripts
         let lctx_entry =
             get_script_context_key_entry_for_cast(reader, chunk_container, key_table, rifx, id);
@@ -75,7 +75,7 @@ impl CastDef {
                 lctx.lnam_section_id,
             )
         });
-        let capital_x = lctx_entry.is_some() && lctx_entry.unwrap().fourcc == FOURCC("LctX");
+        let capital_x = lctx_entry.is_some_and(|e| e.fourcc == FOURCC("LctX"));
         let lctx_section_id = lctx_entry.map(|e| e.section_id);
 
         let mut members: HashMap<u32, CastMemberDef> = HashMap::new();
@@ -105,7 +105,7 @@ impl CastDef {
                     let fourcc_str: String = fourcc_to_string(x.fourcc);
                     let child = get_chunk(reader, chunk_container, rifx, x.fourcc, x.section_id);
                     if let Err(err) = &child {
-                        debug!(
+                        error!(
                             "Failed to read child chunk type='{}' section_id={} for member {}: {}",
                             fourcc_str, x.section_id, member_id, err
                         );

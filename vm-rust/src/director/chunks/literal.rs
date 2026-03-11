@@ -1,3 +1,5 @@
+use std::io;
+use std::io::{Error, ErrorKind};
 use binary_reader::BinaryReader;
 use num_derive::FromPrimitive;
 
@@ -28,27 +30,27 @@ impl LiteralStore {
         reader: &mut BinaryReader,
         dir_version: u16,
         start_offset: usize,
-    ) -> Result<LiteralStore, String> {
-        let record = Self::read_record(reader, dir_version).unwrap();
-        let data = Self::read_data(reader, &record, start_offset).unwrap();
+    ) -> io::Result<LiteralStore> {
+        let record = Self::read_record(reader, dir_version)?;
+        let data = Self::read_data(reader, &record, start_offset)?;
         return Ok(LiteralStore { record, data });
     }
 
     pub fn read_record(
         reader: &mut BinaryReader,
         dir_version: u16,
-    ) -> Result<LiteralStoreRecord, String> {
+    ) -> io::Result<LiteralStoreRecord> {
         let literal_type_id = if dir_version >= 500 {
-            reader.read_u32().unwrap()
+            reader.read_u32()?
         } else {
-            reader.read_u16().unwrap() as u32
+            reader.read_u16()? as u32
         };
         let literal_type: Option<LiteralType> = num::FromPrimitive::from_u32(literal_type_id);
         let literal_type = match literal_type {
             Some(literal_type) => literal_type,
-            None => return Err(format!("Invalid literal type: {}", literal_type_id)),
+            None => return Err(Error::new(ErrorKind::InvalidData, format!("Invalid literal type: {}", literal_type_id))),
         };
-        let offset = reader.read_u32().unwrap() as usize;
+        let offset = reader.read_usize32()?;
         return Ok(LiteralStoreRecord {
             literal_type,
             offset,
@@ -59,7 +61,7 @@ impl LiteralStore {
         reader: &mut BinaryReader,
         record: &LiteralStoreRecord,
         start_offset: usize,
-    ) -> Result<Datum, String> {
+    ) -> io::Result<Datum> {
         let value: Datum;
         match record.literal_type {
             LiteralType::Int => {
@@ -67,15 +69,15 @@ impl LiteralStore {
             }
             _ => {
                 reader.jmp(start_offset + record.offset);
-                let length = reader.read_u32().unwrap() as usize;
+                let length = reader.read_usize32()?;
                 match record.literal_type {
                     LiteralType::String => {
-                        value = Datum::String(reader.read_string(length - 1).unwrap());
+                        value = Datum::String(reader.read_string(length - 1)?);
                     }
                     LiteralType::Float => {
                         let float_val = if length == 8 {
                             // Length 8 means f64 (double precision)
-                            let bytes = reader.read_bytes(8).unwrap();
+                            let bytes = reader.read_bytes(8)?;
                             let val_f64 = f64::from_be_bytes([
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],
@@ -84,7 +86,7 @@ impl LiteralStore {
                             val
                         } else if length == 10 {
                             // Apple 80-bit extended precision
-                            let val = reader.read_apple_float_80().unwrap() as f64;
+                            let val = reader.read_apple_float_80()? as f64;
                             val
                         } else {
                             0.0

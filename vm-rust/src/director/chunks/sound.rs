@@ -1,6 +1,7 @@
 use binary_reader::{BinaryReader, Endian};
+use anyhow::{bail, Context, Result};
 
-use log::debug;
+use log::{debug, warn};
 use wasm_bindgen::JsValue;
 use web_sys::console;
 
@@ -37,37 +38,37 @@ pub struct SndHeaderChunk {
 }
 
 impl SndHeaderChunk {
-    pub fn from_reader(reader: &mut BinaryReader) -> Result<SndHeaderChunk, String> {
+    pub fn from_reader(reader: &mut BinaryReader) -> Result<SndHeaderChunk> {
         let original_endian = reader.endian;
         reader.endian = Endian::Big;
 
-        let offset = reader.read_i32().map_err(|e| format!("sndH offset: {}", e))?;
-        let size = reader.read_i32().map_err(|e| format!("sndH size: {}", e))?;
-        let playback_start = reader.read_i32().map_err(|e| format!("sndH playbackStart: {}", e))?;
-        let playback_start_frame = reader.read_i32().map_err(|e| format!("sndH playbackStartFrame: {}", e))?;
-        let loop_start = reader.read_i32().map_err(|e| format!("sndH loopStart: {}", e))?;
-        let loop_start_frame = reader.read_i32().map_err(|e| format!("sndH loopStartFrame: {}", e))?;
-        let loop_end = reader.read_i32().map_err(|e| format!("sndH loopEnd: {}", e))?;
-        let loop_end_frame = reader.read_i32().map_err(|e| format!("sndH loopEndFrame: {}", e))?;
-        let playback_end = reader.read_i32().map_err(|e| format!("sndH playbackEnd: {}", e))?;
-        let playback_end_frame = reader.read_i32().map_err(|e| format!("sndH playbackEndFrame: {}", e))?;
-        let num_frames = reader.read_i32().map_err(|e| format!("sndH numFrames: {}", e))?;
-        let frame_rate = reader.read_i32().map_err(|e| format!("sndH frameRate: {}", e))?;
-        let byte_rate = reader.read_i32().map_err(|e| format!("sndH byteRate: {}", e))?;
+        let offset = reader.read_i32().context("sndH offset")?;
+        let size = reader.read_i32().context("sndH size")?;
+        let playback_start = reader.read_i32().context("sndH playbackStart")?;
+        let playback_start_frame = reader.read_i32().context("sndH playbackStartFrame")?;
+        let loop_start = reader.read_i32().context("sndH loopStart")?;
+        let loop_start_frame = reader.read_i32().context("sndH loopStartFrame")?;
+        let loop_end = reader.read_i32().context("sndH loopEnd")?;
+        let loop_end_frame = reader.read_i32().context("sndH loopEndFrame")?;
+        let playback_end = reader.read_i32().context("sndH playbackEnd")?;
+        let playback_end_frame = reader.read_i32().context("sndH playbackEndFrame")?;
+        let num_frames = reader.read_i32().context("sndH numFrames")?;
+        let frame_rate = reader.read_i32().context("sndH frameRate")?;
+        let byte_rate = reader.read_i32().context("sndH byteRate")?;
 
         let mut compression_type = [0u8; 16];
         for i in 0..16 {
-            compression_type[i] = reader.read_u8().map_err(|e| format!("sndH compressionType: {}", e))?;
+            compression_type[i] = reader.read_u8().context("sndH compressionType")?;
         }
 
-        let bits_per_sample = reader.read_i32().map_err(|e| format!("sndH bitsPerSample: {}", e))?;
-        let bytes_per_sample = reader.read_i32().map_err(|e| format!("sndH bytesPerSample: {}", e))?;
-        let num_channels = reader.read_i32().map_err(|e| format!("sndH numChannels: {}", e))?;
-        let bytes_per_frame = reader.read_i32().map_err(|e| format!("sndH bytesPerFrame: {}", e))?;
+        let bits_per_sample = reader.read_i32().context("sndH bitsPerSample")?;
+        let bytes_per_sample = reader.read_i32().context("sndH bytesPerSample")?;
+        let num_channels = reader.read_i32().context("sndH numChannels")?;
+        let bytes_per_frame = reader.read_i32().context("sndH bytesPerFrame")?;
 
         let mut sound_header_type = [0u8; 16];
         for i in 0..16 {
-            sound_header_type[i] = reader.read_u8().map_err(|e| format!("sndH soundHeaderType: {}", e))?;
+            sound_header_type[i] = reader.read_u8().context("sndH soundHeaderType")?;
         }
 
         // Skip platformData (63 × u32 = 252 bytes)
@@ -244,7 +245,7 @@ impl Default for SoundChunk {
 }
 
 impl SoundChunk {
-    pub fn from_snd_chunk(reader: &mut BinaryReader, version: u16) -> Result<SoundChunk, String> {
+    pub fn from_snd_chunk(reader: &mut BinaryReader, version: u16) -> Result<SoundChunk> {
         let original_endian = reader.endian;
         reader.endian = Endian::Big;
 
@@ -259,30 +260,30 @@ impl SoundChunk {
 
         if all_bytes.len() < 10 {
             reader.endian = original_endian;
-            return Err(format!("snd chunk too short: {} bytes", all_bytes.len()));
+            bail!("snd chunk too short: {} bytes", all_bytes.len());
         }
 
         debug!("Parsing Mac snd resource ({} bytes)", all_bytes.len());
 
         // --- Parse Mac snd resource header ---
         // Format: type 1 (0x0001) or type 2 (0x0002)
-        let format_type = reader.read_u16().map_err(|e| format!("Failed to read format type: {}", e))?;
+        let format_type = reader.read_u16().context("Failed to read format type")?;
 
         let num_commands: u16;
         match format_type {
             1 => {
                 // Type 1: number of data types (modifiers), then modifiers, then commands
-                let num_data_types = reader.read_u16().map_err(|e| format!("Type 1: {}", e))?;
+                let num_data_types = reader.read_u16().context("Type 1")?;
                 for _ in 0..num_data_types {
-                    let _modifier_type = reader.read_u16().map_err(|e| format!("Modifier type: {}", e))?;
-                    let _modifier_data = reader.read_u32().map_err(|e| format!("Modifier data: {}", e))?;
+                    let _modifier_type = reader.read_u16().context("Modifier type")?;
+                    let _modifier_data = reader.read_u32().context("Modifier data")?;
                 }
-                num_commands = reader.read_u16().map_err(|e| format!("Num commands: {}", e))?;
+                num_commands = reader.read_u16().context("Num commands")?;
             }
             2 => {
                 // Type 2: reference count, then commands
-                let _ref_count = reader.read_u16().map_err(|e| format!("Ref count: {}", e))?;
-                num_commands = reader.read_u16().map_err(|e| format!("Num commands: {}", e))?;
+                let _ref_count = reader.read_u16().context("Ref count")?;
+                num_commands = reader.read_u16().context("Num commands")?;
             }
             _ => {
                 // Unknown format type - could be raw audio data or different format
@@ -305,9 +306,9 @@ impl SoundChunk {
         // Read sound commands, look for bufferCmd (0x8051 or 0x0051)
         let mut sound_header_offset: Option<usize> = None;
         for _ in 0..num_commands {
-            let cmd = reader.read_u16().map_err(|e| format!("Command: {}", e))?;
-            let _param1 = reader.read_u16().map_err(|e| format!("Param1: {}", e))?;
-            let param2 = reader.read_u32().map_err(|e| format!("Param2: {}", e))?;
+            let cmd = reader.read_u16().context("Command")?;
+            let _param1 = reader.read_u16().context("Param1")?;
+            let param2 = reader.read_u32().context("Param2")?;
 
             // bufferCmd = 0x0051, with data offset flag = 0x8051
             if (cmd & 0x7FFF) == 0x0051 {
@@ -323,13 +324,13 @@ impl SoundChunk {
         reader.pos = header_pos;
 
         // --- Parse Sound Data Header ---
-        let _sample_ptr = reader.read_u32().map_err(|e| format!("samplePtr: {}", e))?;
-        let length_or_channels = reader.read_u32().map_err(|e| format!("length/channels: {}", e))?;
-        let sample_rate_fixed = reader.read_u32().map_err(|e| format!("sampleRate: {}", e))?;
-        let _loop_start = reader.read_u32().map_err(|e| format!("loopStart: {}", e))?;
-        let _loop_end = reader.read_u32().map_err(|e| format!("loopEnd: {}", e))?;
-        let encode = reader.read_u8().map_err(|e| format!("encode: {}", e))?;
-        let _base_frequency = reader.read_u8().map_err(|e| format!("baseFrequency: {}", e))?;
+        let _sample_ptr = reader.read_u32().context("samplePtr")?;
+        let length_or_channels = reader.read_u32().context("length/channels")?;
+        let sample_rate_fixed = reader.read_u32().context("sampleRate")?;
+        let _loop_start = reader.read_u32().context("loopStart")?;
+        let _loop_end = reader.read_u32().context("loopEnd")?;
+        let encode = reader.read_u8().context("encode")?;
+        let _base_frequency = reader.read_u8().context("baseFrequency")?;
 
         // Convert Fixed-point 16.16 sample rate to integer
         let sample_rate = sample_rate_fixed >> 16;
@@ -354,12 +355,12 @@ impl SoundChunk {
                 // Extended Sound Header (extSH) - can be 8 or 16 bit, mono or stereo
                 // length_or_channels = numChannels
                 channels = length_or_channels as u16;
-                let num_frames = reader.read_u32().map_err(|e| format!("numFrames: {}", e))?;
+                let num_frames = reader.read_u32().context("numFrames")?;
                 // Skip: AIFFSampleRate (10) + markerChunk (4) + instrumentChunks (4) + AESRecording (4)
                 for _ in 0..22 {
                     let _ = reader.read_u8();
                 }
-                let sample_size = reader.read_u16().map_err(|e| format!("sampleSize: {}", e))?;
+                let sample_size = reader.read_u16().context("sampleSize")?;
                 bits_per_sample = if sample_size == 0 { 16 } else { sample_size };
                 sample_count = num_frames;
                 // Audio data starts at offset 64 from sound data header
@@ -373,12 +374,12 @@ impl SoundChunk {
                 // Compressed Sound Header (cmpSH)
                 // Similar to extended header but with compression info
                 channels = length_or_channels as u16;
-                let num_frames = reader.read_u32().map_err(|e| format!("numFrames: {}", e))?;
+                let num_frames = reader.read_u32().context("numFrames")?;
                 // Skip to get compression format info
                 for _ in 0..22 {
                     let _ = reader.read_u8();
                 }
-                let sample_size = reader.read_u16().map_err(|e| format!("sampleSize: {}", e))?;
+                let sample_size = reader.read_u16().context("sampleSize")?;
                 bits_per_sample = if sample_size == 0 { 16 } else { sample_size };
                 sample_count = num_frames;
                 audio_data_start = (header_pos - start_pos) + 64;
@@ -411,7 +412,7 @@ impl SoundChunk {
         };
 
         if audio_data.is_empty() {
-            return Err("snd chunk contains no audio data".to_string());
+            bail!("snd chunk contains no audio data");
         }
 
         // Detect codec (MP3 vs PCM)
@@ -547,7 +548,7 @@ impl SoundChunk {
                     "ima_adpcm".to_string()
                 } else {
                     let type_str = String::from_utf8_lossy(&header.compression_type);
-                    debug!("Unknown compression type: {:02X?} ('{}')", header.compression_type, type_str.trim_end_matches('\0'));
+                    warn!("Unknown compression type: {:02X?} ('{}')", header.compression_type, type_str.trim_end_matches('\0'));
                     "raw_pcm".to_string()
                 }
             }

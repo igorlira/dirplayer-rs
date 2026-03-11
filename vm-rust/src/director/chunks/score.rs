@@ -1,3 +1,4 @@
+use anyhow::{Result, Error, Context, bail};
 use binary_reader::{BinaryReader, Endian};
 use log::{debug, error, warn};
 
@@ -65,49 +66,49 @@ impl ScoreFrameChannelData {
 }
 
 impl ScoreFrameChannelData {
-    pub fn read_with_size(reader: &mut BinaryReader, sprite_record_size: u16) -> Result<ScoreFrameChannelData, String> {
+    pub fn read_with_size(reader: &mut BinaryReader, sprite_record_size: u16) -> Result<ScoreFrameChannelData> {
         let start_pos = reader.pos;
         let sz = sprite_record_size as usize;
 
         // Core fields: 20 bytes (always present for D5+)
         let sprite_type = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read sprite_type: {:?}", e))?;
+            .context("Failed to read sprite_type")?;
         let raw_ink_byte = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read ink: {:?}", e))?;
+            .context("Failed to read ink")?;
         let raw_ink = raw_ink_byte & 0x3f;
         let trails = (raw_ink_byte & 0x40) != 0;
         let fore_color = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read fore_color: {:?}", e))?;
+            .context("Failed to read fore_color")?;
         let back_color = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read back_color: {:?}", e))?;
+            .context("Failed to read back_color")?;
         let cast_lib = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read cast_lib: {:?}", e))?;
+            .context("Failed to read cast_lib")?;
         let cast_member = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read cast_member: {:?}", e))?;
+            .context("Failed to read cast_member")?;
         let sprite_list_idx_hi = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read sprite_list_idx_hi: {:?}", e))?;
+            .context("Failed to read sprite_list_idx_hi")?;
         let sprite_list_idx_lo = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read sprite_list_idx_lo: {:?}", e))?;
+            .context("Failed to read sprite_list_idx_lo")?;
         let pos_y = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read pos_y: {:?}", e))? as i16;
+            .context("Failed to read pos_y")? as i16;
         let pos_x = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read pos_x: {:?}", e))? as i16;
+            .context("Failed to read pos_x")? as i16;
         let height = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read height: {:?}", e))?;
+            .context("Failed to read height")?;
         let width = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read width: {:?}", e))?;
+            .context("Failed to read width")?;
         // 20 bytes read
 
         // Extended fields: only present if sprite_record_size > 20
@@ -125,46 +126,46 @@ impl ScoreFrameChannelData {
 
         if sz >= 22 {
             let unk3 = reader.read_u8()
-                .map_err(|e| format!("Failed to read unk3: {:?}", e))?;
+                .context("Failed to read unk3")?;
             color_flag = (unk3 >> 4) & 0x03;  // bits 4-5 only (bits 6-7 are editable/moveable)
             editable = (unk3 & 0x40) != 0;  // bit 6
             moveable = (unk3 & 0x80) != 0;  // bit 7
             blend_raw = reader.read_u8()
-                .map_err(|e| format!("Failed to read blend: {:?}", e))?;
+                .context("Failed to read blend")?;
         }
 
         if sz >= 24 {
             let _unk5 = reader.read_u8()
-                .map_err(|e| format!("Failed to read unk5: {:?}", e))?;
+                .context("Failed to read unk5")?;
             let _unk6 = reader.read_u8()
-                .map_err(|e| format!("Failed to read unk6: {:?}", e))?;
+                .context("Failed to read unk6")?;
         }
 
         // D8+ extended color fields
         if sz >= 28 {
             fore_color_g = reader.read_u8()
-                .map_err(|e| format!("Failed to read fore_color_g: {:?}", e))?;
+                .context("Failed to read fore_color_g")?;
             back_color_g = reader.read_u8()
-                .map_err(|e| format!("Failed to read back_color_g: {:?}", e))?;
+                .context("Failed to read back_color_g")?;
             fore_color_b = reader.read_u8()
-                .map_err(|e| format!("Failed to read fore_color_b: {:?}", e))?;
+                .context("Failed to read fore_color_b")?;
             back_color_b = reader.read_u8()
-                .map_err(|e| format!("Failed to read back_color_b: {:?}", e))?;
+                .context("Failed to read back_color_b")?;
         }
 
         // D8+ rotation/skew fields
         if sz >= 36 {
             let _unk7 = reader.read_u16()
-                .map_err(|e| format!("Failed to read unk7: {:?}", e))?;
+                .context("Failed to read unk7")?;
             let rotation_raw = reader.read_u16()
-                .map_err(|e| format!("Failed to read rotation: {:?}", e))? as i16;
+                .context("Failed to read rotation")? as i16;
             if rotation_raw != 0 {
                 rotation_angle = rotation_raw as f64 / 100.0;
             }
             let _unk8 = reader.read_u16()
-                .map_err(|e| format!("Failed to read unk8: {:?}", e))?;
+                .context("Failed to read unk8")?;
             let skew_raw = reader.read_u16()
-                .map_err(|e| format!("Failed to read skew: {:?}", e))? as i16;
+                .context("Failed to read skew")? as i16;
             if skew_raw != 0 {
                 skew_angle = skew_raw as f64 / 100.0;
             }
@@ -215,43 +216,43 @@ impl ScoreFrameChannelData {
     ///   [21]:   blendAmount (u8)
     ///   [22]:   thickness (u8)
     ///   [23]:   unused
-    pub fn read_d5(reader: &mut BinaryReader, _sprite_record_size: u16) -> Result<ScoreFrameChannelData, String> {
+    pub fn read_d5(reader: &mut BinaryReader, _sprite_record_size: u16) -> Result<ScoreFrameChannelData> {
         let sprite_type = reader.read_u8()
-            .map_err(|e| format!("D5: spriteType: {:?}", e))?;          // byte 0
+            .context("D5: spriteType")?;          // byte 0
         let ink_data = reader.read_u8()
-            .map_err(|e| format!("D5: inkData: {:?}", e))?;             // byte 1
+            .context("D5: inkData")?;             // byte 1
         let ink_val = ink_data & 0x3f;
         let trails = (ink_data & 0x40) != 0;
         let cast_lib = reader.read_u16()
-            .map_err(|e| format!("D5: castLib: {:?}", e))? as i16;      // bytes 2-3
+            .context("D5: castLib")? as i16;      // bytes 2-3
         let cast_member = reader.read_u16()
-            .map_err(|e| format!("D5: castId: {:?}", e))?;              // bytes 4-5
+            .context("D5: castId")?;              // bytes 4-5
         let script_cast_lib = reader.read_u16()
-            .map_err(|e| format!("D5: scriptCastLib: {:?}", e))?;       // bytes 6-7
+            .context("D5: scriptCastLib")?;       // bytes 6-7
         let script_member = reader.read_u16()
-            .map_err(|e| format!("D5: scriptMember: {:?}", e))?;        // bytes 8-9
+            .context("D5: scriptMember")?;        // bytes 8-9
         let fore_color = reader.read_u8()
-            .map_err(|e| format!("D5: foreColor: {:?}", e))?;           // byte 10
+            .context("D5: foreColor")?;           // byte 10
         let back_color = reader.read_u8()
-            .map_err(|e| format!("D5: backColor: {:?}", e))?;           // byte 11
+            .context("D5: backColor")?;           // byte 11
         let pos_y = reader.read_u16()
-            .map_err(|e| format!("D5: posY: {:?}", e))? as i16;         // bytes 12-13
+            .context("D5: posY")? as i16;         // bytes 12-13
         let pos_x = reader.read_u16()
-            .map_err(|e| format!("D5: posX: {:?}", e))? as i16;         // bytes 14-15
+            .context("D5: posX")? as i16;         // bytes 14-15
         let height = reader.read_u16()
-            .map_err(|e| format!("D5: height: {:?}", e))?;              // bytes 16-17
+            .context("D5: height")?;              // bytes 16-17
         let width = reader.read_u16()
-            .map_err(|e| format!("D5: width: {:?}", e))?;               // bytes 18-19
+            .context("D5: width")?;               // bytes 18-19
         let colorcode = reader.read_u8()
-            .map_err(|e| format!("D5: colorcode: {:?}", e))?;           // byte 20
+            .context("D5: colorcode")?;           // byte 20
         let editable = (colorcode & 0x40) != 0;  // bit 6
         let moveable = (colorcode & 0x80) != 0;  // bit 7
         let blend_raw = reader.read_u8()
-            .map_err(|e| format!("D5: blend: {:?}", e))?;               // byte 21
+            .context("D5: blend")?;               // byte 21
         let _thickness = reader.read_u8()
-            .map_err(|e| format!("D5: thickness: {:?}", e))?;           // byte 22
+            .context("D5: thickness")?;           // byte 22
         let _unused = reader.read_u8()
-            .map_err(|e| format!("D5: unused: {:?}", e))?;              // byte 23
+            .context("D5: unused")?;              // byte 23
 
         Ok(ScoreFrameChannelData {
             sprite_type,
@@ -280,7 +281,7 @@ impl ScoreFrameChannelData {
         })
     }
 
-    pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameChannelData, String> {
+    pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameChannelData> {
         // Legacy: assume large record size for backward compat with afterburner D8+ files
         Self::read_with_size(reader, 36)
     }
@@ -327,19 +328,19 @@ pub struct SoundChannelData {
 }
 
 impl SoundChannelData {
-    pub fn read(reader: &mut BinaryReader) -> Result<SoundChannelData, String> {
+    pub fn read(reader: &mut BinaryReader) -> Result<SoundChannelData> {
         let _unk0 = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read unk0: {:?}", e))?;
+            .context("Failed to read unk0")?;
         let _unk1 = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read unk1: {:?}", e))?;
+            .context("Failed to read unk1")?;
         let _unk2 = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read unk2: {:?}", e))?;
+            .context("Failed to read unk2")?;
         let cast_member = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read cast_member: {:?}", e))?;
+            .context("Failed to read cast_member")?;
         
         Ok(SoundChannelData {
             cast_member,
@@ -362,57 +363,57 @@ pub struct TempoChannelData {
 }
 
 impl TempoChannelData {
-    pub fn read(reader: &mut BinaryReader) -> Result<TempoChannelData, String> {
+    pub fn read(reader: &mut BinaryReader) -> Result<TempoChannelData> {
         // Bytes 0-3: tempoSpriteListIdx (u32) - split into individual bytes for compatibility
         let flags1 = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read tempo flags1: {:?}", e))?;
+            .context("Failed to read tempo flags1")?;
         let flags2 = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read tempo flags2: {:?}", e))?;
+            .context("Failed to read tempo flags2")?;
         let unk3 = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read tempo unk3: {:?}", e))?;
+            .context("Failed to read tempo unk3")?;
         let unk4 = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read tempo unk4: {:?}", e))?;
+            .context("Failed to read tempo unk4")?;
 
         // Bytes 4-5: tempoCuePoint (u16) - FPS value when tempo==246, delay when tempo==247
         let tempo_cue_point = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read tempo_cue_point: {:?}", e))?;
+            .context("Failed to read tempo_cue_point")?;
 
         // Byte 6: tempo mode byte (D6+: 246=FPS, 247=delay, 248=wait click, etc.)
         let tempo = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read tempo: {:?}", e))?;
+            .context("Failed to read tempo")?;
 
         // Byte 7: colorTempo
         let color_tempo = reader
             .read_u8()
-            .map_err(|e| format!("Failed to read color_tempo: {:?}", e))?;
+            .context("Failed to read color_tempo")?;
         
         // Bytes 8-9 - Wait flags
         let wait_flags = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read tempo wait_flags: {:?}", e))?;
+            .context("Failed to read tempo wait_flags")?;
         
         // Bytes 10-11 - Channel flags
         let channel_flags = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read tempo channel_flags: {:?}", e))?;
+            .context("Failed to read tempo channel_flags")?;
         
         // Skip bytes 12-17
         for i in 0..6 {
             reader
                 .read_u8()
-                .map_err(|e| format!("Failed to read tempo skip{}: {:?}", i + 4, e))?;
+                .with_context(|| format!("Failed to read tempo skip{}", i + 4))?;
         }
         
         // Bytes 18-19 - Frame-specific data
         let frame_data = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read tempo frame_data: {:?}", e))?;
+            .context("Failed to read tempo frame_data")?;
         
         Ok(TempoChannelData {
             tempo,
@@ -441,7 +442,7 @@ impl TempoChannelData {
 
 impl ScoreFrameData {
     #[allow(unused_variables)]
-    pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameData, String> {
+    pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameData, Error> {
         let mut header = Self::read_header(reader)?;
 
         // "numOfFrames in the header is often incorrect"
@@ -463,7 +464,7 @@ impl ScoreFrameData {
         reader.jmp(frame_data_start);
 
         if header.frame_count == 0 || header.frame_count != actual_frame_count {
-            debug!(
+            warn!(
                 "ScoreFrameData: header frame_count={} but actual_frame_count={}, using actual",
                 header.frame_count, actual_frame_count
             );
@@ -488,7 +489,7 @@ impl ScoreFrameData {
         while !reader.eof() && frame_index < header.frame_count {
             let length = reader
                 .read_u16()
-                .map_err(|e| format!("Failed to read frame length: {:?}", e))?;
+                .context("Failed to read frame length")?;
 
             if length == 0 {
                 break;
@@ -510,7 +511,7 @@ impl ScoreFrameData {
             if frame_length > 0 {
                 let chunk_data = reader
                     .read_bytes(frame_length as usize)
-                    .map_err(|e| format!("Failed to read chunk data: {:?}", e))?;
+                    .context("Failed to read chunk data")?;
                 let mut frame_chunk_reader = BinaryReader::from_u8(chunk_data);
                 frame_chunk_reader.set_endian(Endian::Big);
 
@@ -520,22 +521,22 @@ impl ScoreFrameData {
                 while !frame_chunk_reader.eof() {
                     let channel_size = frame_chunk_reader
                         .read_u16()
-                        .map_err(|e| format!("Failed to read channel size: {:?}", e))?
+                        .context("Failed to read channel size")?
                         as usize;
                     let channel_offset = frame_chunk_reader
                         .read_u16()
-                        .map_err(|e| format!("Failed to read channel offset: {:?}", e))?
+                        .context("Failed to read channel offset")?
                         as usize;
                     let channel_delta = frame_chunk_reader
                         .read_bytes(channel_size)
-                        .map_err(|e| format!("Failed to read channel delta: {:?}", e))?;
+                        .context("Failed to read channel delta")?;
 
                     let frame_offset = (frame_index as usize) * frame_size;
                     let end_offset = frame_offset + channel_offset + channel_size;
                     if end_offset > channel_data.len() {
                         error!("Channel data copy out of bounds. Frame offset: {}, Channel offset: {}, Channel size: {}, Total len: {}",
                             frame_offset, channel_offset, channel_size, channel_data.len());
-                        return Err("Channel data copy out of bounds".to_string());
+                        bail!("Channel data copy out of bounds");
                     }
                     channel_data[frame_offset + channel_offset..end_offset]
                         .copy_from_slice(&channel_delta);
@@ -702,9 +703,9 @@ impl ScoreFrameData {
                         } else if channel_index == 5 {
                             // Channel 5 = Palette: castLib at bytes 0-1, member at bytes 2-3
                             let palette_cast_lib = channel_reader.read_i16()
-                                .map_err(|e| format!("Failed to read palette castLib: {:?}", e))?;
+                                .context("Failed to read palette castLib")?;
                             let palette_member = channel_reader.read_i16()
-                                .map_err(|e| format!("Failed to read palette member: {:?}", e))?;
+                                .context("Failed to read palette member")?;
                             if palette_cast_lib != 0 || palette_member != 0 {
                                 palette_channel_data.push((frame_index, palette_cast_lib, palette_member));
                             }
@@ -758,31 +759,31 @@ impl ScoreFrameData {
     }
 
     #[allow(unused_variables)]
-    fn read_header(reader: &mut BinaryReader) -> Result<ScoreFrameDataHeader, String> {
+    fn read_header(reader: &mut BinaryReader) -> Result<ScoreFrameDataHeader> {
         let actual_length = reader
             .read_u32()
-            .map_err(|e| format!("Failed to read actual_length: {:?}", e))?;
+            .context("Failed to read actual_length")?;
         let unk1 = reader
             .read_u32()
-            .map_err(|e| format!("Failed to read unk1: {:?}", e))?;
+            .context("Failed to read unk1")?;
         let frame_count = reader
             .read_u32()
-            .map_err(|e| format!("Failed to read frame_count: {:?}", e))?;
+            .context("Failed to read frame_count")?;
         let frames_version = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read frames_version: {:?}", e))?;
+            .context("Failed to read frames_version")?;
         let sprite_record_size = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read sprite_record_size: {:?}", e))?;
+            .context("Failed to read sprite_record_size")?;
         let num_channels = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read num_channels: {:?}", e))?;
+            .context("Failed to read num_channels")?;
         let _num_channels_displayed: u16;
 
         if frames_version > 13 {
             _num_channels_displayed = reader
                 .read_u16()
-                .map_err(|e| format!("Failed to read _num_channels_displayed: {:?}", e))?;
+                .context("Failed to read _num_channels_displayed")?;
         } else {
             if frames_version <= 7 {
                 _num_channels_displayed = 48;
@@ -791,7 +792,7 @@ impl ScoreFrameData {
             }
             reader
                 .read_u16()
-                .map_err(|e| format!("Failed to skip u16: {:?}", e))?; // Skip
+                .context("Failed to skip u16")?; // Skip
         }
 
         debug!(
@@ -818,18 +819,18 @@ pub struct TweenInfo {
 }
 
 impl TweenInfo {
-    pub fn read(reader: &mut BinaryReader) -> Result<TweenInfo, String> {
+    pub fn read(reader: &mut BinaryReader) -> Result<TweenInfo> {
         Ok(TweenInfo {
             curvature: reader.read_u32()
-                .map_err(|e| format!("Failed to read tween curvature: {:?}", e))?,
+                .context("Failed to read tween curvature")?,
             flags: reader.read_u32()
-                .map_err(|e| format!("Failed to read tween flags: {:?}", e))?,
+                .context("Failed to read tween flags")?,
             ease_in: reader.read_u32()
-                .map_err(|e| format!("Failed to read tween ease_in: {:?}", e))?,
+                .context("Failed to read tween ease_in")?,
             ease_out: reader.read_u32()
-                .map_err(|e| format!("Failed to read tween ease_out: {:?}", e))?,
+                .context("Failed to read tween ease_out")?,
             padding: reader.read_u32()
-                .map_err(|e| format!("Failed to read tween padding: {:?}", e))?,
+                .context("Failed to read tween padding")?,
         })
     }
        
@@ -884,17 +885,17 @@ pub struct FrameIntervalPrimary {
 }
 
 impl FrameIntervalPrimary {
-    pub fn read(reader: &mut BinaryReader) -> Result<FrameIntervalPrimary, String> {
+    pub fn read(reader: &mut BinaryReader) -> Result<FrameIntervalPrimary> {
         let start_frame = reader.read_u32()
-            .map_err(|e| format!("Failed to read start_frame: {:?}", e))?;
+            .context("Failed to read start_frame")?;
         let end_frame = reader.read_u32()
-            .map_err(|e| format!("Failed to read end_frame: {:?}", e))?;
+            .context("Failed to read end_frame")?;
         let xtra_info = reader.read_u32()
-            .map_err(|e| format!("Failed to read xtra_info: {:?}", e))?;
+            .context("Failed to read xtra_info")?;
         let sprite_flags = reader.read_u32()
-            .map_err(|e| format!("Failed to read sprite_flags: {:?}", e))?;
+            .context("Failed to read sprite_flags")?;
         let channel_index = reader.read_u32()
-            .map_err(|e| format!("Failed to read channel_index: {:?}", e))?;
+            .context("Failed to read channel_index")?;
         
         // Read TweenInfo (20 bytes = 5 x u32)
         let tween_info = TweenInfo::read(reader)?;
@@ -946,16 +947,16 @@ pub struct FrameIntervalSecondary {
 }
 
 impl FrameIntervalSecondary {
-    pub fn read(reader: &mut BinaryReader) -> Result<FrameIntervalSecondary, String> {
+    pub fn read(reader: &mut BinaryReader) -> Result<FrameIntervalSecondary> {
         let cast_lib = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read cast_lib: {:?}", e))?;
+            .context("Failed to read cast_lib")?;
         let cast_member = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read cast_member: {:?}", e))?;
+            .context("Failed to read cast_member")?;
         let unk0 = reader
             .read_u32()
-            .map_err(|e| format!("Failed to read unk0: {:?}", e))?;
+            .context("Failed to read unk0")?;
 
         let parameter = vec![];
 
@@ -979,26 +980,26 @@ pub struct ScoreChunkHeader {
 }
 
 impl ScoreChunkHeader {
-    pub fn read(reader: &mut BinaryReader) -> Result<Self, String> {
+    pub fn read(reader: &mut BinaryReader) -> Result<Self> {
         Ok(ScoreChunkHeader {
             total_length: reader
                 .read_u32()
-                .map_err(|e| format!("Failed to read total_length: {:?}", e))?,
+                .context("Failed to read total_length")?,
             unk1: reader
                 .read_u32()
-                .map_err(|e| format!("Failed to read unk1: {:?}", e))?,
+                .context("Failed to read unk1")?,
             unk2: reader
                 .read_u32()
-                .map_err(|e| format!("Failed to read unk2: {:?}", e))?,
+                .context("Failed to read unk2")?,
             entry_count: reader
                 .read_u32()
-                .map_err(|e| format!("Failed to read entry_count: {:?}", e))?,
+                .context("Failed to read entry_count")?,
             unk3: reader
                 .read_u32()
-                .map_err(|e| format!("Failed to read unk3: {:?}", e))?, // entry_count + 1
+                .context("Failed to read unk3")?, // entry_count + 1
             entry_size_sum: reader
                 .read_u32()
-                .map_err(|e| format!("Failed to read entry_size_sum: {:?}", e))?,
+                .context("Failed to read entry_size_sum")?,
         })
     }
 }
@@ -1030,7 +1031,7 @@ pub struct ScoreChunk {
 
 impl ScoreChunk {
     #[allow(unused_variables)]
-    pub fn read(reader: &mut BinaryReader, dir_version: u16, after_burned: bool) -> Result<Self, String> {
+    pub fn read(reader: &mut BinaryReader, dir_version: u16, after_burned: bool) -> Result<ScoreChunk> {
         // Use the same parsing logic for both afterburner and non-afterburner files.
         // The VWSC chunk format is the same regardless of container format.
         Self::read_standard(reader, dir_version)
@@ -1039,25 +1040,25 @@ impl ScoreChunk {
     /// Non-afterburner VWSC reading
     /// For D6+ (version >= 600): reads the sprite detail table header, then extracts entries.
     /// For D4/D5 (version >= 400): reads frame data directly from position 0.
-    fn read_standard(reader: &mut BinaryReader, dir_version: u16) -> Result<Self, String> {
+    fn read_standard(reader: &mut BinaryReader, dir_version: u16) -> Result<Self, Error> {
         reader.set_endian(Endian::Big);
 
         if dir_version >= 600 {
             // D6+ format: sprite detail table + frame data
             let frames_stream_size = reader.read_u32()
-                .map_err(|e| format!("Failed to read framesStreamSize: {:?}", e))?;
+                .context("Failed to read framesStreamSize")?;
             let ver = reader.read_u32()
-                .map_err(|e| format!("Failed to read ver: {:?}", e))?;
+                .context("Failed to read ver")?;
             let list_start = reader.read_u32()
-                .map_err(|e| format!("Failed to read listStart: {:?}", e))? as usize;
+                .context("Failed to read listStart")? as usize;
 
             reader.jmp(list_start);
             let num_entries = reader.read_u32()
-                .map_err(|e| format!("Failed to read numEntries: {:?}", e))? as usize;
+                .context("Failed to read numEntries")? as usize;
             let list_size = reader.read_u32()
-                .map_err(|e| format!("Failed to read listSize: {:?}", e))? as usize;
+                .context("Failed to read listSize")? as usize;
             let max_data_len = reader.read_u32()
-                .map_err(|e| format!("Failed to read maxDataLen: {:?}", e))? as usize;
+                .context("Failed to read maxDataLen")? as usize;
 
             let index_start = list_start + 12; // After the 3 header u32s
             let frame_data_offset = index_start + list_size * 4; // After the offset table
@@ -1075,7 +1076,7 @@ impl ScoreChunk {
             let mut raw_offsets = Vec::with_capacity(num_entries);
             for _ in 0..num_entries {
                 raw_offsets.push(reader.read_u32()
-                    .map_err(|e| format!("Failed to read sprite detail offset: {:?}", e))? as usize);
+                    .context("Failed to read sprite detail offset")? as usize);
             }
 
             // Extract entries using consecutive offset pairs
@@ -1101,7 +1102,7 @@ impl ScoreChunk {
                 let len = entry_end.saturating_sub(entry_start);
                 if len > 0 {
                     entries.push(reader.read_bytes(len)
-                        .map_err(|e| format!("Failed to read entry {}: {:?}", i, e))?
+                        .with_context(|| format!("Failed to read entry {}", i))?
                         .to_vec());
                 } else {
                     entries.push(Vec::new());
@@ -1150,7 +1151,7 @@ impl ScoreChunk {
                 sprite_details: std::collections::HashMap::new(),
             })
         } else {
-            Err(format!("Unsupported Director version for VWSC: {}", dir_version))
+            bail!("Unsupported Director version for VWSC: {}", dir_version)
         }
     }
 
@@ -1536,7 +1537,7 @@ impl ScoreChunk {
     /// Analyze score entries beyond Entry[0] for behavior attachment data
     fn analyze_behavior_attachment_entries(
         entries: &Vec<Vec<u8>>,
-    ) -> Result<Vec<(FrameIntervalPrimary, Option<FrameIntervalSecondary>)>, String> {
+    ) -> Result<Vec<(FrameIntervalPrimary, Option<FrameIntervalSecondary>)>> {
         let mut results = vec![];
         let mut i = 2; // Start at 2, skip entries 0 and 1
 
@@ -1793,30 +1794,26 @@ impl FrameLabelsChunk {
     pub fn from_reader(
         reader: &mut BinaryReader,
         _dir_version: u16,
-    ) -> Result<FrameLabelsChunk, String> {
+    ) -> Result<FrameLabelsChunk, Error> {
         reader.set_endian(binary_reader::Endian::Big);
 
         let labels_count = reader
-            .read_u16()
-            .map_err(|e| format!("Error reading labels_count: {:?}", e))?
+            .read_u16()?
             as usize;
         let label_frames: Vec<(usize, usize)> = (0..labels_count)
             .map(|_i| {
                 let frame_num = reader
-                    .read_u16()
-                    .map_err(|e| format!("Error reading frame_num: {:?}", e))?
+                    .read_u16()?
                     as usize;
                 let label_offset = reader
-                    .read_u16()
-                    .map_err(|e| format!("Error reading label_offset: {:?}", e))?
+                    .read_u16()?
                     as usize;
                 Ok((label_offset, frame_num))
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, Error>>()?;
 
         let labels_size: usize = reader
-            .read_u32()
-            .map_err(|e| format!("Error reading labels_size: {:?}", e))?
+            .read_u32()?
             as usize;
         let labels: Vec<FrameLabel> = (0..labels_count)
             .map(|i| {
@@ -1827,15 +1824,14 @@ impl FrameLabelsChunk {
                     labels_size - label_offset
                 };
                 let label_str = reader
-                    .read_string(label_len)
-                    .map_err(|e| format!("Error reading label_str: {:?}", e))?;
+                    .read_string(label_len)?;
                 // info!("label: {}", label_str);
                 Ok(FrameLabel {
                     frame_num: frame_num as i32,
                     label: label_str.to_string(),
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, Error>>()?;
 
         Ok(FrameLabelsChunk { labels })
     }

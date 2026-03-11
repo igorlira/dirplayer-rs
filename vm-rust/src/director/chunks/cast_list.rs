@@ -1,7 +1,8 @@
+use std::io::Error;
 use binary_reader::{BinaryReader, Endian};
 
 use crate::io::list_readers::{read_pascal_string, read_u16};
-
+use crate::io::reader::DirectorExt;
 use super::list::BasicListChunk;
 
 pub struct CastListChunk {
@@ -22,13 +23,13 @@ impl CastListChunk {
     fn read_header(
         reader: &mut BinaryReader,
         dir_version: u16,
-    ) -> Result<CastListChunkHeader, String> {
+    ) -> Result<CastListChunkHeader, Error> {
         return Ok(CastListChunkHeader {
-            data_offset: reader.read_u32().unwrap() as usize,
-            unk0: reader.read_u16().unwrap(),
-            cast_count: reader.read_u16().unwrap(),
-            items_per_cast: reader.read_u16().unwrap(),
-            unk1: reader.read_u16().unwrap(),
+            data_offset: reader.read_usize32()?,
+            unk0: reader.read_u16()?,
+            cast_count: reader.read_u16()?,
+            items_per_cast: reader.read_u16()?,
+            unk1: reader.read_u16()?,
         });
     }
 
@@ -38,12 +39,12 @@ impl CastListChunk {
         header: CastListChunkHeader,
         offset_table: &Vec<usize>,
         item_endian: Endian,
-    ) -> Result<Vec<CastListEntry>, String> {
+    ) -> Result<Vec<CastListEntry>, Error> {
         let item_bufs =
             BasicListChunk::read_items(reader, dir_version, header.data_offset, offset_table)
-                .unwrap();
+                ?;
         let entries = (0..header.cast_count)
-            .map(|i| {
+            .map(|i| -> Result<CastListEntry, Error> {
                 let mut name = "".to_string();
                 let mut file_path = "".to_string();
                 let mut preload_settings: u16 = 0;
@@ -78,21 +79,21 @@ impl CastListChunk {
                     );
                     item_reader.set_endian(reader.endian);
 
-                    min_member = item_reader.read_u16().unwrap();
-                    max_member = item_reader.read_u16().unwrap();
-                    id = item_reader.read_u32().unwrap();
+                    min_member = item_reader.read_u16()?;
+                    max_member = item_reader.read_u16()?;
+                    id = item_reader.read_u32()?;
                 }
 
-                return CastListEntry {
+                return Ok(CastListEntry {
                     name: name,
                     file_path: file_path,
                     preload_settings: preload_settings,
                     min_member: min_member,
                     max_member: max_member,
                     id: id,
-                };
+                });
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         return Ok(entries);
     }
@@ -103,16 +104,16 @@ impl CastListChunk {
         reader: &mut BinaryReader,
         dir_version: u16,
         item_endian: Endian,
-    ) -> Result<CastListChunk, String> {
+    ) -> Result<CastListChunk, Error> {
         reader.set_endian(Endian::Big);
 
-        let header = Self::read_header(reader, dir_version).unwrap();
+        let header = Self::read_header(reader, dir_version)?;
         let offset_table =
-            BasicListChunk::read_offset_table(reader, dir_version, header.data_offset).unwrap();
+            BasicListChunk::read_offset_table(reader, dir_version, header.data_offset)?;
         //let item_endian = reader.endian;
 
         let items =
-            Self::read_items(reader, dir_version, header, &offset_table, item_endian).unwrap();
+            Self::read_items(reader, dir_version, header, &offset_table, item_endian)?;
         return Ok(CastListChunk { entries: items });
     }
 }

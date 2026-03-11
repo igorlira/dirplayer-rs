@@ -1,4 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
+use anyhow::{bail, Result};
 
 use log::debug;
 use web_sys::console;
@@ -8,7 +9,7 @@ pub struct SordChunk {
 }
 
 impl SordChunk {
-    pub fn from_reader(reader: &mut BinaryReader) -> Result<SordChunk, String> {
+    pub fn from_reader(reader: &mut BinaryReader) -> Result<SordChunk> {
         let original_endian = reader.endian;
         reader.endian = Endian::Big;
 
@@ -23,7 +24,7 @@ impl SordChunk {
         debug!("Read {} bytes for Sord chunk", raw_data.len());
 
         if raw_data.len() < 20 {
-            return Err("Sord chunk too small to contain header".into());
+            bail!("Sord chunk too small to contain header");
         }
 
         let header = &raw_data[..20];

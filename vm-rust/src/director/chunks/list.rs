@@ -1,7 +1,8 @@
+use std::io::Error;
 use binary_reader::BinaryReader;
 
 pub trait ListChunk<H, I> {
-    fn from_reader(reader: &mut BinaryReader, dir_version: u16) -> Result<Vec<I>, String>;
+    fn from_reader(reader: &mut BinaryReader, dir_version: u16) -> Result<Vec<I>, Error>;
     // fn read_header(reader: &mut BinaryReader, dir_version: u32) -> Result<H, String>;
     // fn read_offset_table(reader: &mut BinaryReader, dir_version: u32, header: H) -> Result<Vec<usize>, String>;
     // fn read_items(reader: &mut BinaryReader, dir_version: u32, header: H, offset_table: Vec<usize>) -> Result<Vec<I>, String>;
@@ -10,8 +11,8 @@ pub trait ListChunk<H, I> {
 pub struct BasicListChunk {}
 
 impl BasicListChunk {
-    pub fn read_header(reader: &mut BinaryReader, _dir_version: u16) -> Result<usize, String> {
-        let data_offset = reader.read_u32().unwrap();
+    pub fn read_header(reader: &mut BinaryReader, _dir_version: u16) -> Result<usize, Error> {
+        let data_offset = reader.read_u32()?;
         return Ok(data_offset as usize);
     }
 
@@ -19,14 +20,14 @@ impl BasicListChunk {
         reader: &mut BinaryReader,
         _: u16,
         header: usize,
-    ) -> Result<Vec<usize>, String> {
+    ) -> Result<Vec<usize>, Error> {
         let data_offset = header;
 
         reader.jmp(data_offset);
-        let offset_table_len = reader.read_u16().unwrap();
+        let offset_table_len = reader.read_u16()?;
         let offset_table = (0..offset_table_len)
-            .map(|_| reader.read_u32().unwrap() as usize)
-            .collect();
+            .map(|_| reader.read_u32().map(|x| x as usize))
+            .collect::<Result<_, _>>()?;
 
         return Ok(offset_table);
     }
@@ -37,8 +38,8 @@ impl BasicListChunk {
         dir_version: u16,
         header: usize,
         offset_table: &Vec<usize>,
-    ) -> Result<Vec<Vec<u8>>, String> {
-        let items_len = reader.read_u32().unwrap();
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let items_len = reader.read_u32()?;
 
         let item_endian = reader.endian;
         let list_offset = reader.pos;
@@ -53,19 +54,19 @@ impl BasicListChunk {
                 };
                 reader.jmp(list_offset + offset);
 
-                return reader.read_bytes(next_offset - offset).unwrap().to_vec();
+                return reader.read_bytes(next_offset - offset).map(|v| v.to_vec());
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         return Ok(items);
     }
 }
 
 impl ListChunk<usize, Vec<u8>> for BasicListChunk {
-    fn from_reader(reader: &mut BinaryReader, dir_version: u16) -> Result<Vec<Vec<u8>>, String> {
-        let header = Self::read_header(reader, dir_version).unwrap();
-        let offset_table = Self::read_offset_table(reader, dir_version, header).unwrap();
-        let items = Self::read_items(reader, dir_version, header, &offset_table).unwrap();
+    fn from_reader(reader: &mut BinaryReader, dir_version: u16) -> Result<Vec<Vec<u8>>, Error> {
+        let header = Self::read_header(reader, dir_version)?;
+        let offset_table = Self::read_offset_table(reader, dir_version, header)?;
+        let items = Self::read_items(reader, dir_version, header, &offset_table)?;
 
         return Ok(items);
     }

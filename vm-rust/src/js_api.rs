@@ -825,7 +825,7 @@ impl JsApi {
 
         match chunks::make_chunk(dir_file.endian, &mut rifx, chunk_info.fourcc, raw_bytes) {
             Ok(chunk) => Self::chunk_to_js(&chunk),
-            Err(e) => error_result(&e),
+            Err(e) => error_result(&e.to_string()),
         }
     }
 

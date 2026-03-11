@@ -1,3 +1,4 @@
+use std::io::Error;
 use binary_reader::{BinaryReader, Endian};
 
 #[allow(dead_code)]
@@ -25,13 +26,13 @@ impl ScriptContextMapEntry {
     pub fn from_reader(
         reader: &mut BinaryReader,
         dir_version: u16,
-    ) -> Result<ScriptContextMapEntry, String> {
-        return Ok(ScriptContextMapEntry {
-            unknown0: reader.read_u32().unwrap(),
-            section_id: reader.read_i32().unwrap(),
-            unknown1: reader.read_u16().unwrap(),
-            unknown2: reader.read_u16().unwrap(),
-        });
+    ) -> Result<ScriptContextMapEntry, Error> {
+        Ok(ScriptContextMapEntry {
+            unknown0: reader.read_u32()?,
+            section_id: reader.read_i32()?,
+            unknown1: reader.read_u16()?,
+            unknown2: reader.read_u16()?,
+        })
     }
 }
 
@@ -40,27 +41,27 @@ impl ScriptContextChunk {
     pub fn from_reader(
         reader: &mut BinaryReader,
         dir_version: u16,
-    ) -> Result<ScriptContextChunk, String> {
+    ) -> Result<ScriptContextChunk, Error> {
         reader.set_endian(Endian::Big);
 
-        let unknown0 = reader.read_u32().unwrap();
-        let unknown1 = reader.read_u32().unwrap();
-        let entry_count = reader.read_u32().unwrap();
-        let entry_count2 = reader.read_u32().unwrap();
-        let entries_offset = reader.read_u16().unwrap() as usize;
-        let unknown2 = reader.read_u16().unwrap();
-        let unknown3 = reader.read_u32().unwrap();
-        let unknown4 = reader.read_u32().unwrap();
-        let unknown5 = reader.read_u32().unwrap();
-        let lnam_section_id = reader.read_u32().unwrap();
-        let valid_count = reader.read_u16().unwrap();
-        let flags = reader.read_u16().unwrap();
-        let free_pointer = reader.read_u16().unwrap();
+        let unknown0 = reader.read_u32()?;
+        let unknown1 = reader.read_u32()?;
+        let entry_count = reader.read_u32()?;
+        let entry_count2 = reader.read_u32()?;
+        let entries_offset = reader.read_u16()? as usize;
+        let unknown2 = reader.read_u16()?;
+        let unknown3 = reader.read_u32()?;
+        let unknown4 = reader.read_u32()?;
+        let unknown5 = reader.read_u32()?;
+        let lnam_section_id = reader.read_u32()?;
+        let valid_count = reader.read_u16()?;
+        let flags = reader.read_u16()?;
+        let free_pointer = reader.read_u16()?;
 
         reader.jmp(entries_offset);
-        let section_map = (0..entry_count)
-            .map(|_| ScriptContextMapEntry::from_reader(reader, dir_version).unwrap())
-            .collect();
+        let section_map: Vec<_> = (0..entry_count)
+            .map(|_| ScriptContextMapEntry::from_reader(reader, dir_version))
+            .collect::<Result<_, _>>()?;
 
         return Ok(ScriptContextChunk {
             entry_count,
