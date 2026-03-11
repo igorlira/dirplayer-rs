@@ -1318,8 +1318,7 @@ impl DirPlayer {
             "currentSpriteNum" => {
                 // TODO: this can also be called by a static script
                 let script_instance_ref = self
-                    .scopes
-                    .get(self.current_scope_ref())
+                    .get_current_scope()
                     .and_then(|scope| scope.receiver.clone());
 
                 if let Some(script_instance_ref) = script_instance_ref {
@@ -1620,8 +1619,17 @@ impl DirPlayer {
         self.scope_count -= 1;
     }
 
-    pub fn current_scope_ref(&self) -> ScopeRef {
-        (self.scope_count - 1) as ScopeRef
+    pub fn current_scope_ref(&self) -> Option<ScopeRef> {
+        self.scope_count.checked_sub(1).map(|c| c as ScopeRef)
+    }
+
+    pub fn get_current_scope(&self) -> Option<&Scope> {
+        self.scopes.get(self.current_scope_ref()?)
+    }
+
+    pub fn get_current_scope_mut(&mut self) -> Option<&mut Scope> {
+        let scope = self.current_scope_ref()?;
+        self.scopes.get_mut(scope)
     }
 
     // Lingo: sound(channelNum)
@@ -1959,9 +1967,7 @@ impl ScriptError {
 pub fn player_handle_scope_return(scope: &ScopeResult) {
     if scope.passed {
         reserve_player_mut(|player| {
-            let scope_ref = player.current_scope_ref();
-            let last_scope = player.scopes.get_mut(scope_ref);
-            if let Some(last_scope) = last_scope {
+            if let Some(last_scope) = player.get_current_scope_mut() {
                 last_scope.passed = true;
             }
         });

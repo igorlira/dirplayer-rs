@@ -1392,8 +1392,7 @@ impl TypeHandlers {
             let handler_name = player.get_datum(&args[0]).string_value()?;
 
             // Get the current scope's script_ref to determine which script we're currently in
-            let current_scope_ref = player.current_scope_ref();
-            let current_script_ref = player.scopes.get(current_scope_ref)
+            let current_script_ref = player.get_current_scope()
                 .map(|scope| scope.script_ref.clone());
 
             let list_or_script_instance = player.get_datum(&args[1]);

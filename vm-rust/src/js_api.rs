@@ -1481,7 +1481,7 @@ impl JsApi {
             .unwrap_or(false);
 
         let data: js_sys::Map =
-            if let Some(current_scope) = player.scopes.get(player.current_scope_ref()) {
+            if let Some(current_scope) = player.get_current_scope() {
                 let cast_lib = player
                     .movie
                     .cast_manager
