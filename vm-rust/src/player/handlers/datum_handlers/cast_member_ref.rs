@@ -255,7 +255,7 @@ impl CastMemberRefHandlers {
             let dest_cast = player
                 .movie
                 .cast_manager
-                .get_cast_mut(dest_ref.cast_lib as u32);
+                .get_cast_mut(dest_ref.cast_lib as u32)?;
             dest_cast.insert_member(dest_ref.cast_member as u32, new_member);
 
             Ok(player.alloc_datum(Datum::Int(dest_slot_number)))

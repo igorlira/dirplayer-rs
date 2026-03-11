@@ -715,7 +715,7 @@ impl TypeHandlers {
                 } else {
                     1
                 };
-                let cast = player.movie.cast_manager.get_cast_mut(cast_num);
+                let cast = player.movie.cast_manager.get_cast_mut(cast_num)?;
                 let member_ref = cast.create_member_at(
                     cast.first_free_member_id(),
                     &s,

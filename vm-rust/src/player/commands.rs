@@ -414,7 +414,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 );
 
                 let script = {
-                    let cast_lib = player.movie.cast_manager.get_cast_mut(member_ref.cast_lib as u32);
+                    let cast_lib = player.movie.cast_manager.get_cast_mut_or_null(member_ref.cast_lib as u32)?;
                     cast_lib.get_behavior_script_from_lctx(script_id)
                 };
 
@@ -602,7 +602,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let script_id = member.get_script_id()?;
 
                 let script = {
-                    let cast_lib = player.movie.cast_manager.get_cast_mut(member_ref.cast_lib as u32);
+                    let cast_lib = player.movie.cast_manager.get_cast_mut_or_null(member_ref.cast_lib as u32)?;
                     cast_lib.get_behavior_script_from_lctx(script_id)
                 };
 
