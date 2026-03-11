@@ -762,6 +762,7 @@ impl Score {
 
                 // Reset size flags when sprite re-enters.
                 sprite.has_size_tweened = false;
+                sprite.has_lingo_size = false;
                 let has_explicit_size = data.width != 0 || data.height != 0;
                 sprite.has_size_changed = has_explicit_size;
                 // Score data dimensions are authoritative - dont let bitmap intrinsic
@@ -1891,6 +1892,7 @@ impl Score {
             // Reset size flags when sprite re-enters
             sprite.has_size_tweened = false;
             sprite.has_size_changed = false;
+            sprite.has_lingo_size = false;
         }
     }
 
@@ -2930,6 +2932,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |sprite, value| {
                 sprite.width = value?;
                 sprite.has_size_changed = true;
+                sprite.has_lingo_size = true;
                 Ok(())
             },
         ),
@@ -2939,6 +2942,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |sprite, value| {
                 sprite.height = value?;
                 sprite.has_size_changed = true;
+                sprite.has_lingo_size = true;
                 Ok(())
             },
         ),
@@ -2979,6 +2983,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 let new_right = new_right?;
                 sprite.width = new_right - left;
                 sprite.has_size_changed = true;
+                sprite.has_lingo_size = true;
                 Ok(())
             },
         ),
@@ -2993,6 +2998,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 let new_bottom = new_bottom?;
                 sprite.height = new_bottom - top;
                 sprite.has_size_changed = true;
+                sprite.has_lingo_size = true;
                 Ok(())
             },
         ),
@@ -3175,6 +3181,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     }
 
                     sprite.has_size_changed = false;
+                    sprite.has_lingo_size = false;
                 }
 
                 // If the new member is a film loop, reset its frame and sound triggers
@@ -3849,13 +3856,13 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     // Use bitmap's natural dimensions.
                     (bitmap_width, bitmap_height)
                 }
-            } else if sprite.has_size_changed && (sprite.width != bitmap_width || sprite.height != bitmap_height) {
+            } else if sprite.has_lingo_size && (sprite.width != bitmap_width || sprite.height != bitmap_height) {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
+                    web_sys::console::log_1(&format!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_lingo_size={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_lingo_size,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
                 }
-                // Sprite dimensions were explicitly modified at runtime (by Lingo script,
-                // tween, etc.). Trust the current dimensions directly — they take priority
+                // Sprite dimensions were explicitly modified at runtime (by Lingo script).
+                // Trust the current dimensions directly — they take priority
                 // over bitmap-vs-score heuristics.
                 (sprite.width, sprite.height)
             } else if !sprite.has_size_changed

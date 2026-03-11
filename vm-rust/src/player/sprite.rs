@@ -103,6 +103,7 @@ pub struct Sprite {
     pub has_back_color: bool,
     pub has_size_tweened: bool,
     pub has_size_changed: bool,
+    pub has_lingo_size: bool,
     pub bitmap_size_owned_by_sprite: bool,
     // Base (score-defined) values
     pub base_loc_h: i32,
@@ -174,6 +175,7 @@ impl Sprite {
             has_back_color: false,
             has_size_tweened: false,
             has_size_changed: false,
+            has_lingo_size: false,
             bitmap_size_owned_by_sprite: false,
             base_loc_h: 0,
             base_loc_v: 0,
@@ -229,6 +231,7 @@ impl Sprite {
         self.has_back_color = false;
         self.has_size_tweened = false;
         self.has_size_changed = false;
+        self.has_lingo_size = false;
         self.bitmap_size_owned_by_sprite = false;
     }
 }
