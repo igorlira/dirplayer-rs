@@ -192,10 +192,7 @@ pub fn trigger_timeout(name: &str) {
 
 #[wasm_bindgen]
 pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
-    player_dispatch(PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef {
-        cast_lib,
-        cast_member,
-    }));
+    player_dispatch(PlayerVMCommand::PrintMemberBitmapHex(cast_member_ref(cast_lib, cast_member)));
 }
 
 #[wasm_bindgen]

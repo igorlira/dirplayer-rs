@@ -10,7 +10,7 @@ use crate::{
         Score,
     },
 };
-
+use crate::player::cast_lib::cast_member_ref;
 use super::{
     allocator::ScriptInstanceAllocatorTrait,
     cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils,
@@ -229,10 +229,7 @@ pub async fn player_invoke_frame_and_movie_scripts(
         
         // Frame script first
         if let Some(frame_script) = &frame_script {
-            let script_ref = CastMemberRef {
-                cast_lib: frame_script.cast_lib.into(),
-                cast_member: frame_script.cast_member.into(),
-            };
+            let script_ref = cast_member_ref(frame_script.cast_lib.into(), frame_script.cast_member.into());
             active_static_scripts.push(script_ref);
         }
         
@@ -304,10 +301,7 @@ pub async fn player_invoke_static_event(
         let movie_scripts = movie_scripts.as_ref().unwrap();
         let mut active_static_scripts: Vec<CastMemberRef> = vec![];
         if let Some(frame_script) = frame_script {
-            let script_ref = CastMemberRef {
-                cast_lib: frame_script.cast_lib.into(),
-                cast_member: frame_script.cast_member.into(),
-            };
+            let script_ref = cast_member_ref(frame_script.cast_lib.into(), frame_script.cast_member.into());
             active_static_scripts.push(script_ref);
         }
         for movie_script in movie_scripts {

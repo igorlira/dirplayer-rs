@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use num::FromPrimitive;
-
+use crate::player::cast_lib::cast_member_ref;
 use super::{
     mask::BitmapMask,
     palette::{
@@ -59,10 +59,7 @@ impl PaletteRef {
             PaletteRef::BuiltIn(get_system_default_palette())
         } else {
             // Custom palette: i is already the 1-indexed member number
-            PaletteRef::Member(CastMemberRef {
-                cast_lib: cast_lib as i32,
-                cast_member: i as i32,
-            })
+            PaletteRef::Member(cast_member_ref(cast_lib as i32, i as i32))
         }
     }
 }

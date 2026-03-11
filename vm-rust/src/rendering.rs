@@ -44,6 +44,7 @@ use crate::player::font::FontManager;
 use crate::player::font::bitmap_font_copy_char;
 use crate::player::handlers::datum_handlers::cast_member::font::{FontMemberHandlers, TextAlignment, StyledSpan, HtmlStyle};
 use crate::director::lingo::datum::Datum;
+use crate::player::cast_lib::cast_member_ref;
 use crate::player::score_keyframes::SpritePathKeyframes;
 use crate::rendering_gpu::{DynamicRenderer, Renderer};
 
@@ -546,10 +547,7 @@ pub fn compute_filmloop_initial_rect_with_members(
         } else {
             data.cast_lib as i32
         };
-        let sprite_member_ref = CastMemberRef {
-            cast_lib: sprite_cast_lib,
-            cast_member: data.cast_member as i32,
-        };
+        let sprite_member_ref = cast_member_ref(sprite_cast_lib, data.cast_member as i32);
 
         // Get actual bitmap dimensions and registration point from the cast member.
         // The registration point is the anchor used for positioning - sprite_left = pos_x - reg_x.
@@ -754,10 +752,7 @@ fn render_filmloop_from_channel_data(
 
         // Build member ref from channel data
         // cast_lib 65535 means "use the filmloop's cast library"
-        let sprite_member_ref = CastMemberRef {
-            cast_lib: if data.cast_lib == 65535 { filmloop_cast_lib } else { data.cast_lib as i32 },
-            cast_member: data.cast_member as i32,
-        };
+        let sprite_member_ref = cast_member_ref(if data.cast_lib == 65535 { filmloop_cast_lib } else { data.cast_lib as i32 }, data.cast_member as i32);
 
         let member = player.movie.cast_manager.find_member_by_ref(&sprite_member_ref);
         if member.is_none() {
@@ -2793,10 +2788,7 @@ pub fn player_set_preview_member_ref(cast_lib: i32, cast_num: i32) -> Result<(),
     use crate::rendering_gpu::Renderer;
     with_renderer_mut(|renderer_lock| {
         if let Some(dynamic) = renderer_lock {
-            dynamic.set_preview_member_ref(Some(CastMemberRef {
-                cast_lib,
-                cast_member: cast_num,
-            }));
+            dynamic.set_preview_member_ref(Some(cast_member_ref(cast_lib, cast_num)));
         }
     });
     Ok(())

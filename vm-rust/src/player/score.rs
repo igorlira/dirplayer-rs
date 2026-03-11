@@ -242,10 +242,7 @@ impl Score {
             cast_lib
         };
 
-        let mut script_ref = CastMemberRef {
-            cast_lib: resolved_cast_lib,
-            cast_member,
-        };
+        let mut script_ref = cast_member_ref(resolved_cast_lib, cast_member);
 
         // Check if the script exists in the resolved cast library
         // For cast 65535 (relative cast reference), we only use the filmloop's own cast.
@@ -593,10 +590,7 @@ impl Score {
                     data.cast_lib as i32
                 };
 
-                let member = CastMemberRef {
-                    cast_lib: resolved_cast_lib,
-                    cast_member: data.cast_member as i32,
-                };
+                let member = cast_member_ref(resolved_cast_lib, data.cast_member as i32);
 
                 // For Stage sprites, use sprite_set_prop which handles intrinsic size
                 // initialization and other side effects. For FilmLoop sprites, set
@@ -830,10 +824,7 @@ impl Score {
                     data.cast_lib as i32
                 };
 
-                let member = CastMemberRef {
-                    cast_lib: resolved_cast_lib,
-                    cast_member: data.cast_member as i32,
-                };
+                let member = cast_member_ref(resolved_cast_lib, data.cast_member as i32);
 
                 // Update member if changed
                 let current_member = self.get_sprite(sprite_num).and_then(|s| s.member.clone());
@@ -910,10 +901,7 @@ impl Score {
                     } else {
                         data.cast_lib as i32
                     };
-                    let member = CastMemberRef {
-                        cast_lib: resolved_cast_lib,
-                        cast_member: data.cast_member as i32,
-                    };
+                    let member = cast_member_ref(resolved_cast_lib, data.cast_member as i32);
 
                     match &score_ref {
                         ScoreRef::Stage => {
@@ -1037,10 +1025,7 @@ impl Score {
                             let sound_member_opt = match &score_ref {
                                 ScoreRef::FilmLoop(filmloop_member_ref) => {
                                     // Look up sound in the film loop's cast library
-                                    let cast_member_ref = CastMemberRef {
-                                        cast_lib: filmloop_member_ref.cast_lib,
-                                        cast_member: sound_data.cast_member as i32,
-                                    };
+                                    let cast_member_ref = cast_member_ref(filmloop_member_ref.cast_lib, sound_data.cast_member as i32);
                                     player.movie.cast_manager.find_member_by_ref(&cast_member_ref)
                                         .map(|m| (m, cast_member_ref))
                                 }
@@ -1050,10 +1035,7 @@ impl Score {
                                         .find_member_by_slot_number(sound_data.cast_member as u32)
                                         .map(|m| {
                                             let ref_ = CastMemberRefHandlers::member_ref_from_slot_number(m.number);
-                                            (m, CastMemberRef {
-                                                cast_lib: ref_.cast_lib as i32,
-                                                cast_member: ref_.cast_member as i32,
-                                            })
+                                            (m, cast_member_ref(ref_.cast_lib as i32, ref_.cast_member as i32))
                                         })
                                 }
                             };
@@ -1500,10 +1482,7 @@ impl Score {
                 } else {
                     data.cast_lib as i32
                 };
-                let sprite_member = CastMemberRef {
-                    cast_lib: sprite_cast_lib,
-                    cast_member: data.cast_member as i32,
-                };
+                let sprite_member = cast_member_ref(sprite_cast_lib, data.cast_member as i32);
                 debug!(
                     "D5 sprite ch={}: scriptId=({},{}), sprite_member=({},{})",
                     channel_num, resolved_cast_lib, script_member,
@@ -1811,10 +1790,7 @@ impl Score {
                 });
 
                 // Create the CastMemberRef for later use
-                let cast_member_ref = CastMemberRef {
-                    cast_lib: behavior_ref.cast_lib as i32,
-                    cast_member: behavior_ref.cast_member as i32,
-                };
+                let cast_member_ref = cast_member_ref(behavior_ref.cast_lib as i32, behavior_ref.cast_member as i32);
 
                 // Set spriteNum property
                 reserve_player_mut(|player| {
@@ -1973,10 +1949,7 @@ impl Score {
                 data.cast_lib as i32
             };
 
-            let member = CastMemberRef {
-                cast_lib: resolved_cast_lib,
-                cast_member: data.cast_member as i32,
-            };
+            let member = cast_member_ref(resolved_cast_lib, data.cast_member as i32);
 
             // Set member directly on the sprite instead of using sprite_set_prop,
             // because sprite_set_prop always writes to main stage score,
@@ -2904,10 +2877,7 @@ impl Score {
                     PaletteRef::from(*member, *cast_lib as u32)
                 } else if *member > 0 {
                     // Positive member = cast member palette
-                    PaletteRef::Member(CastMemberRef {
-                        cast_lib: *cast_lib as i32,
-                        cast_member: *member as i32,
-                    })
+                    PaletteRef::Member(cast_member_ref(*cast_lib as i32, *member as i32))
                 } else {
                     // member == 0: use system default
                     PaletteRef::BuiltIn(get_system_default_palette())

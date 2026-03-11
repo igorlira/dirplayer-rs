@@ -279,10 +279,7 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                                 ))),
                             };
                             let member_num = member_id_datum.int_value().unwrap_or(0);
-                            super::cast_lib::CastMemberRef {
-                                cast_lib: cast_lib_num,
-                                cast_member: member_num,
-                            }
+                            super::cast_lib::cast_member_ref(cast_lib_num, member_num)
                         } else {
                             INVALID_CAST_MEMBER_REF
                         }
@@ -1411,10 +1408,7 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                             };
                             // Try to get member number for explicit reference
                             let member_num = member_id_datum.int_value().unwrap_or(0);
-                            super::cast_lib::CastMemberRef {
-                                cast_lib: cast_lib_num,
-                                cast_member: member_num,
-                            }
+                            super::cast_lib::cast_member_ref(cast_lib_num, member_num)
                         } else {
                             super::cast_lib::INVALID_CAST_MEMBER_REF
                         }

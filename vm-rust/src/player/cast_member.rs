@@ -22,6 +22,7 @@ use crate::director::{
     },
     lingo::script::ScriptContext,
 };
+use crate::player::cast_lib::cast_member_ref;
 use crate::player::handlers::datum_handlers::cast_member::font::{StyledSpan, TextAlignment};
 
 #[derive(Clone)]
@@ -1922,7 +1923,7 @@ impl CastMember {
                         .map(|info| info.header.script_id)
                         .unwrap_or(0);
                     let member_script_ref = if script_id > 0 {
-                        Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: script_id as i32 })
+                        Some(cast_member_ref(cast_lib as i32, script_id as i32))
                     } else { None };
                     debug!("Flash member {} is a Shape (via shape_info), script_id={}", number, script_id);
                     return CastMember {
@@ -1957,7 +1958,7 @@ impl CastMember {
                             .map(|info| info.header.script_id)
                             .unwrap_or(0);
                         let member_script_ref = if script_id > 0 {
-                            Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: script_id as i32 })
+                            Some(cast_member_ref(cast_lib as i32, script_id as i32))
                         } else { None };
                         debug!("Flash member {} is actually a Shape! script_id={}", number, script_id);
                         return CastMember {
@@ -2035,10 +2036,7 @@ impl CastMember {
                     let script_chunk = &lctx.as_ref().unwrap().scripts[&script_id];
 
                     // Create the behavior script reference
-                    Some(CastMemberRef {
-                        cast_lib: cast_lib as i32,
-                        cast_member: script_id as i32,
-                    })
+                    Some(cast_member_ref(cast_lib as i32, script_id as i32))
                 } else {
                     None
                 };
@@ -2152,10 +2150,7 @@ impl CastMember {
                     .unwrap_or(0);
 
                 let member_script_ref = if script_id > 0 {
-                    Some(CastMemberRef {
-                        cast_lib: cast_lib as i32,
-                        cast_member: script_id as i32,
-                    })
+                    Some(cast_member_ref(cast_lib as i32, script_id as i32))
                 } else {
                     None
                 };
@@ -2426,10 +2421,7 @@ impl CastMember {
 
                 let behavior_script_ref = if script_id > 0 {
                     let _script_chunk = &lctx.as_ref().unwrap().scripts[&script_id];
-                    Some(CastMemberRef {
-                        cast_lib: cast_lib as i32,
-                        cast_member: script_id as i32,
-                    })
+                    Some(cast_member_ref(cast_lib as i32, script_id as i32))
                 } else {
                     None
                 };
