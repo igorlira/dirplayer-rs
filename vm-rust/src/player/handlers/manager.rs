@@ -32,7 +32,7 @@ impl BuiltInHandlerManager {
         reserve_player_mut(|player| {
             let param_number = player.get_datum(&args[0]).int_value()?;
             if let Some(scope) = player.get_current_scope() &&
-                let Some(arg) = scope.args.get(param_number.overflowing_sub(1).0 as usize) {
+                let Some(arg) = scope.args.get(param_number.wrapping_sub(1) as usize) {
                 Ok(arg.clone())
             } else {
                 // outside a function, Director returns 0

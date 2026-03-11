@@ -212,7 +212,7 @@ impl CastMemberRefHandlers {
         })
     }
 
-    fn duplicate(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn duplicate(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let cast_member_ref = match player.get_datum(datum) {
                 Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
@@ -222,15 +222,29 @@ impl CastMemberRefHandlers {
                     ))
                 }
             };
-            let Some(dest_slot_number) = args.get(0).map(|x| player.get_datum(x).int_value()) else {
-                return Err(ScriptError::new(
-                    "Cannot duplicate cast member without destination slot number".to_string(),
-                ));
-            };
-
-            let dest_slot_number = dest_slot_number?;
             
-            let dest_ref = Self::member_ref_from_slot_number(dest_slot_number as u32);
+            let (dest_lib, dest_slot) = match args {
+                [] => (
+                    cast_member_ref.cast_lib,
+                    player.movie.cast_manager.get_cast(cast_member_ref.cast_lib as u32)?.max_member_id() + 1
+                ),
+                [destination] => match player.get_datum(destination) {
+                    Datum::Int(slot_number) => (cast_member_ref.cast_lib, *slot_number as u32),
+                    Datum::CastMember(cr) => {
+                        (cr.cast_lib, cr.cast_member as u32)
+                    }
+                    _ => {
+                        return Err(ScriptError::new(
+                            "Duplicate cast member destination must be an integer slot number".to_string(),
+                        ))
+                    }
+                },
+                _ => {
+                    return Err(ScriptError::new(
+                        "Duplicate cast member accepts at most one argument (destination slot number)".to_string(),
+                    ))
+                }
+            };
 
             let mut new_member = {
                 let src_member = player
@@ -247,15 +261,17 @@ impl CastMemberRefHandlers {
                     }
                 }
             };
-            new_member.number = dest_ref.cast_member as u32;
+            new_member.number = dest_slot as u32;
 
             let dest_cast = player
                 .movie
                 .cast_manager
-                .get_cast_mut(dest_ref.cast_lib as u32)?;
-            dest_cast.insert_member(dest_ref.cast_member as u32, new_member);
+                .get_cast_mut(dest_lib as u32)?;
+            dest_cast.insert_member(dest_slot as u32, new_member);
 
-            Ok(player.alloc_datum(Datum::Int(dest_slot_number)))
+            let dest_slot_number = Self::get_cast_slot_number(dest_lib as u32, dest_slot);
+
+            Ok(player.alloc_datum(Datum::Int(dest_slot_number as i32)))
         })
     }
 
