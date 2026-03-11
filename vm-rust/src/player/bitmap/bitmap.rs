@@ -1081,14 +1081,6 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
     use image::ImageDecoder;
     use std::io::Cursor;
 
-    let palette_cast_lib = if info.clut_cast_lib > 0 {
-        info.clut_cast_lib as u32
-    } else if info.clut_cast_lib == 0 && info.palette_id > 0 {
-        0
-    } else {
-        cast_lib
-    };
-
     // Find the end of the JPEG stream (last FFD9 marker)
     let mut jpeg_end_pos = data.len();
     for i in (0..data.len().saturating_sub(1)).rev() {
@@ -1167,7 +1159,7 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
         bit_depth: 32,
         original_bit_depth: 32,
         data: rgba_data,
-        palette_ref: PaletteRef::from(info.palette_id, palette_cast_lib),
+        palette_ref: PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
         matte: None,
         use_alpha: info.use_alpha,
         trim_white_space: info.trim_white_space,
