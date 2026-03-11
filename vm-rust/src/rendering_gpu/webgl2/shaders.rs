@@ -42,13 +42,13 @@ impl InkMode {
     /// Convert Director ink number to InkMode
     pub fn from_ink_number(ink: i32) -> Self {
         match ink {
+            2 | 36 => InkMode::BackgroundTransparent,
             3 => InkMode::Ghost,
             7 => InkMode::NotGhost,
             8 => InkMode::Matte,
             9 => InkMode::Mask,
             33 => InkMode::AddPin,
             35 => InkMode::SubPin,
-            36 => InkMode::BackgroundTransparent,
             37 => InkMode::Light,
             39 => InkMode::Dark,
             40 => InkMode::Lighten,
