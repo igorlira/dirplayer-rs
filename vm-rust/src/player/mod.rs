@@ -1387,6 +1387,17 @@ impl DirPlayer {
                 let y_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.1));
                 Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
             }
+            "markerList" => {
+                let props: Vec<(DatumRef, DatumRef)> = self.movie.score.frame_labels
+                    .iter()
+                    .map(|fl| {
+                        let label = self.alloc_datum(Datum::String(fl.label.clone()));
+                        let frame_num = self.alloc_datum(Datum::Int(fl.frame_num));
+                        (label, frame_num)
+                    })
+                    .collect();
+                Ok(self.alloc_datum(Datum::PropList(props, false)))
+            }
             "xtraList" => {
                 let xtra_names = xtra::manager::get_registered_xtra_names();
                 let xtra_list: Vec<DatumRef> = xtra_names
