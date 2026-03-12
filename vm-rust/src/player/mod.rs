@@ -1388,11 +1388,15 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
             }
             "markerList" => {
-                let props: Vec<(DatumRef, DatumRef)> = self.movie.score.frame_labels
+                let labels: Vec<_> = self.movie.score.frame_labels
                     .iter()
-                    .map(|fl| {
-                        let label = self.alloc_datum(Datum::String(fl.label.clone()));
-                        let frame_num = self.alloc_datum(Datum::Int(fl.frame_num));
+                    .map(|fl| (fl.label.clone(), fl.frame_num))
+                    .collect();
+                let props: Vec<(DatumRef, DatumRef)> = labels
+                    .into_iter()
+                    .map(|(label, frame_num)| {
+                        let label = self.alloc_datum(Datum::String(label));
+                        let frame_num = self.alloc_datum(Datum::Int(frame_num));
                         (label, frame_num)
                     })
                     .collect();
