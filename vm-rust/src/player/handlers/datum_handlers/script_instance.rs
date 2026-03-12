@@ -10,6 +10,7 @@ use crate::{
         script::{script_get_prop, script_set_prop, Script, ScriptHandlerRef},
         script_ref::ScriptInstanceRef,
         DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
+        virtual_scripts::VirtualScriptRegistry,
     },
 };
 
@@ -255,6 +256,12 @@ impl ScriptInstanceDatumHandlers {
 
     pub fn has_async_handler(datum: &DatumRef, name: &String) -> Result<bool, ScriptError> {
         return reserve_player_ref(|player| {
+            if let Datum::ScriptInstanceRef(ref instance_ref) = player.get_datum(datum) {
+                if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, instance_ref, name) {
+                    return Ok(true);
+                }
+            }
+
             let handler_ref = ScriptInstanceUtils::get_handler(name, &datum, player)?;
             if handler_ref.is_some() {
                 return Ok(true);
@@ -294,7 +301,15 @@ impl ScriptInstanceDatumHandlers {
             player_handle_scope_return(&result_scope);
             Ok(result_scope.return_value)
         } else {
-            // No handler found in script - check for special handlers first
+            // No handler found in script - check virtual handler first
+            let virtual_result = reserve_player_mut(|player| {
+                crate::player::virtual_scripts::VirtualScriptRegistry::try_call_instance_handler(player, &instance_id, handler_name, args)
+            });
+            match virtual_result {
+                Ok(Some(result)) => return Ok(result),
+                Err(e) => return Err(e),
+                Ok(None) => {}
+            }
 
             // getPropertyDescriptionList returns empty prop list if not implemented
             if handler_name == "getPropertyDescriptionList" {
@@ -548,6 +563,20 @@ impl ScriptInstanceDatumHandlers {
                 Ok(DatumRef::Void)
             }
             _ => {
+                // Check for virtual script handler
+                let virtual_result = reserve_player_mut(|player| {
+                    let instance_ref = match player.get_datum(datum) {
+                        Datum::ScriptInstanceRef(ref r) => r.clone(),
+                        _ => return Ok(None),
+                    };
+                    VirtualScriptRegistry::try_call_instance_handler(player, &instance_ref, handler_name, args)
+                });
+                match virtual_result {
+                    Ok(Some(result)) => return Ok(result),
+                    Err(e) => return Err(e),
+                    Ok(None) => {}
+                }
+
                 // Check for non-ScriptInstance ancestor to delegate to (e.g., TimeoutInstance)
                 let (ancestor_ref, ancestor_type, script_name, script_missing) = reserve_player_ref(|player| {
                     let (script_name, script_missing) = if let Datum::ScriptInstanceRef(ref inst_ref) = player.get_datum(datum) {

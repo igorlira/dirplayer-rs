@@ -493,36 +493,36 @@ impl CastMemberRefHandlers {
             None => return Ok(()), // Member was erased, silently ignore
         };
 
-        match member_type {
-            CastMemberTypeId::Script => {
-                match prop.as_str() {
-                    "scriptText" => Ok(()), // No-op: no lingo compiler
-                    "scriptType" => {
-                        let type_str = value.string_value()?;
-                        let script_type = match type_str.to_lowercase().as_str() {
-                            "movie" => ScriptType::Movie,
-                            "parent" => ScriptType::Parent,
-                            "score" => ScriptType::Score,
-                            "member" => ScriptType::Member,
-                            _ => return Err(ScriptError::new(format!("Unknown scriptType: {}", type_str))),
-                        };
-                        borrow_member_mut(
-                            member_ref,
-                            |_| {},
-                            |cast_member, _| {
-                                if let CastMemberType::Script(ref mut s) = cast_member.member_type {
-                                    s.script_type = script_type;
-                                }
-                                Ok(())
-                            },
-                        )
-                    }
-                    _ => Err(ScriptError::new(format!(
-                        "Cannot set castMember prop {} for member of type Script",
-                        prop
-                    ))),
+        // Handle Script-specific props before the main match so unrecognized
+        // props fall through to the wildcard arm (e.g. implicit bitmap conversion).
+        if member_type == CastMemberTypeId::Script {
+            match prop.as_str() {
+                "scriptText" => return Ok(()), // No-op: no lingo compiler
+                "scriptType" => {
+                    let type_str = value.string_value()?;
+                    let script_type = match type_str.to_lowercase().as_str() {
+                        "movie" => ScriptType::Movie,
+                        "parent" => ScriptType::Parent,
+                        "score" => ScriptType::Score,
+                        "member" => ScriptType::Member,
+                        _ => return Err(ScriptError::new(format!("Unknown scriptType: {}", type_str))),
+                    };
+                    return borrow_member_mut(
+                        member_ref,
+                        |_| {},
+                        |cast_member, _| {
+                            if let CastMemberType::Script(ref mut s) = cast_member.member_type {
+                                s.script_type = script_type;
+                            }
+                            Ok(())
+                        },
+                    );
                 }
+                _ => {} // Fall through to main match
             }
+        }
+
+        match member_type {
             CastMemberTypeId::Field => FieldMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Text => TextMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Button => ButtonMemberHandlers::set_prop(member_ref, prop, value),
