@@ -25,6 +25,16 @@ impl ScoreFrameDelta {
 #[allow(dead_code)]
 const K_CHANNEL_DATA_SIZE: usize = 38664; // (25 * 50);
 
+/// Channel 0 (script channel) data — separate from sprite channels.
+/// In D5: cast_lib/cast_member identify the frame script directly.
+/// In D6+: sprite_list_idx references the sprite detail table for behaviors.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct FrameScriptData {
+    pub cast_lib: u16,
+    pub cast_member: u16,
+    pub sprite_list_idx: u32,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct ScoreFrameChannelData {
@@ -295,6 +305,7 @@ pub struct ScoreFrameData {
     pub header: ScoreFrameDataHeader,
     pub decompressed_data: Vec<u8>,
     pub frame_channel_data: Vec<(u32, u16, ScoreFrameChannelData)>,
+    pub frame_script_data: Vec<(u32, FrameScriptData)>,
     pub sound_channel_data: Vec<(u32, u16, SoundChannelData)>,
     pub tempo_channel_data: Vec<(u32, TempoChannelData)>,
     pub palette_channel_data: Vec<(u32, i16, i16)>,
@@ -306,6 +317,7 @@ impl Default for ScoreFrameData {
             header: ScoreFrameDataHeader::default(),
             decompressed_data: Vec::new(),
             frame_channel_data: Vec::new(),
+            frame_script_data: Vec::new(),
             sound_channel_data: Vec::new(),
             tempo_channel_data: Vec::new(),
             palette_channel_data: Vec::new(),
@@ -463,10 +475,10 @@ impl ScoreFrameData {
         reader.jmp(frame_data_start);
 
         if header.frame_count == 0 || header.frame_count != actual_frame_count {
-            debug!(
+            console::log_1(&format!(
                 "ScoreFrameData: header frame_count={} but actual_frame_count={}, using actual",
                 header.frame_count, actual_frame_count
-            );
+            ).into());
             header.frame_count = actual_frame_count;
         }
 
@@ -551,8 +563,9 @@ impl ScoreFrameData {
         let main_channels_size: usize = if header.frames_version <= 7 { 48 } else { 0 };
         let is_d5 = main_channels_size > 0;
 
-        let (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data, palette_channel_data) = {
+        let (decompressed_data, frame_channel_data, frame_script_data, sound_channel_data, tempo_channel_data, palette_channel_data) = {
             let mut frame_channel_data = vec![];
+            let mut frame_script_data: Vec<(u32, FrameScriptData)> = vec![];
             let mut sound_channel_data = vec![];
             let mut tempo_channel_data = vec![];
             let mut palette_channel_data: Vec<(u32, i16, i16)> = vec![];
@@ -578,31 +591,10 @@ impl ScoreFrameData {
                     let action_cast_lib = channel_reader.read_u16().unwrap_or(0);
                     let action_member = channel_reader.read_u16().unwrap_or(0);
                     if action_member != 0 {
-                        // Store frame script as channel 0
-                        frame_channel_data.push((frame_index, 0_u16, ScoreFrameChannelData {
-                            sprite_type: 0,
-                            ink: 0,
-                            fore_color: 0,
-                            back_color: 0,
+                        frame_script_data.push((frame_index, FrameScriptData {
                             cast_lib: action_cast_lib,
                             cast_member: action_member,
-                            sprite_list_idx_hi: 0,
-                            sprite_list_idx_lo: 0,
-                            pos_y: 0,
-                            pos_x: 0,
-                            height: 0,
-                            width: 0,
-                            color_flag: 0,
-                            fore_color_g: 0,
-                            back_color_g: 0,
-                            fore_color_b: 0,
-                            back_color_b: 0,
-                            blend: 0,
-                            rotation: 0.0,
-                            skew: 0.0,
-                            moveable: false,
-                            editable: false,
-                            trails: false,
+                            sprite_list_idx: 0,
                         }));
                     }
 
@@ -682,8 +674,22 @@ impl ScoreFrameData {
                         let pos = frame_start + (channel_index as usize) * (header.sprite_record_size as usize);
                         channel_reader.jmp(pos);
 
-                        if channel_index == 0 || channel_index == 2 {
-                            // Channel 0 = Script, Channel 2 = Transition (skip)
+                        if channel_index == 0 {
+                            // Channel 0 = Script channel (D6+)
+                            // Layout per ScummVM frame.cpp:1105: actionId.castLib(u16) actionId.member(u16) scriptSpriteListIdx(u32) colorScript(u8) padding(15)
+                            let action_cast_lib = channel_reader.read_u16().unwrap_or(0);
+                            let action_member = channel_reader.read_u16().unwrap_or(0);
+                            let script_sprite_list_idx = channel_reader.read_u32().unwrap_or(0);
+
+                            if action_member != 0 || script_sprite_list_idx != 0 {
+                                frame_script_data.push((frame_index, FrameScriptData {
+                                    cast_lib: action_cast_lib,
+                                    cast_member: action_member,
+                                    sprite_list_idx: script_sprite_list_idx,
+                                }));
+                            }
+                        } else if channel_index == 2 {
+                            // Channel 2 = Transition (skip)
                         } else if channel_index == 1 {
                             // Channel 1 = Tempo
                             let tempo_data = TempoChannelData::read(&mut channel_reader)?;
@@ -739,18 +745,19 @@ impl ScoreFrameData {
                 }
             }
 
-            debug!(
+            console::log_1(&format!(
                 "🏁 Finished processing {} frames. Sprites: {}, Sounds: {}, Tempo changes: {}, Palette changes: {}",
                 header.frame_count, frame_channel_data.len(), sound_channel_data.len(), tempo_channel_data.len(), palette_channel_data.len()
-            );
+            ).into());
 
-            (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data, palette_channel_data)
+            (decompressed_data, frame_channel_data, frame_script_data, sound_channel_data, tempo_channel_data, palette_channel_data)
         };
 
         Ok(ScoreFrameData {
             header,
             decompressed_data,
             frame_channel_data,
+            frame_script_data,
             sound_channel_data,
             tempo_channel_data,
             palette_channel_data,
@@ -794,10 +801,10 @@ impl ScoreFrameData {
                 .map_err(|e| format!("Failed to skip u16: {:?}", e))?; // Skip
         }
 
-        debug!(
+        console::log_1(&format!(
             "ScoreFrameData::read_header: actual_length={}, unk1(frame1Offset)={}, frame_count={}, frames_version={}, sprite_record_size={}, num_channels={}, reader_len={}",
             actual_length, unk1, frame_count, frames_version, sprite_record_size, num_channels, reader.length
-        );
+        ).into());
 
         Ok(ScoreFrameDataHeader {
             frame_count,
@@ -1062,14 +1069,14 @@ impl ScoreChunk {
             let index_start = list_start + 12; // After the 3 header u32s
             let frame_data_offset = index_start + list_size * 4; // After the offset table
 
-            debug!(
+            console::log_1(&format!(
                 "VWSC D6+: framesStreamSize={}, ver={}, listStart=0x{:x}",
                 frames_stream_size, ver, list_start
-            );
-            debug!(
+            ).into());
+            console::log_1(&format!(
                 "VWSC D6+: numEntries={}, listSize={}, maxDataLen=0x{:x}, indexStart={}, frameDataOffset={}",
                 num_entries, list_size, max_data_len, index_start, frame_data_offset
-            );
+            ).into());
 
             // Read raw offsets (numEntries of them, relative to frameDataOffset)
             let mut raw_offsets = Vec::with_capacity(num_entries);
@@ -1089,10 +1096,10 @@ impl ScoreChunk {
                 let entry_end = frame_data_offset + raw_offsets[i + 1];
 
                 if entry_start > reader.length || entry_end > reader.length {
-                    warn!(
+                    console::warn_1(&format!(
                         "VWSC: Entry {} out of bounds: start={}, end={}, stream_len={}",
                         i, entry_start, entry_end, reader.length
-                    );
+                    ).into());
                     entries.push(Vec::new());
                     continue;
                 }
@@ -1109,10 +1116,10 @@ impl ScoreChunk {
             }
 
             let entry_sizes: Vec<usize> = entries.iter().take(10).map(|e| e.len()).collect();
-            debug!(
+            console::log_1(&format!(
                 "VWSC D6+: extracted {} entries, sizes: {:?}",
                 entries.len(), entry_sizes
-            );
+            ).into());
 
             // Entry[0] = frame data (the main score data with channel deltas)
             let frame_data = if !entries.is_empty() && !entries[0].is_empty() {
@@ -1135,10 +1142,10 @@ impl ScoreChunk {
             })
         } else if dir_version >= 400 {
             // D4/D5 format: frame data directly at position 0
-            debug!(
+            console::log_1(&format!(
                 "VWSC D4/D5 standard: reading frame data directly (version {})",
                 dir_version
-            );
+            ).into());
 
             let frame_data = ScoreFrameData::read(reader)?;
 
@@ -1154,7 +1161,6 @@ impl ScoreChunk {
         }
     }
 
-<<<<<<< HEAD
     /// Parse sprite details directly from extracted VWSC entries.
     /// For spriteListIdx = N, entries[N] is the 44-byte sprite info,
     /// and entries[N+1] contains behaviors (8 bytes each: cast_lib u16, cast_member u16, initializer_idx u32).
@@ -1197,34 +1203,22 @@ impl ScoreChunk {
                 if cast_member > 0 && cast_member < 10000 {
                     let mut parameter = Vec::new();
                     // Parse initializer data from entries[initializer_idx]
-                    debug!("Behavior cast={}/{} initializer_idx={}", cast_lib, cast_member, initializer_idx);
                     if initializer_idx > 0 && (initializer_idx as usize) < entries.len() {
-                        debug!("  Found initializer entry at index {}, size: {} bytes", initializer_idx, entries[initializer_idx as usize].len());
                         if let Ok(proplist_string) = String::from_utf8(entries[initializer_idx as usize].clone()) {
                             let clean = proplist_string.trim_end_matches('\0');
-                            debug!("  Initializer string: {:?}", clean);
                             if clean.starts_with('[') {
                                 match eval_lingo_expr_static(clean.to_owned()) {
                                     Ok(proplist) => {
-                                        debug!("  ✅ Successfully parsed initializer proplist");
                                         parameter.push(proplist);
                                     }
                                     Err(e) => {
-                                        warn!(
+                                        console::warn_1(&format!(
                                             "Failed to parse sprite detail initializer: {}", e.message
-                                        );
+                                        ).into());
                                     }
                                 }
-                            } else {
-                                debug!("  ⚠️ Initializer string doesn't start with '[': {:?}", &clean[..clean.len().min(50)]);
                             }
-                        } else {
-                            debug!("  ⚠️ Initializer entry is not valid UTF-8");
                         }
-                    } else if initializer_idx > 0 {
-                        warn!("  ⚠️ initializer_idx {} is out of range (entries.len = {})", initializer_idx, entries.len());
-                    } else {
-                        debug!("  No initializer data (initializer_idx=0)");
                     }
                     info.behaviors.push(SpriteBehavior { cast_lib, cast_member, parameter });
                 }
@@ -1236,40 +1230,20 @@ impl ScoreChunk {
                     let behavior_strs: Vec<String> = info.behaviors.iter()
                         .map(|b| if b.cast_lib == 65535 { format!("(-1)/{}", b.cast_member) } else { format!("{}/{}", b.cast_lib, b.cast_member) })
                         .collect();
-                    debug!(
+                    console::log_1(&format!(
                         "sprite_details: spriteListIdx {} -> {} behaviors [{}]",
                         idx, info.behaviors.len(), behavior_strs.join(", ")
-                    );
+                    ).into());
                 }
                 details.insert(idx as u32, info);
             }
         }
 
         if !details.is_empty() {
-            debug!(
+            console::log_1(&format!(
                 "Parsed {} sprite details with {} total behaviors from entries",
                 details.len(), behavior_count
-            );
-        }
-
-        // Find all sprite detail entries for channel 40 (0x28)
-        for i in 2..entries.len() {
-            let e = &entries[i];
-            if e.len() >= 40 {
-                let channel = u32::from_be_bytes([e[16], e[17], e[18], e[19]]);
-                if channel == 40 {
-                    let sf = u32::from_be_bytes([e[0], e[1], e[2], e[3]]);
-                    let ef = u32::from_be_bytes([e[4], e[5], e[6], e[7]]);
-                    let next_size = if i + 1 < entries.len() { entries[i+1].len() } else { 0 };
-                    let next_hex: String = if i + 1 < entries.len() {
-                        entries[i+1].iter().take(16).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
-                    } else { String::new() };
-                    debug!(
-                        "CH40_ENTRY {}: size={} frames={}-{} next_size={} next_hex: {}",
-                        i, e.len(), sf, ef, next_size, next_hex
-                    );
-                }
-            }
+            ).into());
         }
 
         details
