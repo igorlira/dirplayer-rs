@@ -203,7 +203,7 @@ pub fn string_get_count(
         "char" | "chars" => Ok(value.chars().count() as u32),
         "item" | "items" => Ok(string_get_items(value, delimiter).len() as u32),
         "word" | "words" => Ok(if value.len() > 0 {
-            value.split_whitespace().count() as u32
+            string_get_words(value).len() as u32
         } else {
             0
         }),
@@ -222,10 +222,18 @@ pub fn string_get_items(value: &String, delimiter: char) -> Vec<String> {
     }
 }
 
+fn is_director_whitespace(byte: char) -> bool {
+    if byte.is_ascii_control() || byte.is_ascii_whitespace() {
+        return true;
+    } else {
+        return false;
+    }
+}
+
 #[allow(dead_code)]
 pub fn string_get_words(value: &String) -> Vec<String> {
-    value
-        .split_whitespace()
+    let inner = value.split(is_director_whitespace);
+    inner
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()
