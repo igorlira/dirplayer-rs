@@ -1506,15 +1506,6 @@ impl ScoreChunk {
         if entries.len() > 2 && entries.len() < 50 {
             let sizes: Vec<usize> = entries.iter().map(|e| e.len()).collect();
             debug!(
-                "analyze_behavior_attachment_entries: {} entries, sizes: {:?}",
-                entries.len(), sizes
-            );
-        }
-
-        // Log all entry sizes for debugging filmloop behavior issues
-        if entries.len() > 2 && entries.len() < 50 {
-            let sizes: Vec<usize> = entries.iter().map(|e| e.len()).collect();
-            debug!(
                 "📊 analyze_behavior_attachment_entries: {} entries, sizes: {:?}",
                 entries.len(), sizes
             );
@@ -1528,206 +1519,186 @@ impl ScoreChunk {
                 continue;
             }
 
-            match entry_bytes.len() {
-                // Primary entries: 40 bytes base (10 x u32) + optional trailing data.
-                // D6/D7 typically produce 44 bytes, D8+ may produce 40 or 48.
-                40 | 44 | 48 => {
-                    // Primary entry
-                    let mut reader = BinaryReader::from_u8(entry_bytes);
-                    reader.set_endian(Endian::Big);
+            // SpriteInfo entries: 40 bytes base (10 x u32) + optional keyframes (4 bytes each).
+            // Valid sizes: 40, 44, 48, 52, ... (40 + 4*n). Must be at least 40 and u32-aligned.
+            let is_spriteinfo_size = entry_bytes.len() >= 40 && entry_bytes.len() % 4 == 0;
 
-                    if let Ok(primary) = FrameIntervalPrimary::read(&mut reader) {
+            if is_spriteinfo_size {
+                let mut reader = BinaryReader::from_u8(entry_bytes);
+                reader.set_endian(Endian::Big);
+
+                if let Ok(primary) = FrameIntervalPrimary::read(&mut reader) {
+                    // Sanity-check: start_frame and end_frame should be reasonable values.
+                    // This prevents misinterpreting name strings or parameter data as SpriteInfo.
+                    if primary.start_frame < 1 || primary.start_frame > 100000
+                        || primary.end_frame < primary.start_frame
+                        || primary.end_frame > 100000
+                    {
                         debug!(
-                            "🎯 Found primary at entry {}: channel={}, frames={}-{}",
+                            "⏭️ Entry {} (size={}) parsed as SpriteInfo but has invalid frames {}-{}, skipping",
+                            i, entry_bytes.len(), primary.start_frame, primary.end_frame
+                        );
+                        i += 1;
+                        continue;
+                    }
+
+                    debug!(
+                        "🎯 Found primary at entry {}: channel={}, frames={}-{}",
+                        i, primary.channel_index, primary.start_frame, primary.end_frame
+                    );
+
+                    // Log primary entries for filmloop debugging
+                    // Only log for main movie entries (high entry numbers, channels 55-100)
+                    let is_main_movie_digit_channel = i > 3500 && primary.channel_index >= 55 && primary.channel_index <= 100;
+                    if is_main_movie_digit_channel {
+                        debug!(
+                            "Primary entry {}: channel={} frames={}-{}",
                             i, primary.channel_index, primary.start_frame, primary.end_frame
                         );
 
-                        // Log primary entries for filmloop debugging
-                        // Only log for main movie entries (high entry numbers, channels 55-100)
-                        let is_main_movie_digit_channel = i > 3500 && primary.channel_index >= 55 && primary.channel_index <= 100;
-                        if is_main_movie_digit_channel {
+                        // Log the secondary entry sizes for debugging
+                        if i + 1 < entries.len() {
+                            let sec_size = entries[i + 1].len();
+                            let sec_bytes: String = entries[i + 1].iter()
+                                .take(32)
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<Vec<_>>()
+                                .join(" ");
                             debug!(
-                                "Primary entry {}: channel={} frames={}-{}",
-                                i, primary.channel_index, primary.start_frame, primary.end_frame
+                                "   Secondary entry {} size={} bytes: {}",
+                                i + 1, sec_size, sec_bytes
+                            );
+                        }
+                    }
+
+                    // Collect behaviors from entries[i+1]
+                    let mut secondaries = Vec::new();
+                    if i + 1 < entries.len() {
+                        let behavior_bytes = &entries[i + 1];
+                        let next_size = behavior_bytes.len();
+
+                        debug!("  🔎 Checking entry {} (size={})", i + 1, next_size);
+
+                        if next_size >= 8 && next_size % 8 == 0 {
+                            let behavior_count = next_size / 8;
+                            let mut sec_reader = BinaryReader::from_u8(behavior_bytes);
+                            sec_reader.set_endian(Endian::Big);
+
+                            debug!(
+                                "  📦 Entry {} has {} bytes = {} potential behaviors",
+                                i + 1, next_size, behavior_count
                             );
 
-                            // Log the secondary entry sizes for debugging
-                            if i + 1 < entries.len() {
-                                let sec_size = entries[i + 1].len();
-                                let sec_bytes: String = entries[i + 1].iter()
-                                    .take(32)
-                                    .map(|b| format!("{:02x}", b))
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                debug!(
-                                    "   Secondary entry {} size={} bytes: {}",
-                                    i + 1, sec_size, sec_bytes
-                                );
-                            }
-                        }
+                            // Read all behaviors from this entry
+                            for behavior_idx in 0..behavior_count {
+                                if let Ok(cast_lib) = sec_reader.read_u16() {
+                                    if let Ok(cast_member) = sec_reader.read_u16() {
+                                        if let Ok(unk0) = sec_reader.read_u32() {
+                                            // Only add if it looks like a valid behavior reference
+                                            if cast_lib > 0 && cast_member > 0 {
+                                                let mut secondary = FrameIntervalSecondary {
+                                                    cast_lib,
+                                                    cast_member,
+                                                    unk0,
+                                                    parameter: vec![],
+                                                };
 
-                        // Look ahead to collect ALL secondary entries for this primary
-                        let mut secondaries = Vec::new();
-                        let mut j = i + 1;
-
-                        // Keep reading secondary entries until we hit a non-secondary entry
-                        while j < entries.len() {
-                            let next_size = entries[j].len();
-
-                            debug!("  🔎 Checking entry {} (size={})", j, next_size);
-
-                            // Check if this could be a behavior entry
-                            // Pattern: 8 bytes per behavior (cast_lib u16, cast_member u16, unk0 u32)
-                            // Disambiguate from primary entries (40/44/48 bytes): peek at the
-                            // content — a primary's first two u32s are start_frame/end_frame
-                            // (small sequential numbers), while a behavior's first two u16s are
-                            // cast_lib/cast_member.  If the first u32 looks like a valid
-                            // start_frame (1–10000) and the second u32 >= first, treat it as a
-                            // primary rather than a behavior list.
-                            let looks_like_primary = if (next_size == 40 || next_size == 44 || next_size == 48) && next_size >= 8 {
-                                let b = &entries[j];
-                                let first_u32 = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-                                let second_u32 = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
-                                first_u32 >= 1 && first_u32 <= 10000 && second_u32 >= first_u32
-                            } else {
-                                false
-                            };
-                            if next_size >= 8 && next_size % 8 == 0 && !looks_like_primary {
-                                let behavior_count = next_size / 8;
-                                let mut sec_reader = BinaryReader::from_u8(&entries[j]);
-                                sec_reader.set_endian(Endian::Big);
-
-                                debug!(
-                                    "  📦 Entry {} has {} bytes = {} potential behaviors",
-                                    j, next_size, behavior_count
-                                );
-
-                                let mut found_valid_behavior = false;
-
-                                // Read all behaviors from this entry
-                                for behavior_idx in 0..behavior_count {
-                                    if let Ok(cast_lib) = sec_reader.read_u16() {
-                                        if let Ok(cast_member) = sec_reader.read_u16() {
-                                            if let Ok(unk0) = sec_reader.read_u32() {
-                                                // Only add if it looks like a valid behavior reference
-                                                if cast_lib > 0 && cast_member > 0 {
-                                                    let mut secondary = FrameIntervalSecondary {
-                                                        cast_lib,
-                                                        cast_member,
-                                                        unk0,
-                                                        parameter: vec![],
-                                                    };
-
-                                                    // Handle parameters
-                                                    if secondary.unk0 > 0
-                                                        && (secondary.unk0 as usize) < entries.len()
+                                                // Handle parameters
+                                                if secondary.unk0 > 0
+                                                    && (secondary.unk0 as usize) < entries.len()
+                                                {
+                                                    let proplist_idx = secondary.unk0 as usize;
+                                                    if let Ok(proplist_string) =
+                                                        String::from_utf8(
+                                                            entries[proplist_idx].clone(),
+                                                        )
                                                     {
-                                                        let proplist_idx = secondary.unk0 as usize;
-                                                        if let Ok(proplist_string) =
-                                                            String::from_utf8(
-                                                                entries[proplist_idx].clone(),
-                                                            )
-                                                        {
-                                                            let clean = proplist_string
-                                                                .trim_end_matches('\0');
-                                                            debug!("parsed param string: {}", clean);
-                                                            if clean.starts_with('[') {
-                                                                // TODO: Replace `eval_lingo` with a parser
-                                                                match eval_lingo_expr_static(clean.to_owned()) {
-                                                                    Ok(proplist) => {
-                                                                        debug!("eval_lingo_expr_static succeeded");
-                                                                        secondary.parameter.push(proplist);
-                                                                        debug!("parameter vector now has {} items", secondary.parameter.len());
-                                                                    }
-                                                                    Err(e) => {
-                                                                        error!("eval_lingo_expr_static ERROR: {}", e.message);
-                                                                    }
+                                                        let clean = proplist_string
+                                                            .trim_end_matches('\0');
+                                                        debug!("parsed param string: {}", clean);
+                                                        if clean.starts_with('[') {
+                                                            // TODO: Replace `eval_lingo` with a parser
+                                                            match eval_lingo_expr_static(clean.to_owned()) {
+                                                                Ok(proplist) => {
+                                                                    debug!("eval_lingo_expr_static succeeded");
+                                                                    secondary.parameter.push(proplist);
+                                                                    debug!("parameter vector now has {} items", secondary.parameter.len());
+                                                                }
+                                                                Err(e) => {
+                                                                    web_sys::console::error_1(&format!("eval_lingo_expr_static ERROR: {}", e.message).into());
                                                                 }
                                                             }
                                                         }
                                                     }
-
-                                                    debug!(
-                                                        "    ✅ Behavior {}: cast={}/{}, unk0={}",
-                                                        behavior_idx + 1,
-                                                        cast_lib,
-                                                        cast_member,
-                                                        unk0
-                                                    );
-                                                    secondaries.push(secondary);
-                                                    found_valid_behavior = true;
-                                                } else {
-                                                    warn!("    ⏭️ Skipping invalid behavior {}: cast={}/{}", 
-                                                        behavior_idx + 1, cast_lib, cast_member);
                                                 }
+
+                                                debug!(
+                                                    "    ✅ Behavior {}: cast={}/{}, unk0={}",
+                                                    behavior_idx + 1,
+                                                    cast_lib,
+                                                    cast_member,
+                                                    unk0
+                                                );
+                                                secondaries.push(secondary);
+                                            } else {
+                                                warn!("    ⏭️ Skipping invalid behavior {}: cast={}/{}",
+                                                    behavior_idx + 1, cast_lib, cast_member);
                                             }
                                         }
                                     }
                                 }
-
-                                if found_valid_behavior {
-                                    j += 1;
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                debug!("  ⏹️ Not a behavior entry size, stopping");
-                                // Log entries that don't match behavior pattern
-                                debug!(
-                                    "   ⏹️ Entry {} size {} doesn't match behavior pattern (8-byte multiple)",
-                                    j, next_size
-                                );
-                                break; // Not a behavior entry size
                             }
-                        }
-
-                        debug!(
-                            "📊 Primary for channel {} has {} behaviors total",
-                            primary.channel_index,
-                            secondaries.len()
-                        );
-
-                        // Log behaviors found
-                        debug!(
-                            "Channel {} has {} behaviors",
-                            primary.channel_index, secondaries.len()
-                        );
-                        for sec in &secondaries {
+                        } else {
+                            debug!("  ⏹️ Not a behavior entry size, stopping");
                             debug!(
-                                "   Behavior: cast {}/{}",
-                                sec.cast_lib, sec.cast_member
+                                "   ⏹️ Entry {} size {} doesn't match behavior pattern (8-byte multiple)",
+                                i + 1, next_size
                             );
                         }
-
-                        // Create a separate result entry for EACH secondary
-                        if secondaries.is_empty() {
-                            results.push((primary, None));
-                        } else {
-                            for secondary in secondaries {
-                                results.push((primary.clone(), Some(secondary)));
-                            }
-                        }
-
-                        // Skip all the secondary entries we processed
-                        i = j;
-                        continue;
                     }
-                }
-                _ => {
-                    // Skip other entry types
-                    if entry_bytes.len() > 0 {
-                        warn!(
-                            "⚠️ Skipping entry {} with unexpected size {} bytes (expected 40/44/48 for primary). First bytes: {}",
-                            i,
-                            entry_bytes.len(),
-                            entry_bytes.iter()
-                                .take(20)
-                                .map(|b| format!("{:02x}", b))
-                                .collect::<Vec<_>>()
-                                .join(" ")
+
+                    debug!(
+                        "📊 Primary for channel {} has {} behaviors total",
+                        primary.channel_index,
+                        secondaries.len()
+                    );
+
+                    // Log behaviors found
+                    debug!(
+                        "Channel {} has {} behaviors",
+                        primary.channel_index, secondaries.len()
+                    );
+                    for sec in &secondaries {
+                        debug!(
+                            "   Behavior: cast {}/{}",
+                            sec.cast_lib, sec.cast_member
                         );
                     }
+
+                    // Create a separate result entry for EACH secondary
+                    if secondaries.is_empty() {
+                        results.push((primary, None));
+                    } else {
+                        for secondary in secondaries {
+                            results.push((primary.clone(), Some(secondary)));
+                        }
+                    }
+
+                    // Skip the 3-entry group: primary (i), behaviors (i+1), name (i+2)
+                    i += 3;
+                    continue;
                 }
+            } else if entry_bytes.len() > 0 {
+                warn!(
+                    "⚠️ Skipping entry {} with size {} bytes (not u32-aligned or < 40). First bytes: {}",
+                    i,
+                    entry_bytes.len(),
+                    entry_bytes.iter()
+                        .take(20)
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
             }
 
             i += 1;
