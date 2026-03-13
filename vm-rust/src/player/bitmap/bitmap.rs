@@ -293,7 +293,7 @@ fn decode_bitmap_2bit(
     let mut result_bmp = vec![0; width as usize * height as usize];
     for y in 0..scan_height {
         for x in 0..scan_width {
-            let compressed_index = (y * scan_width + x) as usize;
+            let compressed_index = y as usize * scan_width as usize + x as usize;
             if compressed_index >= decoded_data.len() {
                 return Err(format!(
                     "decode_bitmap_2bit: compressed_index {} >= decoded_data.len() {}",
@@ -302,7 +302,7 @@ fn decode_bitmap_2bit(
                 ));
             }
             if x < width {
-                let pixel_index = (y * width + x) as usize;
+                let pixel_index = y as usize * width as usize + x as usize;
                 let pixel = decoded_data[compressed_index];
                 result_bmp[pixel_index] = pixel;
             }
@@ -349,7 +349,7 @@ fn decode_bitmap_4bit(
 
     for y in 0..height {
         for x in 0..width {
-            let scan_index = (y * scan_width + x) as usize;
+            let scan_index = y as usize * scan_width as usize + x as usize;
 
             if scan_index >= decoded_data.len() {
                 return Err(format!(
@@ -360,7 +360,7 @@ fn decode_bitmap_4bit(
             }
 
             let pixel = decoded_data[scan_index];
-            let pixel_index = (y * width + x) as usize;
+            let pixel_index = y as usize * width as usize + x as usize;
 
             // Store as 8-bit indexed (values 0-15)
             result_bmp[pixel_index] = pixel;
