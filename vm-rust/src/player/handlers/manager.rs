@@ -135,6 +135,26 @@ impl BuiltInHandlerManager {
         })
     }
 
+    fn get_last(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let obj = player.get_datum(&args[0]);
+            match obj {
+                Datum::List(_, list, ..) => {
+                    Ok(list.last().cloned().unwrap_or(DatumRef::Void))
+                }
+                Datum::PropList(prop_list, ..) => {
+                    Ok(prop_list.last().map(|(_, v)| v.clone()).unwrap_or(DatumRef::Void))
+                }
+                _ => {
+                    Err(ScriptError::new(format!(
+                        "Cannot getLast of non-list (type: {})",
+                        obj.type_str()
+                    )))
+                }
+            }
+        })
+    }
+
     fn set_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let list_ref = &args[0];
@@ -575,6 +595,7 @@ impl BuiltInHandlerManager {
             "param" => Self::param(args),
             "count" => Self::count(args),
             "getat" => Self::get_at(args),
+            "getlast" => Self::get_last(args),
             "setat" => Self::set_at(args),
             "ilk" => TypeHandlers::ilk(args),
             "member" => MovieHandlers::member(args),
