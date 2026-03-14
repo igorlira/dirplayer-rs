@@ -77,9 +77,44 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
     let inner_rule = pair.as_rule();
     match pair.as_rule() {
         Rule::expr => {
-            let inner = pair.into_inner().next()
+            let mut inner_pairs: Vec<Pair<Rule>> = pair.into_inner().collect();
+            if inner_pairs.len() == 1 {
+                return eval_lingo_pair_static(inner_pairs.remove(0));
+            }
+            // Handle binary operators (e.g. "foo" & QUOTE & "bar")
+            let mut iter = inner_pairs.into_iter();
+            let first = iter.next()
                 .ok_or_else(|| ScriptError::new("Expected expression content".to_string()))?;
-            eval_lingo_pair_static(inner)
+            let mut result = eval_lingo_pair_static(first)?;
+            while let Some(op) = iter.next() {
+                let right = iter.next()
+                    .ok_or_else(|| ScriptError::new("Expected right operand".to_string()))?;
+                let right_ref = eval_lingo_pair_static(right)?;
+                match op.as_rule() {
+                    Rule::join => {
+                        // String concatenation (&)
+                        result = reserve_player_mut(|player| {
+                            let left_str = player.get_datum(&result).string_value()?;
+                            let right_str = player.get_datum(&right_ref).string_value()?;
+                            Ok(player.alloc_datum(Datum::String(format!("{}{}", left_str, right_str))))
+                        })?;
+                    }
+                    Rule::join_pad => {
+                        // Padded concatenation (&&)
+                        result = reserve_player_mut(|player| {
+                            let left_str = player.get_datum(&result).string_value()?;
+                            let right_str = player.get_datum(&right_ref).string_value()?;
+                            Ok(player.alloc_datum(Datum::String(format!("{} {}", left_str, right_str))))
+                        })?;
+                    }
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Unsupported operator {:?} in static expression", op.as_rule()
+                        )));
+                    }
+                }
+            }
+            Ok(result)
         },
         Rule::term_arg => {
             let inner = pair.into_inner().next()
@@ -317,6 +352,21 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 Ok(player.alloc_datum(Datum::CastLib(castlib_num as u32)))
             })
         }
+        Rule::lang_ident => {
+            // Handle well-known Lingo constants in static context
+            let name = pair.as_str();
+            match name {
+                "QUOTE" => reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::String("\"".to_owned())))
+                }),
+                "TAB" => reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::String("\t".to_owned())))
+                }),
+                _ => Err(ScriptError::new(format!(
+                    "Unknown identifier '{}' in static expression", name
+                ))),
+            }
+        }
         Rule::config_key | Rule::config_ident_part => {
             // Config keys treated as strings in static context
             reserve_player_mut(|player| {
@@ -354,10 +404,14 @@ fn get_eval_top_level_prop(
         return Ok(result);
     }
 
-    // When a breakpoint is active, resolve against the selected (or topmost) scope first
-    if player.current_breakpoint.is_some() && player.scope_count > 0 {
-        let scope_idx = player.eval_scope_index
-            .unwrap_or(player.scope_count - 1) as usize;
+    // Resolve against the current scope (locals, args, receiver properties)
+    // This is needed both during breakpoint evaluation and during `do` command execution
+    if player.scope_count > 0 {
+        let scope_idx = if player.current_breakpoint.is_some() {
+            player.eval_scope_index.unwrap_or(player.scope_count - 1) as usize
+        } else {
+            (player.scope_count - 1) as usize
+        };
         let scope = &player.scopes[scope_idx];
 
         // Check locals by reverse-looking up the name_id from the name table

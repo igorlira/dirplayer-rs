@@ -195,10 +195,7 @@ impl BitmapMemberHandlers {
                     Datum::CastMember(member_ref) => {
                         reserve_player_mut(|player| {
                             let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
-                            bitmap.palette_ref = PaletteRef::from(
-                                member_ref.cast_member as i16,
-                                member_ref.cast_lib as u32,
-                            );
+                            bitmap.palette_ref = PaletteRef::Member(member_ref.clone());
                             Ok(())
                         })?;
                     }
@@ -239,10 +236,7 @@ impl BitmapMemberHandlers {
                                     BuiltInPalette::from_i16(palette_ref as i16).unwrap(),
                                 )
                             } else {
-                                bitmap.palette_ref = PaletteRef::from(
-                                    member.cast_member as i16,
-                                    member.cast_lib as u32,
-                                );
+                                bitmap.palette_ref = PaletteRef::Member(member.clone());
                             }
                             Ok(())
                         })?;
@@ -250,10 +244,7 @@ impl BitmapMemberHandlers {
                     Datum::CastMember(member_ref) => {
                         reserve_player_mut(|player| {
                             let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
-                            bitmap.palette_ref = PaletteRef::from(
-                                member_ref.cast_member as i16,
-                                member_ref.cast_lib as u32,
-                            );
+                            bitmap.palette_ref = PaletteRef::Member(member_ref.clone());
                             Ok(())
                         })?;
                     }

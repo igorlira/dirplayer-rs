@@ -273,6 +273,9 @@ impl Datum {
             Datum::Rect(r) => Ok(format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3])),
             Datum::ColorRef(cr) => Ok(format!("{:?}", cr)),
             Datum::Void => Ok("VOID".to_string()),
+            Datum::CastMember(member_ref) => Ok(format!(
+                "(member {} of castLib {})", member_ref.cast_member, member_ref.cast_lib
+            )),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum type {} to string",
                 self.type_str()
@@ -585,11 +588,17 @@ impl Datum {
     }
 
     pub fn to_string_mut(&mut self) -> Result<&mut String, ScriptError> {
+        // Coerce non-string types to String first (Lingo allows chunk ops on any value)
+        match self {
+            Datum::String(_) => {}
+            _ => {
+                let s = self.string_value()?;
+                *self = Datum::String(s);
+            }
+        }
         match self {
             Datum::String(s) => Ok(s),
-            _ => Err(ScriptError::new(
-                "Cannot convert datum to string".to_string(),
-            )),
+            _ => unreachable!(),
         }
     }
 

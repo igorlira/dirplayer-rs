@@ -92,6 +92,17 @@ impl StackBytecodeHandler {
         Ok(HandlerExecutionResult::Advance)
     }
 
+    pub fn push_var_ref(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+        let name_id = player.get_ctx_current_bytecode(ctx).obj;
+        let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
+        let datum_ref = player.alloc_datum(Datum::Symbol(symbol_name.to_owned()));
+
+        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+        scope.stack.push(datum_ref);
+        Ok(HandlerExecutionResult::Advance)
+    }
+
     pub fn push_cons(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             // let (member_ref, handler_def) = get_current_handler_def(&player, ctx.to_owned()).unwrap();

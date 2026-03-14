@@ -1830,7 +1830,7 @@ pub fn render_score_to_bitmap_with_offset(
                 // For matte-like inks (bgTransparent 36, Matte 8, Not Ghost 7),
                 // skip the fill and rely on the alpha channel instead of color-keying.
                 // This avoids white fringe from AA text pixels that don't exactly match bgColor.
-                let use_alpha_matte = sprite.ink == 36 || sprite.ink == 8 || sprite.ink == 7;
+                let use_alpha_matte = sprite.ink == 2 || sprite.ink == 36 || sprite.ink == 8 || sprite.ink == 7;
 
                 if is_push {
                     if !use_alpha_matte {

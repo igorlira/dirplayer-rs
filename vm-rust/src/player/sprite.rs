@@ -54,11 +54,24 @@ pub enum CursorRef {
     Member(Vec<i32>),
 }
 
+pub const AP_BLEND: u32 = 1 << 0;
+pub const AP_WIDTH: u32 = 1 << 1;
+pub const AP_HEIGHT: u32 = 1 << 2;
+pub const AP_LOC: u32 = 1 << 3;
+pub const AP_MEMBER: u32 = 1 << 4;
+pub const AP_INK: u32 = 1 << 5;
+pub const AP_FORE_COLOR: u32 = 1 << 6;
+pub const AP_BACK_COLOR: u32 = 1 << 7;
+pub const AP_MOVEABLE: u32 = 1 << 8;
+pub const AP_EDITABLE: u32 = 1 << 9;
+
+
 #[derive(Clone)]
 pub struct Sprite {
     pub number: usize,
     pub name: String,
     pub puppet: bool,
+    pub auto_puppet: u32,
     pub visible: bool,
     pub stretch: i32,
     pub loc_h: i32,
@@ -90,6 +103,7 @@ pub struct Sprite {
     pub has_back_color: bool,
     pub has_size_tweened: bool,
     pub has_size_changed: bool,
+    pub has_lingo_size: bool,
     pub bitmap_size_owned_by_sprite: bool,
     // Base (score-defined) values
     pub base_loc_h: i32,
@@ -129,6 +143,7 @@ impl Sprite {
             number,
             name: "".to_owned(),
             puppet: false,
+            auto_puppet: 0,
             visible: true,
             stretch: 0,
             loc_h: 0,
@@ -160,6 +175,7 @@ impl Sprite {
             has_back_color: false,
             has_size_tweened: false,
             has_size_changed: false,
+            has_lingo_size: false,
             bitmap_size_owned_by_sprite: false,
             base_loc_h: 0,
             base_loc_v: 0,
@@ -185,6 +201,7 @@ impl Sprite {
     pub fn reset(&mut self) {
         self.name = "".to_owned();
         self.puppet = false;
+        self.auto_puppet = 0;
         self.visible = true;
         self.stretch = 0;
         self.loc_h = 0;
@@ -214,6 +231,7 @@ impl Sprite {
         self.has_back_color = false;
         self.has_size_tweened = false;
         self.has_size_changed = false;
+        self.has_lingo_size = false;
         self.bitmap_size_owned_by_sprite = false;
     }
 }

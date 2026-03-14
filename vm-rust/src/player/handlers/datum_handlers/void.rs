@@ -54,6 +54,10 @@ impl VoidDatumHandlers {
                 // Return void for attributes on void
                 Ok(player.alloc_datum(Datum::Void))
             }
+            "count" | "number" => {
+                // Director tolerates .count and .number on void, returning 0
+                Ok(player.alloc_datum(Datum::Int(0)))
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get property '{}' on VOID - a variable or property that should contain an object is uninitialized",
                 prop

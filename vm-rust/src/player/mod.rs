@@ -1271,6 +1271,7 @@ impl DirPlayer {
             }
             "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
             "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
+            "keyPressed" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key_pressed()))),
             "floatPrecision" => Ok(self.alloc_datum(Datum::Int(self.float_precision as i32))),
             "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
             "ticks" => Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))),
@@ -1442,6 +1443,7 @@ impl DirPlayer {
             "beepOn" | "centerStage" | "fixStageSize" => Ok(Datum::Int(0)),
             "exitLock" => Ok(datum_bool(self.movie.exit_lock)),
             "key" => Ok(Datum::String(self.keyboard_manager.key())),
+            "keyPressed" => Ok(Datum::String(self.keyboard_manager.key_pressed())),
             "keyCode" => Ok(Datum::Int(self.keyboard_manager.key_code() as i32)),
             "stageColor" => Ok(Datum::Int(0)),
             "doubleClick" => Ok(datum_bool(self.is_double_click)),

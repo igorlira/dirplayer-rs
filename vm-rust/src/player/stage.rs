@@ -45,11 +45,29 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
 pub fn set_stage_prop(
     player: &mut DirPlayer,
     prop: &str,
-    _value: &DatumRef,
+    value: &DatumRef,
 ) -> Result<(), ScriptError> {
     match prop {
         "title" => {
-            player.title = "title".to_string();
+            let value = player.get_datum(value).clone();
+            player.title = value.string_value()?;
+            Ok(())
+        }
+        "bgColor" => {
+            let value = player.get_datum(value).clone();
+            match value {
+                Datum::ColorRef(color_ref) => {
+                    player.bg_color = color_ref;
+                }
+                Datum::Int(i) => {
+                    player.bg_color = super::sprite::ColorRef::PaletteIndex(i as u8);
+                }
+                _ => {
+                    return Err(ScriptError::new(
+                        "Color ref or integer expected for stage bgColor".to_string(),
+                    ));
+                }
+            }
             Ok(())
         }
         _ => {
