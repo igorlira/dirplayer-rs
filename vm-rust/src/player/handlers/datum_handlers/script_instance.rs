@@ -14,6 +14,7 @@ use crate::{
         virtual_scripts::VirtualScriptRegistry,
     },
 };
+use crate::player::script::script_get_prop_opt;
 
 pub struct ScriptInstanceDatumHandlers {}
 pub struct ScriptInstanceUtils {}
@@ -499,7 +500,7 @@ impl ScriptInstanceDatumHandlers {
                     ))
                 }
             };
-            let prop_value = script_get_prop(player, &instance_ref, &prop_name)?;
+            let prop_value = script_get_prop_opt(player, &instance_ref, &prop_name).unwrap_or(DatumRef::Void);
             Ok(prop_value)
         })
     }
