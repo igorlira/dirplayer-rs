@@ -1011,6 +1011,60 @@ pub fn resolve_palette_table(
     table
 }
 
+/// Decompress PackBits/RLE-compressed alpha data with even-padded row width.
+/// Director stores alpha rows padded to 2-byte boundaries; without accounting for
+/// this, odd-width bitmaps get a cumulative 1-byte-per-row diagonal shear.
+fn decompress_alpha_rle(data: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let padded_width = (width + 1) & !1;
+    let pixel_count = width * height;
+    let padded_total = padded_width * height;
+    let mut result = Vec::with_capacity(padded_total);
+    let mut pos = 0;
+    while result.len() < padded_total && pos < data.len() {
+        let control = data[pos] as u16;
+        pos += 1;
+
+        if control < 0x80 {
+            let count = (control + 1) as usize;
+            for _ in 0..count {
+                if result.len() >= padded_total || pos >= data.len() {
+                    break;
+                }
+                result.push(data[pos]);
+                pos += 1;
+            }
+        } else if control == 0x80 {
+            continue;
+        } else {
+            let count = (257 - control) as usize;
+            if pos >= data.len() { break; }
+            let val = data[pos];
+            pos += 1;
+            for _ in 0..count {
+                if result.len() >= padded_total {
+                    break;
+                }
+                result.push(val);
+            }
+        }
+    }
+
+    // Strip row padding if needed
+    if padded_width > width {
+        let mut stripped = Vec::with_capacity(pixel_count);
+        for row in 0..height {
+            let row_start = row * padded_width;
+            let row_end = row_start + width;
+            if row_end <= result.len() {
+                stripped.extend_from_slice(&result[row_start..row_end]);
+            }
+        }
+        stripped
+    } else {
+        result
+    }
+}
+
 /// Decode a JPEG-compressed BITD chunk. The BITD data starts with a JPEG stream (RGB),
 /// optionally followed by a separate alpha channel after the JPEG end marker (FFD9).
 fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bitmap, String> {
@@ -1057,37 +1111,7 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
 
     // Decompress alpha data if present (may be PackBits/RLE compressed)
     let alpha_bytes = if !alpha_data.is_empty() {
-        // Alpha data after JPEG may be RLE compressed (same PackBits as BITD)
-        let mut alpha_result = Vec::new();
-        let mut pos = 0;
-        while alpha_result.len() < pixel_count && pos < alpha_data.len() {
-            let control = alpha_data[pos] as u16;
-            pos += 1;
-
-            if control < 0x80 {
-                let count = (control + 1) as usize;
-                for _ in 0..count {
-                    if alpha_result.len() >= pixel_count || pos >= alpha_data.len() {
-                        break;
-                    }
-                    alpha_result.push(alpha_data[pos]);
-                    pos += 1;
-                }
-            } else if control == 0x80 {
-                continue;
-            } else {
-                let count = (257 - control) as usize;
-                if pos >= alpha_data.len() { break; }
-                let val = alpha_data[pos];
-                pos += 1;
-                for _ in 0..count {
-                    if alpha_result.len() >= pixel_count {
-                        break;
-                    }
-                    alpha_result.push(val);
-                }
-            }
-        }
+        let mut alpha_result = decompress_alpha_rle(alpha_data, width as usize, height as usize);
 
         // If RLE didn't expand to expected size, try raw
         if alpha_result.len() < pixel_count && alpha_data.len() >= pixel_count {
@@ -1162,36 +1186,7 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo, alfa_data: Option<&Vec
 
     // Decompress ALFA chunk data if present (PackBits/RLE compressed)
     let alpha_bytes = if let Some(raw_alfa) = alfa_data {
-        let mut alpha_result = Vec::new();
-        let mut pos = 0;
-        while alpha_result.len() < pixel_count && pos < raw_alfa.len() {
-            let control = raw_alfa[pos] as u16;
-            pos += 1;
-
-            if control < 0x80 {
-                let count = (control + 1) as usize;
-                for _ in 0..count {
-                    if alpha_result.len() >= pixel_count || pos >= raw_alfa.len() {
-                        break;
-                    }
-                    alpha_result.push(raw_alfa[pos]);
-                    pos += 1;
-                }
-            } else if control == 0x80 {
-                continue;
-            } else {
-                let count = (257 - control) as usize;
-                if pos >= raw_alfa.len() { break; }
-                let val = raw_alfa[pos];
-                pos += 1;
-                for _ in 0..count {
-                    if alpha_result.len() >= pixel_count {
-                        break;
-                    }
-                    alpha_result.push(val);
-                }
-            }
-        }
+        let mut alpha_result = decompress_alpha_rle(raw_alfa, width as usize, height as usize);
 
         // If RLE didn't produce enough bytes, try treating as raw uncompressed
         if alpha_result.len() < pixel_count && raw_alfa.len() >= pixel_count {
