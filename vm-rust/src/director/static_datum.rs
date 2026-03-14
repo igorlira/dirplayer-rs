@@ -1,5 +1,5 @@
 use std::borrow::Borrow;
-
+use log::warn;
 use crate::director::lingo::datum::{Datum, DatumType};
 use crate::player::datum_ref::DatumRef;
 
@@ -185,7 +185,7 @@ fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocator) 
         }
         StaticDatum::Void => DatumRef::Void,
         _ => {
-            web_sys::console::log_1(&format!("⚠️ Unhandled StaticDatum type, using Void").into());
+            warn!("⚠️ Unhandled StaticDatum type, using Void");
             DatumRef::Void
         }
         StaticDatum::IntRect(left, top, right, bottom) => {

@@ -223,7 +223,7 @@ impl SoundChunk {
             output_array.set_index(i as u32, normalized_sample);
         }
 
-        console::log_1(&format!("Debug Sample Array size: {}", output_array.length()).into());
+        debug!("Debug Sample Array size: {}", output_array.length());
         Ok(output_array)
     }
 }

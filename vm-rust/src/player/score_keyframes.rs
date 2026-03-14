@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-
+use log::debug;
 use crate::director::chunks::score::{ScoreFrameChannelData, FrameIntervalPrimary, TweenInfo};
 use crate::player::sprite::ColorRef;
 
@@ -943,17 +943,15 @@ impl SpriteBlendKeyframes {
 
         // 5️⃣ Debug output
         if !keyframes.keyframes.is_empty() {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "🎨 Channel {} has {} blend keyframes across {} intervals",
                 keyframes.channel,
                 keyframes.keyframes.len(),
                 intervals.len()
-            ).into());
+            );
 
             for kf in &keyframes.keyframes {
-                web_sys::console::log_1(
-                    &format!("   Frame {}: {}%", kf.frame, kf.blend_percent).into(),
-                );
+                debug!("   Frame {}: {}%", kf.frame, kf.blend_percent);
             }
         }
 
@@ -1073,19 +1071,19 @@ impl SpriteRotationKeyframes {
 
         // 5️⃣ Debug output
         if !keyframes.keyframes.is_empty() {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "🔄 Channel {} has {} rotation keyframes across {} intervals",
                 keyframes.channel,
                 keyframes.keyframes.len(),
                 intervals.len()
-            ).into());
+            );
             
             for kf in &keyframes.keyframes {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "   Frame {}: {:.2}°",
                     kf.frame,
                     kf.rotation
-                ).into());
+                );
             }
         }
 
@@ -1210,17 +1208,15 @@ impl SpriteSkewKeyframes {
 
         // 5️⃣ Debug output
         if !keyframes.keyframes.is_empty() {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "↔️ Channel {} has {} skew keyframes across {} intervals",
                 keyframes.channel,
                 keyframes.keyframes.len(),
                 intervals.len()
-            ).into());
+            );
 
             for kf in &keyframes.keyframes {
-                web_sys::console::log_1(
-                    &format!("   Frame {}: {:.2}°", kf.frame, kf.skew).into(),
-                );
+                debug!("   Frame {}: {:.2}°", kf.frame, kf.skew);
             }
         }
 
@@ -1349,17 +1345,15 @@ impl SpritePathKeyframes {
 
         // 5️⃣ Debug output
         if !keyframes.keyframes.is_empty() {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "🛤️ Channel {} has {} path keyframes across {} intervals",
                 keyframes.channel,
                 keyframes.keyframes.len(),
                 intervals.len()
-            ).into());
+            );
 
             for kf in &keyframes.keyframes {
-                web_sys::console::log_1(
-                    &format!("   Frame {}: ({:?},{:?})", kf.frame, kf.x, kf.y).into(),
-                );
+                debug!("   Frame {}: ({:?},{:?})", kf.frame, kf.x, kf.y);
             }
         }
 
@@ -1489,17 +1483,15 @@ impl SpriteSizeKeyframes {
 
         // 5️⃣ Debug output
         if !keyframes.keyframes.is_empty() {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "📏 Channel {} has {} size keyframes across {} intervals",
                 keyframes.channel,
                 keyframes.keyframes.len(),
                 intervals.len()
-            ).into());
+            );
 
             for kf in &keyframes.keyframes {
-                web_sys::console::log_1(
-                    &format!("   Frame {}: {:?}x{:?}", kf.frame, kf.width, kf.height).into(),
-                );
+                debug!("   Frame {}: {:?}x{:?}", kf.frame, kf.width, kf.height);
             }
         }
 
@@ -1628,17 +1620,15 @@ impl SpriteForeColorKeyframes {
 
         // 5️⃣ Debug output
         if !keyframes.keyframes.is_empty() {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "🎨 Channel {} has {} foreground color keyframes across {} intervals",
                 keyframes.channel,
                 keyframes.keyframes.len(),
                 intervals.len()
-            ).into());
+            );
 
             for kf in &keyframes.keyframes {
-                web_sys::console::log_1(
-                    &format!("   Frame {}: {:?}", kf.frame, kf.color).into(),
-                );
+                debug!("   Frame {}: {:?}", kf.frame, kf.color);
             }
         }
 
@@ -1754,17 +1744,15 @@ impl SpriteBackColorKeyframes {
 
         // 5️⃣ Debug output
         if !keyframes.keyframes.is_empty() {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "🖌️ Channel {} has {} background color keyframes across {} intervals",
                 keyframes.channel,
                 keyframes.keyframes.len(),
                 intervals.len()
-            ).into());
+            );
 
             for kf in &keyframes.keyframes {
-                web_sys::console::log_1(
-                    &format!("   Frame {}: {:?}", kf.frame, kf.color).into(),
-                );
+                debug!("   Frame {}: {:?}", kf.frame, kf.color);
             }
         }
 
@@ -1830,12 +1818,12 @@ pub fn build_blend_keyframes_cache(
     }
     
     if keyframes_cache.is_empty() {
-        web_sys::console::log_1(&format!("ℹ️ No blend keyframes found").into());
+        debug!("ℹ️ No blend keyframes found");
     } else {
-        web_sys::console::log_1(&format!(
+        debug!(
             "✅ Found blend keyframes in {} channels",
             keyframes_cache.len()
-        ).into());
+        );
     }
 
     keyframes_cache
@@ -1871,12 +1859,12 @@ pub fn build_rotation_keyframes_cache(
     }
     
     if keyframes_cache.is_empty() {
-        web_sys::console::log_1(&format!("ℹ️ No rotation keyframes found").into());
+        debug!("ℹ️ No rotation keyframes found");
     } else {
-        web_sys::console::log_1(&format!(
+        debug!(
             "✅ Found rotation keyframes in {} channels",
             keyframes_cache.len()
-        ).into());
+        );
     }
 
     keyframes_cache
@@ -1912,12 +1900,12 @@ pub fn build_skew_keyframes_cache(
     }
     
     if keyframes_cache.is_empty() {
-        web_sys::console::log_1(&format!("ℹ️ No skew keyframes found").into());
+        debug!("ℹ️ No skew keyframes found");
     } else {
-        web_sys::console::log_1(&format!(
+        debug!(
             "✅ Found skew keyframes in {} channels",
             keyframes_cache.len()
-        ).into());
+        );
     }
 
     keyframes_cache
@@ -1953,12 +1941,12 @@ pub fn build_path_keyframes_cache(
     }
     
     if keyframes_cache.is_empty() {
-        web_sys::console::log_1(&format!("ℹ️ No path keyframes found").into());
+        debug!("ℹ️ No path keyframes found");
     } else {
-        web_sys::console::log_1(&format!(
+        debug!(
             "✅ Found path keyframes in {} channels",
             keyframes_cache.len()
-        ).into());
+        );
     }
 
     keyframes_cache
@@ -1994,12 +1982,12 @@ pub fn build_size_keyframes_cache(
     }
     
     if keyframes_cache.is_empty() {
-        web_sys::console::log_1(&format!("ℹ️ No size keyframes found").into());
+        debug!("ℹ️ No size keyframes found");
     } else {
-        web_sys::console::log_1(&format!(
+        debug!(
             "✅ Found size keyframes in {} channels",
             keyframes_cache.len()
-        ).into());
+        );
     }
 
     keyframes_cache
@@ -2035,12 +2023,12 @@ pub fn build_fore_color_keyframes_cache(
     }
     
     if keyframes_cache.is_empty() {
-        web_sys::console::log_1(&format!("ℹ️ No fore color keyframes found").into());
+        debug!("ℹ️ No fore color keyframes found");
     } else {
-        web_sys::console::log_1(&format!(
+        debug!(
             "✅ Found fore color keyframes in {} channels",
             keyframes_cache.len()
-        ).into());
+        );
     }
 
     keyframes_cache
@@ -2076,12 +2064,12 @@ pub fn build_back_color_keyframes_cache(
     }
     
     if keyframes_cache.is_empty() {
-        web_sys::console::log_1(&format!("ℹ️ No back color keyframes found").into());
+        debug!("ℹ️ No back color keyframes found");
     } else {
-        web_sys::console::log_1(&format!(
+        debug!(
             "✅ Found back color keyframes in {} channels",
             keyframes_cache.len()
-        ).into());
+        );
     }
 
     keyframes_cache
@@ -2105,11 +2093,11 @@ pub fn build_all_keyframes_cache(
     frame_channel_data: &Vec<(u32, u16, ScoreFrameChannelData)>,
     frame_intervals: &Vec<(FrameIntervalPrimary, Option<crate::director::chunks::score::FrameIntervalSecondary>)>,
 ) -> HashMap<u16, ChannelKeyframes> {
-    web_sys::console::log_1(&format!(
+    debug!(
         "🎬 Building keyframes cache from {} frame entries and {} intervals",
         frame_channel_data.len(),
         frame_intervals.len()
-    ).into());
+    );
     
     // Build map of channel → Vec<FrameIntervalPrimary> (channels can have multiple intervals!)
     let mut intervals_by_channel: HashMap<u16, Vec<FrameIntervalPrimary>> = HashMap::new();
@@ -2153,11 +2141,11 @@ pub fn build_all_keyframes_cache(
             back_color: back_color_cache.get(&channel).cloned(),
         });
     }
-    
-    web_sys::console::log_1(&format!(
+
+    debug!(
         "✅ Built keyframes cache for {} channels",
         combined_cache.len()
-    ).into());
+    );
     
     combined_cache
 }

@@ -8,7 +8,7 @@ use std::{
 use async_std::task::spawn_local;
 use chrono::Local;
 use itertools::Itertools;
-use log::debug;
+use log::{debug, warn};
 use wasm_bindgen::{prelude::*, Clamped};
 use web_sys::console;
 
@@ -140,9 +140,9 @@ fn get_or_load_font_with_id(
     if let Some(id) = font_id {
         if let Some(font_ref) = font_manager.font_by_id.get(&id).copied() {
             if let Some(font) = font_manager.fonts.get(&font_ref) {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "Font '{}' not found by name, but found by font_id={}", font_name, id
-                ).into());
+                );
                 return Some(Rc::clone(font));
             }
         }
@@ -761,10 +761,10 @@ fn render_filmloop_from_channel_data(
 
         let member = player.movie.cast_manager.find_member_by_ref(&sprite_member_ref);
         if member.is_none() {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "  channel {}: member {}:{} not found",
                 channel_num, sprite_member_ref.cast_lib, sprite_member_ref.cast_member
-            ).into());
+            );
             continue;
         }
         let member = member.unwrap();
@@ -1168,10 +1168,10 @@ fn render_filmloop_from_channel_data(
             }
             _ => {
                 // Other member types not yet supported in filmloop rendering
-                web_sys::console::log_1(&format!(
+                debug!(
                     "  channel {}: unsupported member type {:?}",
                     channel_num, member.member_type.member_type_id()
-                ).into());
+                );
             }
         }
     }
@@ -1978,10 +1978,10 @@ pub fn render_score_to_bitmap_with_offset(
                     (text_member.font.clone(), text_member.font_size, None)
                 };
 
-                web_sys::console::log_1(&format!(
+                debug!(
                     "🔤 Text member font request: name='{}', size={}, style={:?}",
                     font_name, font_size, font_style
-                ).into());
+                );
 
                 // Try to load font with specified style first
                 let mut font_opt = get_or_load_font(
@@ -1994,9 +1994,9 @@ pub fn render_score_to_bitmap_with_offset(
 
                 // If not found with style, try without style
                 if font_opt.is_none() && font_style.is_some() {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "⚠️ Font not found with style, trying without style..."
-                    ).into());
+                    );
                     font_opt = get_or_load_font(
                         &mut player.font_manager,
                         &player.movie.cast_manager,
@@ -2008,9 +2008,9 @@ pub fn render_score_to_bitmap_with_offset(
 
                 // If still not found with size, try without size
                 if font_opt.is_none() {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "⚠️ Font not found with size, trying without size..."
-                    ).into());
+                    );
                     font_opt = get_or_load_font(
                         &mut player.font_manager,
                         &player.movie.cast_manager,
@@ -2954,7 +2954,7 @@ fn try_create_webgl2_renderer(
 
     // Check if WebGL2 is supported
     if !crate::rendering_gpu::is_webgl2_supported() {
-        console::log_1(&"WebGL2 not supported, falling back to Canvas2D".into());
+        debug!("WebGL2 not supported, falling back to Canvas2D");
         return None;
     }
 
@@ -2988,11 +2988,11 @@ fn try_create_webgl2_renderer(
     // Try to create the WebGL2 renderer
     match WebGL2Renderer::new(canvas, preview_canvas) {
         Ok(renderer) => {
-            console::log_1(&"WebGL2 renderer created successfully".into());
+            debug!("WebGL2 renderer created successfully");
             Some(renderer)
         }
         Err(e) => {
-            console::warn_1(&format!("Failed to create WebGL2 renderer: {:?}, falling back to Canvas2D", e).into());
+            warn!("Failed to create WebGL2 renderer: {:?}, falling back to Canvas2D", e);
             None
         }
     }

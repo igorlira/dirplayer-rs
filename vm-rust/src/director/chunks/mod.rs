@@ -246,12 +246,8 @@ pub fn make_chunk(
         "sndH" => return Ok(Chunk::SndHeader(SndHeaderChunk::from_reader(&mut chunk_reader)?)),
         "sndS" => {
             // Sound samples chunk - just raw audio bytes
-            let mut data = Vec::new();
-            while let Ok(byte) = chunk_reader.read_u8() {
-                data.push(byte);
-            }
-            log::debug!("sndS chunk: {} bytes of audio data", data.len());
-            return Ok(Chunk::SndSamples(data));
+            log::debug!("sndS chunk: {} bytes of audio data", view.len());
+            return Ok(Chunk::SndSamples(view.clone()));
         }
         "STXT" => return Ok(Chunk::Text(TextChunk::read(&mut chunk_reader)?)),
         "BITD" => {
@@ -274,11 +270,7 @@ pub fn make_chunk(
         )?)),
         "ALFA" => {
             // Alpha channel data for JPEG bitmaps — store as raw bytes
-            let mut data = Vec::new();
-            while let Ok(byte) = chunk_reader.read_u8() {
-                data.push(byte);
-            }
-            return Ok(Chunk::Raw(data));
+            return Ok(Chunk::Raw(view.clone()));
         }
         _ => {
             return Err(

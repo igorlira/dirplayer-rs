@@ -256,10 +256,8 @@ impl Score {
 
         // Update script_ref if we found the script in a different cast library
         if let Some(found_cast_lib) = found_in_other_lib {
-            web_sys::console::log_1(
-                &format!("create_behavior: script member {} not found in cast_lib {}, found in cast_lib {} instead",
-                    cast_member, resolved_cast_lib, found_cast_lib).into(),
-            );
+            debug!("create_behavior: script member {} not found in cast_lib {}, found in cast_lib {} instead", 
+                cast_member, resolved_cast_lib, found_cast_lib);
             script_ref.cast_lib = found_cast_lib;
         }
 
@@ -358,9 +356,19 @@ impl Score {
                             script_get_prop_opt(player, &script_instance_ref, &prop_name)
                         {
                             let existing_datum = player.get_datum(&existing);
-
-                            matches!(existing_datum, Datum::Void)
+                            let is_void = matches!(existing_datum, Datum::Void);
+                            debug!("  [getPropertyDescriptionList] Property '{}' exists with type {:?}, is_void: {}", 
+                                prop_name, existing_datum.type_enum(), is_void);
+                            if !is_void {
+                                match existing_datum {
+                                    Datum::String(s) => debug!("    Existing value: {:?}", s),
+                                    Datum::Int(n) => debug!("    Existing value: {}", n),
+                                    _ => {}
+                                }
+                            }
+                            is_void
                         } else {
+                            debug!("  [getPropertyDescriptionList] Property '{}' does not exist, will set default", prop_name);
                             true
                         };
 
@@ -368,23 +376,34 @@ impl Score {
                             // Find the default value
                             for (key_name, default_value_ref) in desc_props {
                                 if key_name == "default" {
+                                    let default_value = player.get_datum(&default_value_ref);
+                                    debug!("    [getPropertyDescriptionList] Will set default for '{}' to {:?}", 
+                                        prop_name, default_value.type_enum());
                                     defaults_to_set.push((prop_name.clone(), default_value_ref));
 
                                     break;
                                 }
                             }
+                        } else {
+                            debug!("    [getPropertyDescriptionList] Skipping default for '{}' (already has value)", prop_name);
                         }
                     }
 
                     // Third pass: set all defaults
+                    debug!("  [getPropertyDescriptionList] Setting {} default values", defaults_to_set.len());
                     for (prop_name, default_value_ref) in defaults_to_set {
-                        let _ = script_set_prop(
+                        let default_value = player.get_datum(&default_value_ref);
+                        debug!("    [getPropertyDescriptionList] Setting '{}' = {:?}", prop_name, default_value.type_enum());
+                        let result = script_set_prop(
                             player,
                             &script_instance_ref,
                             &prop_name,
                             &default_value_ref,
                             false,
                         );
+                        if let Err(e) = result {
+                            debug!("      ⚠️ Failed: {}", e.message);
+                        }
                     }
                 }
 
@@ -1359,14 +1378,24 @@ impl Score {
 
                         // Apply behavior parameters from initializer data
                         if !behavior.parameter.is_empty() {
+                            debug!("🔧 [sprite_details] Applying {} saved parameters for behavior cast {}/{}", 
+                                behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
                             reserve_player_mut(|player| {
                                 for param_ref in &behavior.parameter {
                                     let param_datum = player.get_datum(param_ref);
+                                    debug!("  [sprite_details] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
                                         let props_to_set: Vec<(String, DatumRef)> = props.iter()
                                             .filter_map(|(key_ref, value_ref)| {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
+                                                    let value = player.get_datum(value_ref);
+                                                    debug!("    [sprite_details] prop: {} type: {:?}", key_name, value.type_enum());
+                                                    match value {
+                                                        Datum::String(s) => debug!("      [sprite_details] value: {:?}", s),
+                                                        Datum::Int(n) => debug!("      [sprite_details] value: {}", n),
+                                                        _ => debug!("      [sprite_details] value: <{:?}>", value.type_enum()),
+                                                    }
                                                     Some((key_name.clone(), value_ref.clone()))
                                                 } else {
                                                     None
@@ -1374,18 +1403,27 @@ impl Score {
                                             })
                                             .collect();
                                         for (prop_name, value_ref) in props_to_set {
-                                            let _ = script_set_prop(
+                                            debug!("      [sprite_details] Setting property {} on script instance", prop_name);
+                                            let result = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
                                                 &prop_name,
                                                 &value_ref,
                                                 false,
                                             );
+                                            if let Err(e) = result {
+                                                debug!("      [sprite_details] ⚠️ Failed to set property {}: {}", prop_name, e.message);
+                                            } else {
+                                                debug!("      [sprite_details] ✅ Successfully set property {}", prop_name);
+                                            }
                                         }
                                     }
                                 }
                                 Ok::<(), ScriptError>(())
                             }).expect("Failed to set sprite detail behavior parameters");
+                        } else {
+                            debug!("⚠️ [sprite_details] No parameters to apply for behavior cast {}/{}", 
+                                behavior.cast_lib, behavior.cast_member);
                         }
 
                         // Attach behavior to sprite
@@ -1434,11 +1472,11 @@ impl Score {
                     cast_lib: sprite_cast_lib,
                     cast_member: data.cast_member as i32,
                 };
-                web_sys::console::log_1(&format!(
+                debug!(
                     "D5 sprite ch={}: scriptId=({},{}), sprite_member=({},{})",
                     channel_num, resolved_cast_lib, script_member,
                     sprite_cast_lib, data.cast_member
-                ).into());
+                );
 
                 let behavior_result = Self::create_behavior(
                     resolved_cast_lib,
@@ -1611,14 +1649,24 @@ impl Score {
 
                         // Apply behavior parameters
                         if !behavior.parameter.is_empty() {
+                            debug!("🔧 [delta-data] Applying {} saved parameters for behavior cast {}/{}", 
+                                behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
                             reserve_player_mut(|player| {
                                 for param_ref in &behavior.parameter {
                                     let param_datum = player.get_datum(param_ref);
+                                    debug!("  [delta-data] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
                                         let props_to_set: Vec<(String, DatumRef)> = props.iter()
                                             .filter_map(|(key_ref, value_ref)| {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
+                                                    let value = player.get_datum(value_ref);
+                                                    debug!("    [delta-data] prop: {} type: {:?}", key_name, value.type_enum());
+                                                    match value {
+                                                        Datum::String(s) => debug!("      [delta-data] value: {:?}", s),
+                                                        Datum::Int(n) => debug!("      [delta-data] value: {}", n),
+                                                        _ => debug!("      [delta-data] value: <{:?}>", value.type_enum()),
+                                                    }
                                                     Some((key_name.clone(), value_ref.clone()))
                                                 } else {
                                                     None
@@ -1626,18 +1674,27 @@ impl Score {
                                             })
                                             .collect();
                                         for (prop_name, value_ref) in props_to_set {
-                                            let _ = script_set_prop(
+                                            debug!("      [delta-data] Setting property {} on script instance", prop_name);
+                                            let result = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
                                                 &prop_name,
                                                 &value_ref,
                                                 false,
                                             );
+                                            if let Err(e) = result {
+                                                debug!("      [delta-data] ⚠️ Failed to set property {}: {}", prop_name, e.message);
+                                            } else {
+                                                debug!("      [delta-data] ✅ Successfully set property {}", prop_name);
+                                            }
                                         }
                                     }
                                 }
                                 Ok::<(), ScriptError>(())
                             }).expect("Failed to set behavior parameters");
+                        } else {
+                            debug!("⚠️ [delta-data] No parameters to apply for behavior cast {}/{}", 
+                                behavior.cast_lib, behavior.cast_member);
                         }
 
                         let score_ref_clone = score_ref.clone();
@@ -2990,6 +3047,7 @@ pub fn sprite_get_prop(
         "castLibNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| y.cast_lib)
         }))),
+        "editable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.editable))),
         prop_name => {
             let datum_ref = sprite.and_then(|sprite| {
                 reserve_player_mut(|player| {
@@ -3915,16 +3973,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             } else if sprite.bitmap_size_owned_by_sprite
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose BITMAP_SIZE_OWNED_BY_SPRITE (sprite {}x{}, bitmap {}x{})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height).into());
+                    debug!("Sprite {}: chose BITMAP_SIZE_OWNED_BY_SPRITE (sprite {}x{}, bitmap {}x{})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height);
                 }
                 // Sprite size is owned by bitmap, and bitmap is not tiny
                 (bitmap_width, bitmap_height)
             } else if !aspect_ratio_matches
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose ASPECT_RATIO_MISMATCH (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
+                    debug!("Sprite {}: chose ASPECT_RATIO_MISMATCH (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched);
                 }
                 if intentionally_stretched {
                     (sprite.width, sprite.height)
@@ -3938,8 +3996,8 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 && (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose NO_SIZE_CHANGE_BITMAP_LARGER (sprite {}x{}, bitmap {}x{}, has_size_changed={})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, sprite.has_size_changed).into());
+                    debug!("Sprite {}: chose NO_SIZE_CHANGE_BITMAP_LARGER (sprite {}x{}, bitmap {}x{}, has_size_changed={})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, sprite.has_size_changed);
                 }
                 // Sprite hasn't been explicitly resized and bitmap is larger (by sum).
                 (bitmap_width, bitmap_height)
@@ -3947,16 +4005,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 && (sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose NON_PROPORTIONAL_SCALE (sprite {}x{}, bitmap {}x{})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height).into());
+                    debug!("Sprite {}: chose NON_PROPORTIONAL_SCALE (sprite {}x{}, bitmap {}x{})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height);
                 }
                 // Score dimensions differ from bitmap AND are not a clean proportional
                 // scale - they are an approximate bounding box. Use bitmap's natural size.
                 (bitmap_width, bitmap_height)
             } else if sprite.has_size_changed && sprite.width != bitmap_width ||  sprite.has_size_changed && sprite.height != bitmap_height {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
+                    debug!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})", 
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched);
                 }
                 // Sprite dimensions differ from base — something (Lingo script,
                 // member change) has explicitly modified the size at runtime.
@@ -3964,9 +4022,9 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 (sprite.width, sprite.height)
             } else {
                 if is_debug_sprite {
-                    web_sys::console::log_1(&format!("Sprite {}: chose DEFAULT (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned={})",
+                    debug!("Sprite {}: chose DEFAULT (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned={})",
                         sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height,
-                        aspect_ratio_matches, sprite.has_size_changed, sprite.bitmap_size_owned_by_sprite).into());
+                        aspect_ratio_matches, sprite.has_size_changed, sprite.bitmap_size_owned_by_sprite);
                 }
                 // Use sprite's explicit dimensions (default case)
                 (sprite.width, sprite.height)

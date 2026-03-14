@@ -1,4 +1,4 @@
-use log::{debug, warn};
+use log::{debug, error, warn};
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
@@ -357,9 +357,7 @@ impl MovieHandlers {
                                 });
                                 return Err(err);
                             }
-                            web_sys::console::log_1(
-                                &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
-                            );
+                            error!("⚠ stepFrame[{}] error: {}", idx, err.message);
                             reserve_player_mut(|player| {
                                 player.on_script_error(&err);
                                 player.is_in_frame_update = false;
@@ -716,10 +714,8 @@ impl MovieHandlers {
         });
 
         if already_updating || has_player_frame_changed {
-            web_sys::console::log_1(
-                &format!("🔄 execute_frame_update SKIPPED (already_updating={}, frame_changed={}, frame={})",
-                    already_updating, has_player_frame_changed, current_frame).into()
-            );
+            debug!("🔄 execute_frame_update SKIPPED (already_updating={}, frame_changed={}, frame={})", 
+                already_updating, has_player_frame_changed, current_frame);
             return Ok(());  // Exit early if already updating
         }
 
@@ -760,9 +756,7 @@ impl MovieHandlers {
                         });
                         return Err(err);
                     }
-                    web_sys::console::log_1(
-                        &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
-                    );
+                    error!("⚠ stepFrame[{}] error: {}", idx, err.message);
                     reserve_player_mut(|player| {
                         player.on_script_error(&err);
                         player.is_in_frame_update = false;

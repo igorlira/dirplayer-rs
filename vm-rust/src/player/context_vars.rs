@@ -1,3 +1,4 @@
+use log::{debug, error};
 use super::{
     bytecode::handler_manager::BytecodeHandlerContext,
     scope::ScopeRef,
@@ -141,7 +142,7 @@ pub fn player_set_context_var(
             let member_ref = match member_ref_opt {
                 Some(r) => r,
                 None => {
-                    console::log_1(&"❌ Field member not found by identifiers".into());
+                    error!("❌ Field member not found by identifiers");
                     return Err(ScriptError::new("Field member not found".to_string()));
                 }
             };
@@ -196,9 +197,7 @@ pub fn player_set_context_var(
                         Ok(())
                     }
                     other => {
-                        console::log_1(
-                            &format!("Member exists but is not a Field, Text, or Button: {:?}", other).into(),
-                        );
+                        debug!("Member exists but is not a Field, Text, or Button: {:?}", other);
                         Err(ScriptError::new(
                             "Cast member exists but is not a Field, Text, or Button".to_string(),
                         ))
