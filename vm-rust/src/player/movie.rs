@@ -104,7 +104,7 @@ impl Movie {
     }
 
     pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
-        match prop {
+        match_ci!(prop, {
             "alertHook" => match self.alert_hook.to_owned() {
                 Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
                 Some(ScriptReceiver::ScriptInstance(script_instance_id)) => {
@@ -121,12 +121,12 @@ impl Movie {
                 let time = Local::now();
                 let formatted = time.format("%m/%d/%Y").to_string();
                 Ok(Datum::String(formatted))
-            }
+            },
             "long time" => {
                 let time = Local::now();
                 let formatted = time.format("%H:%M:%S %p").to_string();
                 Ok(Datum::String(formatted))
-            }
+            },
             "lastChannel" => Ok(Datum::Int(self.score.get_channel_count() as i32)),
             "moviePath" => {
                 let mut result = self.base_path.clone();
@@ -134,7 +134,7 @@ impl Movie {
                     result.push_str(PATH_SEPARATOR);
                 }
                 Ok(Datum::String(result))
-            }
+            },
             "platform" => Ok(Datum::String("Windows,32".to_string())),
             "frame" => Ok(Datum::Int(self.current_frame as i32)),
             "productVersion" => Ok(Datum::String("10.1".to_string())),
@@ -146,13 +146,16 @@ impl Movie {
             "updateLock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
             "path" => Ok(Datum::String(self.base_path.to_owned())),
             "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
-                let script = match prop {
-                    "mouseDownScript" => &self.mouse_down_script,
-                    "mouseUpScript" => &self.mouse_up_script,
-                    "keyDownScript" => &self.key_down_script,
-                    "keyUpScript" => &self.key_up_script,
-                    "timeoutScript" => &self.timeout_script,
-                    _ => unreachable!(),
+                let script = if prop.eq_ignore_ascii_case("mouseDownScript") {
+                    &self.mouse_down_script
+                } else if prop.eq_ignore_ascii_case("mouseUpScript") {
+                    &self.mouse_up_script
+                } else if prop.eq_ignore_ascii_case("keyDownScript") {
+                    &self.key_down_script
+                } else if prop.eq_ignore_ascii_case("keyUpScript") {
+                    &self.key_up_script
+                } else {
+                    &self.timeout_script
                 };
                 match script.to_owned() {
                     Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
@@ -160,7 +163,7 @@ impl Movie {
                     Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
                     None => Ok(Datum::Int(0)),
                 }
-            }
+            },
             "allowCustomCaching" => Ok(datum_bool(self.allow_custom_caching)),
             "timer" => {
                 reserve_player_ref(|player| {
@@ -171,10 +174,10 @@ impl Movie {
                     let ticks = (elapsed * 60) / 1000;
                     Ok(Datum::Int(ticks as i32))
                 })
-            }
+            },
             "mouseDown" => {
                 Ok(datum_bool(self.mouse_down))
-            }
+            },
             "traceScript" => Ok(datum_bool(self.trace_script)),
             "activeWindow" => Ok(Datum::Stage),
             "rollOver" => {
@@ -182,9 +185,8 @@ impl Movie {
                     let sprite = super::score::get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
                     Ok(Datum::Int(sprite.unwrap_or(0) as i32))
                 })
-            }
+            },
             "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
-            "activeWindow" => Ok(Datum::Stage),
             "maxInteger" => Ok(Datum::Int(i32::MAX)),
             "labelList" => {
                 let s = self
@@ -195,9 +197,9 @@ impl Movie {
                     .collect::<Vec<_>>()
                     .join("\r");
                 Ok(Datum::String(s))
-            }
-            _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
-        }
+            },
+            _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
+        })
     }
 
     pub fn set_prop(
@@ -206,18 +208,21 @@ impl Movie {
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
-        match prop {
+        match_ci!(prop, {
             "exitLock" => {
                 self.exit_lock = value.int_value()? == 1;
-            }
+                Ok(())
+            },
             "itemDelimiter" => {
                 self.item_delimiter = (value.string_value()?).chars().next().unwrap();
-            }
+                Ok(())
+            },
             "debugPlaybackEnabled" => {
                 // TODO
-            }
+                Ok(())
+            },
             "alertHook" => {
-                return match value {
+                match value {
                     Datum::Int(0) => {
                         self.alert_hook = None;
                         Ok(())
@@ -234,39 +239,40 @@ impl Movie {
                         "Object or 0 expected for alertHook value".to_string(),
                     )),
                 }
-            }
+            },
             "traceScript" => {
                 self.trace_script = value.int_value()? != 0;
-            }
+                Ok(())
+            },
             "traceLogFile" => {
                 self.trace_log_file = value.string_value()?;
-            }
+                Ok(())
+            },
             "updateLock" => {
                 self.update_lock = value.int_value()? != 0;
-            }
+                Ok(())
+            },
             "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
-                let target = match prop {
-                    "mouseDownScript" => &mut self.mouse_down_script,
-                    "mouseUpScript" => &mut self.mouse_up_script,
-                    "keyDownScript" => &mut self.key_down_script,
-                    "keyUpScript" => &mut self.key_up_script,
-                    "timeoutScript" => &mut self.timeout_script,
-                    _ => unreachable!(),
+                let target = if prop.eq_ignore_ascii_case("mouseDownScript") {
+                    &mut self.mouse_down_script
+                } else if prop.eq_ignore_ascii_case("mouseUpScript") {
+                    &mut self.mouse_up_script
+                } else if prop.eq_ignore_ascii_case("keyDownScript") {
+                    &mut self.key_down_script
+                } else if prop.eq_ignore_ascii_case("keyUpScript") {
+                    &mut self.key_up_script
+                } else {
+                    &mut self.timeout_script
                 };
-                return match value {
+                match value {
                     Datum::Int(0) | Datum::Void => {
                         *target = None;
                         Ok(())
                     }
                     Datum::String(script_text) => {
                         if script_text.is_empty() {
-                            // EMPTY clears the script
                             *target = None;
                         } else {
-                            // Store everything, including comments like "--nothing".
-                            // In Director, setting mouseDownScript to a comment means
-                            // "intercept the event but do nothing" - the presence of
-                            // the script blocks normal event propagation to sprites.
                             *target = Some(ScriptReceiver::ScriptText(script_text));
                         }
                         Ok(())
@@ -283,40 +289,46 @@ impl Movie {
                         format!("String, object or 0 expected for {} value", prop),
                     )),
                 }
-            }
+            },
             "allowCustomCaching" => {
                 self.allow_custom_caching = value.int_value()? != 0;
-            }
+                Ok(())
+            },
             "puppetTempo" => {
                 self.puppet_tempo = value.int_value()? as u32;
-            }
+                Ok(())
+            },
             "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" => {
                 // Read-only / no-op in practice; ignore sets like Director does
-            }
-            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
-            | "timeoutLapsed" | "soundEnabled" | "soundLevel"
-            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize" | "stageColor" => {
-                // Anim props that are set via property_type 0x07 - accept silently
-            }
-            "randomSeed" => {
-                self.random_seed = Some(value.int_value()?);
-            }
+                Ok(())
+            },
             "stageColor" => {
                 match value {
                     Datum::Int(color_index) => {
                         self.stage_color_ref = ColorRef::PaletteIndex(color_index as u8);
+                        Ok(())
                     }
                     Datum::ColorRef(color_ref) => {
                         self.stage_color_ref = color_ref;
+                        Ok(())
                     }
                     _ => {
-                        return Err(ScriptError::new("Integer color index expected for stageColor".to_string()));
+                        Err(ScriptError::new("Integer color index expected for stageColor".to_string()))
                     }
                 }
-            }
-            _ => return Err(ScriptError::new(format!("Cannot set movie prop {prop}"))),
-        }
-        Ok(())
+            },
+            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
+            | "timeoutLapsed" | "soundEnabled" | "soundLevel"
+            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize" => {
+                // Anim props that are set via property_type 0x07 - accept silently
+                Ok(())
+            },
+            "randomSeed" => {
+                self.random_seed = Some(value.int_value()?);
+                Ok(())
+            },
+            _ => Err(ScriptError::new(format!("Cannot set movie prop {prop}")))
+        })
     }
 
     /// Get the current effective tempo (puppetTempo overrides frameTempo)
