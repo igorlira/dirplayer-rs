@@ -129,6 +129,12 @@ pub fn script_get_prop_opt(
     script_instance_ref: &ScriptInstanceRef,
     prop_name: &String,
 ) -> Option<DatumRef> {
+    // Check virtual script handler first
+    match super::virtual_scripts::VirtualScriptRegistry::try_get_instance_prop(player, script_instance_ref, prop_name) {
+        Ok(Some(datum_ref)) => return Some(datum_ref),
+        Ok(None) | Err(_) => {}
+    }
+
     let script_instance = player.allocator.get_script_instance(&script_instance_ref);
 
     // Handle special "ancestor" property
@@ -240,6 +246,13 @@ pub fn script_set_prop(
     value_ref: &DatumRef,
     required: bool,
 ) -> Result<(), ScriptError> {
+    // Check virtual script handler first
+    match super::virtual_scripts::VirtualScriptRegistry::try_set_instance_prop(player, script_instance_ref, prop_name, value_ref) {
+        Ok(Some(())) => return Ok(()),
+        Err(e) => return Err(e),
+        Ok(None) => {}
+    }
+
     // Try to set the property on the current instance
     let result = {
         if prop_name == "ancestor" {

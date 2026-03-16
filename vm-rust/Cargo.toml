@@ -64,6 +64,7 @@ features = [
   'MouseEvent',
   'Node',
   'Window',
+  'Location',
   'console',
   'Headers',
   'Request',

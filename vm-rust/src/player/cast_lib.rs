@@ -297,38 +297,37 @@ impl CastLib {
             let script_def = self
                 .lctx
                 .as_ref()
-                .unwrap()
-                .scripts
-                .get(&script_member.script_id)
-                .unwrap();
+                .and_then(|lctx| lctx.scripts.get(&script_member.script_id));
 
-            let mut handler_names = Vec::new();
-            let mut handler_name_map = FxHashMap::default();
-            for handler in &script_def.handlers {
-                let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
-                handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
-                handler_names.push(handler_name.to_owned());
+            if let Some(script_def) = script_def {
+                let mut handler_names = Vec::new();
+                let mut handler_name_map = FxHashMap::default();
+                for handler in &script_def.handlers {
+                    let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
+                    handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
+                    handler_names.push(handler_name.to_owned());
+                }
+
+                let property_names = script_def
+                    .property_name_ids
+                    .iter()
+                    .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
+                let mut properties = FxHashMap::default();
+                for name in property_names {
+                    properties.insert(CiString::from(name), DatumRef::Void);
+                }
+
+                let script = Script {
+                    member_ref: cast_member_ref(self.number as i32, number as i32),
+                    name: (&member.name).to_owned(),
+                    chunk: script_def.clone(),
+                    script_type: script_member.script_type,
+                    handlers: handler_name_map,
+                    handler_names,
+                    properties: RefCell::new(properties),
+                };
+                self.scripts.insert(number, Rc::new(script));
             }
-
-            let property_names = script_def
-                .property_name_ids
-                .iter()
-                .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
-            let mut properties = FxHashMap::default();
-            for name in property_names {
-                properties.insert(CiString::from(name), DatumRef::Void);
-            }
-
-            let script = Script {
-                member_ref: cast_member_ref(self.number as i32, number as i32),
-                name: (&member.name).to_owned(),
-                chunk: script_def.clone(),
-                script_type: script_member.script_type,
-                handlers: handler_name_map,
-                handler_names,
-                properties: RefCell::new(properties),
-            };
-            self.scripts.insert(number, Rc::new(script));
         } else if let CastMemberType::Palette(_) = &member.member_type {
             reserve_player_mut(|player| {
                 player.movie.cast_manager.invalidate_palette_cache();
@@ -377,6 +376,14 @@ impl CastLib {
             "palette" => Ok(CastMember::new(
                 number,
                 CastMemberType::Palette(PaletteMember::new()),
+            )),
+            "script" => Ok(CastMember::new(
+                number,
+                CastMemberType::Script(ScriptMember {
+                    script_id: 0,
+                    script_type: ScriptType::Movie,
+                    name: String::new(),
+                }),
             )),
             _ => Err(ScriptError::new(format!(
                 "Cannot create member of type {}",

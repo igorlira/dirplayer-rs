@@ -2,7 +2,7 @@ use itertools::Itertools;
 
 use crate::{
     director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType},
-    player::{cast_member::CastMemberType, reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{DatumRef, DirPlayer, ScriptError, cast_member::CastMemberType, handlers::datum_handlers::string::string_get_words, reserve_player_mut},
 };
 
 use super::string::{string_get_items, string_get_lines};
@@ -224,8 +224,8 @@ impl StringChunkUtils {
         match chunk_type {
             StringChunkType::Item => Ok(string_get_items(string, item_delimiter)),
             StringChunkType::Word => {
-                let words = string.split_whitespace().map(|x| x.to_string());
-                Ok(words.collect_vec())
+                let words = string_get_words(string);
+                Ok(words)
             }
             StringChunkType::Char => {
                 let chars = string.chars().map(|c| c.to_string());
@@ -249,8 +249,8 @@ impl StringChunkUtils {
                 Ok(items.last().unwrap_or("".to_string()).to_string())
             }
             StringChunkType::Word => {
-                let words = string.split_whitespace().map(|x| x.to_string());
-                Ok(words.last().unwrap_or("".to_string()).to_string())
+                let words = string_get_words(string);
+                Ok(words.last().unwrap_or(&"".to_string()).to_string())
             }
             StringChunkType::Char => Ok(string
                 .chars()
@@ -273,7 +273,7 @@ impl StringChunkUtils {
             StringChunkType::Item => {
                 Ok(string.chars().filter(|c| item_delimiter == *c).count() + 1)
             }
-            StringChunkType::Word => Ok(string.split_whitespace().count()),
+            StringChunkType::Word => Ok(string_get_words(string).len()),
             StringChunkType::Char => Ok(string.chars().count()),
             StringChunkType::Line => Ok(string_get_lines(string).len()),
         }

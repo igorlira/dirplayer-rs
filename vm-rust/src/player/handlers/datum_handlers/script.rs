@@ -18,14 +18,17 @@ impl ScriptDatumHandlers {
             "new" => true,
             "handler" => false,
             _ => {
-                // Check if the script has a handler with this name
                 reserve_player_ref(|player| {
                     if let Datum::ScriptRef(script_ref) = player.get_datum(obj_ref) {
                         if let Some(script_rc) =
                             player.movie.cast_manager.get_script_by_ref(script_ref)
                         {
-                            let script = script_rc.as_ref();
-                            return script.get_own_handler(name).is_some();
+                            if script_rc.get_own_handler(name).is_some() {
+                                return true;
+                            }
+                        }
+                        if crate::player::virtual_scripts::VirtualScriptRegistry::has_script_handler(player, script_ref, name) {
+                            return true;
                         }
                     }
                     false
@@ -65,6 +68,19 @@ impl ScriptDatumHandlers {
                 });
 
                 if !has_handler {
+                    let virtual_result = reserve_player_mut(|player| {
+                        let script_ref = match player.get_datum(obj_ref) {
+                            Datum::ScriptRef(script_ref) => script_ref.clone(),
+                            _ => return Ok(None),
+                        };
+                        crate::player::virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_ref, None, handler_name, args)
+                    });
+                    match virtual_result {
+                        Ok(Some(result)) => return Ok(result),
+                        Err(e) => return Err(e),
+                        Ok(None) => {}
+                    }
+
                     return Err(ScriptError::new_code(
                         ScriptErrorCode::HandlerNotFound,
                         format!("No handler {} for script datum", handler_name),
@@ -146,21 +162,22 @@ impl ScriptDatumHandlers {
                 .get_script_by_ref(script_ref)
                 .ok_or_else(|| ScriptError::new(format!("Script not found: {:?}", script_ref)))?;
 
-            let lctx = get_lctx_for_script(player, script)
-                .ok_or_else(|| ScriptError::new(format!("No script context for script: {}", script.name)))?;
-            
-            let lctx_ptr: *const crate::director::lingo::script::ScriptContext = lctx as *const _;
+            let lctx_opt = get_lctx_for_script(player, script);
 
-            let instance = ScriptInstance::new(
-                instance_id,
-                script_ref.to_owned(),
-                script,
-                unsafe { &*lctx_ptr },
-            );
-
-            let instance_ref = player.allocator.alloc_script_instance(instance);
-            let datum_ref = player.alloc_datum(Datum::ScriptInstanceRef(instance_ref.clone()));
-            Ok((instance_ref, datum_ref))
+            if let Some(lctx) = lctx_opt {
+                let lctx_ptr: *const crate::director::lingo::script::ScriptContext = lctx as *const _;
+                let instance = ScriptInstance::new(
+                    instance_id,
+                    script_ref.to_owned(),
+                    script,
+                    unsafe { &*lctx_ptr },
+                );
+                let instance_ref = player.allocator.alloc_script_instance(instance);
+                let datum_ref = player.alloc_datum(Datum::ScriptInstanceRef(instance_ref.clone()));
+                Ok((instance_ref, datum_ref))
+            } else {
+                Ok(crate::player::virtual_scripts::VirtualScriptRegistry::create_instance(player, script_ref))
+            }
         })
     }
 
@@ -204,6 +221,16 @@ impl ScriptDatumHandlers {
                 return Err(e); // Return the error
             }
         };
+
+        // Check if a virtual handler wants to handle the "new" call
+        let virtual_new_result = reserve_player_mut(|player| {
+            crate::player::virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_ref, Some(&script_instance_ref), "new", args)
+        });
+        match virtual_new_result {
+            Ok(Some(_)) => return Ok(datum_ref),
+            Err(e) => return Err(e),
+            Ok(None) => {}
+        }
 
         if let Some(new_handler_ref) = new_handler_ref {
             let mut padded_args = args.clone();

@@ -33,9 +33,11 @@ pub mod stage;
 pub mod timeout;
 pub mod xtra;
 pub mod score_keyframes;
+pub mod virtual_scripts;
 
 use std::{
     collections::HashMap,
+    rc::Rc,
     sync::{Arc, OnceLock},
     time::Duration,
     pin::Pin,
@@ -253,6 +255,7 @@ pub struct DirPlayer {
     /// (e.g. cached scriptInstanceList). Callers should check this before
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
     pub last_sprite_prop_ref: Option<DatumRef>,
+    pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
 }
 
 /// Target frame for a movie transition (gotoNetMovie or go movie).
@@ -385,6 +388,7 @@ impl DirPlayer {
             is_in_transition: false,
             script_instance_list_cache: FxHashMap::default(),
             last_sprite_prop_ref: None,
+            virtual_scripts: FxHashMap::default(),
         };
 
         result.reset();
@@ -444,7 +448,10 @@ impl DirPlayer {
         });
 
         JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
-        
+
+        // Register built-in virtual scripts
+        virtual_scripts::register_virtual_scripts(self);
+
         self.begin_all_sprites();
         JsApi::dispatch_frame_changed(self.movie.current_frame);
     }
@@ -1380,6 +1387,21 @@ impl DirPlayer {
                 let y_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.1));
                 Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
             }
+            "markerList" => {
+                let labels: Vec<_> = self.movie.score.frame_labels
+                    .iter()
+                    .map(|fl| (fl.label.clone(), fl.frame_num))
+                    .collect();
+                let props: Vec<(DatumRef, DatumRef)> = labels
+                    .into_iter()
+                    .map(|(label, frame_num)| {
+                        let label = self.alloc_datum(Datum::String(label));
+                        let frame_num = self.alloc_datum(Datum::Int(frame_num));
+                        (label, frame_num)
+                    })
+                    .collect();
+                Ok(self.alloc_datum(Datum::PropList(props, false)))
+            }
             "xtraList" => {
                 let xtra_names = xtra::manager::get_registered_xtra_names();
                 let xtra_list: Vec<DatumRef> = xtra_names
@@ -1966,7 +1988,19 @@ pub async fn player_call_global_handler(
                 .await?;
         player_handle_scope_return(&scope);
         return Ok(scope.return_value);
-    } else if BuiltInHandlerManager::has_async_handler(handler_name) {
+    }
+
+    // Check virtual scripts for global handler calls
+    let virtual_result = reserve_player_mut(|player| {
+        virtual_scripts::VirtualScriptRegistry::try_call_any_global_handler(player, handler_name, args)
+    });
+    match virtual_result {
+        Ok(Some(result)) => return Ok(result),
+        Err(e) => return Err(e),
+        Ok(None) => {}
+    }
+
+    if BuiltInHandlerManager::has_async_handler(handler_name) {
         return Box::pin(BuiltInHandlerManager::call_async_handler(
             handler_name,
             args,
@@ -2048,6 +2082,21 @@ pub async fn player_call_script_handler_raw_args(
     use_raw_arg_list: bool,
 ) -> Result<ScopeResult, ScriptError> {
     let (script_member_ref, handler_name) = &handler_ref;
+
+    // Check for virtual script handler before running bytecode
+    let virtual_result = reserve_player_mut(|player| {
+        virtual_scripts::VirtualScriptRegistry::try_call_handler(player, script_member_ref, receiver.as_ref(), handler_name, arg_list)
+    });
+    match virtual_result {
+        Ok(Some(return_value)) => {
+            return Ok(ScopeResult {
+                return_value,
+                passed: false,
+            });
+        }
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
 
     // Check if this is a frame script handler
     let is_frame_script = reserve_player_ref(|player| {
