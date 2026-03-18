@@ -2,7 +2,7 @@
  * Network loader service that handles both browser fetch and Electron local file loading
  */
 
-import { isElectron, readLocalFile } from '../utils/electron';
+import { isElectron, readLocalFile, appendLocalFile } from '../utils/electron';
 import { provide_net_task_data } from 'vm-rust';
 
 /**
@@ -42,6 +42,15 @@ export function initializeNetLoader() {
       console.error(`[netLoader] Failed to load file from ${url}:`, error);
       // Provide empty data to indicate failure
       provide_net_task_data(taskId, new Uint8Array(0));
+    }
+  });
+
+  // Listen for file write events (traceLogFile, FileIO writes)
+  window.addEventListener('dirplayer:fileWrite', (event: Event) => {
+    const customEvent = event as CustomEvent<{ filePath: string; content: string; append: boolean }>;
+    const { filePath, content, append } = customEvent.detail;
+    if (append) {
+      appendLocalFile(filePath, content);
     }
   });
 

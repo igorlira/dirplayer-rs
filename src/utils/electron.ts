@@ -55,3 +55,25 @@ export async function readLocalFile(filePath: string): Promise<Uint8Array> {
     throw new Error(`Failed to read file: ${result.error}`);
   }
 }
+
+/**
+ * Append text to a local file in Electron.
+ * Uses Node.js fs directly (available in renderer with nodeIntegration).
+ */
+export function appendLocalFile(filePath: string, content: string): void {
+  if (!isElectron()) {
+    return;
+  }
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    // Ensure directory exists
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.appendFileSync(filePath, content + '\n', 'utf8');
+  } catch (e) {
+    console.error(`[electron] Failed to append to ${filePath}:`, e);
+  }
+}

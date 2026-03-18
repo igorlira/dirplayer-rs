@@ -25,6 +25,18 @@
       Learn how to configure a non-root public URL by running `npm run build`.
     -->
     <title>DirPlayer App</title>
+    <script>
+      window.RufflePlayer = window.RufflePlayer || {};
+      window.RufflePlayer.config = {
+        allowNetworking: "all",
+        socketProxy: [
+          { host: "localhost", port: 9000, proxyUrl: "ws://127.0.0.1:9001" },
+          { host: "127.0.0.1", port: 9000, proxyUrl: "ws://127.0.0.1:9001" },
+          { host: "104.168.190.238", port: 9000, proxyUrl: "ws://127.0.0.1:9001" },
+        ],
+      };
+    </script>
+    <script src="%PUBLIC_URL%/ruffle/ruffle.js"></script>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
