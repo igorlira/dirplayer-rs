@@ -409,7 +409,7 @@ pub fn render_preview_bitmap(
                 bitmap.fill_rect(x, 0, x + grid_w as i32, height as i32, grid_color, palettes, 1.0);
             }
 
-            let draw_params = CopyPixelsParams {
+            let draw_params = CopyPixelsParams { mask_offset: (0, 0),
                 blend: 100,
                 ink: 0,
                 color: ColorRef::PaletteIndex(255),
@@ -420,6 +420,7 @@ pub fn render_preview_bitmap(
                 skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
+                ink9_mask_bitmap: None,
             };
 
             for char_code in 0u16..256 {
@@ -442,7 +443,9 @@ pub fn render_preview_bitmap(
                             rotation: 0.0,
                             skew: 0.0,
                             sprite: None,
-                            original_dst_rect: None,
+                            mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                         };
                         bitmap.draw_text(
                             &label,
@@ -1000,7 +1003,9 @@ fn render_filmloop_from_channel_data(
                     rotation: 0.0,
                     skew: 0.0,
                     sprite: None,
+                    mask_offset: (0, 0),
                     original_dst_rect: Some(dst_rect.clone()),
+                    ink9_mask_bitmap: None,
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -1078,7 +1083,9 @@ fn render_filmloop_from_channel_data(
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
-                        original_dst_rect: None,
+                        mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                     };
 
                     bitmap.draw_text(
@@ -1150,7 +1157,9 @@ fn render_filmloop_from_channel_data(
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
-                        original_dst_rect: None,
+                        mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                     };
 
                     bitmap.draw_text(
@@ -1164,6 +1173,48 @@ fn render_filmloop_from_channel_data(
                         text_member.fixed_line_space,
                         text_member.top_spacing,
                     );
+                }
+            }
+            CastMemberType::Flash(_) => {
+                let flash_bitmap_ref = player
+                    .flash_frame_buffers
+                    .get(&(sprite_member_ref.cast_lib, sprite_member_ref.cast_member))
+                    .copied();
+
+                if let Some(&bitmap_ref) = flash_bitmap_ref.as_ref().filter(|&&r| r != 0) {
+                    let src_bitmap = player.bitmap_manager.get_bitmap(bitmap_ref);
+                    if let Some(src_bitmap) = src_bitmap {
+                        let src_rect = IntRect::from(0, 0, src_bitmap.width as i32, src_bitmap.height as i32);
+                        let dst_rect = sprite_rect.clone();
+
+                        let ink = parent_ink;
+                        let blend = if data.blend == 255 { 100 } else {
+                            ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
+                        };
+
+                        let params = CopyPixelsParams {
+                            blend,
+                            ink,
+                            color: parent_color.clone(),
+                            bg_color: parent_bg_color.clone(),
+                            mask_image: None,
+                            is_text_rendering: false,
+                            rotation: 0.0,
+                            skew: 0.0,
+                            sprite: None,
+                            mask_offset: (0, 0),
+                    original_dst_rect: Some(dst_rect.clone()),
+                    ink9_mask_bitmap: None,
+                        };
+
+                        bitmap.copy_pixels_with_params(
+                            &palettes,
+                            src_bitmap,
+                            dst_rect,
+                            src_rect,
+                            &params,
+                        );
+                    }
                 }
             }
             _ => {
@@ -1389,6 +1440,29 @@ pub fn render_score_to_bitmap_with_offset(
                 };
                 let logical_rect = sprite_rect.clone();
 
+                // For ink 9 (Mask), find the mask bitmap BEFORE mutable borrow of bitmap_manager
+                let sprite_for_mask = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                let ink9_mask = if sprite_for_mask.ink == 9 {
+                    sprite_for_mask.member.as_ref().and_then(|mref| {
+                        let mask_ref = CastMemberRef {
+                            cast_lib: mref.cast_lib,
+                            cast_member: mref.cast_member + 1,
+                        };
+                        player.movie.cast_manager.find_member_by_ref(&mask_ref)
+                            .and_then(|m| {
+                                if let CastMemberType::Bitmap(bm) = &m.member_type {
+                                    Some(bm.image_ref)
+                                } else {
+                                    None
+                                }
+                            })
+                            .and_then(|img_ref| player.bitmap_manager.get_bitmap(img_ref))
+                            .cloned()
+                    })
+                } else {
+                    None
+                };
+
                 let sprite_bitmap = player
                     .bitmap_manager
                     .get_bitmap_mut(bitmap_member.image_ref);
@@ -1469,7 +1543,9 @@ pub fn render_score_to_bitmap_with_offset(
                     rotation: sprite.rotation,
                     skew: sprite.skew,
                     sprite: Some(&sprite.clone()),
+                    mask_offset: (0, 0),
                     original_dst_rect: Some(logical_rect),
+                    ink9_mask_bitmap: ink9_mask.as_ref(),
                 };
 
                 if let Some(mask) = mask {
@@ -1593,7 +1669,9 @@ pub fn render_score_to_bitmap_with_offset(
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
-                        original_dst_rect: None,
+                        mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                     };
 
                     bitmap.draw_text(
@@ -1760,7 +1838,9 @@ pub fn render_score_to_bitmap_with_offset(
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
-                        original_dst_rect: None,
+                        mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                     };
 
                     temp.draw_text_wrapped(
@@ -1821,6 +1901,7 @@ pub fn render_score_to_bitmap_with_offset(
                         field.fixed_line_space,
                         field.top_spacing,
                         0,
+                        &[],
                     ) {
                         console_warn!("Native text render error for Button: {:?}", e);
                     }
@@ -1920,7 +2001,9 @@ pub fn render_score_to_bitmap_with_offset(
                     rotation: 0.0,
                     skew: 0.0,
                     sprite: None,
+                    mask_offset: (0, 0),
                     original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                 };
 
                 if let Some(mask) = mask {
@@ -2045,7 +2128,9 @@ pub fn render_score_to_bitmap_with_offset(
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
-                        original_dst_rect: None,
+                        mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                     };
 
                     // Use styled text rendering if html_styled_spans is populated
@@ -2133,6 +2218,7 @@ pub fn render_score_to_bitmap_with_offset(
                             text_member.fixed_line_space,
                             text_member.top_spacing,
                             text_member.bottom_spacing,
+                            &text_member.tab_stops,
                         ) {
                             console_warn!("Native text render error for Text member: {:?}", e);
                         }
@@ -2260,7 +2346,9 @@ pub fn render_score_to_bitmap_with_offset(
                     rotation,
                     skew,
                     sprite: None,
+                    mask_offset: (0, 0),
                     original_dst_rect: Some(logical_rect),
+                    ink9_mask_bitmap: None,
                 };
 
                 // Debug: log filmloop bitmap properties before compositing
@@ -2284,6 +2372,75 @@ pub fn render_score_to_bitmap_with_offset(
                     IntRect::from_size(0, 0, width, height),
                     &params,
                 );
+            }
+            CastMemberType::Flash(flash_member) => {
+                // Render Flash content from frame buffer provided by Ruffle via JS bridge
+                let flash_bitmap_ref = player
+                    .flash_frame_buffers
+                    .get(&(member_ref.cast_lib, member_ref.cast_member))
+                    .copied();
+
+                if let Some(&bitmap_ref) = flash_bitmap_ref.as_ref().filter(|&&r| r != 0) {
+                    let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                    let rect = get_concrete_sprite_rect(player, sprite);
+                    let sprite_rect = IntRect::from(
+                        rect.left - offset.0,
+                        rect.top - offset.1,
+                        rect.right - offset.0,
+                        rect.bottom - offset.1,
+                    );
+
+                    let src_bitmap = player.bitmap_manager.get_bitmap(bitmap_ref);
+                    if let Some(src_bitmap) = src_bitmap {
+                        let src_rect = IntRect::from(0, 0, src_bitmap.width as i32, src_bitmap.height as i32);
+                        let dst_rect = sprite_rect;
+
+                        let params = CopyPixelsParams {
+                            blend: sprite.blend,
+                            ink: sprite.ink as u32,
+                            color: sprite.color.clone(),
+                            bg_color: sprite.bg_color.clone(),
+                            mask_image: None,
+                            is_text_rendering: false,
+                            rotation: sprite.rotation,
+                            skew: sprite.skew,
+                            sprite: Some(&sprite.clone()),
+                            mask_offset: (0, 0),
+                    original_dst_rect: Some(dst_rect.clone()),
+                    ink9_mask_bitmap: None,
+                        };
+
+                        bitmap.copy_pixels_with_params(
+                            &palettes,
+                            src_bitmap,
+                            dst_rect,
+                            src_rect,
+                            &params,
+                        );
+                    }
+                } else if flash_bitmap_ref.is_none() && has_swf_signature(&flash_member.data) {
+                    // First time seeing this Flash member - notify JS to create Ruffle instance
+                    let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                    let w = sprite.width.max(1) as u32;
+                    let h = sprite.height.max(1) as u32;
+                    debug!(
+                        "  Flash channel {}: requesting Ruffle instance for member {}:{} ({}x{}, {} bytes SWF)",
+                        channel_num, member_ref.cast_lib, member_ref.cast_member, w, h, flash_member.data.len()
+                    );
+                    JsApi::dispatch_flash_member_loaded(
+                        member_ref.cast_lib,
+                        member_ref.cast_member,
+                        &flash_member.data,
+                        w,
+                        h,
+                    );
+                    // Insert a sentinel so we don't re-dispatch every frame
+                    // (The real BitmapRef will be set when update_flash_frame is called from JS)
+                    player.flash_frame_buffers.insert(
+                        (member_ref.cast_lib, member_ref.cast_member),
+                        0, // sentinel value - INVALID_BITMAP_REF
+                    );
+                }
             }
             _ => {}
         }
@@ -2476,7 +2633,7 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
                 cursor_bitmap.width as i32,
                 cursor_bitmap.height as i32,
             ),
-            &CopyPixelsParams {
+            &CopyPixelsParams { mask_offset: (0, 0),
                 blend: 100,
                 ink: 0,
                 bg_color: bitmap.get_bg_color_ref(),
@@ -2487,6 +2644,7 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
                 skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
+                ink9_mask_bitmap: None,
             },
         );
     }
@@ -2561,6 +2719,10 @@ impl PlayerCanvasRenderer {
     }
 
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
+        // Sync persistent 3D state to scene data for the renderer
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
+
         // let time = chrono::Local::now().timestamp_millis() as i64;
         // let time_seconds = time as f64 / 1000.0;
         // let oscillated_r = 127.0 + 255.0 * (time_seconds * 2.0 * std::f32::consts::PI as f64).sin();
@@ -2608,7 +2770,7 @@ impl PlayerCanvasRenderer {
                 player.allocator.script_instance_count()
             );
 
-            let params = CopyPixelsParams {
+            let params = CopyPixelsParams { mask_offset: (0, 0),
                 blend: 100,
                 ink: 36,
                 color: bitmap.get_fg_color_ref(),
@@ -2619,6 +2781,7 @@ impl PlayerCanvasRenderer {
                 skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
+                ink9_mask_bitmap: None,
             };
 
             bitmap.draw_text(
@@ -3092,4 +3255,13 @@ async fn run_draw_loop() {
     let cb = rc_clone.as_ref().borrow();
     let cb = cb.as_ref().unwrap();
     request_animation_frame(&cb);
+}
+
+/// Check if data starts with a valid SWF signature (FWS, CWS, or ZWS)
+pub fn has_swf_signature(data: &[u8]) -> bool {
+    if data.len() < 3 {
+        return false;
+    }
+    let sig = &data[0..3];
+    sig == b"FWS" || sig == b"CWS" || sig == b"ZWS"
 }

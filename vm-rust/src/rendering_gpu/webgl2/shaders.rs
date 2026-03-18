@@ -26,33 +26,27 @@ pub enum InkMode {
     SubPin,
     /// Ink 36: Background Transparent - color key
     BackgroundTransparent,
-    /// Ink 37: Light - MAX(src, dst) per channel
-    Light,
-    /// Ink 39: Dark - MIN(src, dst) per channel
-    Dark,
     /// Ink 40: Lighten
     Lighten,
     /// Ink 41: Darken - multiply blend
     Darken,
-    /// Ink 3: Ghost - background transparent, foreground inverted
-    Ghost,
+    /// Ink 2: Not Copy / Reverse - invert colors
+    Reverse,
 }
 
 impl InkMode {
     /// Convert Director ink number to InkMode
     pub fn from_ink_number(ink: i32) -> Self {
         match ink {
-            2 | 36 => InkMode::BackgroundTransparent,
-            3 => InkMode::Ghost,
             7 => InkMode::NotGhost,
             8 => InkMode::Matte,
             9 => InkMode::Mask,
             33 => InkMode::AddPin,
             35 => InkMode::SubPin,
-            37 => InkMode::Light,
-            39 => InkMode::Dark,
+            36 => InkMode::BackgroundTransparent,
             40 => InkMode::Lighten,
             41 => InkMode::Darken,
+            2 => InkMode::Reverse,
             _ => InkMode::Copy, // Default to copy for unknown inks
         }
     }
@@ -98,9 +92,7 @@ impl ShaderManager {
         programs.insert(InkMode::NotGhost, Self::compile_ink_not_ghost(context)?);
         programs.insert(InkMode::Matte, Self::compile_ink_matte(context)?);
         programs.insert(InkMode::Lighten, Self::compile_ink_lighten(context)?);
-        programs.insert(InkMode::Light, Self::compile_ink_light(context)?);
-        programs.insert(InkMode::Dark, Self::compile_ink_dark(context)?);
-        programs.insert(InkMode::Ghost, Self::compile_ink_ghost(context)?);
+        programs.insert(InkMode::Reverse, Self::compile_ink_reverse(context)?);
 
         Ok(Self {
             programs,
@@ -242,7 +234,10 @@ out vec4 fragColor;
 void main() {
     vec4 src = texture(u_texture, v_texcoord);
 
-    // Color-key transparency: discard if matches bg_color
+    // Discard fully transparent pixels (bgColor already baked as alpha=0 in texture)
+    if (src.a < 0.01) discard;
+
+    // For non-indexed bitmaps (16/32-bit), also do runtime color-key as fallback
     vec3 diff = abs(src.rgb - u_bg_color.rgb);
     float dist = max(max(diff.r, diff.g), diff.b);
     if (dist < u_color_tolerance) discard;
@@ -471,10 +466,8 @@ void main() {
         Self::compile_program(context, Self::vertex_shader_source(), frag_source)
     }
 
-    /// Compile Ink 37 (Light) shader
-    /// Light: MAX(src, dst) per channel. bgColor pixels are transparent.
-    /// Uses GL_MAX blend equation for per-channel max.
-    fn compile_ink_light(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
+    /// Compile Ink 2 (Not Copy / Reverse) shader — inverts RGB, preserves alpha
+    fn compile_ink_reverse(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
         let frag_source = r#"#version 300 es
 precision highp float;
 
@@ -482,98 +475,17 @@ in vec2 v_texcoord;
 
 uniform sampler2D u_texture;
 uniform float u_blend;
-uniform vec4 u_bg_color;
-uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
 void main() {
     vec4 src = texture(u_texture, v_texcoord);
 
-    // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
 
-    // Color-key transparency: discard if matches bg_color
-    vec3 diff = abs(src.rgb - u_bg_color.rgb);
-    float dist = max(max(diff.r, diff.g), diff.b);
-    if (dist < u_color_tolerance) discard;
-
-    // Light: output color, actual MAX blending done via blend equation
+    // Invert RGB, keep alpha
     float alpha = src.a * u_blend;
-    fragColor = vec4(src.rgb, alpha);
-}
-"#;
-
-        Self::compile_program(context, Self::vertex_shader_source(), frag_source)
-    }
-
-    /// Compile Ink 39 (Dark) shader
-    /// Dark: MIN(src, dst) per channel. bgColor pixels are transparent.
-    /// Uses GL_MIN blend equation for per-channel min.
-    fn compile_ink_dark(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
-        let frag_source = r#"#version 300 es
-precision highp float;
-
-in vec2 v_texcoord;
-
-uniform sampler2D u_texture;
-uniform float u_blend;
-uniform vec4 u_bg_color;
-uniform float u_color_tolerance;
-
-out vec4 fragColor;
-
-void main() {
-    vec4 src = texture(u_texture, v_texcoord);
-
-    // Discard fully transparent pixels (from matte mask)
-    if (src.a < 0.01) discard;
-
-    // Color-key transparency: discard if matches bg_color
-    vec3 diff = abs(src.rgb - u_bg_color.rgb);
-    float dist = max(max(diff.r, diff.g), diff.b);
-    if (dist < u_color_tolerance) discard;
-
-    // Dark: output color, actual MIN blending done via blend equation
-    float alpha = src.a * u_blend;
-    fragColor = vec4(src.rgb, alpha);
-}
-"#;
-
-        Self::compile_program(context, Self::vertex_shader_source(), frag_source)
-    }
-
-    /// Compile Ink 3 (Ghost) shader
-    /// Ghost ink makes background-color pixels transparent and inverts foreground pixels.
-    /// Original Director behavior: dst = dst & ~src on palette indices.
-    /// WebGL approximation: color-key bg + invert RGB for foreground.
-    fn compile_ink_ghost(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
-        let frag_source = r#"#version 300 es
-precision highp float;
-
-in vec2 v_texcoord;
-
-uniform sampler2D u_texture;
-uniform float u_blend;
-uniform vec4 u_bg_color;
-uniform float u_color_tolerance;
-
-out vec4 fragColor;
-
-void main() {
-    vec4 src = texture(u_texture, v_texcoord);
-
-    // Discard fully transparent pixels (from matte mask)
-    if (src.a < 0.01) discard;
-
-    // Color-key transparency: discard if matches bg_color
-    vec3 diff = abs(src.rgb - u_bg_color.rgb);
-    float dist = max(max(diff.r, diff.g), diff.b);
-    if (dist < u_color_tolerance) discard;
-
-    // Ghost effect: invert the foreground colors
-    float alpha = src.a * u_blend;
-    fragColor = vec4(1.0 - src.rgb, alpha);
+    fragColor = vec4(1.0 - src.r, 1.0 - src.g, 1.0 - src.b, alpha);
 }
 "#;
 

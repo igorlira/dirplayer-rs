@@ -30,11 +30,15 @@ pub struct CopyPixelsParams<'a> {
     pub color: ColorRef,
     pub bg_color: ColorRef,
     pub mask_image: Option<&'a BitmapMask>,
+    pub mask_offset: (i32, i32),
     pub is_text_rendering: bool,
     pub rotation: f64,
     pub skew: f64,
     pub sprite: Option<&'a Sprite>,
     pub original_dst_rect: Option<IntRect>,
+    /// For ink 9 (Mask): the next cast member's bitmap used as grayscale alpha mask.
+    /// Black=opaque, white=transparent, grays=partial transparency.
+    pub ink9_mask_bitmap: Option<&'a Bitmap>,
 }
 
 impl CopyPixelsParams<'_> {
@@ -45,11 +49,13 @@ impl CopyPixelsParams<'_> {
             color: bitmap.get_fg_color_ref(),
             bg_color: bitmap.get_bg_color_ref(),
             mask_image: None,
+            mask_offset: (0, 0),
             is_text_rendering: false,
             rotation: 0.0,
             skew: 0.0,
             sprite: None,
             original_dst_rect: None,
+            ink9_mask_bitmap: None,
         }
     }
 }
@@ -71,7 +77,13 @@ fn blend_color_alpha(dst: (u8, u8, u8), src: (u8, u8, u8), alpha: f32) -> (u8, u
 }
 
 pub fn should_matte_sprite(ink: u32) -> bool {
-    ink == 2 || ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
+    ink == 36 || ink == 33 || ink == 41 || ink == 8 || ink == 7 || ink == 32
+}
+
+/// Only ink 8 (Matte) uses pixel-level hit testing for mouse clicks.
+/// Other inks use bounding box detection even if they use alpha for rendering.
+pub fn should_matte_hit_test(ink: u32) -> bool {
+    ink == 8
 }
 
 fn director_blend_ink0(
@@ -203,40 +215,6 @@ fn blend_pixel(
         // If the source equals the bg_color, skip; otherwise blend normally.
         36 => {
             blend_color_alpha(dst, src, effective_alpha)
-        }
-        // 37 = Light (Lighten)
-        // Pick the higher of src and dst for each channel.
-        // bg_color pixels are transparent (skipped).
-        37 => {
-            if src == bg_color {
-                dst
-            } else {
-                let r = src.0.max(dst.0);
-                let g = src.1.max(dst.1);
-                let b = src.2.max(dst.2);
-                if blend_alpha >= 0.999 {
-                    (r, g, b)
-                } else {
-                    blend_color_alpha(dst, (r, g, b), blend_alpha)
-                }
-            }
-        }
-        // 39 = Dark (Darken)
-        // Pick the lower of src and dst for each channel.
-        // bg_color pixels are transparent (skipped).
-        39 => {
-            if src == bg_color {
-                dst
-            } else {
-                let r = src.0.min(dst.0);
-                let g = src.1.min(dst.1);
-                let b = src.2.min(dst.2);
-                if blend_alpha >= 0.999 {
-                    (r, g, b)
-                } else {
-                    blend_color_alpha(dst, (r, g, b), blend_alpha)
-                }
-            }
         }
         // 40 = Lighten
         40 => {
@@ -1528,17 +1506,36 @@ impl Bitmap {
             ink = 0;
         }
 
+        // Extract maskOffset parameter
+        let mask_offset = param_list
+            .get("maskOffset")
+            .and_then(|x| {
+                if let Datum::Point(refs) = x {
+                    let ox = reserve_player_mut(|player| player.get_datum(&refs[0]).int_value().ok());
+                    let oy = reserve_player_mut(|player| player.get_datum(&refs[1]).int_value().ok());
+                    match (ox, oy) {
+                        (Some(x), Some(y)) => Some((x, y)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            .unwrap_or((0, 0));
+
         let params = CopyPixelsParams {
             blend,
             ink,
             bg_color,
             mask_image,
+            mask_offset,
             color,
             is_text_rendering,
             rotation,
             skew,
             sprite,
             original_dst_rect,
+            ink9_mask_bitmap: None,
         };
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
@@ -1936,7 +1933,9 @@ impl Bitmap {
                     // Check matte mask for trimWhiteSpace transparency
                     // mask: true = opaque (draw), false = transparent (skip)
                     if let Some(mask) = mask_image {
-                        if !mask.get_bit(sx, sy) {
+                        let mx = (sx as i32 - params.mask_offset.0).max(0) as u16;
+                        let my = (sy as i32 - params.mask_offset.1).max(0) as u16;
+                        if !mask.get_bit(mx, my) {
                             continue; // Edge-connected background pixel - skip
                         }
                     }
@@ -1953,7 +1952,7 @@ impl Bitmap {
                 }
 
                 // Indexed bitmap (1-8 bit) ink 36 color-key transparency
-                if (ink == 2 || ink == 36) && is_indexed {
+                if ink == 36 && is_indexed {
                     let ColorRef::PaletteIndex(i) = src.get_pixel_color_ref(sx, sy) else {
                         unreachable!("indexed bitmap returned non-index color");
                     };
@@ -2009,11 +2008,12 @@ impl Bitmap {
                     // For monochrome-style bitmaps (black content on white bg) with ink 36,
                     // the foreground pixels should be tinted with the sprite's foreColor.
                     // This allows white foreColor to make black numbers appear white.
-                    // Check if pixel is "foreground" (index 255 or black color)
-                    let src_color = if i == 255 || (r, g, b) == (0, 0, 0) {
+                    // Only apply if foreColor was explicitly set via Lingo/tweening.
+                    let has_fg = params.sprite.map_or(false, |s| s.has_fore_color);
+                    let src_color = if has_fg && (i == 255 || (r, g, b) == (0, 0, 0)) {
                         fg_color_resolved // Tint foreground with sprite's foreColor
                     } else {
-                        (r, g, b) // Keep original color for other pixels
+                        (r, g, b) // Keep original color
                     };
 
                     let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
@@ -2030,12 +2030,16 @@ impl Bitmap {
 
                 // 16-bit bitmap ink 36 color-key transparency
                 // 16-bit is stored as 32-bit RGB, so compare RGB values directly
-                if (ink == 2 || ink == 36) && src.original_bit_depth == 16 {
+                if ink == 36 && src.original_bit_depth == 16 {
                     let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
-                    // Skip pixel if it matches the sprite's bgColor
-                    if (r, g, b) == bg_color_resolved {
-                        continue; // transparent - RGB matches background color
+                    // Skip pixel if it matches the sprite's bgColor (with tolerance
+                    // for RGB565 quantization — pixel values may differ by up to ~4 from bgColor)
+                    let max_diff = (r as i16 - bg_color_resolved.0 as i16).unsigned_abs()
+                        .max((g as i16 - bg_color_resolved.1 as i16).unsigned_abs())
+                        .max((b as i16 - bg_color_resolved.2 as i16).unsigned_abs());
+                    if max_diff <= 4 {
+                        continue; // transparent - RGB matches background color within 16-bit tolerance
                     }
 
                     let src_color = (r, g, b);
@@ -2053,7 +2057,7 @@ impl Bitmap {
 
                 // 32-bit bitmap ink 36 color-key transparency
                 // PFR font bitmaps are decoded to 32-bit RGBA; background is white, glyphs are black.
-                if (ink == 2 || ink == 36) && src.original_bit_depth == 32 {
+                if ink == 36 && src.original_bit_depth == 32 {
                     let (r, g, b, a) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     // Skip fully transparent pixels (use_alpha bitmaps like text member images)
@@ -2122,7 +2126,9 @@ impl Bitmap {
                 // Skip mask check for ink 33 - it handles transparency via bgColor check
                 if ink != 33 {
                     if let Some(mask) = mask_image {
-                        if !mask.get_bit(sx, sy) {
+                        let mx = (sx as i32 - params.mask_offset.0).max(0) as u16;
+                        let my = (sy as i32 - params.mask_offset.1).max(0) as u16;
+                        if !mask.get_bit(mx, my) {
                             continue;
                         }
                     }
@@ -2177,6 +2183,44 @@ impl Bitmap {
 
                     self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     continue;
+                }
+
+                // Ink 9 (Mask): use next cast member's bitmap as grayscale alpha mask
+                // Black=opaque, white=transparent, grays=partial transparency
+                if ink == 9 {
+                    if let Some(mask_bmp) = params.ink9_mask_bitmap {
+                        let mx = (sx).min(mask_bmp.width.saturating_sub(1));
+                        let my = (sy).min(mask_bmp.height.saturating_sub(1));
+                        let (mr, mg, mb) = mask_bmp.get_pixel_color(palettes, mx, my);
+                        // Invert grayscale: black(0)→opaque(1.0), white(255)→transparent(0.0)
+                        let gray = (mr as u16 + mg as u16 + mb as u16) / 3;
+                        let mask_alpha = (255 - gray as u8) as f32 / 255.0;
+
+                        if mask_alpha < 0.004 {
+                            continue; // Fully transparent
+                        }
+
+                        let (sr, sg, sb) = if let Some(cache) = &src_palette_cache {
+                            let color_ref = src.get_pixel_color_ref(sx, sy);
+                            if let ColorRef::PaletteIndex(i) = color_ref {
+                                cache[i as usize]
+                            } else {
+                                src.get_pixel_color(palettes, sx, sy)
+                            }
+                        } else {
+                            src.get_pixel_color(palettes, sx, sy)
+                        };
+
+                        let dst_color = if !dst_palette_cache.is_empty() {
+                            self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16)
+                        } else {
+                            self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                        };
+
+                        let blended = blend_color_alpha(dst_color, (sr, sg, sb), mask_alpha * alpha);
+                        self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
+                        continue;
+                    }
                 }
 
                 // Sample source pixel
@@ -2300,7 +2344,7 @@ impl Bitmap {
                 // ----------------------------------------------------------
                 // Director ink 36 (Blend) alpha semantics
                 // ----------------------------------------------------------
-                if (ink == 2 || ink == 36) && sa == 0 && src.original_bit_depth == 32 {
+                if ink == 36 && sa == 0 && src.original_bit_depth == 32 {
                     if (sr, sg, sb) == bg_color_resolved {
                         continue;
                     }
@@ -2313,7 +2357,7 @@ impl Bitmap {
                 // ----------------------------------------------------------
                 if !params.is_text_rendering
                     && sa == 255
-                    && (ink == 2 || ink == 36)
+                    && ink == 36
                     && (sr, sg, sb) == bg_color_resolved
                 {
                     continue; // This pixel is background → transparent
