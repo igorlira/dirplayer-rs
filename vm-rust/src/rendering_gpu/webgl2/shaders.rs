@@ -30,6 +30,8 @@ pub enum InkMode {
     Lighten,
     /// Ink 41: Darken - multiply blend
     Darken,
+    /// Ink 2: Not Copy / Reverse - invert colors
+    Reverse,
 }
 
 impl InkMode {
@@ -44,6 +46,7 @@ impl InkMode {
             36 => InkMode::BackgroundTransparent,
             40 => InkMode::Lighten,
             41 => InkMode::Darken,
+            2 => InkMode::Reverse,
             _ => InkMode::Copy, // Default to copy for unknown inks
         }
     }
@@ -89,6 +92,7 @@ impl ShaderManager {
         programs.insert(InkMode::NotGhost, Self::compile_ink_not_ghost(context)?);
         programs.insert(InkMode::Matte, Self::compile_ink_matte(context)?);
         programs.insert(InkMode::Lighten, Self::compile_ink_lighten(context)?);
+        programs.insert(InkMode::Reverse, Self::compile_ink_reverse(context)?);
 
         Ok(Self {
             programs,
@@ -230,7 +234,10 @@ out vec4 fragColor;
 void main() {
     vec4 src = texture(u_texture, v_texcoord);
 
-    // Color-key transparency: discard if matches bg_color
+    // Discard fully transparent pixels (bgColor already baked as alpha=0 in texture)
+    if (src.a < 0.01) discard;
+
+    // For non-indexed bitmaps (16/32-bit), also do runtime color-key as fallback
     vec3 diff = abs(src.rgb - u_bg_color.rgb);
     float dist = max(max(diff.r, diff.g), diff.b);
     if (dist < u_color_tolerance) discard;
@@ -453,6 +460,32 @@ void main() {
     // Lighten: output color, actual MAX blending done via blend equation
     float alpha = src.a * u_blend;
     fragColor = vec4(src.rgb, alpha);
+}
+"#;
+
+        Self::compile_program(context, Self::vertex_shader_source(), frag_source)
+    }
+
+    /// Compile Ink 2 (Not Copy / Reverse) shader — inverts RGB, preserves alpha
+    fn compile_ink_reverse(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
+        let frag_source = r#"#version 300 es
+precision highp float;
+
+in vec2 v_texcoord;
+
+uniform sampler2D u_texture;
+uniform float u_blend;
+
+out vec4 fragColor;
+
+void main() {
+    vec4 src = texture(u_texture, v_texcoord);
+
+    if (src.a < 0.01) discard;
+
+    // Invert RGB, keep alpha
+    float alpha = src.a * u_blend;
+    fragColor = vec4(1.0 - src.r, 1.0 - src.g, 1.0 - src.b, alpha);
 }
 "#;
 
