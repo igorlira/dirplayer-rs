@@ -73,10 +73,21 @@ impl CastManager {
         for index in 0..dir.cast_entries.len() {
             let cast_entry = &dir.cast_entries[index];
             let cast_def = dir.casts.iter().find(|cast| cast.id == cast_entry.id);
+            web_sys::console::log_1(&format!(
+                "MCsL entry {}: name='{}' file_path='{}' id={} min={} max={} preload={} has_cast_def={}",
+                index, cast_entry.name, cast_entry.file_path, cast_entry.id,
+                cast_entry.min_member, cast_entry.max_member, cast_entry.preload_settings,
+                cast_def.is_some()
+            ).into());
+
+            // A cast is external if it has a file_path in the MCsL entry,
+            // regardless of whether we found a CAS* chunk (which may come
+            // from a fallback lookup in the same .cct file).
+            let is_external = !cast_entry.file_path.is_empty();
 
             let mut cast = CastLib {
                 name: cast_entry.name.to_owned(),
-                file_name: if cast_def.is_some() {
+                file_name: if !is_external {
                     // Embedded casts: fileName should reference the parent movie (like real Shockwave player).
                     // This ensures Lingo scripts checking fileName.char[end-2..end] = "dcr" work correctly.
                     match &net_manager.base_path {
@@ -89,7 +100,7 @@ impl CastManager {
                         .map_or("".to_string(), |it| it.to_string())
                 },
                 number: (index + 1) as u32,
-                is_external: cast_def.is_none(),
+                is_external,
                 state: if cast_def.is_some() {
                     CastLibState::Loaded
                 } else {
@@ -205,28 +216,21 @@ impl CastManager {
         for cast in self.casts.iter_mut() {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
                 web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode)));
-                // match cast.preload_mode {
-                //     0 => {
-                //         // Preload: When Needed
-                //     }
-                //     1 => {
-                //         // Preload: After frame one
-                //         if reason == CastPreloadReason::AfterFrameOne {
-                //             cast.preload(net_manager, bitmap_manager, dir_cache).await;
-                //         }
-                //     }
-                //     2 => {
-                //         // Preload: Before frame one
-                //         if reason == CastPreloadReason::MovieLoaded {
-                //             cast.preload(net_manager, bitmap_manager, dir_cache).await;
-                //         }
-                //     }
-                //     _ => {}
-                // }
-
-                // It seems like when the runMode is "Plugin" all casts getting directly download
-                // check with mobiles disco in shockwave player
-                cast.preload(net_manager, bitmap_manager, dir_cache).await;
+                match cast.preload_mode {
+                    0 | 1 => {
+                        // Preload: When Needed / After frame one
+                        // Load on both MovieLoaded and AfterFrameOne to ensure casts
+                        // are available even when scripts jump past frame 1 immediately
+                        cast.preload(net_manager, bitmap_manager, dir_cache).await;
+                    }
+                    2 => {
+                        // Preload: Before frame one
+                        if reason == CastPreloadReason::MovieLoaded {
+                            cast.preload(net_manager, bitmap_manager, dir_cache).await;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -243,6 +247,10 @@ impl CastManager {
 
     pub fn get_cast_mut(&mut self, number: u32) -> &mut CastLib {
         return self.casts.get_mut(number as usize - 1).unwrap();
+    }
+
+    pub fn casts_len(&self) -> usize {
+        self.casts.len()
     }
 
     pub fn get_cast_by_name(&self, name: &str) -> Option<&CastLib> {
@@ -422,6 +430,24 @@ impl CastManager {
             member_ref.cast_member as u32,
         );
         self.find_member_by_slot_number(slot_number)
+    }
+
+    pub fn find_member_by_ref_mut(&mut self, member_ref: &CastMemberRef) -> Option<&mut CastMember> {
+        if member_ref.cast_lib > 0 {
+            let cast = self.casts.get_mut(member_ref.cast_lib as usize - 1)?;
+            return cast.find_mut_member_by_number(member_ref.cast_member as u32);
+        }
+        let slot_number = CastMemberRefHandlers::get_cast_slot_number(
+            member_ref.cast_lib as u32,
+            member_ref.cast_member as u32,
+        );
+        let member_ref2 = CastMemberRefHandlers::member_ref_from_slot_number(slot_number);
+        if member_ref2.cast_lib > 0 {
+            let cast = self.casts.get_mut(member_ref2.cast_lib as usize - 1)?;
+            cast.find_mut_member_by_number(member_ref2.cast_member as u32)
+        } else {
+            None
+        }
     }
 
     pub fn find_member_by_slot_number(&self, slot_number: u32) -> Option<&CastMember> {
