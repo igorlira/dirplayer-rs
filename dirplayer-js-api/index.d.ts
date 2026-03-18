@@ -51,6 +51,8 @@ type TVmCallbacks = {
   onChannelChanged: (channelNumber: number, channelData: ScoreSpriteSnapshot) => void,
   onChannelDisplayNameChanged: (channelNumber: number, displayName: string) => void,
   onExternalEvent?: (event: string) => void,
+  onFlashMemberLoaded?: (castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number) => void,
+  onFlashMemberUnloaded?: (castLib: number, castMember: number) => void,
 }
 declare let vmCallbacks: TVmCallbacks | undefined;
 
