@@ -371,9 +371,57 @@ impl PropListDatumHandlers {
             "getLast" => Self::get_last(datum, args),
             "count" => Self::count(datum, args),
             "getPropRef" => Self::get_prop_ref(datum, args),
-            _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for prop list datum"
-            ))),
+            "toString" => {
+                // Support toString() on PropLists that have a #toString property (e.g. Flash Date objects)
+                reserve_player_mut(|player| {
+                    let prop_list = player.get_datum(datum).to_map()?;
+                    for (key_ref, val_ref) in prop_list {
+                        let key = player.get_datum(&key_ref);
+                        if let Datum::Symbol(s) = key {
+                            if s == "toString" {
+                                return Ok(val_ref.clone());
+                            }
+                        }
+                    }
+                    // Fallback: return string representation
+                    let formatted = crate::player::datum_formatting::format_datum(datum, &player);
+                    Ok(player.alloc_datum(Datum::String(formatted)))
+                })
+            }
+            _ => {
+                // Flash object prop lists from callbacks: handle getter/setter methods
+                // by mapping to properties. e.g. getScreenName() -> #screenName,
+                // getTypeOf() -> #typeOf, setScreenName(v) -> #screenName = v
+                let name_lower = handler_name.to_lowercase();
+                if name_lower.starts_with("get") && handler_name.len() > 3 {
+                    let prop_name = &handler_name[3..];
+                    let prop_name_camel = {
+                        let mut chars = prop_name.chars();
+                        match chars.next() {
+                            Some(c) => format!("{}{}", c.to_lowercase(), chars.as_str()),
+                            None => String::new(),
+                        }
+                    };
+                    return reserve_player_mut(|player| {
+                        let prop_list = player.get_datum(datum).to_map()?.clone();
+                        for (key_ref, val_ref) in &prop_list {
+                            if let Datum::Symbol(s) = player.get_datum(key_ref) {
+                                if s == &prop_name_camel || s.eq_ignore_ascii_case(&prop_name_camel) {
+                                    return Ok(val_ref.clone());
+                                }
+                            }
+                        }
+                        Ok(player.alloc_datum(Datum::Void))
+                    });
+                }
+                if name_lower.starts_with("set") && handler_name.len() > 3 {
+                    // Silently ignore setters on prop lists
+                    return Ok(DatumRef::Void);
+                }
+                Err(ScriptError::new(format!(
+                    "No handler {handler_name} for prop list datum"
+                )))
+            }
         }
     }
 

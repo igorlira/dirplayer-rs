@@ -9,6 +9,7 @@ use std::collections::{hash_map::Entry, HashMap};
 
 #[derive(Clone)]
 pub struct ScriptChunk {
+    pub script_number: u16,
     pub literals: Vec<Datum>,
     pub handlers: Vec<HandlerDef>,
     pub property_name_ids: Vec<u16>,
@@ -102,6 +103,7 @@ impl ScriptChunk {
         }
 
         Ok(ScriptChunk {
+            script_number,
             literals,
             handlers,
             property_name_ids,

@@ -3,16 +3,17 @@ use crate::{
     player::{DatumRef, ScriptError},
 };
 
+use super::fileio::{borrow_fileio_manager_mut, FileIoXtraManager};
 use super::multiuser::{borrow_multiuser_manager_mut, MultiuserXtraManager};
 use super::xmlparser::{borrow_xmlparser_manager_mut, XmlParserXtraManager};
 
 pub fn is_xtra_registered(name: &String) -> bool {
     let name_lower = name.to_lowercase();
-    return name == "Multiuser" || name_lower == "xmlparser";
+    return name == "Multiuser" || name_lower == "xmlparser" || name_lower == "fileio";
 }
 
 pub fn get_registered_xtra_names() -> Vec<&'static str> {
-    vec!["Multiusr", "XmlParser"]
+    vec!["Multiusr", "XmlParser", "FileIO"]
 }
 
 pub fn call_xtra_instance_handler(
@@ -28,6 +29,9 @@ pub fn call_xtra_instance_handler(
         }
         "xmlparser" => {
             return XmlParserXtraManager::call_instance_handler(handler_name, instance_id, args)
+        }
+        "fileio" => {
+            return FileIoXtraManager::call_instance_handler(handler_name, instance_id, args)
         }
         _ => Err(ScriptError::new(format!(
             "No handler {} found for xtra {} instance #{}",
@@ -60,6 +64,14 @@ pub async fn call_xtra_instance_async_handler(
             )
             .await
         }
+        "fileio" => {
+            return FileIoXtraManager::call_instance_async_handler(
+                handler_name,
+                instance_id,
+                args,
+            )
+            .await
+        }
         _ => Err(ScriptError::new(format!(
             "No async handler {} found for xtra {} instance #{}",
             handler_name, xtra_name, instance_id
@@ -76,6 +88,7 @@ pub fn has_xtra_instance_async_handler(
     match xtra_name_lower.as_str() {
         "multiuser" => MultiuserXtraManager::has_instance_async_handler(handler_name),
         "xmlparser" => XmlParserXtraManager::has_instance_async_handler(handler_name),
+        "fileio" => FileIoXtraManager::has_instance_async_handler(handler_name),
         _ => false,
     }
 }
@@ -88,6 +101,7 @@ pub fn create_xtra_instance(
     match xtra_name_lower.as_str() {
         "multiuser" => Ok(borrow_multiuser_manager_mut(|x| x.create_instance(args))),
         "xmlparser" => Ok(borrow_xmlparser_manager_mut(|x| x.create_instance(args))),
+        "fileio" => Ok(borrow_fileio_manager_mut(|x| x.create_instance(args))),
         _ => Err(ScriptError::new(format!("Xtra {} not found", xtra_name))),
     }
 }

@@ -33,6 +33,59 @@ impl VectorDatumHandlers {
         match handler_name {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
+            "duplicate" => Ok(datum.clone()),
+            "distanceTo" => reserve_player_mut(|player| {
+                let a = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
+                let dx = a[0] - b[0];
+                let dy = a[1] - b[1];
+                let dz = a[2] - b[2];
+                Ok(player.alloc_datum(Datum::Float((dx*dx + dy*dy + dz*dz).sqrt())))
+            }),
+            "getNormalized" => reserve_player_mut(|player| {
+                let [x, y, z] = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let len = (x*x + y*y + z*z).sqrt();
+                if len > 1e-10 {
+                    Ok(player.alloc_datum(Datum::Vector([x/len, y/len, z/len])))
+                } else {
+                    Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0])))
+                }
+            }),
+            "normalize" => reserve_player_mut(|player| {
+                let [x, y, z] = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let len = (x*x + y*y + z*z).sqrt();
+                if len > 1e-10 {
+                    *player.get_datum_mut(datum) = Datum::Vector([x/len, y/len, z/len]);
+                }
+                Ok(DatumRef::Void)
+            }),
+            "crossProduct" | "cross" => reserve_player_mut(|player| {
+                let a = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
+                Ok(player.alloc_datum(Datum::Vector([
+                    a[1]*b[2] - a[2]*b[1],
+                    a[2]*b[0] - a[0]*b[2],
+                    a[0]*b[1] - a[1]*b[0],
+                ])))
+            }),
+            "dotProduct" | "dot" => reserve_player_mut(|player| {
+                let a = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
+                Ok(player.alloc_datum(Datum::Float(a[0]*b[0] + a[1]*b[1] + a[2]*b[2])))
+            }),
+            "angleBetween" => reserve_player_mut(|player| {
+                let a = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
+                let len_a = (a[0]*a[0] + a[1]*a[1] + a[2]*a[2]).sqrt();
+                let len_b = (b[0]*b[0] + b[1]*b[1] + b[2]*b[2]).sqrt();
+                let angle = if len_a > 1e-10 && len_b > 1e-10 {
+                    let cos_angle = (a[0]*b[0] + a[1]*b[1] + a[2]*b[2]) / (len_a * len_b);
+                    cos_angle.clamp(-1.0, 1.0).acos().to_degrees()
+                } else {
+                    0.0
+                };
+                Ok(player.alloc_datum(Datum::Float(angle)))
+            }),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for vector"
             ))),

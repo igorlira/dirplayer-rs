@@ -145,6 +145,9 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
         Datum::MovieRef => {
             format!("<_movie>")
         }
+        Datum::MouseRef => {
+            format!("<_mouse>")
+        }
         Datum::XmlRef(id) => {
             format!("<xml:{}>", id)
         }
@@ -170,6 +173,16 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
         }
         Datum::JavaScript(data) => {
             format!("<javascript {} bytes>", data.len())
+        }
+        Datum::FlashObjectRef(fr) => {
+            format!("<Flash object: {}>", fr.path)
+        }
+        Datum::Shockwave3dObjectRef(sr) => {
+            format!("{}(\"{}\")", sr.object_type, sr.name)
+        }
+        Datum::Transform3d(m) => {
+            format!("transform({:.2},{:.2},{:.2},{:.2}, {:.2},{:.2},{:.2},{:.2}, {:.2},{:.2},{:.2},{:.2}, {:.2},{:.2},{:.2},{:.2})",
+                m[0],m[1],m[2],m[3], m[4],m[5],m[6],m[7], m[8],m[9],m[10],m[11], m[12],m[13],m[14],m[15])
         }
     }
 }

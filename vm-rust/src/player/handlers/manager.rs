@@ -1,4 +1,5 @@
 use log::{warn, debug, error};
+use wasm_bindgen::prelude::*;
 
 use super::{
     cast::CastHandlers,
@@ -25,9 +26,78 @@ use crate::{
     },
 };
 
+#[wasm_bindgen]
+extern "C" {
+    /// Call into Ruffle's JS API to get a Flash variable
+    #[wasm_bindgen(js_name = "ruffleGetVariable", catch)]
+    fn ruffle_get_variable(cast_lib: i32, cast_member: i32, path: &str) -> Result<JsValue, JsValue>;
+
+    /// Call into Ruffle's JS API to set a Flash variable
+    #[wasm_bindgen(js_name = "ruffleSetVariable", catch)]
+    fn ruffle_set_variable(cast_lib: i32, cast_member: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
+
+    /// Call a Flash function via Ruffle's JS API
+    #[wasm_bindgen(js_name = "ruffleCallFunction", catch)]
+    fn ruffle_call_function(cast_lib: i32, cast_member: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
+
+    /// Go to a specific frame on a Flash instance
+    #[wasm_bindgen(js_name = "ruffleGoToFrame")]
+    fn ruffle_goto_frame(cast_lib: i32, cast_member: i32, frame: i32);
+
+    #[wasm_bindgen(js_name = "ruffleStop")]
+    fn ruffle_stop(cast_lib: i32, cast_member: i32);
+
+    #[wasm_bindgen(js_name = "rufflePlay")]
+    fn ruffle_play(cast_lib: i32, cast_member: i32);
+
+    #[wasm_bindgen(js_name = "ruffleRewind")]
+    fn ruffle_rewind(cast_lib: i32, cast_member: i32);
+
+    #[wasm_bindgen(js_name = "ruffleIsPlaying")]
+    fn ruffle_is_playing(cast_lib: i32, cast_member: i32) -> bool;
+
+    #[wasm_bindgen(js_name = "ruffleGetFrameCount")]
+    fn ruffle_get_frame_count(cast_lib: i32, cast_member: i32) -> i32;
+
+    #[wasm_bindgen(js_name = "ruffleGetCurrentFrame")]
+    fn ruffle_get_current_frame(cast_lib: i32, cast_member: i32) -> i32;
+
+    #[wasm_bindgen(js_name = "ruffleCallFrame")]
+    fn ruffle_call_frame(cast_lib: i32, cast_member: i32, frame: i32);
+
+    #[wasm_bindgen(js_name = "ruffleHitTest")]
+    fn ruffle_hit_test(cast_lib: i32, cast_member: i32, x: f64, y: f64) -> bool;
+
+    #[wasm_bindgen(js_name = "ruffleGetFlashProperty", catch)]
+    fn ruffle_get_flash_property(cast_lib: i32, cast_member: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_name = "ruffleSetFlashProperty")]
+    fn ruffle_set_flash_property(cast_lib: i32, cast_member: i32, target: &str, prop_num: i32, value: &str);
+}
+
 pub struct BuiltInHandlerManager {}
 
 impl BuiltInHandlerManager {
+    /// Resolve a sprite datum to (cast_lib, cast_member) for Flash bridge calls.
+    fn resolve_flash_member(datum_ref: &DatumRef) -> Result<Option<(i32, i32)>, ScriptError> {
+        reserve_player_ref(|player| {
+            let datum = player.get_datum(datum_ref);
+            let sprite_num = match datum {
+                Datum::SpriteRef(n) => *n,
+                Datum::Int(n) => *n as i16,
+                _ => return Ok(None),
+            };
+            let sprite = match player.movie.score.get_sprite(sprite_num) {
+                Some(s) => s,
+                None => return Ok(None),
+            };
+            match &sprite.member {
+                Some(member_ref) => Ok(Some((member_ref.cast_lib as i32, member_ref.cast_member as i32))),
+                None => Ok(None),
+            }
+        })
+    }
+
     fn param(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_ref(|player| {
             let param_number = player.get_datum(&args[0]).int_value()?;
@@ -57,18 +127,71 @@ impl BuiltInHandlerManager {
         })
     }
 
+    fn get_pos_global(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // getPos(list, value) - find position of value in list
+        use crate::player::compare::datum_equals;
+        reserve_player_mut(|player| {
+            let list_datum = player.get_datum(&args[0]);
+            let search_ref = &args[1];
+            match list_datum {
+                Datum::List(_, items, _) => {
+                    let items = items.clone();
+                    for (i, item_ref) in items.iter().enumerate() {
+                        let item = player.get_datum(item_ref);
+                        let search = player.get_datum(search_ref);
+                        if datum_equals(item, search, &player.allocator)? {
+                            return Ok(player.alloc_datum(Datum::Int((i + 1) as i32)));
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Int(0)))
+                }
+                Datum::PropList(pairs, _) => {
+                    let pairs = pairs.clone();
+                    for (i, (_, val_ref)) in pairs.iter().enumerate() {
+                        let val = player.get_datum(val_ref);
+                        let search = player.get_datum(search_ref);
+                        if datum_equals(val, search, &player.allocator)? {
+                            return Ok(player.alloc_datum(Datum::Int((i + 1) as i32)));
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Int(0)))
+                }
+                _ => Err(ScriptError::new(format!("getPos: not a list")))
+            }
+        })
+    }
+
     fn get_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {  // Changed to reserve_player_mut
+        // Check if it's a FlashObjectRef first (needs special handling to avoid nested locks)
+        let flash_info = reserve_player_ref(|player| {
+            let obj = player.get_datum(&args[0]);
+            if let Datum::FlashObjectRef(flash_ref) = obj {
+                Some((flash_ref.clone(), player.get_datum(&args[1]).int_value().unwrap_or(0)))
+            } else {
+                None
+            }
+        });
+
+        if let Some((flash_ref, position)) = flash_info {
+            // Flash arrays use 0-based indexing
+            let prop_name = position.to_string();
+            let prop_ref = reserve_player_mut(|player| {
+                player.alloc_datum(Datum::FlashObjectRef(flash_ref))
+            });
+            return crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::get_prop(&prop_ref, &prop_name);
+        }
+
+        reserve_player_mut(|player| {
             let obj = player.get_datum(&args[0]);
             let position = player.get_datum(&args[1]).int_value()?;
             let index = (position - 1) as usize;
-            
+
             debug!(
-                "getAt: list={}, index={}", 
+                "getAt: list={}, index={}",
                 format_concrete_datum(obj, player),
                 position
             );
-            
+
             match obj {
                 Datum::Point(arr) => {
                     if index >= 2 {
@@ -89,45 +212,49 @@ impl BuiltInHandlerManager {
                     }
                     Ok(arr[index].clone())
                 }
-                Datum::List(_, list, ..) => {
-                    let index = (position - 1) as usize;
+                Datum::List(datum_type, list, ..) => {
+                    let index = if *datum_type == crate::director::lingo::datum::DatumType::XmlChildNodes {
+                        position as usize // 0-based for Flash/XML arrays
+                    } else {
+                        (position - 1) as usize // 1-based for Lingo lists
+                    };
                     if index >= list.len() {
                         return Err(ScriptError::new(format!(
-                            "Index {} out of bounds for list of length {}", 
-                            position, 
+                            "Index {} out of bounds for list of length {}",
+                            position,
                             list.len()
                         )));
                     }
                     let result = list[index].clone();
-                    
+
                     debug!(
-                        "getAt returned: {}", 
+                        "getAt returned: {}",
                         format_concrete_datum(player.get_datum(&result), player)
                     );
-                    
+
                     Ok(result)
                 }
                 Datum::PropList(prop_list, ..) => {
                     let index = (position - 1) as usize;
                     if index >= prop_list.len() {
                         return Err(ScriptError::new(format!(
-                            "Index {} out of bounds for proplist of length {}", 
-                            position, 
+                            "Index {} out of bounds for proplist of length {}",
+                            position,
                             prop_list.len()
                         )));
                     }
                     let result = prop_list[index].1.clone();
-                    
+
                     debug!(
-                        "getAt returned (from PropList): {}", 
+                        "getAt returned (from PropList): {}",
                         format_concrete_datum(player.get_datum(&result), player)
                     );
-                    
+
                     Ok(result)
                 }
                 _ => {
                     Err(ScriptError::new(format!(
-                        "Cannot getAt of non-list (type: {})", 
+                        "Cannot getAt of non-list (type: {})",
                         obj.type_str()
                     )))
                 }
@@ -160,7 +287,8 @@ impl BuiltInHandlerManager {
             let list_ref = &args[0];
             let position = player.get_datum(&args[1]).int_value()?;
             let new_value = args[2].clone();
-            let index = (position - 1) as usize;
+            let is_zero_based = matches!(player.get_datum(list_ref), Datum::List(crate::director::lingo::datum::DatumType::XmlChildNodes, ..));
+            let index = if is_zero_based { position as usize } else { (position - 1) as usize };
             
             let list_datum = player.get_datum(list_ref);
             debug!(
@@ -596,6 +724,7 @@ impl BuiltInHandlerManager {
             "count" => Self::count(args),
             "getat" => Self::get_at(args),
             "getlast" => Self::get_last(args),
+            "getpos" => Self::get_pos_global(args),
             "setat" => Self::set_at(args),
             "ilk" => TypeHandlers::ilk(args),
             "member" => MovieHandlers::member(args),
@@ -616,6 +745,13 @@ impl BuiltInHandlerManager {
             "clearglobals" => Self::clear_globals(args),
             "sprite" => MovieHandlers::sprite(args),
             "point" => TypeHandlers::point(args),
+            "clickloc" => {
+                reserve_player_mut(|player| {
+                    let x_ref = player.alloc_datum(Datum::Int(player.movie.click_loc.0));
+                    let y_ref = player.alloc_datum(Datum::Int(player.movie.click_loc.1));
+                    Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                })
+            }
             "cursor" => TypeHandlers::cursor(args),
             "externalparamcount" => MovieHandlers::external_param_count(args),
             "externalparamname" => MovieHandlers::external_param_name(args),
@@ -637,6 +773,7 @@ impl BuiltInHandlerManager {
             "stopevent" => MovieHandlers::stop_event(args),
             "getpref" => MovieHandlers::get_pref(args),
             "setpref" => MovieHandlers::set_pref(args),
+            "urlencode" => StringHandlers::url_encode(args),
             "gotonetpage" => MovieHandlers::go_to_net_page(args),
             "gotonetmovie" => MovieHandlers::go_to_net_movie(args),
             "pass" => MovieHandlers::pass(args),
@@ -645,10 +782,198 @@ impl BuiltInHandlerManager {
             "power" => TypeHandlers::power(args),
             "add" => TypeHandlers::add(args),
             "abort" => Err(ScriptError::new_code(ScriptErrorCode::Abort, "abort".to_string())),
-            "getvariable" | "setvariable" => {
-                // Flash (SWF) member interop stubs — getVariable returns a variable
-                // from a Flash sprite, setVariable sets one. Flash members are not
-                // supported, so return VOID / no-op.
+            "mousedown" => {
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(datum_bool(player.movie.mouse_down)))
+                })
+            }
+            "rightmousedown" => {
+                // We don't track right mouse state separately yet — return FALSE
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(datum_bool(false)))
+                })
+            }
+            "getrendererservices" => {
+                // Return a prop list with renderer info stubs
+                reserve_player_mut(|player| {
+                    let make_sym = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::Symbol(s.to_string()));
+                    let make_str = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::String(s.to_string()));
+                    let make_int = |p: &mut DirPlayer, n: i32| p.alloc_datum(Datum::Int(n));
+
+                    // rendererDeviceList
+                    let rdl_key = make_sym(player, "rendererDeviceList");
+                    let device = make_str(player, "WebGL2");
+                    let rdl_val = player.alloc_datum(Datum::List(DatumType::List, vec![device], false));
+
+                    // renderer
+                    let rend_key = make_sym(player, "renderer");
+                    let rend_val = make_str(player, "#openGL");
+
+                    // Hardware info as nested proplist
+                    let vendor_k = make_sym(player, "vendor");
+                    let vendor_v = make_str(player, "WebGL");
+                    let model_k = make_sym(player, "model");
+                    let model_v = make_str(player, "WebGL2 Renderer");
+                    let version_k = make_sym(player, "version");
+                    let version_v = make_str(player, "2.0");
+                    let max_tex_k = make_sym(player, "maxTextureSize");
+                    let max_tex_v = make_int(player, 4096);
+                    let tex_fmt_k = make_sym(player, "supportedTextureRenderFormats");
+                    let fmt = make_str(player, "rgba8880");
+                    let tex_fmt_v = player.alloc_datum(Datum::List(DatumType::List, vec![fmt], false));
+                    let tex_units_k = make_sym(player, "textureUnits");
+                    let tex_units_v = make_int(player, 8);
+                    let depth_k = make_sym(player, "depthBufferRange");
+                    let depth_v = make_int(player, 24);
+                    let color_k = make_sym(player, "colorBufferRange");
+                    let color_v = make_int(player, 32);
+
+                    let hw_info = player.alloc_datum(Datum::PropList(vec![
+                        (vendor_k, vendor_v), (model_k, model_v), (version_k, version_v),
+                        (max_tex_k, max_tex_v), (tex_fmt_k, tex_fmt_v), (tex_units_k, tex_units_v),
+                        (depth_k, depth_v), (color_k, color_v),
+                    ], false));
+                    let hw_key = make_sym(player, "hardwareInfo");
+
+                    let result = player.alloc_datum(Datum::PropList(vec![
+                        (rdl_key, rdl_val), (rend_key, rend_val), (hw_key, hw_info),
+                    ], false));
+                    Ok(result)
+                })
+            }
+            "getvariable" => {
+                // Flash (SWF) member interop — getVariable(sprite, path)
+                if args.len() >= 2 {
+                    let member_ref = Self::resolve_flash_member(&args[0])?;
+                    let path = reserve_player_ref(|player| {
+                        player.get_datum(&args[1]).string_value()
+                    })?;
+                    if let Some((cast_lib, cast_member)) = member_ref {
+                        match ruffle_get_variable(cast_lib, cast_member, &path) {
+                            Ok(val) => {
+                                if let Some(s) = val.as_string() {
+                                    return reserve_player_mut(|player| {
+                                        Ok(player.alloc_datum(Datum::String(s)))
+                                    });
+                                }
+                            }
+                            Err(e) => warn!("getVariable error: {:?}", e),
+                        }
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "setvariable" => {
+                // Flash (SWF) member interop — setVariable(sprite, path, value)
+                if args.len() >= 3 {
+                    let member_ref = Self::resolve_flash_member(&args[0])?;
+                    let path = reserve_player_ref(|player| {
+                        player.get_datum(&args[1]).string_value()
+                    })?;
+                    let value = reserve_player_ref(|player| {
+                        player.get_datum(&args[2]).string_value()
+                    })?;
+                    if let Some((cast_lib, cast_member)) = member_ref {
+                        if let Err(e) = ruffle_set_variable(cast_lib, cast_member, &path, &value) {
+                            warn!("setVariable error: {:?}", e);
+                        }
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "gotoframe" => {
+                // Flash (SWF) member interop — goToFrame(sprite, frame)
+                if args.len() >= 2 {
+                    let member_ref = Self::resolve_flash_member(&args[0])?;
+                    let frame = reserve_player_ref(|player| {
+                        player.get_datum(&args[1]).int_value()
+                    })?;
+                    if let Some((cast_lib, cast_member)) = member_ref {
+                        ruffle_goto_frame(cast_lib, cast_member, frame);
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "callframe" => {
+                if args.len() >= 2 {
+                    let member_ref = Self::resolve_flash_member(&args[0])?;
+                    let frame = reserve_player_ref(|player| {
+                        player.get_datum(&args[1]).int_value()
+                    })?;
+                    if let Some((cast_lib, cast_member)) = member_ref {
+                        ruffle_call_frame(cast_lib, cast_member, frame);
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "getflashproperty" => {
+                if args.len() >= 3 {
+                    let member_ref = Self::resolve_flash_member(&args[0])?;
+                    let target = reserve_player_ref(|player| {
+                        player.get_datum(&args[1]).string_value()
+                    })?;
+                    let prop_num = reserve_player_ref(|player| {
+                        player.get_datum(&args[2]).int_value()
+                    })?;
+                    if let Some((cast_lib, cast_member)) = member_ref {
+                        match ruffle_get_flash_property(cast_lib, cast_member, &target, prop_num) {
+                            Ok(val) => {
+                                if let Some(s) = val.as_string() {
+                                    return reserve_player_mut(|player| {
+                                        Ok(player.alloc_datum(Datum::String(s)))
+                                    });
+                                }
+                            }
+                            Err(e) => warn!("getFlashProperty error: {:?}", e),
+                        }
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "setflashproperty" => {
+                if args.len() >= 4 {
+                    let member_ref = Self::resolve_flash_member(&args[0])?;
+                    let target = reserve_player_ref(|player| {
+                        player.get_datum(&args[1]).string_value()
+                    })?;
+                    let prop_num = reserve_player_ref(|player| {
+                        player.get_datum(&args[2]).int_value()
+                    })?;
+                    let value = reserve_player_ref(|player| {
+                        player.get_datum(&args[3]).string_value()
+                    })?;
+                    if let Some((cast_lib, cast_member)) = member_ref {
+                        ruffle_set_flash_property(cast_lib, cast_member, &target, prop_num, &value);
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "hittest" => {
+                if args.len() >= 3 {
+                    let member_ref = Self::resolve_flash_member(&args[0])?;
+                    let x = reserve_player_ref(|player| {
+                        player.get_datum(&args[1]).int_value()
+                    })?;
+                    let y = reserve_player_ref(|player| {
+                        player.get_datum(&args[2]).int_value()
+                    })?;
+                    if let Some((cast_lib, cast_member)) = member_ref {
+                        let result = ruffle_hit_test(cast_lib, cast_member, x as f64, y as f64);
+                        return reserve_player_mut(|player| {
+                            Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
+                        });
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "telltarget" => {
+                if args.len() >= 2 {
+                    // tellTarget is complex; for now just log it
+                    let target = reserve_player_ref(|player| {
+                        player.get_datum(&args[0]).string_value()
+                    })?;
+                    debug!("tellTarget: target={}", target);
+                }
                 Ok(DatumRef::Void)
             }
             "getaprop" => TypeHandlers::get_a_prop(args),
@@ -839,7 +1164,9 @@ impl BuiltInHandlerManager {
             "atan" => TypeHandlers::atan(args),
             "sound" => TypeHandlers::sound(args),
             "vector" => TypeHandlers::vector(args),
+            "transform" => TypeHandlers::transform3d(args),
             "color" => TypeHandlers::color(args),
+            "date" => TypeHandlers::date(args),
             "keypressed" => Self::key_pressed(args),
             "showglobals" => Self::show_globals(),
             "tellstreamstatus" => Self::tell_stream_status(args),
@@ -892,15 +1219,15 @@ impl BuiltInHandlerManager {
                         .find_member_by_ref(&member_ref)
                         .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
 
-                    let (text, fixed_line_space, top_spacing) = match &member.member_type {
+                    let (text, fixed_line_space, top_spacing, char_spacing, member_width) = match &member.member_type {
                         crate::player::cast_member::CastMemberType::Text(t) => {
-                            (t.text.clone(), t.fixed_line_space, t.top_spacing)
+                            (t.text.clone(), t.fixed_line_space, t.top_spacing, t.char_spacing as i16, t.width as i16)
                         }
                         crate::player::cast_member::CastMemberType::Field(f) => {
-                            (f.text.clone(), f.fixed_line_space, f.top_spacing)
+                            (f.text.clone(), f.fixed_line_space, f.top_spacing, 0, f.width as i16)
                         }
                         crate::player::cast_member::CastMemberType::Button(b) => {
-                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing)
+                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing, 0, b.field.width as i16)
                         }
                         _ => {
                             return Err(ScriptError::new(
@@ -915,6 +1242,8 @@ impl BuiltInHandlerManager {
                         line_height: None,
                         line_spacing: fixed_line_space,
                         top_spacing,
+                        char_spacing,
+                        member_width: if member_width > 0 { Some(member_width) } else { None },
                     };
 
                     // char_pos is 1-based; convert to 0-based index
@@ -1162,6 +1491,7 @@ impl BuiltInHandlerManager {
                 | Datum::Matte(..)
                 | Datum::PlayerRef
                 | Datum::MovieRef
+                | Datum::MouseRef
                 | Datum::Stage
                 | Datum::CastLib(_)
                 | Datum::DateRef(_)
@@ -1350,8 +1680,23 @@ fn get_datum_script_instance_ids(
             instance_refs.push(instance_id.clone());
         }
         Datum::SpriteRef(sprite_id) => {
-            let sprite = player.movie.score.get_sprite(*sprite_id).unwrap();
-            instance_refs.extend(sprite.script_instance_list.clone());
+            // Check cached scriptInstanceList first (includes behaviors added via .add())
+            if let Some(cached_ref) = player.script_instance_list_cache.get(sprite_id).cloned() {
+                let datum = player.get_datum(&cached_ref).clone();
+                if let Datum::List(_, item_refs, _) = datum {
+                    for item_ref in &item_refs {
+                        if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
+                            instance_refs.push(id.clone());
+                        }
+                    }
+                } else {
+                    let sprite = player.movie.score.get_sprite(*sprite_id).unwrap();
+                    instance_refs.extend(sprite.script_instance_list.clone());
+                }
+            } else {
+                let sprite = player.movie.score.get_sprite(*sprite_id).unwrap();
+                instance_refs.extend(sprite.script_instance_list.clone());
+            }
         }
         Datum::Int(_) => {}
         _ => {

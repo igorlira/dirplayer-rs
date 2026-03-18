@@ -283,7 +283,9 @@ impl FieldMemberHandlers {
                             rotation: 0.0,
                             skew: 0.0,
                             sprite: None,
-                            original_dst_rect: None,
+                            mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                         };
 
                         bitmap.draw_text(

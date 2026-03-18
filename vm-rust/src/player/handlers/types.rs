@@ -70,10 +70,14 @@ impl TypeUtils {
             Datum::Matte(..) => Ok(vec!["image"]),
             Datum::PlayerRef => Ok(vec!["player"]),
             Datum::MovieRef => Ok(vec!["movie"]),
+            Datum::MouseRef => Ok(vec!["mouse"]),
             Datum::XmlRef(..) => Ok(vec!["xml"]),
             Datum::DateRef(..) => Ok(vec!["date"]),
             Datum::MathRef(..) => Ok(vec!["math"]),
             Datum::VarRef(..) => Ok(vec!["void"]), // VarRef should be dereferenced before checking ilk
+            Datum::FlashObjectRef(..) => Ok(vec!["instance"]),
+            Datum::Shockwave3dObjectRef(ref r) => Ok(vec![&r.object_type]),
+            Datum::Transform3d(..) => Ok(vec!["transform"]),
 
             _ => Err(ScriptError::new(format!(
                 "Getting ilk for unknown type: {}",
@@ -250,6 +254,15 @@ impl TypeUtils {
                     }
                 }
             }
+            Datum::List(_, items, _) => {
+                let index = prop_key.int_value()?;
+                let idx = (index - 1) as usize;
+                if idx < items.len() {
+                    items[idx].clone()
+                } else {
+                    player.alloc_datum(Datum::Void)
+                }
+            }
             _ => {
                 web_sys::console::log_1(
                     &format!(
@@ -301,12 +314,25 @@ impl TypeUtils {
                 }
                 Ok(())
             }
+            DatumType::Rect => {
+                let position = player.get_datum(prop_key_ref).int_value()?;
+                let index = (position - 1) as usize;
+                if index >= 4 {
+                    return Err(ScriptError::new(format!("Rect index out of bounds: {position}")));
+                }
+                let rect = player.get_datum_mut(datum_ref).to_rect_mut()?;
+                rect[index] = value_ref.clone();
+                Ok(())
+            }
             _ => {
-                return Err(ScriptError::new(format!(
-                    "Cannot set sub-prop `{}` on prop of type {}",
-                    formatted_key,
-                    datum_type.type_str()
-                )))
+                web_sys::console::warn_1(
+                    &format!(
+                        "⚠️ Cannot set sub-prop `{}` on prop of type {} (ignored)",
+                        formatted_key,
+                        datum_type.type_str()
+                    ).into(),
+                );
+                Ok(())
             }
         }
     }
@@ -704,24 +730,52 @@ impl TypeHandlers {
         let result = match obj_type {
             DatumType::Symbol => reserve_player_mut(|player| {
                 let s = player.get_datum(&args[0]).string_value()?;
-                let cast_num = if args.len() > 1 {
-                    match player.get_datum(&args[1]) {
-                        Datum::CastLib(cast_num) => *cast_num,
+                // args[1] can be: CastLib (create in first free slot) or CastMember (create at specific slot)
+                if args.len() > 1 {
+                    match player.get_datum(&args[1]).clone() {
+                        Datum::CastLib(cast_num) => {
+                            let cast = player.movie.cast_manager.get_cast_mut(cast_num);
+                            let member_ref = cast.create_member_at(
+                                cast.first_free_member_id(),
+                                &s,
+                                &mut player.bitmap_manager,
+                            )?;
+                            Ok(player.alloc_datum(Datum::CastMember(member_ref)))
+                        }
+                        Datum::CastMember(member_ref) => {
+                            // Create/replace at the specific member slot
+                            let cast_num = (member_ref.cast_lib as u32).max(1);
+                            let num_casts = player.movie.cast_manager.casts_len();
+                            if cast_num as usize > num_casts || cast_num == 0 {
+                                web_sys::console::warn_1(&format!(
+                                    "[new] Cast {} not found for new(#{}, member({},{}))",
+                                    cast_num, s, member_ref.cast_lib, member_ref.cast_member
+                                ).into());
+                                Ok(player.alloc_datum(Datum::Void))
+                            } else {
+                                let cast = player.movie.cast_manager.get_cast_mut(cast_num);
+                                let new_ref = cast.create_member_at(
+                                    member_ref.cast_member as u32,
+                                    &s,
+                                    &mut player.bitmap_manager,
+                                )?;
+                                Ok(player.alloc_datum(Datum::CastMember(new_ref)))
+                            }
+                        }
                         other => Err(ScriptError::new(format!(
-                            "Unsupported call location type: {}",
+                            "Unsupported new() location type: {}",
                             other.type_str()
                         )))?,
                     }
                 } else {
-                    1
-                };
-                let cast = player.movie.cast_manager.get_cast_mut(cast_num);
-                let member_ref = cast.create_member_at(
-                    cast.first_free_member_id(),
-                    &s,
-                    &mut player.bitmap_manager,
-                )?;
-                Ok(player.alloc_datum(Datum::CastMember(member_ref)))
+                    let cast = player.movie.cast_manager.get_cast_mut(1);
+                    let member_ref = cast.create_member_at(
+                        cast.first_free_member_id(),
+                        &s,
+                        &mut player.bitmap_manager,
+                    )?;
+                    Ok(player.alloc_datum(Datum::CastMember(member_ref)))
+                }
             }),
             DatumType::ScriptRef => {
                 Ok(
@@ -931,8 +985,10 @@ impl TypeHandlers {
         reserve_player_mut(|player| {
             let xtra_name = player.get_datum(&args[0]).string_value()?;
             if is_xtra_registered(&xtra_name) {
+                web_sys::console::log_1(&format!("Xtra '{}' registered OK", xtra_name).into());
                 Ok(player.alloc_datum(Datum::Xtra(xtra_name)))
             } else {
+                web_sys::console::log_1(&format!("Xtra '{}' NOT registered", xtra_name).into());
                 Err(ScriptError::new(format!(
                     "Xtra {} is not registered",
                     xtra_name
@@ -999,6 +1055,45 @@ impl TypeHandlers {
                 }
             };
             Ok(player.alloc_datum(Datum::Vector([x, y, z])))
+        })
+    }
+
+    pub fn transform3d(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            // transform() with no args returns identity matrix
+            if args.is_empty() {
+                return Ok(player.alloc_datum(Datum::Transform3d([
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ])));
+            }
+            Err(ScriptError::new("transform() takes 0 arguments".into()))
+        })
+    }
+
+    pub fn date(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let date_id = player.allocator.get_free_script_instance_id();
+            let date_obj = if args.len() >= 3 {
+                let year = player.get_datum(&args[0]).int_value()?;
+                let month = player.get_datum(&args[1]).int_value()?;
+                let day = player.get_datum(&args[2]).int_value()?;
+                let js_date = js_sys::Date::new_0();
+                js_date.set_full_year(year as u32);
+                js_date.set_month((month - 1) as u32);
+                js_date.set_date(day as u32);
+                js_date.set_hours(0);
+                js_date.set_minutes(0);
+                js_date.set_seconds(0);
+                js_date.set_milliseconds(0);
+                DateObject::from_timestamp(date_id, js_date.get_time() as i64)
+            } else {
+                DateObject::new(date_id)
+            };
+            player.date_objects.insert(date_id, date_obj);
+            Ok(player.alloc_datum(Datum::DateRef(date_id)))
         })
     }
 
@@ -1528,7 +1623,8 @@ impl TypeHandlers {
 
         match object_type.to_lowercase().as_str() {
             "xml" => reserve_player_mut(|player| {
-                let xml_id = player.allocator.get_free_script_instance_id();
+                let xml_id = player.next_xml_id;
+                player.next_xml_id += 1;
                 let xml_doc = XmlDocument {
                     id: xml_id,
                     root_element: None,
@@ -1540,7 +1636,23 @@ impl TypeHandlers {
             }),
             "date" => reserve_player_mut(|player| {
                 let date_id = player.allocator.get_free_script_instance_id();
-                let date_obj = DateObject::new(date_id);
+                let date_obj = if args.len() >= 4 {
+                    // date(year, month, day)
+                    let year = player.get_datum(&args[1]).int_value()?;
+                    let month = player.get_datum(&args[2]).int_value()?;
+                    let day = player.get_datum(&args[3]).int_value()?;
+                    let js_date = js_sys::Date::new_0();
+                    js_date.set_full_year(year as u32);
+                    js_date.set_month((month - 1) as u32); // JS months are 0-based
+                    js_date.set_date(day as u32);
+                    js_date.set_hours(0);
+                    js_date.set_minutes(0);
+                    js_date.set_seconds(0);
+                    js_date.set_milliseconds(0);
+                    DateObject::from_timestamp(date_id, js_date.get_time() as i64)
+                } else {
+                    DateObject::new(date_id)
+                };
                 player.date_objects.insert(date_id, date_obj);
                 Ok(player.alloc_datum(Datum::DateRef(date_id)))
             }),
@@ -1564,6 +1676,15 @@ impl TypeHandlers {
                     String::new()
                 };
                 reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(value))))
+            }
+            "array" => {
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::List(
+                        crate::director::lingo::datum::DatumType::XmlChildNodes,
+                        Vec::new(),
+                        false,
+                    )))
+                })
             }
             _ => Err(ScriptError::new(format!(
                 "newObject: Unsupported object type '{}'",

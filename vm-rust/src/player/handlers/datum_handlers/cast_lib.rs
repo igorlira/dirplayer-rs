@@ -15,12 +15,35 @@ impl CastLibDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
-            "getPropRef" => Self::get_prop_ref(datum, args),
+            "getPropRef" | "getProp" => Self::get_prop_ref(datum, args),
+            "count" => Self::count(datum, args),
             _ => Err(ScriptError::new_code(
                 ScriptErrorCode::HandlerNotFound,
                 format!("No handler {handler_name} for castLib datum"),
             )),
         }
+    }
+
+    fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let cast_lib_num = match player.get_datum(datum) {
+                Datum::CastLib(num) => *num,
+                _ => return Err(ScriptError::new("count: datum is not a castLib".to_string())),
+            };
+
+            // count(#member) returns the number of cast members
+            if !args.is_empty() {
+                let prop = player.get_datum(&args[0]).string_value().unwrap_or_default();
+                if prop.eq_ignore_ascii_case("member") {
+                    let cast = player.movie.cast_manager.get_cast(cast_lib_num)?;
+                    return Ok(player.alloc_datum(Datum::Int(cast.members.len() as i32)));
+                }
+            }
+
+            // Default: return member count
+            let cast = player.movie.cast_manager.get_cast(cast_lib_num)?;
+            Ok(player.alloc_datum(Datum::Int(cast.members.len() as i32)))
+        })
     }
 
     fn get_prop_ref(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

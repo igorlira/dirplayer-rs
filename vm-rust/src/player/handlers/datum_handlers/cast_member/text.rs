@@ -58,9 +58,10 @@ impl TextMemberHandlers {
                 } else {
                     start
                 };
-                let chunk_expr = StringChunkType::from(&prop_name);
+                let chunk_type = StringChunkType::try_from_str(&prop_name)
+                    .ok_or_else(|| ScriptError::new(format!("Invalid chunk type '{}' for text member getPropRef", prop_name)))?;
                 let chunk_expr = StringChunkExpr {
-                    chunk_type: chunk_expr,
+                    chunk_type,
                     start,
                     end,
                     item_delimiter: player.movie.item_delimiter.clone(),
@@ -83,6 +84,8 @@ impl TextMemberHandlers {
                     line_height: None,
                     line_spacing: text.fixed_line_space,
                     top_spacing: text.top_spacing,
+                    char_spacing: 0,
+                    member_width: None,
                 };
 
                 let index = get_text_index_at_pos(&text.text, &params, x, y);
@@ -129,6 +132,11 @@ impl TextMemberHandlers {
         let prop_lc = prop.to_ascii_lowercase();
         match prop_lc.as_str() {
             "text" => Ok(Datum::String(text_data.text.to_owned())),
+            "line" => {
+                let lines: Vec<&str> = text_data.text.split('\r').collect();
+                let line_datums = lines.into_iter().map(|l| Datum::String(l.to_string())).map(|d| player.alloc_datum(d)).collect();
+                Ok(Datum::List(DatumType::List, line_datums, false))
+            }
             "alignment" => Ok(Datum::String(text_data.alignment.to_owned())),
             "wordwrap" => Ok(datum_bool(text_data.word_wrap)),
             "width" => Ok(Datum::Int(text_data.width as i32)),
@@ -684,10 +692,14 @@ impl TextMemberHandlers {
                 };
                 is_pfr_font = font.char_widths.is_some();
 
-                let use_native = match glyph_pref {
-                    GlyphPreference::Native => true,
-                    GlyphPreference::Bitmap | GlyphPreference::Outline => false,
-                    GlyphPreference::Auto => false, // Default: bitmap for image property
+                let use_native = if !text_data.tab_stops.is_empty() {
+                    true // Force native rendering for tab stop support
+                } else {
+                    match glyph_pref {
+                        GlyphPreference::Native => true,
+                        GlyphPreference::Bitmap | GlyphPreference::Outline => false,
+                        GlyphPreference::Auto => false, // Default: bitmap for image property
+                    }
                 };
 
                 if use_native && !is_pfr_font {
@@ -726,6 +738,7 @@ impl TextMemberHandlers {
                         text_data.fixed_line_space,
                         text_data.top_spacing,
                         text_data.bottom_spacing,
+                        &text_data.tab_stops,
                     ) {
                         web_sys::console::warn_1(
                             &format!("[text.image] Native render error: {:?}", e).into()
@@ -769,6 +782,7 @@ impl TextMemberHandlers {
                         text_data.fixed_line_space,
                         text_data.top_spacing,
                         text_data.bottom_spacing,
+                        &text_data.tab_stops,
                     ) {
                         web_sys::console::warn_1(
                             &format!("[text.image] Native render error (PFR): {:?}", e).into()
@@ -791,7 +805,9 @@ impl TextMemberHandlers {
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
-                        original_dst_rect: None,
+                        mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                     };
 
                     use crate::player::bitmap::bitmap::resolve_color_ref;
@@ -1727,6 +1743,52 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
+            "charspacing" => Ok(()),
+            "tabs" => {
+                use crate::player::cast_member::TabStop;
+                borrow_member_mut(
+                    member_ref,
+                    |player| {
+                        // tabs is a list of prop lists: [[#type: #right, #position: 200]]
+                        let list_result = value.to_list_tuple();
+                        let tab_items = if let Ok((_, items, _)) = list_result {
+                            items.clone()
+                        } else {
+                            Vec::new()
+                        };
+                        let mut tab_stops = Vec::new();
+                        for item_ref in &tab_items {
+                            let item_datum = player.get_datum(item_ref);
+                            if let Ok((entries, _)) = item_datum.to_map_tuple() {
+                                let entries = entries.clone();
+                                let mut tab_type = "left".to_string();
+                                let mut position = 0i32;
+                                for (key_ref, val_ref) in &entries {
+                                    let key = player.get_datum(key_ref).string_value().unwrap_or_default();
+                                    match key.as_str() {
+                                        "type" => {
+                                            let t = player.get_datum(val_ref).string_value().unwrap_or_default();
+                                            tab_type = t;
+                                        }
+                                        "position" => {
+                                            position = player.get_datum(val_ref).int_value().unwrap_or(0);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                tab_stops.push(TabStop { tab_type, position });
+                            }
+                        }
+                        tab_stops
+                    },
+                    |cast_member, tab_stops| {
+                        if let Some(text) = cast_member.member_type.as_text_mut() {
+                            text.tab_stops = tab_stops;
+                        }
+                        Ok(())
+                    },
+                )
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot set castMember prop {} for text",
                 prop

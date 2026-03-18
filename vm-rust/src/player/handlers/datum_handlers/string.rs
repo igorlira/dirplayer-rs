@@ -68,6 +68,12 @@ impl StringDatumUtils {
                 let code = value.chars().next().map_or(0, |c| c as i32);
                 Ok(Datum::Int(code))
             }
+            "charSpacing" => Ok(Datum::Int(0)),
+            "char" => {
+                // String chunk type accessed as property — return the string itself
+                // so subsequent indexing (e.g., .char[1]) can work via character indexing
+                Ok(Datum::String(value.clone()))
+            }
             "marker" => {
                 // Quirky director behavior:
                 // Any string can run .marker on it to get the frame number of the marker, if it does not match a marker name, it returns 0

@@ -30,6 +30,7 @@ impl FloatDatumHandlers {
                 }
             }
             "string" => Ok(player.alloc_datum(Datum::String(float_value.to_string()))),
+            "magnitude" => Ok(player.alloc_datum(Datum::Float(float_value.abs()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get float property {}",
                 prop

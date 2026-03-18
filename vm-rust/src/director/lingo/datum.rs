@@ -45,12 +45,16 @@ pub enum DatumType {
     Matte,
     PlayerRef,
     MovieRef,
+    MouseRef,
     XmlRef,
     DateRef,
     MathRef,
     Vector,
     Media,
     JavaScript,
+    FlashObjectRef,
+    Shockwave3dObjectRef,
+    Transform3d,
 }
 
 #[derive(Clone, PartialEq, FromPrimitive)]
@@ -61,15 +65,22 @@ pub enum StringChunkType {
     Line,
 }
 
+impl StringChunkType {
+    pub fn try_from_str(s: &str) -> Option<Self> {
+        match s {
+            "item" | "items" => Some(StringChunkType::Item),
+            "word" | "words" => Some(StringChunkType::Word),
+            "char" | "chars" => Some(StringChunkType::Char),
+            "line" | "lines" => Some(StringChunkType::Line),
+            _ => None,
+        }
+    }
+}
+
 impl From<&String> for StringChunkType {
     fn from(s: &String) -> Self {
-        match s.as_str() {
-            "item" => StringChunkType::Item,
-            "word" => StringChunkType::Word,
-            "char" => StringChunkType::Char,
-            "line" => StringChunkType::Line,
-            _ => panic!("Invalid string chunk type"),
-        }
+        StringChunkType::try_from_str(s.as_str())
+            .unwrap_or_else(|| panic!("Invalid string chunk type: {}", s))
     }
 }
 
@@ -109,6 +120,47 @@ pub struct StringChunkExpr {
 pub type PropListPair = (DatumRef, DatumRef);
 pub type TimeoutRef = String;
 pub type XtraInstanceId = u32;
+
+#[derive(Clone, Debug)]
+pub struct FlashObjectRef {
+    pub path: String,
+    pub instance_id: u32,
+    pub cast_lib: i32,
+    pub cast_member: i32,
+}
+
+/// Reference to a Shockwave 3D object (model, shader, texture, camera, light, group, motion).
+/// The object_type + name identify the object within the member's W3dScene.
+#[derive(Clone, Debug)]
+pub struct Shockwave3dObjectRef {
+    /// The cast member that owns this 3D object
+    pub cast_lib: i32,
+    pub cast_member: i32,
+    /// Object type: "model", "shader", "texture", "camera", "light", "group", "motion", "modelResource"
+    pub object_type: String,
+    /// Object name within the scene
+    pub name: String,
+}
+
+impl FlashObjectRef {
+    pub fn from_path_with_member(path: &str, cast_lib: i32, cast_member: i32) -> Self {
+        Self {
+            path: path.to_string(),
+            instance_id: 0,
+            cast_lib,
+            cast_member,
+        }
+    }
+
+    pub fn from_path(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            instance_id: 0,
+            cast_lib: 0,
+            cast_member: 0,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub enum StringChunkSource {
@@ -157,6 +209,7 @@ pub enum Datum {
     Matte(Arc<BitmapMask>),
     PlayerRef,
     MovieRef,
+    MouseRef,
     XmlRef(u32),
     DateRef(u32),
     MathRef(u32),
@@ -164,6 +217,10 @@ pub enum Datum {
     Media(Media),
     Null,
     JavaScript(Vec<u8>),
+    FlashObjectRef(FlashObjectRef),
+    Shockwave3dObjectRef(Shockwave3dObjectRef),
+    /// 4x4 row-major transform matrix for Shockwave 3D
+    Transform3d([f64; 16]),
 }
 
 impl DatumType {
@@ -205,12 +262,16 @@ impl DatumType {
             DatumType::Matte => "matte".to_string(),
             DatumType::PlayerRef => "player_ref".to_string(),
             DatumType::MovieRef => "movie_ref".to_string(),
+            DatumType::MouseRef => "mouse_ref".to_string(),
             DatumType::XmlRef => "xml".to_string(),
             DatumType::DateRef => "date".to_string(),
             DatumType::MathRef => "math".to_string(),
             DatumType::Vector => "vector".to_string(),
             DatumType::Media => "media".to_string(),
             DatumType::JavaScript => "javascript".to_string(),
+            DatumType::FlashObjectRef => "flash_object_ref".to_string(),
+            DatumType::Shockwave3dObjectRef => "shockwave3d_object_ref".to_string(),
+            DatumType::Transform3d => "transform".to_string(),
         }
     }
 }
@@ -249,6 +310,7 @@ impl Datum {
             Datum::Matte(..) => DatumType::Matte,
             Datum::PlayerRef => DatumType::PlayerRef,
             Datum::MovieRef => DatumType::MovieRef,
+            Datum::MouseRef => DatumType::MouseRef,
             Datum::XmlRef(_) => DatumType::XmlRef,
             Datum::DateRef(_) => DatumType::DateRef,
             Datum::MathRef(_) => DatumType::MathRef,
@@ -256,6 +318,9 @@ impl Datum {
             Datum::Media(_) => DatumType::Media,
             Datum::Null => DatumType::Null,
             Datum::JavaScript(_) => DatumType::JavaScript,
+            Datum::FlashObjectRef(_) => DatumType::FlashObjectRef,
+            Datum::Shockwave3dObjectRef(_) => DatumType::Shockwave3dObjectRef,
+            Datum::Transform3d(_) => DatumType::Transform3d,
         }
     }
 
@@ -268,11 +333,13 @@ impl Datum {
             Datum::String(s) => Ok(s.clone()),
             Datum::StringChunk(_, _, str_value) => Ok(str_value.to_owned()),
             Datum::Int(n) => Ok(n.to_string()),
+            Datum::Float(n) => Ok(n.to_string()),
             Datum::Symbol(s) => Ok(s.clone()),
             Datum::Vector(v) => Ok(format!("[{},{},{}]", v[0], v[1], v[2])),
             Datum::Rect(r) => Ok(format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3])),
             Datum::ColorRef(cr) => Ok(format!("{:?}", cr)),
             Datum::Void => Ok("VOID".to_string()),
+            Datum::FlashObjectRef(fr) => Ok(fr.path.clone()),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum type {} to string",
                 self.type_str()
@@ -389,6 +456,17 @@ impl Datum {
         match self {
             Datum::Void => true,
             _ => false,
+        }
+    }
+
+    pub fn is_flash_object(&self) -> bool {
+        matches!(self, Datum::FlashObjectRef(_))
+    }
+
+    pub fn as_flash_object(&self) -> Option<&FlashObjectRef> {
+        match self {
+            Datum::FlashObjectRef(obj_ref) => Some(obj_ref),
+            _ => None,
         }
     }
 
@@ -655,6 +733,9 @@ impl Datum {
     pub fn to_vector(&self) -> Result<[f64; 3], ScriptError> {
         match self {
             Datum::Vector(v) => Ok(*v),
+            Datum::Int(v) => Ok([*v as f64, *v as f64, *v as f64]),
+            Datum::Float(v) => Ok([*v, *v, *v]),
+            Datum::Void => Ok([0.0, 0.0, 0.0]),
             _ => Err(ScriptError::new(format!(
                 "Expected Vector, got {}",
                 self.type_str()

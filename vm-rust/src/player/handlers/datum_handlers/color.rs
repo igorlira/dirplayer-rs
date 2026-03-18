@@ -28,6 +28,7 @@ impl ColorDatumHandlers {
                 let hex_string = format!("#{:02x}{:02x}{:02x}", r, g, b);
                 Ok(player.alloc_datum(Datum::String(hex_string)))
             }),
+            "duplicate" => Ok(datum.clone()),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for color"
             ))),
@@ -66,6 +67,10 @@ impl ColorDatumHandlers {
                 },
             },
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("color".to_owned()))),
+            "colorType" => match color_ref {
+                ColorRef::Rgb(..) => Ok(player.alloc_datum(Datum::Symbol("rgb".to_owned()))),
+                ColorRef::PaletteIndex(_) => Ok(player.alloc_datum(Datum::Symbol("paletteIndex".to_owned()))),
+            },
             "paletteIndex" => match color_ref {
                 ColorRef::PaletteIndex(i) => Ok(player.alloc_datum(Datum::Int(*i as i32))),
                 ColorRef::Rgb(..) => Err(ScriptError::new("RGB color has no palette index".to_owned())),
@@ -124,6 +129,38 @@ impl ColorDatumHandlers {
                         *color_ref = ColorRef::Rgb(0, 0, b as u8);
                         Ok(())
                     }
+                }
+            }
+            "colorType" => {
+                let symbol = player.get_datum(value).string_value()?;
+                let color_ref = player.get_datum(datum).to_color_ref()?.clone();
+                match symbol.as_str() {
+                    "rgb" => {
+                        if let ColorRef::PaletteIndex(_) = color_ref {
+                            let (r, g, b) = resolve_color_ref(
+                                &player.movie.cast_manager.palettes(),
+                                &color_ref,
+                                &PaletteRef::BuiltIn(get_system_default_palette()),
+                                8,
+                            );
+                            let color_mut = player.get_datum_mut(datum).to_color_ref_mut()?;
+                            *color_mut = ColorRef::Rgb(r, g, b);
+                        }
+                        Ok(())
+                    }
+                    "paletteIndex" => {
+                        if let ColorRef::Rgb(r, g, b) = color_ref {
+                            // Convert RGB to nearest palette index (default to index based on luminance)
+                            let luminance = (r as u16 * 30 + g as u16 * 59 + b as u16 * 11) / 100;
+                            let index = if luminance > 128 { 0u8 } else { 255u8 };
+                            let color_mut = player.get_datum_mut(datum).to_color_ref_mut()?;
+                            *color_mut = ColorRef::PaletteIndex(index);
+                        }
+                        Ok(())
+                    }
+                    _ => Err(ScriptError::new(format!(
+                        "Invalid colorType: {}. Expected #rgb or #paletteIndex", symbol
+                    ))),
                 }
             }
             _ => Err(ScriptError::new(format!(

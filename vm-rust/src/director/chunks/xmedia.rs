@@ -49,6 +49,10 @@ impl XMediaChunk {
         false
     }
 
+    pub fn is_shockwave3d(&self) -> bool {
+        self.raw_data.len() >= 4 && &self.raw_data[0..4] == b"3DEM"
+    }
+
     pub fn is_styled_text(&self) -> bool {
         if self.raw_data.len() < 12 {
             web_sys::console::log_1(&format!("XMED data too small ({} bytes)", self.raw_data.len()).into());

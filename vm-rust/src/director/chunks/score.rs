@@ -740,10 +740,10 @@ impl ScoreFrameData {
             }
 
             console::log_1(&format!(
-                "🏁 Finished processing {} frames. Sprites: {}, Sounds: {}, Tempo changes: {}, Palette changes: {}",
-                header.frame_count, frame_channel_data.len(), sound_channel_data.len(), tempo_channel_data.len(), palette_channel_data.len()
+                "🏁 Finished processing {} frames. Sprites: {}, Sounds: {}, Tempo changes: {}, Palette changes: {} num_channels={} sprite_record_size={} frames_version={}",
+                header.frame_count, frame_channel_data.len(), sound_channel_data.len(), tempo_channel_data.len(), palette_channel_data.len(),
+                header.num_channels, header.sprite_record_size, header.frames_version
             ).into());
-
             (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data, palette_channel_data)
         };
 

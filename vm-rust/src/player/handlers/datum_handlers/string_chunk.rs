@@ -185,7 +185,7 @@ impl StringChunkUtils {
         }
     }
 
-    fn vm_range_to_host(range: (i32, i32), max_length: usize) -> (usize, usize) {
+    pub fn vm_range_to_host(range: (i32, i32), max_length: usize) -> (usize, usize) {
         let (start, end) = range;
         // Director's compiler uses -30000 as a sentinel for "the last element"
         // (e.g. `delete the last char of t` compiles to `delete char -30000 of t`)
@@ -518,8 +518,20 @@ impl StringChunkHandlers {
     }
 
     pub fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::get_prop_inner(datum, args, false)
+    }
+
+    pub fn get_prop_ref(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::get_prop_inner(datum, args, true)
+    }
+
+    fn get_prop_inner(datum: &DatumRef, args: &Vec<DatumRef>, as_ref: bool) -> Result<DatumRef, ScriptError> {
+        let datum = datum.clone();
         reserve_player_mut(|player| {
-            let datum = player.get_datum(datum);
+            let datum_val = player.get_datum(&datum);
+            let (source, _, _) = datum_val.to_string_chunk()?;
+            let source = source.clone();
+            let parent_str = datum_val.string_value()?;
             let prop_name = player.get_datum(&args[0]).string_value()?;
             let start = player.get_datum(&args[1]).int_value()?;
             let end = if args.len() > 2 {
@@ -535,20 +547,56 @@ impl StringChunkHandlers {
             };
 
             let str_value =
-                StringChunkUtils::resolve_chunk_expr_string(&datum.string_value()?, &chunk_expr)?;
-            Ok(player.alloc_datum(Datum::String(str_value)))
+                StringChunkUtils::resolve_chunk_expr_string(&parent_str, &chunk_expr)?;
+            if as_ref {
+                Ok(player.alloc_datum(Datum::StringChunk(source, chunk_expr, str_value)))
+            } else {
+                Ok(player.alloc_datum(Datum::String(str_value)))
+            }
         })
     }
 
     pub fn set_prop(
-        _: &mut DirPlayer,
-        _: &DatumRef,
+        player: &mut DirPlayer,
+        datum_ref: &DatumRef,
         prop: &String,
-        _value_ref: &DatumRef,
+        value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
         match prop.as_str() {
             "font" | "fontStyle" | "color" => {
                 // TODO
+            }
+            "charSpacing" => {
+                // Update the source member's char_spacing
+                // Walk the source chain to find the originating member
+                let new_val = player.get_datum(value_ref).int_value()?;
+                let datum = player.get_datum(datum_ref).clone();
+                if let Datum::StringChunk(source, _, _) = datum {
+                    let mut current_source = source;
+                    loop {
+                        match current_source {
+                            StringChunkSource::Member(member_ref) => {
+                                if let Some(member) = player.movie.cast_manager.find_member_by_ref_mut(&member_ref) {
+                                    if let CastMemberType::Text(ref mut text) = member.member_type {
+                                        text.char_spacing = new_val;
+                                        for span in text.html_styled_spans.iter_mut() {
+                                            span.style.char_spacing = new_val;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                            StringChunkSource::Datum(ref source_datum_ref) => {
+                                let source_datum = player.get_datum(source_datum_ref).clone();
+                                if let Datum::StringChunk(inner_source, _, _) = source_datum {
+                                    current_source = inner_source;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             _ => {
                 return Err(ScriptError::new(format!(
@@ -589,6 +637,7 @@ impl StringChunkHandlers {
         match handler_name.as_str() {
             "count" => Self::count(datum, args),
             "getProp" => Self::get_prop(datum, args),
+            "getPropRef" => Self::get_prop_ref(datum, args),
             "delete" => Self::delete(datum, args),
             "setContents" => Self::set_contents(datum, args),
             _ => Err(ScriptError::new(format!(

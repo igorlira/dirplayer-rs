@@ -109,6 +109,7 @@ features = [
   'WebGlUniformLocation',
   'WebGlVertexArrayObject',
   'WebGlActiveInfo',
+  'WebGlContextAttributes',
   'MessageChannel',
   'MessagePort',
   'Storage',

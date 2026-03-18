@@ -67,6 +67,7 @@ use score::{get_score_sprite_mut, ScoreRef};
 use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
+use xtra::fileio::{FileIoXtraManager, FILEIO_XTRA_MANAGER_OPT};
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
 
@@ -95,6 +96,7 @@ use crate::{
     rendering::with_renderer_mut,
     utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks},
 };
+use url::Url;
 
 use self::{
     bitmap::manager::BitmapRef,
@@ -130,15 +132,34 @@ use crate::player::handlers::datum_handlers::player_call_datum_handler;
 
 fn trace_output(message: &str, trace_log_file: &str) {
     use crate::js_api::JsApi;
-    
+
     if trace_log_file.is_empty() {
-        // Use the same output as 'put' command, but without the "-- " prefix
-        // since trace messages already have their own prefixes (-->, ==, etc.)
         JsApi::dispatch_debug_message(message);
     } else {
-        // TODO: Append to file
-        // For now, output to message window with file indicator
-        JsApi::dispatch_debug_message(&format!("[{}] {}", trace_log_file, message));
+        // Append to file via FileIO virtual filesystem
+        let manager = unsafe { FILEIO_XTRA_MANAGER_OPT.as_mut() };
+        if let Some(mgr) = manager {
+            let entry = mgr.virtual_fs.entry(trace_log_file.to_string()).or_insert_with(Vec::new);
+            entry.extend_from_slice(message.as_bytes());
+            entry.push(b'\n');
+        }
+        // Emit file-append event for Electron/local file writing
+        dispatch_file_write_event(trace_log_file, message);
+    }
+}
+
+pub fn dispatch_file_write_event(file_path: &str, content: &str) {
+    let window = web_sys::window();
+    if let Some(window) = window {
+        let event_init = web_sys::CustomEventInit::new();
+        let detail = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&detail, &"filePath".into(), &file_path.into());
+        let _ = js_sys::Reflect::set(&detail, &"content".into(), &content.into());
+        let _ = js_sys::Reflect::set(&detail, &"append".into(), &true.into());
+        event_init.set_detail(&detail);
+        if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict("dirplayer:fileWrite", &event_init) {
+            let _ = window.dispatch_event(&event);
+        }
     }
 }
 
@@ -220,6 +241,10 @@ pub struct DirPlayer {
     pub system_start_time: chrono::DateTime<chrono::Local>, // For ticks & milliSeconds (system uptime)
     pub handler_stack_depth: usize,
     pub in_frame_script: bool,
+    /// Flash frame buffers: maps (cast_lib, cast_member) to BitmapRef in bitmap_manager
+    pub flash_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
+    /// Cached rendered 3D scene bitmaps (populated during sprite rendering, read by world.image)
+    pub w3d_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
     pub in_enter_frame: bool,
     pub in_prepare_frame: bool,
     pub in_event_dispatch: bool,
@@ -230,6 +255,7 @@ pub struct DirPlayer {
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub has_frame_changed_in_go: bool,
+    pub go_same_frame: bool,
     pub go_direction: u8,
     pub is_getting_property_descriptions: bool,
     pub is_initializing_behavior_props: bool,
@@ -256,6 +282,9 @@ pub struct DirPlayer {
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
     pub last_sprite_prop_ref: Option<DatumRef>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
+    /// Optional fake movie path override. When set, `the moviePath` and `the movieName`
+    /// return values derived from this path, while actual file fetching uses the real URL.
+    pub movie_path_override: Option<String>,
 }
 
 /// Target frame for a movie transition (gotoNetMovie or go movie).
@@ -305,9 +334,11 @@ impl DirPlayer {
                 click_loc: (0,0),
                 frame_script_instance: None,
                 frame_script_member: None,
+                sound_device: String::new(),
             },
             net_manager: NetManager {
                 base_path: None,
+                override_base_path: None,
                 tasks: HashMap::new(),
                 task_states: HashMap::new(),
                 shared_state: Arc::new(Mutex::new(NetManagerSharedState::new())),
@@ -366,6 +397,8 @@ impl DirPlayer {
             system_start_time: now - chrono::Duration::days(8), // Simulated system start
             handler_stack_depth: 0,
             in_frame_script: false,
+            flash_frame_buffers: HashMap::new(),
+            w3d_frame_buffers: HashMap::new(),
             in_enter_frame: false,
             in_prepare_frame: false,
             in_event_dispatch: false,
@@ -376,6 +409,7 @@ impl DirPlayer {
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             has_frame_changed_in_go: false,
+            go_same_frame: false,
             go_direction: 0,
             is_getting_property_descriptions: false,
             is_initializing_behavior_props: false,
@@ -389,6 +423,7 @@ impl DirPlayer {
             script_instance_list_cache: FxHashMap::default(),
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
+            movie_path_override: None,
         };
 
         result.reset();
@@ -428,6 +463,29 @@ impl DirPlayer {
                 &mut self.dir_cache,
             )
             .await;
+
+        // Apply fake movie path override if set (moviePath/movieName use this,
+        // but net_manager.base_path stays real for actual file fetching)
+        if let Some(ref override_path) = self.movie_path_override {
+            if !override_path.is_empty() {
+                if let Ok(url) = Url::parse(override_path) {
+                    self.movie.base_path = get_base_url(&url).to_string();
+                    if let Some(name) = url.path_segments().and_then(|s| s.last()) {
+                        self.movie.file_name = name.to_string();
+                    }
+                } else {
+                    // Treat as a plain path
+                    if let Some(pos) = override_path.rfind('/') {
+                        self.movie.base_path = override_path[..pos].to_string();
+                        self.movie.file_name = override_path[pos + 1..].to_string();
+                    } else {
+                        self.movie.file_name = override_path.clone();
+                    }
+                }
+                // Store the fake base path on net_manager so it can resolve override paths
+                self.net_manager.override_base_path = Some(self.movie.base_path.clone());
+            }
+        }
 
         self.bg_color = self.movie.stage_color_ref.clone();
 
@@ -892,6 +950,33 @@ impl DirPlayer {
         return self.allocator.alloc_datum(datum).unwrap();
     }
 
+    /// Sync cached scriptInstanceList back to sprite's Vec for a given sprite.
+    /// Call this before reading script_instance_list on sprites that may have been
+    /// modified via .add() on the cached Datum::List.
+    pub fn sync_script_instance_list(&mut self, sprite_id: i16) {
+        if let Some(cached_ref) = self.script_instance_list_cache.get(&sprite_id).cloned() {
+            let datum = self.get_datum(&cached_ref).clone();
+            if let Datum::List(_, ref items, _) = datum {
+                let mut synced_ids = vec![];
+                for item_ref in items {
+                    if let Datum::ScriptInstanceRef(id) = self.get_datum(item_ref) {
+                        synced_ids.push(id.clone());
+                    }
+                }
+                let sprite = self.movie.score.get_sprite_mut(sprite_id);
+                sprite.script_instance_list = synced_ids;
+            }
+        }
+    }
+
+    /// Sync ALL cached scriptInstanceLists back to sprite Vecs.
+    pub fn sync_all_script_instance_lists(&mut self) {
+        let sprite_ids: Vec<i16> = self.script_instance_list_cache.keys().cloned().collect();
+        for sprite_id in sprite_ids {
+            self.sync_script_instance_list(sprite_id);
+        }
+    }
+
     fn datum_leak_scan(&self) -> String {
         use std::collections::{HashMap, HashSet};
         use crate::player::datum_formatting::format_datum;
@@ -1230,6 +1315,12 @@ impl DirPlayer {
                 web_sys::console::log_1(&stats.clone().into());
                 Ok(self.alloc_datum(Datum::String(stats)))
             }
+            "systemDate" => {
+                let date_id = self.allocator.get_free_script_instance_id();
+                let date_obj = crate::player::handlers::datum_handlers::date::DateObject::new(date_id);
+                self.date_objects.insert(date_id, date_obj);
+                Ok(self.alloc_datum(Datum::DateRef(date_id)))
+            }
             "stage" => Ok(self.alloc_datum(Datum::Stage)),
             "time" => Ok(self.alloc_datum(Datum::String(
                 chrono::Local::now().format("%H:%M %p").to_string(),
@@ -1320,7 +1411,7 @@ impl DirPlayer {
                     .clone())
             }
             "clickOn" => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
-            "environment" => {
+            "environment" | "environmentPropList" => {
                 // Build the environment property list
                 let props = vec![
                     (
@@ -1337,7 +1428,11 @@ impl DirPlayer {
                     ),
                     (
                         self.alloc_datum(Datum::Symbol("runMode".to_string())),
-                        self.alloc_datum(Datum::String("Plugin".to_string()))
+                        self.alloc_datum(Datum::String(
+                            self.external_params.get("_runMode")
+                                .cloned()
+                                .unwrap_or_else(|| "Plugin".to_string())
+                        ))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol("colorDepth".to_string())),
@@ -1414,6 +1509,12 @@ impl DirPlayer {
                     .collect();
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
             }
+            "runMode" => {
+                let mode = self.external_params.get("_runMode")
+                    .cloned()
+                    .unwrap_or_else(|| "Plugin".to_string());
+                Ok(self.alloc_datum(Datum::String(mode)))
+            }
             _ => {
                 let datum = self.movie.get_prop(prop)?;
                 Ok(self.alloc_datum(datum))
@@ -1425,7 +1526,43 @@ impl DirPlayer {
         match prop.as_str() {
             "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
             "productVersion" => Ok(self.alloc_datum(Datum::String("10.1".to_string()))), // TODO
+            "runMode" => {
+                let mode = self.external_params.get("_runMode")
+                    .cloned()
+                    .unwrap_or_else(|| "Plugin".to_string());
+                Ok(self.alloc_datum(Datum::String(mode)))
+            }
             _ => Err(ScriptError::new(format!("Unknown player prop {}", prop))),
+        }
+    }
+
+    fn get_mouse_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
+        match prop {
+            "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
+            "mouseLoc" => {
+                let x_ref = self.alloc_datum(Datum::Int(self.mouse_loc.0));
+                let y_ref = self.alloc_datum(Datum::Int(self.mouse_loc.1));
+                Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
+            }
+            _ => Err(ScriptError::new(format!("Unknown _mouse prop {}", prop))),
+        }
+    }
+
+    fn set_mouse_prop(&mut self, prop: &str, value_ref: &DatumRef) -> Result<(), ScriptError> {
+        match prop {
+            "mouseLoc" => {
+                let value = self.get_datum(value_ref).clone();
+                match value {
+                    Datum::Point(refs) => {
+                        let x = self.get_datum(&refs[0]).int_value()?;
+                        let y = self.get_datum(&refs[1]).int_value()?;
+                        self.mouse_loc = (x, y);
+                        Ok(())
+                    }
+                    _ => Err(ScriptError::new("mouseLoc requires a point value".to_string())),
+                }
+            }
+            _ => Err(ScriptError::new(format!("Cannot set _mouse prop {}", prop))),
         }
     }
 
@@ -1436,8 +1573,8 @@ impl DirPlayer {
                 self.movie.item_delimiter = (value.string_value()?).chars().next().unwrap();
                 Ok(())
             }
-            "traceScript" => {
-                // TODO
+            "traceScript" | "debugPlaybackEnabled" => {
+                // Accepted, no-op
                 Ok(())
             }
             _ => Err(ScriptError::new(format!("Cannot set player prop {}", prop))),
@@ -1538,6 +1675,7 @@ impl DirPlayer {
         if err.code == ScriptErrorCode::Abort {
             return;
         }
+        web_sys::console::error_1(&format!("[!!] play failed with error: {}", err.message).into());
         warn!("[!!] play failed with error: {}", err.message);
         self.stop();
 
@@ -2112,7 +2250,6 @@ pub async fn player_call_script_handler_raw_args(
         }
     });
 
-    // Track handler depth and frame script execution
     reserve_player_mut(|player| {
         player.handler_stack_depth += 1;
         if is_frame_script {
@@ -2455,14 +2592,27 @@ async fn stop_movie_sequence() {
 /// Shared by `play()` and `transition_to_net_movie`.
 async fn run_movie_init_sequence() {
     // prepareMovie
+    web_sys::console::log_1(&">>> Dispatching prepareMovie".into());
     dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
 
     if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
+        web_sys::console::error_1(&format!("prepareMovie FAILED: {}", err.message).into());
         if err.code != ScriptErrorCode::Abort {
             reserve_player_mut(|player| player.on_script_error(&err));
         }
         return;
     }
+    web_sys::console::log_1(&">>> prepareMovie completed successfully".into());
+
+    // Log bPreloadCasts state after prepareMovie
+    reserve_player_ref(|player| {
+        let val = player.globals.get("bPreloadCasts");
+        let desc = match val {
+            Some(r) => format!("{}", player.get_datum(r).type_str()),
+            None => "NOT SET".to_string(),
+        };
+        web_sys::console::log_1(&format!(">>> bPreloadCasts after prepareMovie: {}", desc).into());
+    });
 
     player_wait_available().await;
 
@@ -2578,7 +2728,9 @@ async fn run_movie_init_sequence() {
         let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
         let actor_list_datum = player.get_datum(&actor_list_ref);
         match actor_list_datum {
-            Datum::List(_, items, _) => items.clone(),
+            Datum::List(_, items, _) => {
+                items.clone()
+            },
             _ => vec![],
         }
     });
@@ -2791,7 +2943,7 @@ pub async fn run_frame_loop() {
             // After transition, refresh local state and continue the frame loop
             (is_playing, is_script_paused) = reserve_player_ref(|player| {
                 (player.is_playing, player.is_script_paused)
-            });
+            }); 
             last_frame_time = chrono::Local::now();
             continue;
         }
@@ -2911,6 +3063,8 @@ pub async fn run_frame_loop() {
             // Relay exitFrame to timeout targets
             dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
 
+            let mut stayed_on_same_frame = false;
+
             if has_player_frame_changed {
                 player_wait_available().await;
 
@@ -2951,9 +3105,24 @@ pub async fn run_frame_loop() {
 
                 player_wait_available().await;
 
-                let has_frame_changed = reserve_player_ref(|player| player.has_frame_changed_in_go);
+                let (has_frame_changed, go_same_frame) = reserve_player_ref(|player|
+                    (player.has_frame_changed_in_go, player.go_same_frame));
 
-                if !has_frame_changed {
+                if go_same_frame {
+                    // go(the frame) — stay on current frame, no advancement
+                    reserve_player_mut(|player| {
+                        player.go_same_frame = false;
+                    });
+                    stayed_on_same_frame = true;
+                } else if has_frame_changed {
+                    // go(differentFrame) — go() already did end/begin/advance
+                    reserve_player_mut(|player| {
+                        player.has_frame_changed_in_go = false;
+                        player.has_player_frame_changed = false;
+                    });
+                    stayed_on_same_frame = true;
+                } else {
+                    // No go() called — normal frame advancement
                     let ended_sprite_nums = reserve_player_mut_async(|player| {
                         Box::pin(async move {
                             player.end_all_sprites().await
@@ -2962,7 +3131,6 @@ pub async fn run_frame_loop() {
                     player_wait_available().await;
                     reserve_player_mut(|player| {
                         for (score_source, sprite_num) in ended_sprite_nums.iter() {
-                            // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
                             if let Some(sprite) =
                                 get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
                             {
@@ -2977,10 +3145,7 @@ pub async fn run_frame_loop() {
                         player.has_player_frame_changed = false;
                         (player.is_playing, player.is_script_paused)
                     });
-                } else {
-                    reserve_player_mut(|player| {
-                        player.has_frame_changed_in_go = false;
-                    });
+                    stayed_on_same_frame = false;
                 }
 
                 player_wait_available().await;
@@ -2989,8 +3154,10 @@ pub async fn run_frame_loop() {
             player_wait_available().await;
 
             reserve_player_mut(|player| {
-                player.movie.frame_script_instance = None;
-                player.begin_all_sprites();
+                if !stayed_on_same_frame {
+                    player.movie.frame_script_instance = None;
+                    player.begin_all_sprites();
+                }
 
                 player.movie.score.apply_tween_modifiers(player.movie.current_frame);
             });
@@ -3099,10 +3266,10 @@ pub async fn run_frame_loop() {
 
             for behavior_ref in &remaining_behaviors {
                 let receivers = vec![behavior_ref.clone()];
-                let _ = player_invoke_targeted_event(
+                let _ = player_invoke_event_to_instances(
                     &"beginSprite".to_string(),
                     &vec![],
-                    Some(&receivers),
+                    &receivers,
                 ).await;
             }
 
@@ -3215,6 +3382,7 @@ pub fn init_player() {
     unsafe {
         PLAYER_TX = Some(tx.clone());
         PLAYER_EVENT_TX = Some(event_tx.clone());
+        FILEIO_XTRA_MANAGER_OPT = Some(FileIoXtraManager::new());
         MULTIUSER_XTRA_MANAGER_OPT = Some(MultiuserXtraManager::new());
         XMLPARSER_XTRA_MANAGER_OPT = Some(XmlParserXtraManager::new());
     }

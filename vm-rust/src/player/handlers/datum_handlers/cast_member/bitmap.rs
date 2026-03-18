@@ -87,7 +87,7 @@ impl BitmapMemberHandlers {
         match prop.as_str() {
             "image" | "picture" => {
                 if value.is_void() {
-                    return Ok(()); // Setting image to VOID is a no-op in Director
+                    return Ok(());
                 }
                 reserve_player_mut(|player| {
                     let bitmap_ref = player.resolve_bitmap_ref(&value)?;

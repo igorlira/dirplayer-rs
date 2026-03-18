@@ -165,15 +165,20 @@ pub fn dump_execution_history_on_error(error_message: &str) {
 
 fn trace_output(message: &str, trace_log_file: &str) {
     use crate::js_api::JsApi;
-    
+    use crate::player::xtra::fileio::FILEIO_XTRA_MANAGER_OPT;
+
     if trace_log_file.is_empty() {
-        // Use the same output as 'put' command, but without the "-- " prefix
-        // since trace messages already have their own prefixes (-->, ==, etc.)
         JsApi::dispatch_debug_message(message);
     } else {
-        // TODO: Append to file
-        // For now, output to message window with file indicator
-        JsApi::dispatch_debug_message(&format!("[{}] {}", trace_log_file, message));
+        // Append to file via FileIO virtual filesystem
+        let manager = unsafe { FILEIO_XTRA_MANAGER_OPT.as_mut() };
+        if let Some(mgr) = manager {
+            let entry = mgr.virtual_fs.entry(trace_log_file.to_string()).or_insert_with(Vec::new);
+            entry.extend_from_slice(message.as_bytes());
+            entry.push(b'\n');
+        }
+        // Emit file-append event for Electron/local file writing
+        crate::player::dispatch_file_write_event(trace_log_file, message);
     }
 }
 

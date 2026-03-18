@@ -2,7 +2,7 @@ use std::cmp::max;
 
 use itertools::Itertools;
 use log::debug;
-use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
     },
     js_api::JsApi,
     player::bitmap::bitmap::{PaletteRef, get_system_default_palette},
-    player::bitmap::drawing::should_matte_sprite,
+    player::bitmap::drawing::{should_matte_hit_test},
     player::bitmap::palette::SYSTEM_WIN_PALETTE,
     player::events::{dispatch_event_endsprite, dispatch_event_endsprite_for_score},
     player::font::measure_text,
@@ -47,6 +47,16 @@ use super::{
     sprite::{ColorRef, CursorRef, Sprite},
     DirPlayer, ScriptError, PLAYER_OPT,
 };
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = "ruffleIsPlaying")]
+    fn ruffle_is_playing(cast_lib: i32, cast_member: i32) -> bool;
+    #[wasm_bindgen(js_name = "ruffleGetFrameCount")]
+    fn ruffle_get_frame_count(cast_lib: i32, cast_member: i32) -> i32;
+    #[wasm_bindgen(js_name = "ruffleGetCurrentFrame")]
+    fn ruffle_get_current_frame(cast_lib: i32, cast_member: i32) -> i32;
+}
 
 #[derive(Clone, Debug)]
 pub enum ScoreRef {
@@ -182,7 +192,7 @@ pub fn get_channel_number_from_index(index: u32) -> u32 {
 /// D8+ uses inverted 0-255 scale: 0 → 100% (opaque), 255 → 0% (transparent).
 /// D5-D7 uses direct 0-100 percentage: 0 → 100% (opaque/not set).
 fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
-    if dir_version >= 700 {
+    if dir_version > 700 {
         // D8+: inverted 0-255 scale
         if raw == 0 {
             100
@@ -2671,6 +2681,12 @@ impl Score {
         let frame_labels_chunk = dir.frame_labels.as_ref();
         if frame_labels_chunk.is_some() {
             self.frame_labels = frame_labels_chunk.unwrap().labels.clone();
+            for label in &self.frame_labels {
+                web_sys::console::log_1(&format!(
+                    "Frame label: '{}' at frame {}",
+                    label.label, label.frame_num
+                ).into());
+            }
         }
         if let Some(score_chunk) = dir.score.as_ref() {
             self.load_from_score_chunk(score_chunk, dir.version);
@@ -2883,6 +2899,18 @@ pub fn sprite_get_prop(
                 .map(|x| x.clone())
                 .unwrap_or(NULL_CAST_MEMBER_REF),
         )),
+        "camera" => {
+            // Shockwave3D sprite camera — returns the active camera as a Shockwave3dObjectRef
+            let cam_name = sprite.and_then(|s| s.w3d_camera.as_ref()).cloned().unwrap_or_else(|| "DefaultView".to_string());
+            let member_ref = sprite.and_then(|s| s.member.as_ref()).cloned().unwrap_or(NULL_CAST_MEMBER_REF);
+            Ok(Datum::Shockwave3dObjectRef(crate::director::lingo::datum::Shockwave3dObjectRef {
+                cast_lib: member_ref.cast_lib,
+                cast_member: member_ref.cast_member,
+                object_type: "camera".to_string(),
+                name: cam_name,
+            }))
+        }
+        "cameraCount" => Ok(Datum::Int(1)),
         "flipH" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_h))),
         "flipV" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_v))),
         "rotation" => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.rotation))),
@@ -2895,6 +2923,18 @@ pub fn sprite_get_prop(
                 // a separate copy that .add() wouldn't sync back).
                 player.last_sprite_prop_ref = Some(cached_ref.clone());
                 let datum = player.get_datum(&cached_ref).clone();
+                // Sync cached list back to sprite's script_instance_list Vec
+                // so that if the cache is later cleared, the Vec has the data.
+                if let Datum::List(_, ref items, _) = datum {
+                    let mut synced_ids = vec![];
+                    for item_ref in items {
+                        if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
+                            synced_ids.push(id.clone());
+                        }
+                    }
+                    let sprite = player.movie.score.get_sprite_mut(sprite_id);
+                    sprite.script_instance_list = synced_ids;
+                }
                 Ok(datum)
             } else {
                 let instance_ids = sprite.map_or(vec![], |x| x.script_instance_list.clone());
@@ -2990,6 +3030,67 @@ pub fn sprite_get_prop(
         "castLibNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| y.cast_lib)
         }))),
+        // Flash (SWF) sprite properties
+        "playing" => {
+            if let Some(member_ref) = sprite.and_then(|s| s.member.as_ref()) {
+                Ok(datum_bool(ruffle_is_playing(member_ref.cast_lib, member_ref.cast_member)))
+            } else {
+                Ok(datum_bool(false))
+            }
+        }
+        "frameCount" => {
+            if let Some(member_ref) = sprite.and_then(|s| s.member.as_ref()) {
+                Ok(Datum::Int(ruffle_get_frame_count(member_ref.cast_lib, member_ref.cast_member)))
+            } else {
+                Ok(Datum::Int(0))
+            }
+        }
+        "currentFrame" | "frame" => {
+            if let Some(member_ref) = sprite.and_then(|s| s.member.as_ref()) {
+                Ok(Datum::Int(ruffle_get_current_frame(member_ref.cast_lib, member_ref.cast_member)))
+            } else {
+                Ok(Datum::Int(0))
+            }
+        }
+        "actionsEnabled" | "buttonsEnabled" | "imageEnabled" | "sound" | "static" => {
+            // Flash properties that default to true/1
+            Ok(datum_bool(true))
+        }
+        "quality" => Ok(Datum::String("high".to_string())),
+        "scaleMode" => Ok(Datum::String("showAll".to_string())),
+        "playBackMode" => Ok(Datum::Int(0)), // 0 = normal
+        "centerRegPoint" => Ok(datum_bool(true)),
+        "defaultRectMode" => Ok(Datum::Int(0)),
+        "eventPassMode" => Ok(Datum::Int(0)),
+        "clickMode" => Ok(Datum::Int(0)),
+        "fixedRate" => Ok(Datum::Int(0)),
+        "streamMode" => Ok(Datum::Int(0)),
+        "broadcastProps" => Ok(datum_bool(false)),
+        "linked" => Ok(datum_bool(false)),
+        "posterFrame" => Ok(Datum::Int(1)),
+        "mouseOverButton" => Ok(datum_bool(false)),
+        "viewScale" => Ok(Datum::Float(100.0)),
+        "originMode" => Ok(Datum::Int(0)),
+        "originH" | "originV" => Ok(Datum::Int(0)),
+        "viewH" | "viewV" => Ok(Datum::Int(0)),
+        "flashRect" | "defaultRect" => {
+            let w = sprite.map_or(0, |s| s.width);
+            let h = sprite.map_or(0, |s| s.height);
+            Ok(Datum::Rect([
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(w)),
+                player.alloc_datum(Datum::Int(h)),
+            ]))
+        }
+        "originPoint" | "viewPoint" => {
+            Ok(Datum::Point([
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(0)),
+            ]))
+        }
+        "bytesStreamed" | "bufferSize" | "streamSize" => Ok(Datum::Int(0)),
+        "scale" => Ok(Datum::Float(100.0)),
         prop_name => {
             let datum_ref = sprite.and_then(|sprite| {
                 reserve_player_mut(|player| {
@@ -3263,6 +3364,22 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
+        // Shockwave3D camera assignment
+        "camera" => {
+            let cam_name = match &value {
+                Datum::Shockwave3dObjectRef(r) => r.name.clone(),
+                Datum::String(s) => s.clone(),
+                _ => "DefaultView".to_string(),
+            };
+            borrow_sprite_mut(
+                sprite_id,
+                |_player| Ok(cam_name.clone()),
+                |sprite, name: Result<String, ScriptError>| {
+                    sprite.w3d_camera = Some(name.unwrap_or_default());
+                    Ok(())
+                },
+            )
+        }
         // Member properties
         "member" => borrow_sprite_mut(
             sprite_id,
@@ -3301,6 +3418,12 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                             }
                             CastMemberType::VectorShape(vs) => {
                                 Some((vs.width().ceil() as i32, vs.height().ceil() as i32))
+                            }
+                            CastMemberType::Flash(flash) => {
+                                flash.flash_info.as_ref().map(|fi| {
+                                    let (l, t, r, b) = fi.flash_rect;
+                                    ((r - l) as i32, (b - t) as i32)
+                                })
                             }
                             _ => None,
                         };
@@ -3478,6 +3601,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                                 let h = film_loop.initial_rect.height();
                                 ((w / 2) as i16, (h / 2) as i16)
                             }
+                            CastMemberType::Flash(flash) => flash.reg_point,
                             _ => (0, 0),
                         })
                         .unwrap_or((0, 0));
@@ -3660,10 +3784,11 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                         })
                     })
                     .unwrap_or_else(|| {
-                        Err(ScriptError::new(format!(
-                            "Cannot set prop {} of sprite",
+                        eprintln!(
+                            "Warning: Cannot set prop {} of sprite, ignoring",
                             prop_name
-                        )))
+                        );
+                        Ok(())
                     })
             },
         ),
@@ -3678,7 +3803,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
 /// Returns true if the sprite is not matte-ink, or if the matte is not yet computed,
 /// or if the pixel at the given point is opaque.
 fn matte_pixel_hit_test(player: &DirPlayer, sprite: &Sprite, rect: &IntRect, hit_x: i32, hit_y: i32) -> bool {
-    if !should_matte_sprite(sprite.ink as u32) {
+    if !should_matte_hit_test(sprite.ink as u32) {
         return true;
     }
     let member_ref = match sprite.member.as_ref() {
@@ -3774,10 +3899,21 @@ pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: 
     false
 }
 
-fn is_active_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
+pub fn is_active_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
     // Per Director docs, an "active sprite" has a sprite script (behavior) OR cast member script.
     if sprite.script_instance_list.len() > 0 {
         return true;
+    }
+    // Also check the cached scriptInstanceList — behaviors added via
+    // sprite.scriptInstanceList.add() only update the cached Datum::List,
+    // not the sprite's internal script_instance_list Vec.
+    if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite.number as i16)) {
+        let datum = player.get_datum(cached_ref);
+        if let Datum::List(_, items, _) = datum {
+            if !items.is_empty() {
+                return true;
+            }
+        }
     }
     if let Some(member_ref) = sprite.member.as_ref() {
         if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
@@ -4158,6 +4294,72 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.loc_v - reg_y,
                 sprite.loc_h - reg_x + sprite.width,
                 sprite.loc_v - reg_y + sprite.height,
+            )
+        }
+        CastMemberType::Flash(flash_member) => {
+            let flash_width = flash_member.flash_info.as_ref()
+                .map(|i| (i.flash_rect.2 - i.flash_rect.0) as i32)
+                .unwrap_or(sprite.width);
+            let flash_height = flash_member.flash_info.as_ref()
+                .map(|i| (i.flash_rect.3 - i.flash_rect.1) as i32)
+                .unwrap_or(sprite.height);
+
+            let mut reg_x = flash_member.reg_point.0 as i32;
+            let mut reg_y = flash_member.reg_point.1 as i32;
+
+            // If centerRegPoint, use center of the flash rect dimensions
+            if flash_member.flash_info.as_ref().map_or(true, |i| i.center_reg_point) {
+                if flash_width > 0 && flash_height > 0 {
+                    reg_x = flash_width / 2;
+                    reg_y = flash_height / 2;
+                }
+            }
+
+            // Scale registration point proportionally when sprite is stretched
+            let scaled_reg_x = if flash_width > 0 {
+                ((reg_x * sprite.width) as f32 / flash_width as f32).round() as i32
+            } else {
+                reg_x
+            };
+            let scaled_reg_y = if flash_height > 0 {
+                ((reg_y * sprite.height) as f32 / flash_height as f32).round() as i32
+            } else {
+                reg_y
+            };
+
+            IntRect::from(
+                sprite.loc_h - scaled_reg_x,
+                sprite.loc_v - scaled_reg_y,
+                sprite.loc_h - scaled_reg_x + sprite.width,
+                sprite.loc_v - scaled_reg_y + sprite.height,
+            )
+        }
+        CastMemberType::Shockwave3d(w3d) => {
+            // Use sprite dimensions if set, otherwise fall back to member's default_rect
+            let default_rect = w3d.info.default_rect;
+            let member_width = (default_rect.2 - default_rect.0).max(0) as i32;
+            let member_height = (default_rect.3 - default_rect.1).max(0) as i32;
+
+            // Use the larger of sprite dimensions and member rect
+            let display_width = if sprite.width > member_width { sprite.width } else if member_width > 0 { member_width } else { sprite.width };
+            let display_height = if sprite.height > member_height { sprite.height } else if member_height > 0 { member_height } else { sprite.height };
+
+            // RegPoint handling: when sprite is much larger than member (>2x = fullscreen),
+            // skip regPoint offset. Otherwise use raw regPoint.
+            let (reg_x, reg_y) = if member_width > 0 && member_height > 0
+                && display_width <= member_width * 2 && display_height <= member_height * 2 {
+                // Normal size: use raw regPoint
+                (w3d.info.reg_point.0, w3d.info.reg_point.1)
+            } else {
+                // Fullscreen/stretched: no regPoint offset
+                (0, 0)
+            };
+
+            IntRect::from(
+                sprite.loc_h - reg_x,
+                sprite.loc_v - reg_y,
+                sprite.loc_h - reg_x + display_width,
+                sprite.loc_v - reg_y + display_height,
             )
         }
         _ => IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height),

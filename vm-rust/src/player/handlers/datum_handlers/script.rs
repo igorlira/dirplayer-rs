@@ -15,7 +15,7 @@ pub struct ScriptDatumHandlers {}
 impl ScriptDatumHandlers {
     pub fn has_async_handler(obj_ref: &DatumRef, name: &String) -> bool {
         match name.as_str() {
-            "new" => true,
+            "new" | "rawNew" => true,
             "handler" => false,
             _ => {
                 reserve_player_ref(|player| {
@@ -44,6 +44,7 @@ impl ScriptDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
             "new" => Self::new(obj_ref, args).await,
+            "rawNew" => Self::raw_new(obj_ref).await,
             _ => {
                 // Try to call a handler defined in the script itself
                 let handler_ref = reserve_player_ref(|player| {
@@ -179,6 +180,18 @@ impl ScriptDatumHandlers {
                 Ok(crate::player::virtual_scripts::VirtualScriptRegistry::create_instance(player, script_ref))
             }
         })
+    }
+
+    pub async fn raw_new(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
+        let script_ref = reserve_player_ref(|player| {
+            match player.get_datum(datum) {
+                Datum::ScriptRef(script_ref) => Ok(script_ref.clone()),
+                _ => Err(ScriptError::new("Cannot create new instance of non-script".to_string())),
+            }
+        })?;
+
+        let (_script_instance_ref, datum_ref) = Self::create_script_instance(&script_ref)?;
+        Ok(datum_ref)
     }
 
     pub async fn new(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

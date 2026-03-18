@@ -62,6 +62,10 @@ impl GetSetUtils {
         match prop_name {
             "_player" => Ok(Datum::PlayerRef),
             "_movie" => Ok(Datum::MovieRef),
+            "_mouse" => Ok(Datum::MouseRef),
+            "_system" => Ok(Datum::MovieRef), // _system properties like randomSeed are movie-level
+            "_sound" => Ok(Datum::MovieRef),  // _sound properties like soundDevice are movie-level
+            "_key" => Ok(Datum::PlayerRef),    // _key properties handled via PlayerRef
             _ => Err(ScriptError::new(format!(
                 "Invalid top level prop: {}",
                 prop_name
@@ -316,6 +320,20 @@ impl GetSetBytecodeHandler {
                             Ok(HandlerExecutionResult::Advance)
                         }
                     }
+                }
+                0x0a => {
+                    // Set property on a string chunk of a cast member
+                    // e.g. set the textStyle of line 1 of member "X" to "bold"
+                    // Stack: [zeros..., chunk_num, chunk_type, member_name, cast_lib, value, prop_id] (prop_id already popped)
+                    // Pop remaining stack items
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    // Pop: cast_lib(0), member_name, chunk_type(0), chunk_num(1), and 6 zeros
+                    for _ in 0..10 {
+                        if scope.stack.is_empty() { break; }
+                        scope.stack.pop();
+                    }
+                    warn!("kOpSet 0x0a (string chunk of member) not fully implemented, ignoring");
+                    Ok(HandlerExecutionResult::Advance)
                 }
                 _ => Err(ScriptError::new(format!(
                     "Invalid propertyType/propertyID for kOpSet: {}",
@@ -695,7 +713,9 @@ impl GetSetBytecodeHandler {
                         get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
                     }
                 }
-                _ => get_obj_prop(player, &obj_ref, &prop_name.to_owned())?,
+                _ => {
+                    get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+                },
             };
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();

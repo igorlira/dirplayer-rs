@@ -6,7 +6,9 @@ use crate::{
         cast_lib::INVALID_CAST_MEMBER_REF,
         datum_formatting::format_datum, ScriptInstanceRef, Score,
         reserve_player_mut, reserve_player_ref, reserve_player_mut_async,
+        player_call_script_handler,
         score::{get_sprite_at, concrete_sprite_hit_test}, handlers::datum_handlers::player_call_datum_handler,
+        handlers::datum_handlers::script_instance::ScriptInstanceUtils,
         DatumRef, ScriptError, ScriptErrorCode, get_score_sprite_mut, MovieFrameTarget,
         events::{
             player_invoke_event_to_instances, player_invoke_static_event,
@@ -132,7 +134,7 @@ impl MovieHandlers {
             let datum_type = datum.type_enum();
             use crate::player::format_datum;
 
-            debug!("Function go() called with datum: {}", format_datum(&args[0], player));
+            debug!("go() called: current_frame={} datum={}", player.movie.current_frame, format_datum(&args[0], player));
 
             let dest = match datum_type {
                 DatumType::Int => Some(datum.int_value()? as u32),
@@ -148,8 +150,12 @@ impl MovieHandlers {
                 DatumType::Symbol => {
                     let symbol = datum.string_value()?;
                     match symbol.as_str() {
-                        "next" => Some(player.movie.current_frame + 1),
-                        "previous" => Some(player.movie.current_frame.saturating_sub(1).max(1)),
+                        "next" => {
+                            let next_frame = player.movie.current_frame + 1;
+                            debug!("🎬 go(#next): {} -> {}", player.movie.current_frame, next_frame);
+                            Some(next_frame)
+                        },
+                        "previous" => Some(if player.movie.current_frame > 1 { player.movie.current_frame - 1 } else { 1 }),
                         "loop" => Some(player.movie.current_frame),
                         _ => player.movie.score.frame_labels
                             .iter()
@@ -326,102 +332,24 @@ impl MovieHandlers {
 
                 player_wait_available().await;
 
-                // 3. Send stepFrame to actorList
-                let actor_list_snapshot = reserve_player_ref(|player| {
-                    let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-                    let actor_list_datum = player.get_datum(&actor_list_ref);
-                    match actor_list_datum {
-                        Datum::List(_, items, _) => items.clone(),
-                        _ => vec![],
-                    }
-                });
-
-                for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-                    let still_active = reserve_player_ref(|player| {
-                        let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-                        let actor_list_datum = player.get_datum(&actor_list_ref);
-                        match actor_list_datum {
-                            Datum::List(_, items, _) => items.contains(&actor_ref),
-                            _ => false,
-                        }
-                    });
-
-                    if still_active {
-                        let result =
-                            player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
-
-                        if let Err(err) = result {
-                            if err.code == ScriptErrorCode::Abort {
-                                reserve_player_mut(|player| {
-                                    player.is_in_frame_update = false;
-                                });
-                                return Err(err);
-                            }
-                            web_sys::console::log_1(
-                                &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
-                            );
-                            reserve_player_mut(|player| {
-                                player.on_script_error(&err);
-                                player.is_in_frame_update = false;
-                            });
-                            return Err(err);
-                        }
-                    }
-                }
-
-                player_wait_available().await;
-
-                // Prevent re-entrant calls
-                let already_updating = reserve_player_mut(|player| {
-                    if player.is_in_frame_update {
-                        return true;
-                    }
-                    player.is_in_frame_update = true;
-                    false
-                });
-
-                if !already_updating {
-                    reserve_player_mut(|player| {
-                        player.in_prepare_frame = true;
-                    });
-
-                    // Relay prepareFrame to timeout targets
-                    dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
-
-                    // 4. Send prepareFrame: Sprite behaviors -> Frame behaviors
-                    let _ = dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
-
-                    reserve_player_mut(|player| {
-                        player.in_prepare_frame = false;
-                    });
-
-                    player_wait_available().await;
-
-                    reserve_player_mut(|player| {
-                        player.in_enter_frame = true;
-                    });
-
-                    // 5. Send enterFrame: Sprite behaviors -> Frame behaviors
-                    let _ = dispatch_event_to_all_behaviors(&"enterFrame".to_string(), &vec![]).await;
-
-                    reserve_player_mut(|player| {
-                        player.in_enter_frame = false;
-                    });
-
-                    player_wait_available().await;
-
-                    reserve_player_mut(|player| {
-                        player.is_in_frame_update = false;
-                    });
-                } else {
-                    warn!("Failed to run frame update in go function, already updating");
-                }
+                // Note: stepFrame, prepareFrame, and enterFrame are NOT dispatched here.
+                // The main frame loop handles those events after go() returns and
+                // has_frame_changed_in_go is set. Dispatching them here would cause
+                // re-entrant calls (e.g., stepFrame firing timers that call go() again).
             }
         }
         
-        reserve_player_mut(|player| {
-            player.has_frame_changed_in_go = true;
-        });
+        if frame_advanced {
+            reserve_player_mut(|player| {
+                player.has_frame_changed_in_go = true;
+            });
+        } else {
+            // go(the frame) — stay on current frame
+            // ONLY set go_same_frame, NOT has_frame_changed_in_go
+            reserve_player_mut(|player| {
+                player.go_same_frame = true;
+            });
+        }
 
         Ok(DatumRef::Void)
     }
@@ -430,6 +358,28 @@ impl MovieHandlers {
         reserve_player_mut(|player| {
             let sprite_number = player.get_datum(&args[0]).int_value()?;
             let is_puppet = player.get_datum(&args[1]).int_value()? == 1;
+
+            if !is_puppet {
+                // When un-puppeting: if the channel has no score spans at all,
+                // clear the sprite state (member, visible, etc.).
+                // This matches Director's behavior: un-puppeting in a channel with no
+                // score data reverts to score state which is empty for dynamic/pool sprites.
+                // Without this, the Lingo clearSpritePool() iteration bug (list mutation
+                // during iteration skips ~half the sprites) leaves stuck-puppeted sprites
+                // that continue rendering in the next room.
+                let channel_has_spans = player.movie.score.sprite_spans
+                    .iter()
+                    .any(|span| span.channel_number == sprite_number as u32);
+
+                if !channel_has_spans {
+                    let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
+                    sprite.puppet = false;
+                    sprite.member = None;
+                    sprite.visible = true;
+                    return Ok(DatumRef::Void);
+                }
+            }
+
             let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
             sprite.puppet = is_puppet;
             Ok(DatumRef::Void)
@@ -452,62 +402,95 @@ impl MovieHandlers {
             let remaining_args = &args[2..].to_vec();
             let sprite = player.movie.score.get_sprite(sprite_num as i16)
                 .ok_or_else(|| ScriptError::new(format!("sendSprite: sprite {} not found", sprite_num)))?;
-            let receivers = sprite.script_instance_list.clone();
+            // Check cached scriptInstanceList first (includes behaviors added via .add())
+            let receivers = if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite_num as i16)).cloned() {
+                let datum = player.get_datum(&cached_ref).clone();
+                if let Datum::List(_, item_refs, _) = datum {
+                    let mut ids = vec![];
+                    for item_ref in &item_refs {
+                        if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
+                            ids.push(id.clone());
+                        }
+                    }
+                    ids
+                } else {
+                    sprite.script_instance_list.clone()
+                }
+            } else {
+                sprite.script_instance_list.clone()
+            };
             Ok((message.clone(), remaining_args.clone(), receivers))
         })?;
-        
+
+        // sendSprite returns the return value of the first handler that handles the message
+        let mut last_return_value = DatumRef::Void;
         let mut handled_by_sprite = false;
         for receiver in receivers {
-            let receivers = vec![receiver];
-            match player_invoke_event_to_instances(&message, &remaining_args, &receivers).await {
-                Ok(handled) => {
-                    handled_by_sprite = handled || handled_by_sprite;
-                }
-                Err(err) => {
-                    // Error already logged by player_invoke_event_to_instances
-                    // Continue execution instead of propagating error
-                    web_sys::console::warn_1(
-                        &format!("⚠ sendSprite continuing after error in handler").into()
-                    );
-                    // Optionally: break here if you want to stop after first error
-                    // For now, continue to match Director behavior
+            let handler_pair = reserve_player_ref(|player| {
+                ScriptInstanceUtils::get_script_instance_handler(
+                    &message,
+                    &receiver,
+                    player,
+                )
+            })?;
+
+            if let Some(handler_ref) = handler_pair {
+                match player_call_script_handler(Some(receiver), handler_ref, &remaining_args).await {
+                    Ok(scope) => {
+                        if !scope.passed {
+                            handled_by_sprite = true;
+                        }
+                        // Capture the return value from the handler
+                        if scope.return_value != DatumRef::Void {
+                            last_return_value = scope.return_value;
+                        }
+                    }
+                    Err(err) => {
+                        if err.code != ScriptErrorCode::Abort {
+                            web_sys::console::warn_1(
+                                &format!("⚠ sendSprite continuing after error in handler '{}': {}", message, err.message).into()
+                            );
+                        } else {
+                            return Err(err);
+                        }
+                    }
                 }
             }
         }
-        
+
         if !handled_by_sprite {
             player_invoke_static_event(&message, &remaining_args).await?;
         }
-        
-        reserve_player_mut(|player: &mut crate::player::DirPlayer| {
-            Ok(player.alloc_datum(Datum::Int(handled_by_sprite as i32)))
-        })
+
+        Ok(last_return_value)
     }
 
     pub async fn send_all_sprites(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        // Check for re-entrant sendAllSprites call
-        let skip = reserve_player_mut(|player| {
-            if player.is_in_send_all_sprites {
-                warn!(
-                    "Blocking re-entrant sendAllSprites call to prevent infinite recursion"
-                );
-                return true;
-            }
-            player.is_in_send_all_sprites = true;
-            false
-        });
-
-        if skip {
-            return Ok(DatumRef::Void);
-        }
-
         let (message, remaining_args, receivers) = reserve_player_mut(|player| {
             let message = player.get_datum(&args[0]).symbol_value()
                 .map_err(|e| ScriptError::new(format!("sendAllSprites: invalid message: {:?}", e)))?;
             let remaining_args = &args[1..].to_vec();
 
             // Collect receivers from stage score
-            let mut receivers = player.movie.score.get_active_script_instance_list();
+            // Check cached scriptInstanceList for each channel (includes behaviors added via .add())
+            let mut receivers: Vec<ScriptInstanceRef> = Vec::new();
+            for channel in player.movie.score.channels.iter() {
+                let sprite_num = channel.number as i16;
+                if let Some(cached_ref) = player.script_instance_list_cache.get(&sprite_num).cloned() {
+                    let datum = player.get_datum(&cached_ref).clone();
+                    if let Datum::List(_, item_refs, _) = datum {
+                        for item_ref in &item_refs {
+                            if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
+                                receivers.push(id.clone());
+                            }
+                        }
+                        continue;
+                    }
+                }
+                for instance_ref in &channel.sprite.script_instance_list {
+                    receivers.push(instance_ref.clone());
+                }
+            }
 
             // Also collect receivers from filmloop scores
             let active_filmloops = player.get_active_filmloop_scores();
@@ -520,18 +503,26 @@ impl MovieHandlers {
         })?;
         
         let mut handled_by_sprite = false;
+        let mut last_return_value = DatumRef::Void;
         for receiver in receivers {
-            let receivers = vec![receiver];
-            match player_invoke_event_to_instances(&message, &remaining_args, &receivers).await {
-                Ok(handled) => {
-                    handled_by_sprite = handled || handled_by_sprite;
-                }
-                Err(err) => {
-                    // Error already logged by player_invoke_event_to_instances
-                    web_sys::console::warn_1(
-                        &format!("⚠ sendAllSprites continuing after error in handler").into()
-                    );
-                    // Continue to next sprite instead of stopping
+            let handler_pair = reserve_player_ref(|player| {
+                ScriptInstanceUtils::get_script_instance_handler(&message, &receiver, player)
+            })?;
+            if let Some(handler_ref) = handler_pair {
+                match player_call_script_handler(Some(receiver), handler_ref, &remaining_args).await {
+                    Ok(scope) => {
+                        if !scope.passed {
+                            handled_by_sprite = true;
+                        }
+                        if scope.return_value != DatumRef::Void {
+                            last_return_value = scope.return_value;
+                        }
+                    }
+                    Err(err) => {
+                        web_sys::console::warn_1(
+                            &format!("⚠ sendAllSprites continuing after error in handler: {}", err.message).into()
+                        );
+                    }
                 }
             }
         }
@@ -540,11 +531,7 @@ impl MovieHandlers {
             player_invoke_static_event(&message, &remaining_args).await?;
         }
 
-        reserve_player_mut(|player: &mut crate::player::DirPlayer| {
-            // Reset the re-entrancy flag
-            player.is_in_send_all_sprites = false;
-            Ok(player.alloc_datum(Datum::Int(handled_by_sprite as i32)))
-        })
+        Ok(last_return_value)
     }
 
     pub fn external_param_count(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -725,6 +712,13 @@ impl MovieHandlers {
 
         player_wait_available().await;
 
+        // Sync all cached scriptInstanceLists back to sprite Vecs.
+        // Behaviors added via scriptInstanceList.add() only exist in the cache
+        // until synced — this ensures all event dispatch within this frame sees them.
+        reserve_player_mut(|player| {
+            player.sync_all_script_instance_lists();
+        });
+
         reserve_player_mut(|player| {
             player.movie.score.apply_tween_modifiers(player.movie.current_frame);
         });
@@ -734,7 +728,9 @@ impl MovieHandlers {
             let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
             let actor_list_datum = player.get_datum(&actor_list_ref);
             match actor_list_datum {
-                Datum::List(_, items, _) => items.clone(),
+                Datum::List(_, items, _) => {
+                    items.clone()
+                },
                 _ => vec![],
             }
         });

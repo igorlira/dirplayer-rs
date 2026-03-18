@@ -126,4 +126,73 @@ impl StringHandlers {
             Ok(player.alloc_datum(Datum::String(result_string)))
         })
     }
+
+    pub fn url_encode(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            // urlEncode([#empty: sSessionID]) - takes a prop list and converts to URL parameters
+            let prop_list_datum = player.get_datum(&args[0]);
+
+            let result = match prop_list_datum {
+                Datum::PropList(prop_list, ..) => {
+                    // Convert prop list to URL parameters: [#empty: "value"] -> "empty=encoded_value"
+                    let mut url_params = String::new();
+                    for (key_ref, value_ref) in prop_list {
+                        let key = player.get_datum(key_ref);
+                        let value = player.get_datum(value_ref);
+
+                        if let Datum::Symbol(symbol) = key {
+                            if let Datum::String(s) = value {
+                                if !url_params.is_empty() {
+                                    url_params.push('&');
+                                }
+
+                                // URL encode the value using the same character mapping as ActionScript
+                                let mut encoded_value = String::new();
+                                for ch in s.chars() {
+                                    let encoded_char = match ch {
+                                        ':' => "%3A", ';' => "%3B", '<' => "%3C", '=' => "%3D", '>' => "%3E", '?' => "%3F",
+                                        '@' => "%40", '[' => "%5B", ']' => "%5D", '{' => "%7B", '}' => "%7D", '~' => "%7E",
+                                        ' ' => "%20", '!' => "%21", '"' => "%22", '#' => "%23", '$' => "%24", '%' => "%25",
+                                        '&' => "%26", '\'' => "%27", '(' => "%28", ')' => "%29", '*' => "%2A", '+' => "%2B",
+                                        ',' => "%2C", '-' => "%2D", '.' => "%2E", '/' => "%2F", '©' => "%26%23169", '®' => "%26%23174",
+                                        _ => {
+                                            encoded_value.push(ch);
+                                            continue;
+                                        }
+                                    };
+                                    encoded_value.push_str(encoded_char);
+                                }
+
+                                url_params.push_str(&format!("{}={}", symbol, encoded_value));
+                            }
+                        }
+                    }
+                    url_params
+                },
+                Datum::String(s) => {
+                    // Direct string encoding (fallback)
+                    let mut encoded = String::new();
+                    for ch in s.chars() {
+                        let encoded_char = match ch {
+                            ':' => "%3A", ';' => "%3B", '<' => "%3C", '=' => "%3D", '>' => "%3E", '?' => "%3F",
+                            '@' => "%40", '[' => "%5B", ']' => "%5D", '{' => "%7B", '}' => "%7D", '~' => "%7E",
+                            ' ' => "%20", '!' => "%21", '"' => "%22", '#' => "%23", '%' => "%25",
+                            '&' => "%26", '\'' => "%27", '(' => "%28", ')' => "%29", '*' => "%2A", '+' => "%2B",
+                            ',' => "%2C", '©' => "%26%23169", '®' => "%26%23174",
+                            _ => {
+                                encoded.push(ch);
+                                continue;
+                            }
+                        };
+                        encoded.push_str(encoded_char);
+                    }
+                    encoded
+                },
+                _ => return Err(ScriptError::new("urlEncode: argument must be a prop list or string".to_string()))
+            };
+
+            web_sys::console::log_1(&format!("urlEncode() = '{}'", result).into());
+            Ok(player.alloc_datum(Datum::String(result)))
+        })
+    }
 }

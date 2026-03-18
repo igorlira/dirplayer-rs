@@ -47,6 +47,7 @@ pub struct Movie {
     pub click_loc: (i32, i32),
     pub frame_script_instance: Option<ScriptInstanceRef>,
     pub frame_script_member: Option<CastMemberRef>,
+    pub sound_device: String,
 }
 
 impl Movie {
@@ -104,8 +105,9 @@ impl Movie {
     }
 
     pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
-        match prop {
-            "alertHook" => match self.alert_hook.to_owned() {
+        let prop_lower = prop.to_lowercase();
+        match prop_lower.as_str() {
+            "alerthook" => match self.alert_hook.to_owned() {
                 Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
                 Some(ScriptReceiver::ScriptInstance(script_instance_id)) => {
                     Ok(Datum::ScriptInstanceRef(script_instance_id))
@@ -113,9 +115,9 @@ impl Movie {
                 Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
                 None => Ok(Datum::Int(0)),
             },
-            "exitLock" => Ok(datum_bool(self.exit_lock)),
-            "itemDelimiter" => Ok(Datum::String(self.item_delimiter.into())),
-            "runMode" => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
+            "exitlock" => Ok(datum_bool(self.exit_lock)),
+            "itemdelimiter" => Ok(Datum::String(self.item_delimiter.into())),
+            "runmode" => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
             "date" => {
                 // TODO localize formatting
                 let time = Local::now();
@@ -127,8 +129,8 @@ impl Movie {
                 let formatted = time.format("%H:%M:%S %p").to_string();
                 Ok(Datum::String(formatted))
             }
-            "lastChannel" => Ok(Datum::Int(self.score.get_channel_count() as i32)),
-            "moviePath" => {
+            "lastchannel" => Ok(Datum::Int(self.score.get_channel_count() as i32)),
+            "moviepath" => {
                 let mut result = self.base_path.clone();
                 if !result.is_empty() && !result.ends_with(PATH_SEPARATOR) {
                     result.push_str(PATH_SEPARATOR);
@@ -137,21 +139,21 @@ impl Movie {
             }
             "platform" => Ok(Datum::String("Windows,32".to_string())),
             "frame" => Ok(Datum::Int(self.current_frame as i32)),
-            "productVersion" => Ok(Datum::String("10.1".to_string())),
-            "stageRight" => Ok(Datum::Int(self.rect.right as i32)),
-            "stageLeft" => Ok(Datum::Int(self.rect.left as i32)),
-            "stageTop" => Ok(Datum::Int(self.rect.top as i32)),
-            "stageBottom" => Ok(Datum::Int(self.rect.bottom as i32)),
-            "movieName" => Ok(Datum::String(self.file_name.to_owned())),
-            "updateLock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
+            "productversion" => Ok(Datum::String("10.1".to_string())),
+            "stageright" => Ok(Datum::Int(self.rect.right as i32)),
+            "stageleft" => Ok(Datum::Int(self.rect.left as i32)),
+            "stagetop" => Ok(Datum::Int(self.rect.top as i32)),
+            "stagebottom" => Ok(Datum::Int(self.rect.bottom as i32)),
+            "moviename" => Ok(Datum::String(self.file_name.to_owned())),
+            "updatelock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
             "path" => Ok(Datum::String(self.base_path.to_owned())),
-            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
-                let script = match prop {
-                    "mouseDownScript" => &self.mouse_down_script,
-                    "mouseUpScript" => &self.mouse_up_script,
-                    "keyDownScript" => &self.key_down_script,
-                    "keyUpScript" => &self.key_up_script,
-                    "timeoutScript" => &self.timeout_script,
+            "mousedownscript" | "mouseupscript" | "keydownscript" | "keyupscript" | "timeoutscript" => {
+                let script = match prop_lower.as_str() {
+                    "mousedownscript" => &self.mouse_down_script,
+                    "mouseupscript" => &self.mouse_up_script,
+                    "keydownscript" => &self.key_down_script,
+                    "keyupscript" => &self.key_up_script,
+                    "timeoutscript" => &self.timeout_script,
                     _ => unreachable!(),
                 };
                 match script.to_owned() {
@@ -161,7 +163,7 @@ impl Movie {
                     None => Ok(Datum::Int(0)),
                 }
             }
-            "allowCustomCaching" => Ok(datum_bool(self.allow_custom_caching)),
+            "allowcustomcaching" => Ok(datum_bool(self.allow_custom_caching)),
             "timer" => {
                 reserve_player_ref(|player| {
                     let elapsed = chrono::Local::now()
@@ -172,21 +174,73 @@ impl Movie {
                     Ok(Datum::Int(ticks as i32))
                 })
             }
-            "mouseDown" => {
+            "mousedown" => {
                 Ok(datum_bool(self.mouse_down))
             }
-            "traceScript" => Ok(datum_bool(self.trace_script)),
-            "activeWindow" => Ok(Datum::Stage),
-            "rollOver" => {
+            "tracescript" => Ok(datum_bool(self.trace_script)),
+            "activewindow" => Ok(Datum::Stage),
+            "rollover" => {
                 reserve_player_ref(|player| {
                     let sprite = super::score::get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
                     Ok(Datum::Int(sprite.unwrap_or(0) as i32))
                 })
             }
-            "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
-            "activeWindow" => Ok(Datum::Stage),
-            "maxInteger" => Ok(Datum::Int(i32::MAX)),
-            "labelList" => {
+            "randomseed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
+            "maxinteger" => Ok(Datum::Int(i32::MAX)),
+            "memorysize" => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
+            "active3drenderer" => Ok(Datum::String("#openGL".to_string())),
+            "scriptexecutionstyle" => Ok(Datum::Int(9)),
+            "xtralist" => {
+                // Return a list of prop lists, each with #name and #fileName
+                use crate::player::xtra::manager::get_registered_xtra_names;
+                reserve_player_mut(|player| {
+                    let names = get_registered_xtra_names();
+                    let mut items = Vec::new();
+                    for name in names {
+                        let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
+                        let name_val = player.alloc_datum(Datum::String(name.to_string()));
+                        let file_key = player.alloc_datum(Datum::Symbol("fileName".to_string()));
+                        let file_val = player.alloc_datum(Datum::String(format!("{}.x32", name)));
+                        let entry = player.alloc_datum(Datum::PropList(vec![
+                            (name_key, name_val), (file_key, file_val),
+                        ], false));
+                        items.push(entry);
+                    }
+                    Ok(Datum::List(
+                        crate::director::lingo::datum::DatumType::List,
+                        items,
+                        false,
+                    ))
+                })
+            }
+            "sounddevice" => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
+            "sounddevicelist" => {
+                reserve_player_mut(|player| {
+                    let device = player.alloc_datum(Datum::String("WebAudio".to_string()));
+                    Ok(Datum::List(
+                        crate::director::lingo::datum::DatumType::List,
+                        vec![device],
+                        false,
+                    ))
+                })
+            }
+            "desktoprectlist" => {
+                reserve_player_mut(|player| {
+                    let w = player.movie.rect.right as i32;
+                    let h = player.movie.rect.bottom as i32;
+                    let l = player.alloc_datum(Datum::Int(0));
+                    let t = player.alloc_datum(Datum::Int(0));
+                    let r = player.alloc_datum(Datum::Int(w));
+                    let b = player.alloc_datum(Datum::Int(h));
+                    let rect = player.alloc_datum(Datum::Rect([l, t, r, b]));
+                    Ok(Datum::List(
+                        crate::director::lingo::datum::DatumType::List,
+                        vec![rect],
+                        false,
+                    ))
+                })
+            }
+            "labellist" => {
                 let s = self
                     .score
                     .frame_labels
@@ -196,6 +250,7 @@ impl Movie {
                     .join("\r");
                 Ok(Datum::String(s))
             }
+            "debugplaybackenabled" => Ok(Datum::Int(0)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
         }
     }
@@ -206,17 +261,18 @@ impl Movie {
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
-        match prop {
-            "exitLock" => {
+        let prop_lower = prop.to_lowercase();
+        match prop_lower.as_str() {
+            "exitlock" => {
                 self.exit_lock = value.int_value()? == 1;
             }
-            "itemDelimiter" => {
+            "itemdelimiter" => {
                 self.item_delimiter = (value.string_value()?).chars().next().unwrap();
             }
-            "debugPlaybackEnabled" => {
+            "debugplaybackenabled" => {
                 // TODO
             }
-            "alertHook" => {
+            "alerthook" => {
                 return match value {
                     Datum::Int(0) => {
                         self.alert_hook = None;
@@ -235,22 +291,22 @@ impl Movie {
                     )),
                 }
             }
-            "traceScript" => {
+            "tracescript" => {
                 self.trace_script = value.int_value()? != 0;
             }
-            "traceLogFile" => {
+            "tracelogfile" => {
                 self.trace_log_file = value.string_value()?;
             }
-            "updateLock" => {
+            "updatelock" => {
                 self.update_lock = value.int_value()? != 0;
             }
-            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
-                let target = match prop {
-                    "mouseDownScript" => &mut self.mouse_down_script,
-                    "mouseUpScript" => &mut self.mouse_up_script,
-                    "keyDownScript" => &mut self.key_down_script,
-                    "keyUpScript" => &mut self.key_up_script,
-                    "timeoutScript" => &mut self.timeout_script,
+            "mousedownscript" | "mouseupscript" | "keydownscript" | "keyupscript" | "timeoutscript" => {
+                let target = match prop_lower.as_str() {
+                    "mousedownscript" => &mut self.mouse_down_script,
+                    "mouseupscript" => &mut self.mouse_up_script,
+                    "keydownscript" => &mut self.key_down_script,
+                    "keyupscript" => &mut self.key_up_script,
+                    "timeoutscript" => &mut self.timeout_script,
                     _ => unreachable!(),
                 };
                 return match value {
@@ -284,24 +340,29 @@ impl Movie {
                     )),
                 }
             }
-            "allowCustomCaching" => {
+            "allowcustomcaching" => {
                 self.allow_custom_caching = value.int_value()? != 0;
             }
-            "puppetTempo" => {
+            "puppettempo" => {
                 self.puppet_tempo = value.int_value()? as u32;
             }
-            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" => {
+            "colordepth" | "usefastquads" | "romanlingo" | "allowsavelocal" => {
                 // Read-only / no-op in practice; ignore sets like Director does
             }
-            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
-            | "timeoutLapsed" | "soundEnabled" | "soundLevel"
-            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize" | "stageColor" => {
+            "sounddevice" => {
+                // Accept the sound device setting (DirectSound, MacroMix, QT3Mix, etc.)
+                // In WASM we use WebAudio, so this is stored but not acted upon
+                self.sound_device = value.string_value().unwrap_or_default();
+            }
+            "timeoutlength" | "timeoutkeydown" | "timeoutmouse" | "timeoutplay"
+            | "timeoutlapsed" | "soundenabled" | "soundlevel"
+            | "beepon" | "centerstage" | "fixstagesize" => {
                 // Anim props that are set via property_type 0x07 - accept silently
             }
-            "randomSeed" => {
+            "randomseed" => {
                 self.random_seed = Some(value.int_value()?);
             }
-            "stageColor" => {
+            "stagecolor" => {
                 match value {
                     Datum::Int(color_index) => {
                         self.stage_color_ref = ColorRef::PaletteIndex(color_index as u8);

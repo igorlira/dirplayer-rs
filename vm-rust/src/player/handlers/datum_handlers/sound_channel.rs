@@ -1106,6 +1106,7 @@ pub struct SoundChannel {
     pub is_decoding: Rc<RefCell<bool>>,
     pub decode_generation: Rc<RefCell<u32>>, // Incremented each time a new decode starts
     pub playback_start_context_time: f64, // AudioContext.currentTime when playback started
+
 }
 
 impl SoundChannel {

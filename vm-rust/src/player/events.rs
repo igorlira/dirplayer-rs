@@ -593,7 +593,7 @@ pub async fn player_dispatch_event_beginsprite(
     if sprite_instances.is_empty() && frame_instances.is_empty() {
         return Ok(Vec::new());
     }
-    
+
     if frame_instances.len() > 0 {
         let _ = player_invoke_frame_and_movie_scripts(
             handler_name,
@@ -766,11 +766,54 @@ pub async fn dispatch_event_to_all_behaviors(
         // Collect stage sprites - include all entered sprites with behaviors,
         // not just those in sprite_spans. Sprites initialized from channel_initialization_data
         // (D6+ path) also need event dispatch.
+        if handler_name == "exitFrame" || handler_name == "beginSprite" {
+            let mut total_channels = 0;
+            let mut with_behaviors = 0;
+            let mut entered_with_behaviors = 0;
+            for channel in player.movie.score.channels.iter() {
+                total_channels += 1;
+                let has_internal = !channel.sprite.script_instance_list.is_empty();
+                let has_cached = player.script_instance_list_cache.contains_key(&(channel.number as i16));
+                if has_internal || has_cached {
+                    with_behaviors += 1;
+                    if channel.sprite.entered || channel.sprite.puppet {
+                        entered_with_behaviors += 1;
+                    }
+                }
+            }
+        }
         for channel in player.movie.score.channels.iter() {
-            if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered {
+            let sprite_num = channel.number as i16;
+            // Check both the sprite's internal list AND the cached scriptInstanceList
+            // (behaviors added via sprite.scriptInstanceList.add() only exist in the cache)
+            let has_internal = !channel.sprite.script_instance_list.is_empty();
+            let has_cached = player.script_instance_list_cache.contains_key(&sprite_num);
+
+            if !has_internal && !has_cached {
                 continue;
             }
-            let behaviors = channel.sprite.script_instance_list.clone();
+            if !channel.sprite.entered && !channel.sprite.puppet {
+                continue;
+            }
+
+            // Prefer cached list (it includes .add()-ed behaviors)
+            let behaviors = if let Some(cached_ref) = player.script_instance_list_cache.get(&sprite_num).cloned() {
+                let datum = player.get_datum(&cached_ref).clone();
+                if let Datum::List(_, item_refs, _) = datum {
+                    let mut ids = vec![];
+                    for item_ref in &item_refs {
+                        if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
+                            ids.push(id.clone());
+                        }
+                    }
+                    ids
+                } else {
+                    channel.sprite.script_instance_list.clone()
+                }
+            } else {
+                channel.sprite.script_instance_list.clone()
+            };
+
             if channel.number > 0 {
                 sprites.push((ScoreRef::Stage, channel.number, behaviors));
             } else if channel.number == 0 {

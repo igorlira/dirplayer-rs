@@ -5,6 +5,7 @@ use crate::{
         ScriptError, ScriptErrorCode,
     },
 };
+use super::super::types::TypeHandlers;
 
 pub struct PlayerDatumHandlers {}
 
@@ -12,6 +13,7 @@ impl PlayerDatumHandlers {
     pub fn call(handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
             "count" => Self::count(args),
+            "cursor" => TypeHandlers::cursor(args),
             _ => reserve_player_ref(|player| {
                 Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,

@@ -140,17 +140,11 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         }),
         Rule::rect => {
             let mut inner = pair.into_inner();
+            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect x".to_string()))?)?;
+            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect y".to_string()))?)?;
+            let w_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect w".to_string()))?)?;
+            let h_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect h".to_string()))?)?;
             reserve_player_mut(|player| {
-                let x = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected rect x".to_string()))?)?;
-                let y = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected rect y".to_string()))?)?;
-                let w = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected rect width".to_string()))?)?;
-                let h = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected rect height".to_string()))?)?;
-                
-                let x_ref = player.alloc_datum(if x.fract() == 0.0 { Datum::Int(x as i32) } else { Datum::Float(x) });
-                let y_ref = player.alloc_datum(if y.fract() == 0.0 { Datum::Int(y as i32) } else { Datum::Float(y) });
-                let w_ref = player.alloc_datum(if w.fract() == 0.0 { Datum::Int(w as i32) } else { Datum::Float(w) });
-                let h_ref = player.alloc_datum(if h.fract() == 0.0 { Datum::Int(h as i32) } else { Datum::Float(h) });
-                
                 Ok(player.alloc_datum(Datum::Rect([x_ref, y_ref, w_ref, h_ref])))
             })
         }
@@ -207,13 +201,9 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         }),
         Rule::point => {
             let mut inner = pair.into_inner();
+            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point x".to_string()))?)?;
+            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point y".to_string()))?)?;
             reserve_player_mut(|player| {
-                let x = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected point x".to_string()))?)?;
-                let y = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected point y".to_string()))?)?;
-                
-                let x_ref = player.alloc_datum(if x.fract() == 0.0 { Datum::Int(x as i32) } else { Datum::Float(x) });
-                let y_ref = player.alloc_datum(if y.fract() == 0.0 { Datum::Int(y as i32) } else { Datum::Float(y) });
-                
                 Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
             })
         }
@@ -541,6 +531,19 @@ fn parse_lingo_expr_runtime(
                     LingoExpr::HandlerCall(name, args) => {
                         Ok(LingoExpr::ObjHandlerCall(Box::new(obj_ref), name, args))
                     }
+                    LingoExpr::MemberRef(member_expr, _cast_lib) => {
+                        // pMapCastLib.member[expr] → ObjHandlerCall(obj, "getPropRef", [#member, expr])
+                        // Unwrap single-element ListLiteral (from [expr] syntax)
+                        let index_expr = match *member_expr {
+                            LingoExpr::ListLiteral(mut items) if items.len() == 1 => items.remove(0),
+                            other => other,
+                        };
+                        Ok(LingoExpr::ObjHandlerCall(
+                            Box::new(obj_ref),
+                            "getPropRef".to_string(),
+                            vec![LingoExpr::SymbolLiteral("member".to_string()), index_expr],
+                        ))
+                    }
                     _ => Err(ScriptError::new(format!(
                         "Invalid object prop operator rhs {:?}",
                         rhs
@@ -672,11 +675,14 @@ pub fn parse_lingo_rule_runtime(
         }
         Rule::rgb_num_color => {
             let mut inner = pair.into_inner();
-            Ok(LingoExpr::ColorLiteral(ColorRef::Rgb(
-                inner.next().unwrap().as_str().parse::<u8>().unwrap(),
-                inner.next().unwrap().as_str().parse::<u8>().unwrap(),
-                inner.next().unwrap().as_str().parse::<u8>().unwrap(),
-            )))
+            let r_str = inner.next().unwrap().as_str().trim();
+            let g_str = inner.next().unwrap().as_str().trim();
+            let b_str = inner.next().unwrap().as_str().trim();
+            // Parse as i32 first to handle negative values and values > 255, then clamp to u8
+            let r = r_str.parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+            let g = g_str.parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+            let b = b_str.parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+            Ok(LingoExpr::ColorLiteral(ColorRef::Rgb(r, g, b)))
         }
         Rule::rgb_str_color => {
             let mut inner = pair.into_inner();
@@ -1309,6 +1315,18 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                             )))
                         } else {
                             Ok(rect_arr[(index_num - 1) as usize].clone())
+                        }
+                    }
+                    // String indexed by number: return nth character
+                    Datum::String(s) => {
+                        let index_num = index_datum.int_value()?;
+                        if index_num < 1 || index_num as usize > s.chars().count() {
+                            Ok(player.alloc_datum(Datum::String(String::new())))
+                        } else {
+                            let ch = s.chars().nth((index_num - 1) as usize)
+                                .map(|c| c.to_string())
+                                .unwrap_or_default();
+                            Ok(player.alloc_datum(Datum::String(ch)))
                         }
                     }
                     _ => Err(ScriptError::new(format!(
