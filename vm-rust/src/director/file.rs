@@ -344,16 +344,21 @@ fn read_casts(
         if cast_list.is_some() {
             let cast_list = cast_list.unwrap();
             for cast_entry in &cast_list.entries {
-                let cast = get_cast_chunk_for_cast(
-                    reader,
-                    chunk_container,
-                    rifx,
-                    key_table,
-                    &cast_entry.id,
-                );
+                // External casts (with file_path) have their data in separate .cct files,
+                // not in this movie file. Skip CAS* lookup to avoid false matches
+                // when the external entry shares a cast_id with an internal cast.
+                let cast = if !cast_entry.file_path.is_empty() {
+                    None
+                } else {
+                    get_cast_chunk_for_cast(
+                        reader,
+                        chunk_container,
+                        rifx,
+                        key_table,
+                        &cast_entry.id,
+                    )
+                };
                 if cast.is_none() && cast_entry.file_path.is_empty() {
-                    // Cast has no CAS* chunk AND no file_path - this is unusual
-                    // It should either be internal (has CAS*) or external (has file_path)
                     #[cfg(target_arch = "wasm32")]
                     web_sys::console::warn_1(&format!(
                         "Cast '{}' (id={}) has no CAS* chunk and no file_path - data may be missing",
@@ -1042,14 +1047,19 @@ fn read_chunk_data(reader: &mut BinaryReader, fourcc: u32, len: u32) -> Result<V
         use_len = valid_len;
     }
 
-    // validate chunk
+    // validate chunk - allow null-byte variants (e.g., CAS\0 for CASt)
     if fourcc != valid_fourcc {
-        return Err(format!(
-            "At offset 0x{:x} expected '{}' chunk but got '{}'",
-            offset,
-            fourcc_to_string(fourcc),
-            fourcc_to_string(valid_fourcc),
-        ));
+        let a = fourcc.to_be_bytes();
+        let b = valid_fourcc.to_be_bytes();
+        let close_match = (0..4).all(|i| a[i] == b[i] || a[i] == 0 || b[i] == 0);
+        if !close_match {
+            return Err(format!(
+                "At offset 0x{:x} expected '{}' chunk but got '{}'",
+                offset,
+                fourcc_to_string(fourcc),
+                fourcc_to_string(valid_fourcc),
+            ));
+        }
     }
 
     if use_len != valid_len {
@@ -1093,9 +1103,31 @@ fn get_chunk_data(
     // let after_burned = self.after_burned;
     match chunk_container.chunk_info.get(&id) {
         Some(info) => {
-            if fourcc != info.fourcc {
+            // Allow chunks where the FOURCC has a null byte replacing a character
+            // (e.g., CAS\0 matching CASt). Some Director files use null-terminated FOURCCs.
+            let fourcc_match = if fourcc != info.fourcc {
+                // Mask: if either FOURCC has a zero byte in any position, ignore that position
+                let a = fourcc.to_be_bytes();
+                let b = info.fourcc.to_be_bytes();
+                web_sys::console::log_1(&format!(
+                    "FOURCC mismatch: expected 0x{:08x} [{},{},{},{}] got 0x{:08x} [{},{},{},{}]",
+                    fourcc, a[0], a[1], a[2], a[3],
+                    info.fourcc, b[0], b[1], b[2], b[3]
+                ).into());
+                let mut match_count = 0;
+                for i in 0..4 {
+                    if a[i] == b[i] || a[i] == 0 || b[i] == 0 {
+                        match_count += 1;
+                    }
+                }
+                match_count == 4
+            } else {
+                true
+            };
+            if !fourcc_match {
                 return Err(format_args!(
-                    "Expected chunk ${id} to be '{}', but is actually '{}'",
+                    "At offset 0x{:x} expected '{}' chunk but got '{}'",
+                    id,
                     fourcc_to_string(fourcc),
                     fourcc_to_string(info.fourcc)
                 )

@@ -2,7 +2,7 @@ use std::cmp::max;
 
 use itertools::Itertools;
 use log::debug;
-use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
     },
     js_api::JsApi,
     player::bitmap::bitmap::{PaletteRef, get_system_default_palette},
-    player::bitmap::drawing::should_matte_sprite,
+    player::bitmap::drawing::{should_matte_hit_test},
     player::bitmap::palette::SYSTEM_WIN_PALETTE,
     player::events::{dispatch_event_endsprite, dispatch_event_endsprite_for_score},
     player::font::measure_text,
@@ -47,6 +47,16 @@ use super::{
     sprite::{ColorRef, CursorRef, Sprite},
     DirPlayer, ScriptError, PLAYER_OPT,
 };
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = "ruffleIsPlaying")]
+    fn ruffle_is_playing(cast_lib: i32, cast_member: i32) -> bool;
+    #[wasm_bindgen(js_name = "ruffleGetFrameCount")]
+    fn ruffle_get_frame_count(cast_lib: i32, cast_member: i32) -> i32;
+    #[wasm_bindgen(js_name = "ruffleGetCurrentFrame")]
+    fn ruffle_get_current_frame(cast_lib: i32, cast_member: i32) -> i32;
+}
 
 #[derive(Clone, Debug)]
 pub enum ScoreRef {
@@ -182,7 +192,7 @@ pub fn get_channel_number_from_index(index: u32) -> u32 {
 /// D8+ uses inverted 0-255 scale: 0 → 100% (opaque), 255 → 0% (transparent).
 /// D5-D7 uses direct 0-100 percentage: 0 → 100% (opaque/not set).
 fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
-    if dir_version >= 700 {
+    if dir_version > 700 {
         // D8+: inverted 0-255 scale
         if raw == 0 {
             100
@@ -256,8 +266,10 @@ impl Score {
 
         // Update script_ref if we found the script in a different cast library
         if let Some(found_cast_lib) = found_in_other_lib {
-            debug!("create_behavior: script member {} not found in cast_lib {}, found in cast_lib {} instead", 
-                cast_member, resolved_cast_lib, found_cast_lib);
+            web_sys::console::log_1(
+                &format!("create_behavior: script member {} not found in cast_lib {}, found in cast_lib {} instead",
+                    cast_member, resolved_cast_lib, found_cast_lib).into(),
+            );
             script_ref.cast_lib = found_cast_lib;
         }
 
@@ -356,19 +368,9 @@ impl Score {
                             script_get_prop_opt(player, &script_instance_ref, &prop_name)
                         {
                             let existing_datum = player.get_datum(&existing);
-                            let is_void = matches!(existing_datum, Datum::Void);
-                            debug!("  [getPropertyDescriptionList] Property '{}' exists with type {:?}, is_void: {}", 
-                                prop_name, existing_datum.type_enum(), is_void);
-                            if !is_void {
-                                match existing_datum {
-                                    Datum::String(s) => debug!("    Existing value: {:?}", s),
-                                    Datum::Int(n) => debug!("    Existing value: {}", n),
-                                    _ => {}
-                                }
-                            }
-                            is_void
+
+                            matches!(existing_datum, Datum::Void)
                         } else {
-                            debug!("  [getPropertyDescriptionList] Property '{}' does not exist, will set default", prop_name);
                             true
                         };
 
@@ -376,34 +378,23 @@ impl Score {
                             // Find the default value
                             for (key_name, default_value_ref) in desc_props {
                                 if key_name == "default" {
-                                    let default_value = player.get_datum(&default_value_ref);
-                                    debug!("    [getPropertyDescriptionList] Will set default for '{}' to {:?}", 
-                                        prop_name, default_value.type_enum());
                                     defaults_to_set.push((prop_name.clone(), default_value_ref));
 
                                     break;
                                 }
                             }
-                        } else {
-                            debug!("    [getPropertyDescriptionList] Skipping default for '{}' (already has value)", prop_name);
                         }
                     }
 
                     // Third pass: set all defaults
-                    debug!("  [getPropertyDescriptionList] Setting {} default values", defaults_to_set.len());
                     for (prop_name, default_value_ref) in defaults_to_set {
-                        let default_value = player.get_datum(&default_value_ref);
-                        debug!("    [getPropertyDescriptionList] Setting '{}' = {:?}", prop_name, default_value.type_enum());
-                        let result = script_set_prop(
+                        let _ = script_set_prop(
                             player,
                             &script_instance_ref,
                             &prop_name,
                             &default_value_ref,
                             false,
                         );
-                        if let Err(e) = result {
-                            debug!("      ⚠️ Failed: {}", e.message);
-                        }
                     }
                 }
 
@@ -1001,7 +992,7 @@ impl Score {
                                     if let Some(ref current_member_ref) = channel.member {
                                         let current_datum = player.get_datum(current_member_ref);
 
-                                        if let Datum::CastMember(current_cast_ref) =
+                                        if let Datum::CastMember(ref current_cast_ref) =
                                             current_datum
                                         {
                                             return current_cast_ref.cast_member
@@ -1016,7 +1007,7 @@ impl Score {
                                     if let Some(ref current_member_ref) = channel.member {
                                         let current_datum = player.get_datum(current_member_ref);
 
-                                        if let Datum::CastMember(current_cast_ref) =
+                                        if let Datum::CastMember(ref current_cast_ref) =
                                             current_datum
                                         {
                                             return current_cast_ref.cast_member
@@ -1172,7 +1163,7 @@ impl Score {
                     let actual_instance_ref = reserve_player_mut(|player| {
                         let datum = player.get_datum(&datum_ref);
                         match datum {
-                            Datum::ScriptInstanceRef(instance_ref) => Ok(instance_ref.clone()),
+                            Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
                             _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
                         }
                     })
@@ -1212,7 +1203,7 @@ impl Score {
                                                 // Try to format value safely
                                                 match value {
                                                     Datum::Int(n) => debug!("      value: {}", n),
-                                                    Datum::CastMember(m) => debug!("      value: member {} of castLib {}", m.cast_member, m.cast_lib),
+                                                    Datum::CastMember(ref m) => debug!("      value: member {} of castLib {}", m.cast_member, m.cast_lib),
                                                     _ => debug!("      value: <{:?}>", value.type_enum()),
                                                 }
 
@@ -1359,7 +1350,7 @@ impl Score {
                         let actual_instance_ref = reserve_player_mut(|player| {
                             let datum = player.get_datum(&datum_ref);
                             match datum {
-                                Datum::ScriptInstanceRef(instance_ref) => Ok(instance_ref.clone()),
+                                Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
                                 _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
                             }
                         })
@@ -1378,24 +1369,14 @@ impl Score {
 
                         // Apply behavior parameters from initializer data
                         if !behavior.parameter.is_empty() {
-                            debug!("🔧 [sprite_details] Applying {} saved parameters for behavior cast {}/{}", 
-                                behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
                             reserve_player_mut(|player| {
                                 for param_ref in &behavior.parameter {
                                     let param_datum = player.get_datum(param_ref);
-                                    debug!("  [sprite_details] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
                                         let props_to_set: Vec<(String, DatumRef)> = props.iter()
                                             .filter_map(|(key_ref, value_ref)| {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
-                                                    let value = player.get_datum(value_ref);
-                                                    debug!("    [sprite_details] prop: {} type: {:?}", key_name, value.type_enum());
-                                                    match value {
-                                                        Datum::String(s) => debug!("      [sprite_details] value: {:?}", s),
-                                                        Datum::Int(n) => debug!("      [sprite_details] value: {}", n),
-                                                        _ => debug!("      [sprite_details] value: <{:?}>", value.type_enum()),
-                                                    }
                                                     Some((key_name.clone(), value_ref.clone()))
                                                 } else {
                                                     None
@@ -1403,27 +1384,18 @@ impl Score {
                                             })
                                             .collect();
                                         for (prop_name, value_ref) in props_to_set {
-                                            debug!("      [sprite_details] Setting property {} on script instance", prop_name);
-                                            let result = script_set_prop(
+                                            let _ = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
                                                 &prop_name,
                                                 &value_ref,
                                                 false,
                                             );
-                                            if let Err(e) = result {
-                                                debug!("      [sprite_details] ⚠️ Failed to set property {}: {}", prop_name, e.message);
-                                            } else {
-                                                debug!("      [sprite_details] ✅ Successfully set property {}", prop_name);
-                                            }
                                         }
                                     }
                                 }
                                 Ok::<(), ScriptError>(())
                             }).expect("Failed to set sprite detail behavior parameters");
-                        } else {
-                            debug!("⚠️ [sprite_details] No parameters to apply for behavior cast {}/{}", 
-                                behavior.cast_lib, behavior.cast_member);
                         }
 
                         // Attach behavior to sprite
@@ -1472,11 +1444,11 @@ impl Score {
                     cast_lib: sprite_cast_lib,
                     cast_member: data.cast_member as i32,
                 };
-                debug!(
+                web_sys::console::log_1(&format!(
                     "D5 sprite ch={}: scriptId=({},{}), sprite_member=({},{})",
                     channel_num, resolved_cast_lib, script_member,
                     sprite_cast_lib, data.cast_member
-                );
+                ).into());
 
                 let behavior_result = Self::create_behavior(
                     resolved_cast_lib,
@@ -1489,7 +1461,7 @@ impl Score {
                         let actual_instance_ref = reserve_player_mut(|player| {
                             let datum = player.get_datum(&datum_ref);
                             match datum {
-                                Datum::ScriptInstanceRef(instance_ref) => Ok(instance_ref.clone()),
+                                Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
                                 _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
                             }
                         })
@@ -1630,7 +1602,7 @@ impl Score {
                         let actual_instance_ref = reserve_player_mut(|player| {
                             let datum = player.get_datum(&datum_ref);
                             match datum {
-                                Datum::ScriptInstanceRef(instance_ref) => Ok(instance_ref.clone()),
+                                Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
                                 _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
                             }
                         })
@@ -1649,24 +1621,14 @@ impl Score {
 
                         // Apply behavior parameters
                         if !behavior.parameter.is_empty() {
-                            debug!("🔧 [delta-data] Applying {} saved parameters for behavior cast {}/{}", 
-                                behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
                             reserve_player_mut(|player| {
                                 for param_ref in &behavior.parameter {
                                     let param_datum = player.get_datum(param_ref);
-                                    debug!("  [delta-data] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
                                         let props_to_set: Vec<(String, DatumRef)> = props.iter()
                                             .filter_map(|(key_ref, value_ref)| {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
-                                                    let value = player.get_datum(value_ref);
-                                                    debug!("    [delta-data] prop: {} type: {:?}", key_name, value.type_enum());
-                                                    match value {
-                                                        Datum::String(s) => debug!("      [delta-data] value: {:?}", s),
-                                                        Datum::Int(n) => debug!("      [delta-data] value: {}", n),
-                                                        _ => debug!("      [delta-data] value: <{:?}>", value.type_enum()),
-                                                    }
                                                     Some((key_name.clone(), value_ref.clone()))
                                                 } else {
                                                     None
@@ -1674,27 +1636,18 @@ impl Score {
                                             })
                                             .collect();
                                         for (prop_name, value_ref) in props_to_set {
-                                            debug!("      [delta-data] Setting property {} on script instance", prop_name);
-                                            let result = script_set_prop(
+                                            let _ = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
                                                 &prop_name,
                                                 &value_ref,
                                                 false,
                                             );
-                                            if let Err(e) = result {
-                                                debug!("      [delta-data] ⚠️ Failed to set property {}: {}", prop_name, e.message);
-                                            } else {
-                                                debug!("      [delta-data] ✅ Successfully set property {}", prop_name);
-                                            }
                                         }
                                     }
                                 }
                                 Ok::<(), ScriptError>(())
                             }).expect("Failed to set behavior parameters");
-                        } else {
-                            debug!("⚠️ [delta-data] No parameters to apply for behavior cast {}/{}", 
-                                behavior.cast_lib, behavior.cast_member);
                         }
 
                         let score_ref_clone = score_ref.clone();
@@ -1761,7 +1714,7 @@ impl Score {
                 // Extract ScriptInstanceRef
                 let actual_instance_ref = reserve_player_mut(|player| {
                     match player.get_datum(&datum_ref) {
-                        Datum::ScriptInstanceRef(inst) => inst.clone(),
+                        Datum::ScriptInstanceRef(ref inst) => inst.clone(),
                         _ => {
                             web_sys::console::error_1(&"Expected ScriptInstanceRef".into());
                             panic!("Expected ScriptInstanceRef");
@@ -2728,6 +2681,12 @@ impl Score {
         let frame_labels_chunk = dir.frame_labels.as_ref();
         if frame_labels_chunk.is_some() {
             self.frame_labels = frame_labels_chunk.unwrap().labels.clone();
+            for label in &self.frame_labels {
+                web_sys::console::log_1(&format!(
+                    "Frame label: '{}' at frame {}",
+                    label.label, label.frame_num
+                ).into());
+            }
         }
         if let Some(score_chunk) = dir.score.as_ref() {
             self.load_from_score_chunk(score_chunk, dir.version);
@@ -2858,7 +2817,7 @@ impl Score {
             .map(|(_, cast_lib, member)| {
                 if *member < 0 {
                     // Negative member = built-in palette
-                    PaletteRef::from(*member, *cast_lib, 0)
+                    PaletteRef::from(*member, *cast_lib as u32)
                 } else if *member > 0 {
                     // Positive member = cast member palette
                     PaletteRef::Member(CastMemberRef {
@@ -2940,6 +2899,18 @@ pub fn sprite_get_prop(
                 .map(|x| x.clone())
                 .unwrap_or(NULL_CAST_MEMBER_REF),
         )),
+        "camera" => {
+            // Shockwave3D sprite camera — returns the active camera as a Shockwave3dObjectRef
+            let cam_name = sprite.and_then(|s| s.w3d_camera.as_ref()).cloned().unwrap_or_else(|| "DefaultView".to_string());
+            let member_ref = sprite.and_then(|s| s.member.as_ref()).cloned().unwrap_or(NULL_CAST_MEMBER_REF);
+            Ok(Datum::Shockwave3dObjectRef(crate::director::lingo::datum::Shockwave3dObjectRef {
+                cast_lib: member_ref.cast_lib,
+                cast_member: member_ref.cast_member,
+                object_type: "camera".to_string(),
+                name: cam_name,
+            }))
+        }
+        "cameraCount" => Ok(Datum::Int(1)),
         "flipH" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_h))),
         "flipV" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_v))),
         "rotation" => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.rotation))),
@@ -2952,6 +2923,18 @@ pub fn sprite_get_prop(
                 // a separate copy that .add() wouldn't sync back).
                 player.last_sprite_prop_ref = Some(cached_ref.clone());
                 let datum = player.get_datum(&cached_ref).clone();
+                // Sync cached list back to sprite's script_instance_list Vec
+                // so that if the cache is later cleared, the Vec has the data.
+                if let Datum::List(_, ref items, _) = datum {
+                    let mut synced_ids = vec![];
+                    for item_ref in items {
+                        if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
+                            synced_ids.push(id.clone());
+                        }
+                    }
+                    let sprite = player.movie.score.get_sprite_mut(sprite_id);
+                    sprite.script_instance_list = synced_ids;
+                }
                 Ok(datum)
             } else {
                 let instance_ids = sprite.map_or(vec![], |x| x.script_instance_list.clone());
@@ -3047,7 +3030,67 @@ pub fn sprite_get_prop(
         "castLibNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| y.cast_lib)
         }))),
-        "editable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.editable))),
+        // Flash (SWF) sprite properties
+        "playing" => {
+            if let Some(member_ref) = sprite.and_then(|s| s.member.as_ref()) {
+                Ok(datum_bool(ruffle_is_playing(member_ref.cast_lib, member_ref.cast_member)))
+            } else {
+                Ok(datum_bool(false))
+            }
+        }
+        "frameCount" => {
+            if let Some(member_ref) = sprite.and_then(|s| s.member.as_ref()) {
+                Ok(Datum::Int(ruffle_get_frame_count(member_ref.cast_lib, member_ref.cast_member)))
+            } else {
+                Ok(Datum::Int(0))
+            }
+        }
+        "currentFrame" | "frame" => {
+            if let Some(member_ref) = sprite.and_then(|s| s.member.as_ref()) {
+                Ok(Datum::Int(ruffle_get_current_frame(member_ref.cast_lib, member_ref.cast_member)))
+            } else {
+                Ok(Datum::Int(0))
+            }
+        }
+        "actionsEnabled" | "buttonsEnabled" | "imageEnabled" | "sound" | "static" => {
+            // Flash properties that default to true/1
+            Ok(datum_bool(true))
+        }
+        "quality" => Ok(Datum::String("high".to_string())),
+        "scaleMode" => Ok(Datum::String("showAll".to_string())),
+        "playBackMode" => Ok(Datum::Int(0)), // 0 = normal
+        "centerRegPoint" => Ok(datum_bool(true)),
+        "defaultRectMode" => Ok(Datum::Int(0)),
+        "eventPassMode" => Ok(Datum::Int(0)),
+        "clickMode" => Ok(Datum::Int(0)),
+        "fixedRate" => Ok(Datum::Int(0)),
+        "streamMode" => Ok(Datum::Int(0)),
+        "broadcastProps" => Ok(datum_bool(false)),
+        "linked" => Ok(datum_bool(false)),
+        "posterFrame" => Ok(Datum::Int(1)),
+        "mouseOverButton" => Ok(datum_bool(false)),
+        "viewScale" => Ok(Datum::Float(100.0)),
+        "originMode" => Ok(Datum::Int(0)),
+        "originH" | "originV" => Ok(Datum::Int(0)),
+        "viewH" | "viewV" => Ok(Datum::Int(0)),
+        "flashRect" | "defaultRect" => {
+            let w = sprite.map_or(0, |s| s.width);
+            let h = sprite.map_or(0, |s| s.height);
+            Ok(Datum::Rect([
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(w)),
+                player.alloc_datum(Datum::Int(h)),
+            ]))
+        }
+        "originPoint" | "viewPoint" => {
+            Ok(Datum::Point([
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(0)),
+            ]))
+        }
+        "bytesStreamed" | "bufferSize" | "streamSize" => Ok(Datum::Int(0)),
+        "scale" => Ok(Datum::Float(100.0)),
         prop_name => {
             let datum_ref = sprite.and_then(|sprite| {
                 reserve_player_mut(|player| {
@@ -3321,6 +3364,22 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
+        // Shockwave3D camera assignment
+        "camera" => {
+            let cam_name = match &value {
+                Datum::Shockwave3dObjectRef(r) => r.name.clone(),
+                Datum::String(s) => s.clone(),
+                _ => "DefaultView".to_string(),
+            };
+            borrow_sprite_mut(
+                sprite_id,
+                |_player| Ok(cam_name.clone()),
+                |sprite, name: Result<String, ScriptError>| {
+                    sprite.w3d_camera = Some(name.unwrap_or_default());
+                    Ok(())
+                },
+            )
+        }
         // Member properties
         "member" => borrow_sprite_mut(
             sprite_id,
@@ -3359,6 +3418,12 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                             }
                             CastMemberType::VectorShape(vs) => {
                                 Some((vs.width().ceil() as i32, vs.height().ceil() as i32))
+                            }
+                            CastMemberType::Flash(flash) => {
+                                flash.flash_info.as_ref().map(|fi| {
+                                    let (l, t, r, b) = fi.flash_rect;
+                                    ((r - l) as i32, (b - t) as i32)
+                                })
                             }
                             _ => None,
                         };
@@ -3536,6 +3601,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                                 let h = film_loop.initial_rect.height();
                                 ((w / 2) as i16, (h / 2) as i16)
                             }
+                            CastMemberType::Flash(flash) => flash.reg_point,
                             _ => (0, 0),
                         })
                         .unwrap_or((0, 0));
@@ -3718,10 +3784,11 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                         })
                     })
                     .unwrap_or_else(|| {
-                        Err(ScriptError::new(format!(
-                            "Cannot set prop {} of sprite",
+                        eprintln!(
+                            "Warning: Cannot set prop {} of sprite, ignoring",
                             prop_name
-                        )))
+                        );
+                        Ok(())
                     })
             },
         ),
@@ -3736,7 +3803,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
 /// Returns true if the sprite is not matte-ink, or if the matte is not yet computed,
 /// or if the pixel at the given point is opaque.
 fn matte_pixel_hit_test(player: &DirPlayer, sprite: &Sprite, rect: &IntRect, hit_x: i32, hit_y: i32) -> bool {
-    if !should_matte_sprite(sprite.ink as u32) {
+    if !should_matte_hit_test(sprite.ink as u32) {
         return true;
     }
     let member_ref = match sprite.member.as_ref() {
@@ -3832,10 +3899,21 @@ pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: 
     false
 }
 
-fn is_active_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
+pub fn is_active_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
     // Per Director docs, an "active sprite" has a sprite script (behavior) OR cast member script.
     if sprite.script_instance_list.len() > 0 {
         return true;
+    }
+    // Also check the cached scriptInstanceList — behaviors added via
+    // sprite.scriptInstanceList.add() only update the cached Datum::List,
+    // not the sprite's internal script_instance_list Vec.
+    if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite.number as i16)) {
+        let datum = player.get_datum(cached_ref);
+        if let Datum::List(_, items, _) = datum {
+            if !items.is_empty() {
+                return true;
+            }
+        }
     }
     if let Some(member_ref) = sprite.member.as_ref() {
         if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
@@ -3973,16 +4051,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             } else if sprite.bitmap_size_owned_by_sprite
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    debug!("Sprite {}: chose BITMAP_SIZE_OWNED_BY_SPRITE (sprite {}x{}, bitmap {}x{})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height);
+                    web_sys::console::log_1(&format!("Sprite {}: chose BITMAP_SIZE_OWNED_BY_SPRITE (sprite {}x{}, bitmap {}x{})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height).into());
                 }
                 // Sprite size is owned by bitmap, and bitmap is not tiny
                 (bitmap_width, bitmap_height)
             } else if !aspect_ratio_matches
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    debug!("Sprite {}: chose ASPECT_RATIO_MISMATCH (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched);
+                    web_sys::console::log_1(&format!("Sprite {}: chose ASPECT_RATIO_MISMATCH (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
                 }
                 if intentionally_stretched {
                     (sprite.width, sprite.height)
@@ -3996,8 +4074,8 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 && (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    debug!("Sprite {}: chose NO_SIZE_CHANGE_BITMAP_LARGER (sprite {}x{}, bitmap {}x{}, has_size_changed={})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, sprite.has_size_changed);
+                    web_sys::console::log_1(&format!("Sprite {}: chose NO_SIZE_CHANGE_BITMAP_LARGER (sprite {}x{}, bitmap {}x{}, has_size_changed={})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, sprite.has_size_changed).into());
                 }
                 // Sprite hasn't been explicitly resized and bitmap is larger (by sum).
                 (bitmap_width, bitmap_height)
@@ -4005,16 +4083,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 && (sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 if is_debug_sprite {
-                    debug!("Sprite {}: chose NON_PROPORTIONAL_SCALE (sprite {}x{}, bitmap {}x{})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height);
+                    web_sys::console::log_1(&format!("Sprite {}: chose NON_PROPORTIONAL_SCALE (sprite {}x{}, bitmap {}x{})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height).into());
                 }
                 // Score dimensions differ from bitmap AND are not a clean proportional
                 // scale - they are an approximate bounding box. Use bitmap's natural size.
                 (bitmap_width, bitmap_height)
             } else if sprite.has_size_changed && sprite.width != bitmap_width ||  sprite.has_size_changed && sprite.height != bitmap_height {
                 if is_debug_sprite {
-                    debug!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched);
+                    web_sys::console::log_1(&format!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
                 }
                 // Sprite dimensions differ from base — something (Lingo script,
                 // member change) has explicitly modified the size at runtime.
@@ -4022,9 +4100,9 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 (sprite.width, sprite.height)
             } else {
                 if is_debug_sprite {
-                    debug!("Sprite {}: chose DEFAULT (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned={})",
+                    web_sys::console::log_1(&format!("Sprite {}: chose DEFAULT (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned={})",
                         sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height,
-                        aspect_ratio_matches, sprite.has_size_changed, sprite.bitmap_size_owned_by_sprite);
+                        aspect_ratio_matches, sprite.has_size_changed, sprite.bitmap_size_owned_by_sprite).into());
                 }
                 // Use sprite's explicit dimensions (default case)
                 (sprite.width, sprite.height)
@@ -4216,6 +4294,72 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.loc_v - reg_y,
                 sprite.loc_h - reg_x + sprite.width,
                 sprite.loc_v - reg_y + sprite.height,
+            )
+        }
+        CastMemberType::Flash(flash_member) => {
+            let flash_width = flash_member.flash_info.as_ref()
+                .map(|i| (i.flash_rect.2 - i.flash_rect.0) as i32)
+                .unwrap_or(sprite.width);
+            let flash_height = flash_member.flash_info.as_ref()
+                .map(|i| (i.flash_rect.3 - i.flash_rect.1) as i32)
+                .unwrap_or(sprite.height);
+
+            let mut reg_x = flash_member.reg_point.0 as i32;
+            let mut reg_y = flash_member.reg_point.1 as i32;
+
+            // If centerRegPoint, use center of the flash rect dimensions
+            if flash_member.flash_info.as_ref().map_or(true, |i| i.center_reg_point) {
+                if flash_width > 0 && flash_height > 0 {
+                    reg_x = flash_width / 2;
+                    reg_y = flash_height / 2;
+                }
+            }
+
+            // Scale registration point proportionally when sprite is stretched
+            let scaled_reg_x = if flash_width > 0 {
+                ((reg_x * sprite.width) as f32 / flash_width as f32).round() as i32
+            } else {
+                reg_x
+            };
+            let scaled_reg_y = if flash_height > 0 {
+                ((reg_y * sprite.height) as f32 / flash_height as f32).round() as i32
+            } else {
+                reg_y
+            };
+
+            IntRect::from(
+                sprite.loc_h - scaled_reg_x,
+                sprite.loc_v - scaled_reg_y,
+                sprite.loc_h - scaled_reg_x + sprite.width,
+                sprite.loc_v - scaled_reg_y + sprite.height,
+            )
+        }
+        CastMemberType::Shockwave3d(w3d) => {
+            // Use sprite dimensions if set, otherwise fall back to member's default_rect
+            let default_rect = w3d.info.default_rect;
+            let member_width = (default_rect.2 - default_rect.0).max(0) as i32;
+            let member_height = (default_rect.3 - default_rect.1).max(0) as i32;
+
+            // Use the larger of sprite dimensions and member rect
+            let display_width = if sprite.width > member_width { sprite.width } else if member_width > 0 { member_width } else { sprite.width };
+            let display_height = if sprite.height > member_height { sprite.height } else if member_height > 0 { member_height } else { sprite.height };
+
+            // RegPoint handling: when sprite is much larger than member (>2x = fullscreen),
+            // skip regPoint offset. Otherwise use raw regPoint.
+            let (reg_x, reg_y) = if member_width > 0 && member_height > 0
+                && display_width <= member_width * 2 && display_height <= member_height * 2 {
+                // Normal size: use raw regPoint
+                (w3d.info.reg_point.0, w3d.info.reg_point.1)
+            } else {
+                // Fullscreen/stretched: no regPoint offset
+                (0, 0)
+            };
+
+            IntRect::from(
+                sprite.loc_h - reg_x,
+                sprite.loc_v - reg_y,
+                sprite.loc_h - reg_x + display_width,
+                sprite.loc_v - reg_y + display_height,
             )
         }
         _ => IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height),

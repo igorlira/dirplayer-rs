@@ -294,6 +294,16 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
         (Datum::Void, Datum::Int(_)) => Ok(false),
         (Datum::Void, Datum::Float(_)) => Ok(false),
         
+        // String vs number: Director coerces strings to numbers (empty string = 0)
+        (Datum::String(left), Datum::Int(right)) => {
+            let left_number = left.parse::<i32>().unwrap_or(0);
+            Ok(left_number > *right)
+        }
+        (Datum::String(left), Datum::Float(right)) => {
+            let left_number = left.parse::<f64>().unwrap_or(0.0);
+            Ok(left_number > *right)
+        }
+
         // Point comparisons
         (Datum::Point(left), Datum::Point(right)) => {
             let left_x = allocator.get_datum(&left[0]).int_value()?;
@@ -302,7 +312,7 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
             let right_y = allocator.get_datum(&right[1]).int_value()?;
             Ok(left_x > right_x && left_y > right_y)
         }
-        
+
         // Catch-all
         _ => {
             warn!(
@@ -345,6 +355,16 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
             let right_x = allocator.get_datum(&right[0]).int_value()?;
             let right_y = allocator.get_datum(&right[1]).int_value()?;
             Ok(left_x < right_x && left_y < right_y)
+        }
+
+        // String vs number: Director coerces strings to numbers (empty string = 0)
+        (Datum::String(left), Datum::Int(right)) => {
+            let left_number = left.parse::<i32>().unwrap_or(0);
+            Ok(left_number < *right)
+        }
+        (Datum::String(left), Datum::Float(right)) => {
+            let left_number = left.parse::<f64>().unwrap_or(0.0);
+            Ok(left_number < *right)
         }
 
         // String comparisons

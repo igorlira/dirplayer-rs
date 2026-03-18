@@ -112,6 +112,7 @@ impl VirtualScriptRegistry {
             member_ref: member_ref.clone(),
             name: name.to_string(),
             chunk: ScriptChunk {
+                script_number: 0,
                 literals: vec![],
                 handlers: vec![],
                 property_name_ids: vec![],
@@ -127,6 +128,7 @@ impl VirtualScriptRegistry {
         let cast_member = CastMember {
             number: member_number,
             name: name.to_string(),
+            comments: "".to_string(),
             member_type: CastMemberType::Script(ScriptMember {
                 script_id: 0,
                 script_type,

@@ -7,7 +7,7 @@ use super::{
 
 pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, ScriptError> {
     match prop {
-        "rect" => Ok(
+        "rect" | "drawRect" => Ok(
             Datum::Rect([
                 player.alloc_datum(Datum::Int(0)),
                 player.alloc_datum(Datum::Int(0)),

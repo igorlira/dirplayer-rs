@@ -144,7 +144,12 @@ impl CastDef {
                     );
                     // TODO script.setContext(this);
                     if let Some(script) = script {
-                        scripts.insert(i + 1, script);
+                        let key = script.script_number as u32 + 1;
+                        web_sys::console::log_1(&format!(
+                            "Lctx cast {}: script index {} script_number={} (key={}) section_id={}",
+                            id, i, script.script_number, key, section.section_id
+                        ).into());
+                        scripts.insert(key, script);
                     }
                 }
             }

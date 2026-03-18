@@ -82,8 +82,8 @@ impl ListDatumHandlers {
 
             if position < 0 || position >= list_vec.len() as i32 {
                 return Err(ScriptError::new(format!(
-                    "Index out of bounds: {} (list length: {})",
-                    position,
+                    "List index {} out of bounds (list has {} items)",
+                    position + 1,
                     list_vec.len()
                 )));
             }
@@ -129,14 +129,27 @@ impl ListDatumHandlers {
             "duplicate" => Self::duplicate(datum, args),
             "addAt" => Self::add_at(datum, args),
             "getLast" => Self::get_last(datum, args),
-            "append" => Self::append(datum, args),
+            "append" | "push" => Self::append(datum, args),
             "deleteOne" => Self::delete_one(datum, args),
             "deleteAt" => Self::delete_at(datum, args),
             "deleteAll" => Self::delete_all(datum, args),
             "findPos" => Self::find_pos(datum, args),
-            "getPos" => Self::find_pos(datum, args),
+            "getPos" => Self::get_one(datum, args),
             "join" => Self::join(datum, args),
-            "getPropRef" => Self::get_prop_ref(datum, args),
+            "getPropRef" | "getProp" => Self::get_prop_ref(datum, args),
+            "toString" => {
+                Ok(reserve_player_mut(|player| {
+                    let s = crate::player::datum_formatting::format_datum(datum, player);
+                    player.alloc_datum(Datum::String(s))
+                }))
+            },
+            "getTypeOf" => {
+                // Flash objects have getTypeOf() for error checking.
+                // A list is never an error type, so return empty string.
+                Ok(reserve_player_mut(|player| {
+                    player.alloc_datum(Datum::String("".to_string()))
+                }))
+            },
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for list datum"
             ))),
@@ -170,9 +183,10 @@ impl ListDatumHandlers {
             }
 
             let result = items[actual_index].clone();
-            // If there are more keys, recursively resolve
-            if args.len() > 2 {
-                TypeUtils::get_sub_prop(&result, &args[2], player)
+            // If there are more keys AND the first arg was an int (nested indexing like list[a][b]),
+            // recursively resolve. Don't sub-index when args[0] was a symbol (#prop, index) pattern.
+            if args.len() >= 2 && player.get_datum(&args[0]).is_int() {
+                TypeUtils::get_sub_prop(&result, &args[1], player)
             } else {
                 Ok(result)
             }
@@ -230,7 +244,19 @@ impl ListDatumHandlers {
             if datum_value.is_void() {
                 return Ok(DatumRef::Void);
             }
-            
+            if args.is_empty() {
+                // add() with no args — add a PropList with textureCoordinateList key
+                // This is used by meshDeform.mesh[m].textureLayer.add()
+                let key = player.alloc_datum(Datum::Symbol("textureCoordinateList".to_string()));
+                let val = player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List, vec![], false,
+                ));
+                let prop_list = player.alloc_datum(Datum::PropList(vec![(key, val)], false));
+                let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
+                list_vec.push(prop_list);
+                return Ok(DatumRef::Void);
+            }
+
             let item = &args[0];
             let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
             let index_to_add = if is_sorted {

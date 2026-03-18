@@ -377,6 +377,8 @@ impl FontMemberHandlers {
                     line_height: None,
                     line_spacing: text.fixed_line_space,
                     top_spacing: text.top_spacing,
+                    char_spacing: 0,
+                    member_width: None,
                 };
 
                 let index = get_text_index_at_pos(&text.text, &params, x, y);
@@ -434,6 +436,7 @@ impl FontMemberHandlers {
         fixed_line_space: u16,
         top_spacing: i16,
         bottom_spacing: i16,
+        tab_stops: &[crate::player::cast_member::TabStop],
     ) -> Result<(), ScriptError> {
         // Create temporary canvas for text rendering (size of text area only)
         let document = web_sys::window()
@@ -479,6 +482,7 @@ impl FontMemberHandlers {
             text: String,
             width: f64,
             style: NativeSegmentStyle,
+            is_tab: bool, // Tab marker - width is placeholder, resolved during rendering
         }
 
         #[derive(Default)]
@@ -568,7 +572,11 @@ impl FontMemberHandlers {
                     .map(|m| m.width())
                     .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55));
 
-                let would_overflow = line.width + token_width > wrap_width;
+                // If the line has a tab marker, text after the tab is positioned by
+                // the tab stop (e.g. right-aligned), so it doesn't increase line width
+                // and should not trigger word wrap.
+                let has_tab = line.segments.iter().any(|s| s.is_tab);
+                let would_overflow = !has_tab && line.width + token_width > wrap_width;
                 let will_wrap = would_overflow && !line.segments.is_empty() && !is_whitespace;
 
                 if will_wrap {
@@ -577,11 +585,14 @@ impl FontMemberHandlers {
 
                 if !(is_whitespace && line.segments.is_empty()) {
                     line.max_font_px = line.max_font_px.max(style.size_px);
-                    line.width += token_width;
+                    if !has_tab {
+                        line.width += token_width;
+                    }
                     line.segments.push(NativeSegment {
                         text: token_text.clone(),
                         width: token_width,
                         style: style.clone(),
+                        is_tab: false,
                     });
                 }
 
@@ -608,6 +619,34 @@ impl FontMemberHandlers {
                     );
                     token_is_ws = None;
                     push_line(&mut current_line, &mut lines);
+                    continue;
+                }
+                if ch == '\t' {
+                    flush_token(
+                        &mut token,
+                        token_is_ws,
+                        &mut current_line,
+                        &mut lines,
+                        &seg_style,
+                    );
+                    token_is_ws = None;
+                    // Count how many tabs we've seen so far on this line
+                    let tab_idx = current_line.segments.iter().filter(|s| s.is_tab).count();
+                    // Insert a tab marker segment
+                    current_line.segments.push(NativeSegment {
+                        text: String::new(),
+                        width: 0.0,
+                        style: seg_style.clone(),
+                        is_tab: true,
+                    });
+                    // Update line.width to the tab stop position so subsequent
+                    // flush_token calls don't cause false word-wrap overflow
+                    if tab_idx < tab_stops.len() {
+                        let stop_pos = tab_stops[tab_idx].position as f64;
+                        if stop_pos > current_line.width {
+                            current_line.width = stop_pos;
+                        }
+                    }
                     continue;
                 }
 
@@ -638,6 +677,7 @@ impl FontMemberHandlers {
             lines.push(current_line);
         }
 
+
         let mut y = top_spacing.max(0) as f64;
         for line in &lines {
             if y >= canvas_height as f64 {
@@ -664,7 +704,40 @@ impl FontMemberHandlers {
             };
 
             let mut x = x_start.max(0.0);
-            for segment in &line.segments {
+            let mut tab_index = 0usize;
+            for (seg_i, segment) in line.segments.iter().enumerate() {
+                if segment.is_tab {
+                    // Advance to the next tab stop
+                    if tab_index < tab_stops.len() {
+                        let stop = &tab_stops[tab_index];
+                        match stop.tab_type.as_str() {
+                            "right" => {
+                                // For right-aligned tabs, measure remaining text after the tab
+                                let remaining_width: f64 = line.segments[seg_i + 1..]
+                                    .iter()
+                                    .filter(|s| !s.is_tab)
+                                    .map(|s| s.width)
+                                    .sum();
+                                x = (stop.position as f64 - remaining_width).max(x);
+                            }
+                            "center" => {
+                                let remaining_width: f64 = line.segments[seg_i + 1..]
+                                    .iter()
+                                    .filter(|s| !s.is_tab)
+                                    .map(|s| s.width)
+                                    .sum();
+                                x = (stop.position as f64 - remaining_width / 2.0).max(x);
+                            }
+                            _ => {
+                                // Left tab: just advance to position
+                                x = (stop.position as f64).max(x);
+                            }
+                        }
+                        tab_index += 1;
+                    }
+                    continue;
+                }
+
                 let (r, g, b) = segment.style.color;
                 ctx.set_font(&segment.style.font);
                 ctx.set_fill_style_str(&format!("rgb({},{},{})", r, g, b));
@@ -1166,7 +1239,9 @@ impl FontMemberHandlers {
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
-                        original_dst_rect: None,
+                        mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                     };
 
                     bitmap.draw_text(
@@ -1337,7 +1412,9 @@ impl FontMemberHandlers {
                                     rotation: 0.0,
                                     skew: 0.0,
                                     sprite: None,
-                                    original_dst_rect: None,
+                                    mask_offset: (0, 0),
+                    original_dst_rect: None,
+                    ink9_mask_bitmap: None,
                                 };
 
                                 if let Some(mask) = mask {

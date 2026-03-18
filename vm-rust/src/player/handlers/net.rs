@@ -35,7 +35,7 @@ impl NetHandlers {
 
             // TODO should the task be tagged as a text task?
             // URL decoding is handled by preload_net_thing
-            let task_id = player.net_manager.preload_net_thing(url);
+            let task_id = player.net_manager.preload_net_thing(url.clone());
             Ok(player.alloc_datum(Datum::Int(task_id as i32)))
         })
     }
@@ -159,7 +159,28 @@ impl NetHandlers {
                 ));
             }
 
-            let url = player.get_datum(&args[0]).string_value()?;
+            let mut url = player.get_datum(&args[0]).string_value()?;
+
+            // If a fake movie path override is active, rewrite URLs that use
+            // the fake base path back to the real base path so network requests
+            // reach the actual server (e.g. postNetText(the moviePath & "security.asp", ...))
+            if let Some(ref override_path) = player.movie_path_override {
+                if !override_path.is_empty() {
+                    let fake_base = if let Ok(parsed) = url::Url::parse(override_path) {
+                        crate::utils::get_base_url(&parsed).to_string()
+                    } else if let Some(pos) = override_path.rfind('/') {
+                        override_path[..=pos].to_string()
+                    } else {
+                        String::new()
+                    };
+                    if !fake_base.is_empty() && url.starts_with(&fake_base) {
+                        if let Some(ref real_base) = player.net_manager.base_path {
+                            let relative = &url[fake_base.len()..];
+                            url = format!("{}{}", real_base.as_str(), relative);
+                        }
+                    }
+                }
+            }
 
             // Get the post data (can be a property list or string)
             let post_data = if args.len() > 1 {

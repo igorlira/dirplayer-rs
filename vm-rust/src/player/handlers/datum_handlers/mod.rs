@@ -22,9 +22,13 @@ pub mod timeout;
 pub mod vector;
 pub mod void;
 pub mod xml;
+pub mod flash_object;
 pub mod float;
+pub mod shockwave3d_object;
+pub mod transform3d;
 
 use player::PlayerDatumHandlers;
+use self::flash_object::FlashObjectDatumHandlers;
 
 use self::cast_lib::CastLibDatumHandlers;
 use self::date::DateDatumHandlers;
@@ -137,6 +141,19 @@ pub async fn player_call_datum_handler(
                 SpriteDatumHandlers::call(obj_ref, handler_name, args)
             }
         }
+        DatumType::Xtra => {
+            // xtra("name").new() — create an instance via method call on the Xtra class datum
+            if handler_name == "new" {
+                let mut full_args = vec![obj_ref.clone()];
+                full_args.extend(args.iter().cloned());
+                Box::pin(crate::player::handlers::types::TypeHandlers::new(&full_args)).await
+            } else {
+                Err(ScriptError::new_code(
+                    ScriptErrorCode::HandlerNotFound,
+                    format!("No handler {handler_name} for Xtra datum"),
+                ))
+            }
+        }
         DatumType::XtraInstance => {
             let (xtra_name, instance_id) = reserve_player_ref(|player| {
                 let (xtra_name, instance_id) =
@@ -164,12 +181,57 @@ pub async fn player_call_datum_handler(
                 "newMember" => {
                     Box::pin(crate::player::handlers::types::TypeHandlers::new(&args.clone())).await
                 }
+                "go" => {
+                    Box::pin(crate::player::handlers::movie::MovieHandlers::go(&args)).await
+                }
+                "count" => {
+                    reserve_player_mut(|player| {
+                        use crate::director::lingo::datum::Datum;
+                        let prop_name = player.get_datum(&args[0]).string_value()?;
+                        let prop_datum = player.movie.get_prop(&prop_name)?;
+                        let count = match &prop_datum {
+                            Datum::List(_, items, _) => items.len() as i32,
+                            Datum::PropList(items, _) => items.len() as i32,
+                            _ => 0,
+                        };
+                        Ok(player.alloc_datum(Datum::Int(count)))
+                    })
+                }
+                "getProp" | "getAt" | "getPropRef" => {
+                    // _system.desktopRectList[1] → getProp(desktopRectList, 1)
+                    reserve_player_mut(|player| {
+                        use crate::director::lingo::datum::Datum;
+                        let prop_name = player.get_datum(&args[0]).string_value()?;
+                        let prop_datum = player.movie.get_prop(&prop_name)?;
+                        let prop_ref = player.alloc_datum(prop_datum);
+                        if args.len() > 1 {
+                            let index = player.get_datum(&args[1]).int_value()?;
+                            let list_datum = player.get_datum(&prop_ref);
+                            match list_datum {
+                                Datum::List(_, items, _) => {
+                                    let idx = (index as usize).saturating_sub(1);
+                                    if idx < items.len() {
+                                        Ok(items[idx].clone())
+                                    } else {
+                                        Ok(DatumRef::Void)
+                                    }
+                                }
+                                _ => Ok(prop_ref)
+                            }
+                        } else {
+                            Ok(prop_ref)
+                        }
+                    })
+                }
                 _ => Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,
                     format!("No handler {handler_name} for datum <_movie>"),
                 )),
             }
         }
+        DatumType::FlashObjectRef => FlashObjectDatumHandlers::call(obj_ref, handler_name, args),
+        DatumType::Shockwave3dObjectRef => shockwave3d_object::Shockwave3dObjectDatumHandlers::call(obj_ref, handler_name, args),
+        DatumType::Transform3d => transform3d::Transform3dDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Void => {
             // Try VoidDatumHandlers first for specific methods that should return VOID gracefully
             match VoidDatumHandlers::call(obj_ref.clone(), handler_name, args) {
@@ -192,13 +254,20 @@ pub async fn player_call_datum_handler(
                 }
             }
         }
-        _ => reserve_player_ref(|player| {
-            let formatted_datum = format_datum(obj_ref, &player);
-            Err(ScriptError::new_code(
-                ScriptErrorCode::HandlerNotFound,
-                format!("No handler {handler_name} for datum {}", formatted_datum),
-            ))
-        }),
+        _ => {
+            // getAt on scalar types (Int, Float) returns the value itself for index 1
+            if handler_name == "getAt" {
+                return Ok(obj_ref.clone());
+            }
+            reserve_player_ref(|player| {
+                let formatted_datum = format_datum(obj_ref, &player);
+                eprintln!(
+                    "Warning: No handler {handler_name} for datum {}, returning VOID",
+                    formatted_datum
+                );
+                Ok(DatumRef::Void)
+            })
+        },
     };
 
     if handler_name == "getPropertyDescriptionList" {

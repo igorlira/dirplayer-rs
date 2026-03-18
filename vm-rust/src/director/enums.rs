@@ -548,6 +548,417 @@ impl From<&[u8]> for FilmLoopInfo {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Shockwave3dInfo {
+    pub loops: bool,
+    pub duration: u32,
+    pub direct_to_stage: bool,
+    pub animation_enabled: bool,
+    pub preload: bool,
+    pub reg_point: (i32, i32),
+    pub default_rect: (i32, i32, i32, i32), // left, top, right, bottom
+    pub camera_position: Option<(f32, f32, f32)>,
+    pub camera_rotation: Option<(f32, f32, f32)>,
+    pub bg_color: Option<(u8, u8, u8)>,
+    pub ambient_color: Option<(u8, u8, u8)>,
+}
+
+impl Shockwave3dInfo {
+    pub fn from(bytes: &[u8]) -> Option<Shockwave3dInfo> {
+        if bytes.len() < 4 { return None; }
+        let str_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        // 4 (str_len) + str_len + 4 (unknown u32) + 4 ("3DPR") + 4 (block_size) = content start
+        let o = 4 + str_len + 12;
+        if bytes.len() < o + 80 { return None; }
+
+        // o+0x00: unknown (6)
+        // o+0x04: loops
+        // o+0x08: duration
+        // o+0x0C: direct_to_stage
+        // o+0x10: animation_enabled
+        let loops             = u32::from_be_bytes([bytes[o+4],  bytes[o+5],  bytes[o+6],  bytes[o+7]])  != 0;
+        let duration          = u32::from_be_bytes([bytes[o+8],  bytes[o+9],  bytes[o+10], bytes[o+11]]);
+        let direct_to_stage   = u32::from_be_bytes([bytes[o+12], bytes[o+13], bytes[o+14], bytes[o+15]]) != 0;
+        let animation_enabled = u32::from_be_bytes([bytes[o+16], bytes[o+17], bytes[o+18], bytes[o+19]]) != 0;
+
+        // Verified offsets from hex dump (o = 0x1B):
+        // reg_y  @ abs 0x56 → o+0x3B = 120
+        // reg_x  @ abs 0x5A → o+0x3F = 160
+        // rect   @ abs 0x5E, 0x62, 0x66, 0x6A → (left=0, top=0, bottom=240, right=320)
+        // preload@ abs 0x6E → o+0x53 = 1
+        if bytes.len() < o + 0x57 { return None; }
+        let reg_y       = i32::from_be_bytes([bytes[o+0x3B], bytes[o+0x3C], bytes[o+0x3D], bytes[o+0x3E]]);
+        let reg_x       = i32::from_be_bytes([bytes[o+0x3F], bytes[o+0x40], bytes[o+0x41], bytes[o+0x42]]);
+        let rect_left   = i32::from_be_bytes([bytes[o+0x43], bytes[o+0x44], bytes[o+0x45], bytes[o+0x46]]);
+        let rect_top    = i32::from_be_bytes([bytes[o+0x47], bytes[o+0x48], bytes[o+0x49], bytes[o+0x4A]]);
+        let rect_bottom = i32::from_be_bytes([bytes[o+0x4B], bytes[o+0x4C], bytes[o+0x4D], bytes[o+0x4E]]);
+        let rect_right  = i32::from_be_bytes([bytes[o+0x4F], bytes[o+0x50], bytes[o+0x51], bytes[o+0x52]]);
+        let preload     = u32::from_be_bytes([bytes[o+0x53], bytes[o+0x54], bytes[o+0x55], bytes[o+0x56]]) != 0;
+
+        // Parse extended properties (camera, colors) from the tail of the 3DPR block.
+        // These are stored as typed records: 0x16=vector(3 floats), 0x12=color(3 u32s), 0x03=string
+        let mut camera_position = None;
+        let mut camera_rotation = None;
+        let mut bg_color = None;
+        let mut ambient_color = None;
+        let mut found_view_name = false;
+
+        // Scan for type markers after preload
+        let mut scan = o + 0x57;
+        while scan + 4 <= bytes.len() {
+            let marker = u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]);
+            match marker {
+                0x03 => {
+                    // String: 4-byte len + chars
+                    scan += 4;
+                    if scan + 4 > bytes.len() { break; }
+                    let slen = u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]) as usize;
+                    scan += 4;
+                    if scan + slen > bytes.len() { break; }
+                    let s: String = bytes[scan..scan+slen].iter().map(|&b| b as char).collect();
+                    if s == "DefaultView" || s.ends_with("View") || s.ends_with("view") {
+                        found_view_name = true;
+                    }
+                    scan += slen;
+                }
+                0x16 => {
+                    // Vector: 3 BE floats + 4 extra bytes
+                    scan += 4;
+                    if scan + 16 > bytes.len() { break; }
+                    let f1 = f32::from_bits(u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]));
+                    let f2 = f32::from_bits(u32::from_be_bytes([bytes[scan+4], bytes[scan+5], bytes[scan+6], bytes[scan+7]]));
+                    let f3 = f32::from_bits(u32::from_be_bytes([bytes[scan+8], bytes[scan+9], bytes[scan+10], bytes[scan+11]]));
+                    scan += 16; // 3 floats + 4 unknown bytes
+
+                    if found_view_name {
+                        if camera_position.is_none() {
+                            camera_position = Some((f1, f2, f3));
+                        } else if camera_rotation.is_none() {
+                            camera_rotation = Some((f1, f2, f3));
+                        }
+                    }
+                }
+                0x12 => {
+                    // Color: 3 u32 components (as bytes)
+                    scan += 4;
+                    if scan + 12 > bytes.len() { break; }
+                    let r = u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]) as u8;
+                    let g = u32::from_be_bytes([bytes[scan+4], bytes[scan+5], bytes[scan+6], bytes[scan+7]]) as u8;
+                    let b = u32::from_be_bytes([bytes[scan+8], bytes[scan+9], bytes[scan+10], bytes[scan+11]]) as u8;
+                    scan += 12;
+
+                    // First color after basic fields is diffuse, then bg, then ambient, then directional
+                    if bg_color.is_none() {
+                        // Skip diffuse color (first 0x12)
+                        bg_color = Some((r, g, b)); // will be overwritten
+                    } else if ambient_color.is_none() {
+                        ambient_color = Some((r, g, b));
+                    }
+                }
+                _ => {
+                    scan += 4; // skip unknown marker
+                }
+            }
+        }
+
+        // Re-parse colors in proper order: diffuse, bg, ambient, directional
+        // The hex shows: 0x12 diffuse(FF,FF,FF), 0x12 bg(FD,FD,FD), 0x12 ambient(00,00,00), 0x12 directional(FF,FF,FF)
+        // Let's re-scan just for colors
+        let mut colors: Vec<(u8, u8, u8)> = Vec::new();
+        scan = o + 0x57;
+        while scan + 16 <= bytes.len() {
+            let marker = u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]);
+            if marker == 0x12 {
+                scan += 4;
+                let r = u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]) as u8;
+                let g = u32::from_be_bytes([bytes[scan+4], bytes[scan+5], bytes[scan+6], bytes[scan+7]]) as u8;
+                let b = u32::from_be_bytes([bytes[scan+8], bytes[scan+9], bytes[scan+10], bytes[scan+11]]) as u8;
+                colors.push((r, g, b));
+                scan += 12;
+            } else {
+                scan += 4;
+            }
+        }
+        // colors[0]=diffuse, colors[1]=bg, colors[2]=ambient, colors[3]=directional
+        let bg_color = colors.get(1).copied();
+        let ambient_color = colors.get(2).copied();
+
+        Some(Shockwave3dInfo {
+            loops, duration, direct_to_stage, animation_enabled, preload,
+            reg_point: (reg_x, reg_y),
+            default_rect: (rect_left, rect_top, rect_right, rect_bottom),
+            camera_position,
+            camera_rotation,
+            bg_color,
+            ambient_color,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum FlashOriginMode {
+    Center = 0,
+    TopLeft = 1,
+    Point = 2,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum FlashPlaybackMode {
+    Normal = 0,
+    Fixed = 1,
+    LockStep = 2,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum FlashScaleMode {
+    ShowAll = 0,
+    NoScale = 1,
+    AutoSize = 2,
+    ExactFit = 3,
+    NoBorder = 4,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum FlashQuality {
+    AutoHigh = 0,
+    AutoMedium = 1,
+    Low = 2,
+    High = 3,
+    AutoLow = 4,
+    Medium = 5,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum FlashStreamMode {
+    Frame = 0,
+    Idle = 1,
+    Manual = 2,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum FlashEventPassMode {
+    PassAlways = 0,
+    PassButton = 1,
+    PassNotButton = 2,
+    PassNever = 3,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum FlashClickMode {
+    BoundingBox = 0,
+    Opaque = 1,
+    Object = 2,
+}
+
+#[derive(Clone, Debug)]
+pub struct FlashInfo {
+    // SWF-derived / cached fields
+    pub reg_point: (i32, i32),        // [6],[7] - center of flash rect
+    pub flash_rect: (i32, i32, i32, i32), // [8],[9],[10],[11] - left,top,right,bottom
+    pub bg_color: u32,                // [13] - from SWF
+
+    // Settings
+    pub direct_to_stage: bool,        // [4]
+    pub image_enabled: bool,          // [14]
+    pub sound_enabled: bool,          // [15]
+    pub paused_at_start: bool,        // [16]
+    pub loop_enabled: bool,           // [17]
+    pub scale_mode: FlashScaleMode,   // [20]
+    pub stream_mode: FlashStreamMode, // [21]
+    pub fixed_rate: u32,              // [22]
+    pub scale: f32,                   // [23]
+
+    // Origin / view (variable section)
+    pub origin_mode: FlashOriginMode, // [26]
+    pub origin_h: f32,                // [27]
+    pub origin_v: f32,                // [28]
+    pub view_scale: f32,              // [29]
+    pub view_h: f32,                  // [31]
+    pub view_v: f32,                  // [32]
+
+    // Display settings
+    pub center_reg_point: bool,       // [33]
+    pub quality: FlashQuality,        // [34]
+    pub is_static: bool,              // [35]
+    pub buttons_enabled: bool,        // [36]
+    pub actions_enabled: bool,        // [37]
+    pub event_pass_mode: FlashEventPassMode, // [38]
+    pub click_mode: FlashClickMode,   // [39]
+    pub poster_frame: u32,            // [40]
+    pub playback_mode: FlashPlaybackMode, // [41]
+    pub preload: bool,                // [42]
+    pub buffer_size: u32,             // [3]
+
+    // Strings
+    pub source_file_name: String,
+    pub common_player: String,
+}
+
+impl FlashInfo {
+    pub fn from(bytes: &[u8]) -> Option<FlashInfo> {
+        if bytes.len() < 9 {
+            return None;
+        }
+        let mut reader = BinaryReader::from_u8(bytes);
+        reader.set_endian(Endian::Big);
+
+        // Header: u32 string_len + "flash" + u32 data_len + "FLSH" + u32 data_len2 + u32 count
+        let str_len = reader.read_u32().unwrap_or(0) as usize;
+        if str_len == 0 || bytes.len() < 4 + str_len + 16 {
+            return None;
+        }
+        let name_bytes = reader.read_bytes(str_len).ok()?;
+        let name = String::from_utf8_lossy(name_bytes).to_string();
+        if name != "flash" {
+            return None;
+        }
+
+        let _data_len = reader.read_u32().unwrap_or(0);
+        let fourcc = reader.read_bytes(4).ok()?;
+        if fourcc != b"FLSH" {
+            return None;
+        }
+        let _data_len2 = reader.read_u32().unwrap_or(0);
+        let _count = reader.read_u32().unwrap_or(0);
+
+        // Now read 26 u32 values (fixed section)
+        let mut u32s = [0u32; 26];
+        for i in 0..26 {
+            u32s[i] = reader.read_u32().unwrap_or(0);
+        }
+
+        let buffer_size = u32s[3];
+        let direct_to_stage = u32s[4] != 0;
+        let reg_point = (u32s[6] as i32, u32s[7] as i32);
+        let flash_rect = (u32s[8] as i32, u32s[9] as i32, u32s[10] as i32, u32s[11] as i32);
+        let bg_color = u32s[13];
+        let image_enabled = u32s[14] != 0;
+        let sound_enabled = u32s[15] != 0;
+        let paused_at_start = u32s[16] != 0;
+        let loop_enabled = u32s[17] != 0;
+        // u32s[18], u32s[19] unknown
+        let scale_mode = match u32s[20] {
+            1 => FlashScaleMode::NoScale,
+            2 => FlashScaleMode::AutoSize,
+            3 => FlashScaleMode::ExactFit,
+            4 => FlashScaleMode::NoBorder,
+            _ => FlashScaleMode::ShowAll,
+        };
+        let stream_mode = match u32s[21] {
+            1 => FlashStreamMode::Idle,
+            2 => FlashStreamMode::Manual,
+            _ => FlashStreamMode::Frame,
+        };
+        let fixed_rate = u32s[22];
+        let scale = f32::from_bits(u32s[23]);
+
+        // Variable section: read remaining u32/f32 values
+        let origin_mode_val = reader.read_u32().unwrap_or(0);
+        let origin_mode = match origin_mode_val {
+            1 => FlashOriginMode::TopLeft,
+            2 => FlashOriginMode::Point,
+            _ => FlashOriginMode::Center,
+        };
+        let origin_h = f32::from_bits(reader.read_u32().unwrap_or(0));
+        let origin_v = f32::from_bits(reader.read_u32().unwrap_or(0));
+        let view_scale = f32::from_bits(reader.read_u32().unwrap_or(0));
+        let _unk30 = reader.read_u32().unwrap_or(0);
+        let view_h = f32::from_bits(reader.read_u32().unwrap_or(0));
+        let view_v = f32::from_bits(reader.read_u32().unwrap_or(0));
+
+        let center_reg_point = reader.read_u32().unwrap_or(0) != 0;
+        let quality = match reader.read_u32().unwrap_or(3) {
+            0 => FlashQuality::AutoHigh,
+            1 => FlashQuality::AutoMedium,
+            2 => FlashQuality::Low,
+            4 => FlashQuality::AutoLow,
+            5 => FlashQuality::Medium,
+            _ => FlashQuality::High,
+        };
+        let is_static = reader.read_u32().unwrap_or(0) != 0;
+        let buttons_enabled = reader.read_u32().unwrap_or(1) != 0;
+        let actions_enabled = reader.read_u32().unwrap_or(1) != 0;
+        let event_pass_mode = match reader.read_u32().unwrap_or(0) {
+            1 => FlashEventPassMode::PassButton,
+            2 => FlashEventPassMode::PassNotButton,
+            3 => FlashEventPassMode::PassNever,
+            _ => FlashEventPassMode::PassAlways,
+        };
+        let click_mode = match reader.read_u32().unwrap_or(1) {
+            0 => FlashClickMode::BoundingBox,
+            2 => FlashClickMode::Object,
+            _ => FlashClickMode::Opaque,
+        };
+        let poster_frame = reader.read_u32().unwrap_or(1);
+        let playback_mode = match reader.read_u32().unwrap_or(0) {
+            1 => FlashPlaybackMode::Fixed,
+            2 => FlashPlaybackMode::LockStep,
+            _ => FlashPlaybackMode::Normal,
+        };
+        let preload = reader.read_u32().unwrap_or(1) != 0;
+
+        // Skip 4 unknown u32s [43-46]
+        for _ in 0..4 {
+            let _ = reader.read_u32();
+        }
+
+        // Source file name (length-prefixed string)
+        let src_len = reader.read_u32().unwrap_or(0) as usize;
+        let source_file_name = if src_len > 0 {
+            let src_bytes = reader.read_bytes(src_len).unwrap_or(&[]);
+            String::from_utf8_lossy(src_bytes).to_string()
+        } else {
+            String::new()
+        };
+
+        // Skip u32 (observed value=2, possibly string count)
+        let _ = reader.read_u32();
+
+        // Common player (length-prefixed string)
+        let cp_len = reader.read_u32().unwrap_or(0) as usize;
+        let common_player = if cp_len > 0 {
+            let cp_bytes = reader.read_bytes(cp_len).unwrap_or(&[]);
+            String::from_utf8_lossy(cp_bytes).to_string()
+        } else {
+            String::new()
+        };
+
+        Some(FlashInfo {
+            reg_point,
+            flash_rect,
+            bg_color,
+            direct_to_stage,
+            image_enabled,
+            sound_enabled,
+            paused_at_start,
+            loop_enabled,
+            scale_mode,
+            stream_mode,
+            fixed_rate,
+            scale,
+            origin_mode,
+            origin_h,
+            origin_v,
+            view_scale,
+            view_h,
+            view_v,
+            center_reg_point,
+            quality,
+            is_static,
+            buttons_enabled,
+            actions_enabled,
+            event_pass_mode,
+            click_mode,
+            poster_frame,
+            playback_mode,
+            preload,
+            buffer_size,
+            source_file_name,
+            common_player,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SoundInfo {
     pub sample_rate: u32,

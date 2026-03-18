@@ -6,7 +6,7 @@ ident = @{ !digit ~ (alpha | digit | "_")+ }
 lang_ident = { !reserved_keyword ~ ident }
 
 reserved_keyword = @{
-    ("sprite" | "castLib" | "member" | "put" | "set" | "to" | "into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item" | "delete" | "field") ~ !(alpha | digit | "_")
+    ("sprite" | "castLib" | "set" | "to" | "into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item" | "delete" | "field") ~ !(alpha | digit | "_")
 }
 
 void_keyword = _{ ("void" | "VOID" | "Void") ~ !(alpha | digit | "_") }
@@ -72,23 +72,23 @@ rgb_num_arg   = { digit{,3} }
 rgb_num_color = { ^"rgb" ~ "(" ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ ")" }
 rgb_str_color = { ^"rgb" ~ "(" ~ (string) ~ ")" }
 rgb_color     = { rgb_num_color | rgb_str_color }
-rect          = { ^"rect" ~ "(" ~ number ~ "," ~ number ~ "," ~ number ~ "," ~ number ~ ")" }
-point         = { ^"point" ~ "(" ~ number ~ "," ~ number ~ ")" }
+rect          = { ^"rect" ~ "(" ~ expr ~ "," ~ expr ~ "," ~ expr ~ "," ~ expr ~ ")" }
+point         = { ^"point" ~ "(" ~ expr ~ "," ~ expr ~ ")" }
 
 // CastLib references: "castLib 1" or "castLib "levels""
-castlib_ref = { &reserved_keyword ~ ^"castLib" ~ term_arg }
+castlib_ref = { ^"castLib" ~ term_arg }
 
 // Member references: "member 5" or "member 5 of castLib 1"
-member_ref = { &reserved_keyword ~ ^"member" ~ term_arg ~ (^"of" ~ castlib_ref)? }
+member_ref = { ^"member" ~ term_arg ~ (^"of" ~ castlib_ref)? }
 
 // Sprite references: "sprite 17"
-sprite_ref = { &reserved_keyword ~ ^"sprite" ~ term_arg }
+sprite_ref = { ^"sprite" ~ term_arg }
 
 // Field references: "field 5" or "field "myField""
-field_ref = { &reserved_keyword ~ ^"field" ~ term_arg }
+field_ref = { ^"field" ~ !(alpha | digit | "_") ~ term_arg }
 
 // Chunk expressions for "char 1 of myStr", "line 1 to 3 of myStr", etc.
-chunk_type = { &reserved_keyword ~ (^"char" | ^"word" | ^"line" | ^"item") }
+chunk_type  = { ^"char" | ^"word" | ^"line" | ^"item" }
 chunk_range = { ^"to" ~ expr }
 chunk_expr  = { chunk_type ~ expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
 
@@ -127,8 +127,8 @@ command_inline_args              = _{ command_inline_args_comma | command_inline
 // put() with parentheses must have at least one argument, otherwise it's an error
 put_handler_call                 =  { ^"put" ~ "(" ~ handler_call_args ~ ")" }
 // Allow other handlers with parentheses to be called normally
-handler_call                     =  { lang_ident ~ "(" ~ handler_call_args? ~ ")" }
-command_inline                   =  { lang_ident ~ !(WHITESPACE* ~ ("(" | "." | "=")) ~ command_inline_args }
+handler_call                     =  { !^"put" ~ !^"set" ~ lang_ident ~ "(" ~ handler_call_args? ~ ")" }
+command_inline                   =  { !^"put" ~ !^"set" ~ lang_ident ~ !(WHITESPACE* ~ ("(" | "." | "=")) ~ WHITESPACE+ ~ command_inline_args }
 
 // Put statement variations (order matters - most specific first!)
 put_into_chunk   = { ^"put" ~ expr ~ ^"into" ~ chunk_expr }

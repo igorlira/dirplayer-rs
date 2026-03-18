@@ -4,7 +4,7 @@ use log::debug;
 
 use crate::director::{
     chunks::cast_member_info::CastMemberInfoChunk,
-    enums::{BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, SoundInfo, FieldInfo, TextInfo},
+    enums::{BitmapInfo, FilmLoopInfo, FlashInfo, FontInfo, MemberType, ScriptType, ShapeInfo, SoundInfo, FieldInfo, TextInfo},
 };
 
 use super::Chunk;
@@ -137,6 +137,13 @@ impl CastMemberChunk {
                 specific_data_parsed =
                     CastMemberSpecificData::FilmLoop(FilmLoopInfo::from(specific_data.as_slice()))
             }
+            MemberType::Flash => {
+                if let Some(flash_info) = FlashInfo::from(specific_data.as_slice()) {
+                    specific_data_parsed = CastMemberSpecificData::Flash(flash_info);
+                } else {
+                    specific_data_parsed = CastMemberSpecificData::None;
+                }
+            }
             MemberType::Sound => {
                 specific_data_parsed = CastMemberSpecificData::None;
             }
@@ -174,6 +181,7 @@ pub enum CastMemberSpecificData {
     Font(FontInfo),
     Field(FieldInfo),
     Text(TextInfo),  // D6+ text member with "text" FourCC header
+    Flash(FlashInfo),
     None,
 }
 
@@ -205,6 +213,14 @@ impl CastMemberSpecificData {
     pub fn film_loop_info(&self) -> Option<&FilmLoopInfo> {
         if let CastMemberSpecificData::FilmLoop(film_loop_info) = self {
             Some(film_loop_info)
+        } else {
+            None
+        }
+    }
+
+    pub fn flash_info(&self) -> Option<&FlashInfo> {
+        if let CastMemberSpecificData::Flash(info) = self {
+            Some(info)
         } else {
             None
         }

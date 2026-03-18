@@ -81,6 +81,16 @@ impl ArithmeticsBytecodeHandler {
             let right = player.get_datum(&right);
             let left = player.get_datum(&left);
 
+            // Treat Void as 0 (Director behavior)
+            let left = match left {
+                Datum::Void => &Datum::Int(0),
+                other => other,
+            };
+            let right = match right {
+                Datum::Void => &Datum::Int(0),
+                other => other,
+            };
+
             let result = match (left, right) {
                 (Datum::Int(left), Datum::Int(right)) => {
                     Datum::Int(Self::safe_mod_int(*left, *right))
@@ -205,6 +215,9 @@ impl ArithmeticsBytecodeHandler {
                         )),
                     };
                     Datum::Point([x_ref, y_ref])
+                }
+                Datum::Vector(v) => {
+                    Datum::Vector([-v[0], -v[1], -v[2]])
                 }
                 Datum::List(list_type, items, sorted) => {
                     let mut negated_items = Vec::with_capacity(items.len());

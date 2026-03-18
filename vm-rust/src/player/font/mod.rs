@@ -97,6 +97,8 @@ pub struct DrawTextParams<'a> {
     pub line_height: Option<u16>,
     pub line_spacing: u16,
     pub top_spacing: i16,
+    pub char_spacing: i16,
+    pub member_width: Option<i16>,
 }
 
 impl FontManager {
@@ -1235,28 +1237,37 @@ pub fn measure_text_wrapped(
 }
 
 pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize) -> (i16, i16) {
-    let mut x = 0;
+    let mut x: i16 = 0;
     let mut y = params.top_spacing;
-    let mut line_width = 0;
+    let mut line_width: i16 = 0;
     let mut line_index = 0;
+    let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
+    let line_step = params.line_height.unwrap_or(eff_lh) as i16
+        + params.line_spacing as i16
+        + 1;
+
+    let mut prev_was_cr = false;
     for c in text.chars() {
         if c == '\r' || c == '\n' {
             if line_index == char_index {
-                return (x, y);
+                return (line_width, y);
             }
-            if line_width > x {
-                x = line_width;
+            // Treat \r\n as a single line break
+            if c == '\n' && prev_was_cr {
+                prev_was_cr = false;
+                line_index += 1;
+                continue;
             }
+            prev_was_cr = c == '\r';
             line_width = 0;
-            let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
-            y += params.line_height.unwrap_or(eff_lh) as i16
-                + params.line_spacing as i16
-                + 1;
+            y += line_step;
         } else {
+            prev_was_cr = false;
+            let char_advance = params.font.get_char_advance(c as u8) as i16 + 1 + params.char_spacing;
             if line_index == char_index {
-                return (x, y);
+                return (line_width, y);
             }
-            line_width += params.font.get_char_advance(c as u8) as i16 + 1;
+            line_width += char_advance;
         }
         line_index += 1;
     }

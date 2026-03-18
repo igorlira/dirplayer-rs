@@ -28,7 +28,7 @@ pub struct DateDatumHandlers;
 impl DateDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: &String,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -42,12 +42,13 @@ impl DateDatumHandlers {
                 date_obj.timestamp_ms as f64,
             ));
 
-            match handler_name {
-                "getTime" => {
+            let handler_name_lower = handler_name.to_lowercase();
+            match handler_name_lower.as_str() {
+                "gettime" => {
                     let time = js_date.get_time() as i32;
                     Ok(player.alloc_datum(Datum::Int(time)))
                 }
-                "setTime" => {
+                "settime" => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setTime requires a time argument".to_string(),
@@ -60,31 +61,31 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = time;
                     Ok(DatumRef::Void)
                 }
-                "getFullYear" => {
+                "getfullyear" => {
                     let year = js_date.get_full_year() as i32;
                     Ok(player.alloc_datum(Datum::Int(year)))
                 }
-                "getMonth" => {
+                "getmonth" => {
                     let month = js_date.get_month() as i32;
                     Ok(player.alloc_datum(Datum::Int(month)))
                 }
-                "getDate" => {
+                "getdate" => {
                     let date = js_date.get_date() as i32;
                     Ok(player.alloc_datum(Datum::Int(date)))
                 }
-                "getHours" => {
+                "gethours" => {
                     let hours = js_date.get_hours() as i32;
                     Ok(player.alloc_datum(Datum::Int(hours)))
                 }
-                "getMinutes" => {
+                "getminutes" => {
                     let minutes = js_date.get_minutes() as i32;
                     Ok(player.alloc_datum(Datum::Int(minutes)))
                 }
-                "getSeconds" => {
+                "getseconds" => {
                     let seconds = js_date.get_seconds() as i32;
                     Ok(player.alloc_datum(Datum::Int(seconds)))
                 }
-                "setFullYear" => {
+                "setfullyear" => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setFullYear requires a year argument".to_string(),
@@ -100,7 +101,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setMonth" => {
+                "setmonth" => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setMonth requires a month argument".to_string(),
@@ -116,7 +117,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setDate" => {
+                "setdate" => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setDate requires a date argument".to_string(),
@@ -132,7 +133,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setHours" => {
+                "sethours" => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setHours requires an hours argument".to_string(),
@@ -148,7 +149,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setMinutes" => {
+                "setminutes" => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setMinutes requires a minutes argument".to_string(),
@@ -164,7 +165,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setSeconds" => {
+                "setseconds" => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setSeconds requires a seconds argument".to_string(),
@@ -191,9 +192,9 @@ impl DateDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: &String,
     ) -> Result<DatumRef, ScriptError> {
-        match prop {
+        match prop.as_str() {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("date".to_owned()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get date property {}",
@@ -205,7 +206,7 @@ impl DateDatumHandlers {
     pub fn set_prop(
         _player: &mut DirPlayer,
         _datum: &DatumRef,
-        prop: &str,
+        prop: &String,
         _value: &DatumRef,
     ) -> Result<(), ScriptError> {
         Err(ScriptError::new(format!(

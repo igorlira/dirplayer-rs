@@ -24,6 +24,7 @@ pub mod sound;
 pub mod text;
 pub mod thum;
 pub mod xmedia;
+pub mod w3d;
 pub mod xmedia_styled_text;
 
 use std::collections::HashMap;
@@ -122,6 +123,9 @@ impl Chunk {
     pub fn as_bytes(&self) -> Option<&Vec<u8>> {
         match self {
             Self::Raw(data) => { Some(data) }
+            Self::SndSamples(data) => { Some(data) }
+            Self::Media(m) => { Some(&m.audio_data) }
+            Self::XMedia(x) => { Some(&x.raw_data) }
             _ => { None }
         }
     }
@@ -273,10 +277,7 @@ pub fn make_chunk(
             return Ok(Chunk::Raw(view.clone()));
         }
         _ => {
-            return Err(
-                format_args!("Could not deserialize '{}' chunk", fourcc_to_string(fourcc))
-                    .to_string(),
-            );
+            return Ok(Chunk::Raw(view.to_vec()));
         }
     }
 }

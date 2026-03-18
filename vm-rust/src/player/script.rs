@@ -227,6 +227,34 @@ pub fn script_get_prop(
 ) -> Result<DatumRef, ScriptError> {
     if let Some(prop) = script_get_prop_opt(player, script_instance_ref, prop_name) {
         Ok(prop)
+    } else if prop_name.eq_ignore_ascii_case("count") {
+        // In Director, .count on a non-list object returns 1
+        Ok(player.alloc_datum(Datum::Int(1)))
+    } else if prop_name.eq_ignore_ascii_case("spriteNum") {
+        // spriteNum is a built-in property for behaviors — if not explicitly set,
+        // look up which sprite channel this instance belongs to.
+        // Check script_instance_list first
+        for channel in &player.movie.score.channels {
+            if channel.sprite.script_instance_list.iter().any(|si| si.id() == script_instance_ref.id()) {
+                let datum_ref = player.alloc_datum(Datum::Int(channel.sprite.number as i32));
+                return Ok(datum_ref);
+            }
+        }
+        // Also check the cache — behaviors may be in cache but not in script_instance_list Vec
+        for (&sprite_id, cached_ref) in &player.script_instance_list_cache {
+            let datum = player.get_datum(cached_ref);
+            if let Datum::List(_, items, _) = datum {
+                for item_ref in items {
+                    if let Datum::ScriptInstanceRef(id) = player.get_datum(&item_ref) {
+                        if id.id() == script_instance_ref.id() {
+                            let datum_ref = player.alloc_datum(Datum::Int(sprite_id as i32));
+                            return Ok(datum_ref);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(player.alloc_datum(Datum::Int(0)))
     } else {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         let valid_props = script_instance.properties.keys().collect_vec();
@@ -458,6 +486,9 @@ pub async fn player_set_obj_prop(
         Datum::PlayerRef => {
             reserve_player_mut(|player| player.set_player_prop(prop_name, value_ref))
         }
+        Datum::MouseRef => {
+            reserve_player_mut(|player| player.set_mouse_prop(prop_name, value_ref))
+        }
         Datum::MovieRef => reserve_player_mut(|player| {
             player.set_movie_prop(prop_name, player.get_datum(value_ref).clone())
         }),
@@ -478,6 +509,21 @@ pub async fn player_set_obj_prop(
         }),
         Datum::SoundChannel(_) => reserve_player_mut(|player| {
             SoundChannelDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
+        }),
+        Datum::FlashObjectRef(_) => {
+            let value_datum = reserve_player_ref(|player| {
+                player.get_datum(value_ref).clone()
+            });
+            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::set_prop(obj_ref, &prop_name, &value_datum)
+        }
+        Datum::Shockwave3dObjectRef(_) => {
+            let value_datum = reserve_player_ref(|player| {
+                player.get_datum(value_ref).clone()
+            });
+            crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::set_prop(obj_ref, &prop_name, &value_datum)
+        }
+        Datum::Transform3d(_) => reserve_player_mut(|player| {
+            crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::set_prop(player, obj_ref, &prop_name, value_ref)
         }),
         Datum::Void | Datum::Null => {
             // In Director, setting a property on void/nothing is a no-op (silently ignored)
@@ -581,10 +627,117 @@ pub fn get_obj_prop(
         Datum::String(s) => {
             Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(&s, &prop_name)?))
         }
-        Datum::StringChunk(..) => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
-            &obj_clone.string_value()?,
-            &prop_name,
-        )?)),
+        Datum::StringChunk(ref source, ref chunk_expr, ref _str_val) => {
+            match prop_name.as_str() {
+                "ref" => {
+                    // .ref returns the chunk reference itself (a StringChunk datum)
+                    Ok(obj_ref.clone())
+                }
+                "range" => {
+                    // .range returns point(startCharPos, endCharPos) — 1-based char positions in the source
+                    use crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils;
+                    use crate::director::lingo::datum::StringChunkType;
+
+                    let source_str = match source {
+                        crate::director::lingo::datum::StringChunkSource::Datum(ref d) => player.get_datum(d).string_value()?,
+                        crate::director::lingo::datum::StringChunkSource::Member(ref m) => {
+                            let member = player.movie.cast_manager.find_member_by_ref(m)
+                                .ok_or_else(|| ScriptError::new("Member not found for string chunk range".to_string()))?;
+                            if let Some(field) = member.member_type.as_field() {
+                                field.text.clone()
+                            } else if let Some(text) = member.member_type.as_text() {
+                                text.text.clone()
+                            } else {
+                                return Err(ScriptError::new("Member is not a text/field type".to_string()));
+                            }
+                        }
+                    };
+
+                    let chunk_list = StringChunkUtils::resolve_chunk_list(
+                        &source_str,
+                        chunk_expr.chunk_type.clone(),
+                        chunk_expr.item_delimiter,
+                    )?;
+
+                    let (start_idx, end_idx_exclusive) = StringChunkUtils::vm_range_to_host(
+                        (chunk_expr.start, chunk_expr.end),
+                        chunk_list.len(),
+                    );
+                    // vm_range_to_host returns exclusive end; convert to inclusive for the loop below
+                    let end_idx = if end_idx_exclusive > 0 { end_idx_exclusive - 1 } else { 0 };
+
+                    // Calculate character positions based on chunk type
+                    let (char_start, char_end) = match chunk_expr.chunk_type {
+                        StringChunkType::Char => {
+                            (start_idx as i32 + 1, end_idx_exclusive as i32)
+                        }
+                        _ => {
+                            // For line/word/item, find character positions by summing chunk lengths + delimiters
+                            let mut pos = 0usize;
+                            let mut result_start = 0usize;
+                            let delimiter_len = match chunk_expr.chunk_type {
+                                StringChunkType::Line => {
+                                    // Detect \r\n vs \r vs \n
+                                    if source_str.contains("\r\n") { 2 } else { 1 }
+                                }
+                                StringChunkType::Item => 1, // delimiter char
+                                StringChunkType::Word => 1, // whitespace
+                                _ => 1,
+                            };
+                            for (i, chunk) in chunk_list.iter().enumerate() {
+                                if i == start_idx {
+                                    result_start = pos;
+                                }
+                                pos += chunk.chars().count();
+                                if i == end_idx {
+                                    break;
+                                }
+                                if i + 1 < chunk_list.len() {
+                                    pos += delimiter_len;
+                                }
+                            }
+                            let result_end = pos;
+                            (result_start as i32 + 1, result_end as i32)
+                        }
+                    };
+
+                    let start_ref = player.alloc_datum(Datum::Int(char_start));
+                    let end_ref = player.alloc_datum(Datum::Int(char_end));
+                    Ok(player.alloc_datum(Datum::Point([start_ref, end_ref])))
+                }
+                "charSpacing" => {
+                    // Read charSpacing from the source member's styled spans, walking the source chain
+                    if let Datum::StringChunk(ref source, _, _) = obj_clone {
+                        let mut current_source = source.clone();
+                        loop {
+                            match current_source {
+                                crate::director::lingo::datum::StringChunkSource::Member(ref member_ref) => {
+                                    if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                                        if let Some(text) = member.member_type.as_text() {
+                                            return Ok(player.alloc_datum(Datum::Int(text.char_spacing)));
+                                        }
+                                    }
+                                    break;
+                                }
+                                crate::director::lingo::datum::StringChunkSource::Datum(ref d) => {
+                                    let inner = player.get_datum(d).clone();
+                                    if let Datum::StringChunk(inner_source, _, _) = inner {
+                                        current_source = inner_source;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Int(0)))
+                }
+                _ => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
+                    &obj_clone.string_value()?,
+                    &prop_name,
+                )?)),
+            }
+        }
         Datum::TimeoutRef(_) | Datum::TimeoutInstance { .. } | Datum::TimeoutFactory
              => Ok(TimeoutDatumHandlers::get_prop(player, obj_ref, &prop_name)?),
         Datum::Symbol(_) => SymbolDatumHandlers::get_prop(player, obj_ref, &prop_name),
@@ -593,6 +746,7 @@ pub fn get_obj_prop(
         Datum::Float(_) => FloatDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::ColorRef(_) => ColorDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::PlayerRef => player.get_player_prop(prop_name),
+        Datum::MouseRef => player.get_mouse_prop(&prop_name),
         Datum::XmlRef(_) => XmlDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::DateRef(_) => DateDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::MathRef(_) => MathDatumHandlers::get_prop(player, obj_ref, prop_name),
@@ -603,6 +757,16 @@ pub fn get_obj_prop(
             player, obj_ref, &prop_name,
         )?)),
         Datum::MovieRef => player.get_movie_prop(prop_name),
+        Datum::FlashObjectRef(_) => {
+            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+        }
+        Datum::Shockwave3dObjectRef(_) => {
+            crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+        }
+        Datum::Transform3d(_) => {
+            let result = crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::get_prop(player, obj_ref, &prop_name)?;
+            Ok(player.alloc_datum(result))
+        }
         _ => {
             if prop_name == "ilk" {
                 let ilk = TypeUtils::get_datum_ilk(&obj_clone)?;
