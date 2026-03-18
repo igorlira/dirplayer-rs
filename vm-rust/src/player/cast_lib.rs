@@ -150,13 +150,18 @@ impl CastLib {
         self.members.get_mut(&number)
     }
 
-    pub fn find_member_by_name(&self, name: &str) -> Option<&CastMember> {
+    pub fn find_member_by_name(&self, name: &String) -> Option<&CastMember> {
+        // Director returns the lowest-numbered member when duplicates exist in the same cast.
+        // HashMap iteration order is non-deterministic, so we must track the best match.
+        let mut best: Option<&CastMember> = None;
         for member in self.members.values() {
             if member.name.eq_ignore_ascii_case(name) {
-                return Some(member);
+                if best.is_none() || member.number < best.unwrap().number {
+                    best = Some(member);
+                }
             }
         }
-        None
+        best
     }
 
     fn clear(&mut self) {
@@ -180,12 +185,12 @@ impl CastLib {
 
     pub fn set_prop(
         &mut self,
-        prop: &str,
+        prop: &String,
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
         // TODO
-        match prop {
+        match prop.as_str() {
             "preloadMode" => {
                 self.preload_mode = value.int_value()? as u16;
             }
@@ -205,10 +210,21 @@ impl CastLib {
         Ok(())
     }
 
-    pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
-        match prop {
+    pub fn get_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
+        match prop.as_str() {
             "preloadMode" => Ok(Datum::Int(self.preload_mode as i32)),
-            "fileName" => Ok(Datum::String(self.file_name.clone())),
+            "fileName" => {
+                // Only return the fileName if the cast is actually loaded.
+                // External casts with preloadMode=0 ("When Needed") have file_name set
+                // in the movie structure but aren't loaded yet. Scripts like PreloadCast
+                // compare castLib.fileName to decide whether to download — returning the
+                // configured name for an unloaded cast would skip the download.
+                if self.is_external && self.state == CastLibState::None {
+                    Ok(Datum::String(String::new()))
+                } else {
+                    Ok(Datum::String(self.file_name.clone()))
+                }
+            }
             "number" => Ok(Datum::Int(self.number as i32)),
             "name" => Ok(Datum::String(self.name.clone())),
             "number of castMembers" | "number of members" => {
@@ -479,7 +495,7 @@ impl CastMemberRef {
 
 pub async fn player_cast_lib_set_prop(
     cast_lib: u32,
-    prop_name: &str,
+    prop_name: &String,
     value: Datum,
 ) -> Result<(), ScriptError> {
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
