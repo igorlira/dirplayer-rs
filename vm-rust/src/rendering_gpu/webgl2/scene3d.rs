@@ -641,8 +641,22 @@ void main() {
         let mut mesh_groups: HashMap<String, Vec<Mesh3dBuffers>> = HashMap::new();
         let mut all_meshes = Vec::new();
 
-        // Upload CLOD meshes (keyed by resource name)
+        // Collect resource names used by LIGHT nodes (to skip their geometry)
+        let light_resources: std::collections::HashSet<&str> = scene.nodes.iter()
+            .filter(|n| n.node_type == W3dNodeType::Light)
+            .flat_map(|n| {
+                let mut names = vec![];
+                if !n.model_resource_name.is_empty() { names.push(n.model_resource_name.as_str()); }
+                if !n.resource_name.is_empty() && n.resource_name != "." { names.push(n.resource_name.as_str()); }
+                names
+            })
+            .collect();
+
+        // Upload CLOD meshes (skip light geometry)
         for (name, decoded_meshes) in &scene.clod_meshes {
+            if light_resources.contains(name.as_str()) {
+                continue; // Skip light cone/sphere meshes
+            }
             let mut group = Vec::new();
             for (mi, mesh) in decoded_meshes.iter().enumerate() {
                 if mesh.positions.is_empty() || mesh.faces.is_empty() {
@@ -687,8 +701,11 @@ void main() {
             mesh_groups.insert(name.clone(), group);
         }
 
-        // Upload raw meshes
+        // Upload raw meshes (skip light geometry)
         for mesh in &scene.raw_meshes {
+            if light_resources.contains(mesh.name.as_str()) {
+                continue; // Skip light cone/sphere meshes
+            }
             if mesh.positions.is_empty() || mesh.faces.is_empty() {
                 continue;
             }
@@ -1645,6 +1662,13 @@ void main() {
         gl.uniform4f(shader.u_emissive_color.as_ref(), mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.emissive[3]);
         gl.uniform1f(shader.u_shininess.as_ref(), mat.shininess);
         gl.uniform1f(shader.u_opacity.as_ref(), mat.opacity);
+        // Enable alpha blending for transparent materials
+        if mat.opacity < 1.0 {
+            gl.enable(WebGl2RenderingContext::BLEND);
+            gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+        } else {
+            gl.disable(WebGl2RenderingContext::BLEND);
+        }
     }
 
     fn bind_default_material(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, scene: &W3dScene) {
