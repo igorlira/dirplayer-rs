@@ -454,13 +454,21 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(())
                 }
                 "parent" => {
+                    let is_detach = matches!(value, Datum::Void);
                     let parent_name = match value {
                         Datum::Shockwave3dObjectRef(r) => r.name.clone(),
                         Datum::String(s) => s.clone(),
+                        Datum::Void => String::new(), // VOID = detach from world
                         _ => "World".to_string(),
                     };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            // Track detached nodes for renderer filtering
+                            if is_detach {
+                                w3d.runtime_state.detached_nodes.insert(s3d_ref.name.clone());
+                            } else {
+                                w3d.runtime_state.detached_nodes.remove(&s3d_ref.name);
+                            }
                             if let Some(scene) = w3d.scene_mut() {
                                 if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
                                     node.parent_name = parent_name;

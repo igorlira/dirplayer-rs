@@ -442,6 +442,9 @@ pub struct Shockwave3dRuntimeState {
     // ─── Reset tracking ───
     pub world_reset: bool,
 
+    // ─── Detached nodes (parent set to VOID) ───
+    pub detached_nodes: std::collections::HashSet<String>,
+
     // ─── Camera properties ───
     /// Per-camera rootNode: camera_name -> node_name (limits which subtree to render)
     pub camera_root_nodes: std::collections::HashMap<String, String>,
