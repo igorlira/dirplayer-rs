@@ -1255,6 +1255,31 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                 }
                             }
+                        } else if prop_name == "blendFunctionList" {
+                            // Set blend function for a texture layer
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            let blend_val = match &value {
+                                Datum::Symbol(s) => match s.as_str() {
+                                    "add" => 1u8,
+                                    "replace" => 2,
+                                    "blend" => 3,
+                                    _ => 0, // multiply
+                                },
+                                _ => 0,
+                            };
+                            let idx = (index as usize).saturating_sub(1);
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                            while shader.texture_layers.len() <= idx {
+                                                shader.texture_layers.push(crate::director::chunks::w3d::types::W3dTextureLayer::default());
+                                            }
+                                            shader.texture_layers[idx].blend_func = blend_val;
+                                        }
+                                    }
+                                }
+                            }
                         } else if prop_name == "textureList" {
                             // Update the persistent textureList at the given index
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
@@ -1541,8 +1566,27 @@ impl Shockwave3dObjectDatumHandlers {
                                     Some(transform_ref)
                                 }
                             }
+                            "blendFunctionList" => {
+                                // Return the blend function at index from texture layers
+                                let shader = scene.shaders.iter().find(|s| s.name == s3d_ref.name);
+                                if let Some(s) = shader {
+                                    if let Some(layer) = s.texture_layers.get(idx) {
+                                        let sym = match layer.blend_func {
+                                            1 => "add",
+                                            2 => "replace",
+                                            3 => "blend",
+                                            _ => "multiply",
+                                        };
+                                        Some(player.alloc_datum(Datum::Symbol(sym.to_string())))
+                                    } else {
+                                        Some(player.alloc_datum(Datum::Symbol("multiply".to_string())))
+                                    }
+                                } else {
+                                    Some(player.alloc_datum(Datum::Symbol("multiply".to_string())))
+                                }
+                            }
                             "textureModeList" | "textureRepeatList"
-                            | "blendFunctionList" | "blendSourceList" | "blendConstantList" => {
+                            | "blendSourceList" | "blendConstantList" => {
                                 Some(player.alloc_datum(Datum::Void))
                             }
                             // bonesPlayer.bone[n] — return bone ref
@@ -2351,6 +2395,26 @@ impl Shockwave3dObjectDatumHandlers {
                 }
                 if items.is_empty() {
                     items.push_back(player.alloc_datum(Datum::Symbol("none".to_string())));
+                }
+                Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List, items, false,
+                )))
+            }
+            "blendFunctionList" => {
+                let mut items = VecDeque::new();
+                if let Some(s) = shader {
+                    for layer in &s.texture_layers {
+                        let sym = match layer.blend_func {
+                            1 => "add",
+                            2 => "replace",
+                            3 => "blend",
+                            _ => "multiply",
+                        };
+                        items.push_back(player.alloc_datum(Datum::Symbol(sym.to_string())));
+                    }
+                }
+                if items.is_empty() {
+                    items.push_back(player.alloc_datum(Datum::Symbol("multiply".to_string())));
                 }
                 Ok(player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List, items, false,

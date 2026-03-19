@@ -1560,6 +1560,28 @@ void main() {
         if !tex_bound {
             gl.uniform1i(shader.u_has_texture.as_ref(), 0);
         }
+
+        // Apply blend mode based on material opacity and first texture layer's blend function
+        let first_blend_func = self.get_first_blend_func(scene, model_node, runtime_state);
+        let opacity = scene.shaders.iter()
+            .find(|s| s.name == effective_shader_name)
+            .and_then(|s| scene.materials.iter().find(|m| m.name == s.material_name))
+            .map(|m| m.opacity)
+            .unwrap_or(1.0);
+        Self::apply_blend_mode(gl, opacity, first_blend_func);
+    }
+
+    /// Get the first texture layer's blend_func for a model node
+    fn get_first_blend_func(&self, scene: &W3dScene, node: &W3dNode, runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>) -> u8 {
+        let effective_shader = runtime_state
+            .and_then(|rs| rs.node_shaders.get(&node.name))
+            .cloned()
+            .unwrap_or_else(|| node.shader_name.clone());
+        scene.shaders.iter()
+            .find(|s| s.name == effective_shader)
+            .and_then(|s| s.texture_layers.first())
+            .map(|l| l.blend_func)
+            .unwrap_or(0)
     }
 
     /// Bind material for a specific mesh index using model resource shader bindings
@@ -1636,6 +1658,10 @@ void main() {
                 if let Some(m) = mat {
                     self.set_material_uniforms(gl, shader, m);
                 }
+                // Apply blend mode for this shader
+                let first_bf = w3d_shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0);
+                let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
+                Self::apply_blend_mode(gl, opacity, first_bf);
                 return true;
             }
 
@@ -1649,6 +1675,7 @@ void main() {
         if let Some(mat) = best_material {
             self.set_material_uniforms(gl, shader, mat);
             gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+            Self::apply_blend_mode(gl, mat.opacity, 0);
             return true;
         }
 
@@ -1662,10 +1689,19 @@ void main() {
         gl.uniform4f(shader.u_emissive_color.as_ref(), mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.emissive[3]);
         gl.uniform1f(shader.u_shininess.as_ref(), mat.shininess);
         gl.uniform1f(shader.u_opacity.as_ref(), mat.opacity);
-        // Enable alpha blending for transparent materials
-        if mat.opacity < 1.0 {
+    }
+
+    /// Set GL blend mode based on material opacity and shader blend function
+    fn apply_blend_mode(gl: &WebGl2RenderingContext, opacity: f32, first_layer_blend_func: u8) {
+        if opacity < 1.0 || first_layer_blend_func == 1 {
             gl.enable(WebGl2RenderingContext::BLEND);
-            gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+            if first_layer_blend_func == 1 {
+                // #add — additive blending (for glow/lightbox effects)
+                gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE);
+            } else {
+                // #multiply / default — standard alpha blending
+                gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+            }
         } else {
             gl.disable(WebGl2RenderingContext::BLEND);
         }
