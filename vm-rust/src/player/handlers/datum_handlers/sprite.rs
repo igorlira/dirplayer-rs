@@ -140,7 +140,8 @@ impl SpriteDatumHandlers {
             "gotoframe" | "callframe" | "stop" | "play" | "rewind" | "hold" |
             "getvariable" | "setvariable" | "callfunction" | "setcallback" |
             "hittest" | "getflashproperty" | "setflashproperty" | "telltarget" |
-            "findlabel" | "flashtostage" | "stagetoflash" | "mapstagetomember" | "getpropref"
+            "findlabel" | "flashtostage" | "stagetoflash" | "mapstagetomember" | "getpropref" |
+            "addcamera" | "removecamera" | "cameracount"
         );
         if is_sync_handler {
             return Ok(false);
@@ -197,6 +198,15 @@ impl SpriteDatumHandlers {
                     Ok(player.alloc_datum(Datum::Int(if intersects { 1 } else { 0 })))
                 })
             }
+            "cameracount" => {
+                reserve_player_mut(|player| {
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let count = if let Some(sprite) = player.movie.score.get_sprite(sprite_num) {
+                        1 + sprite.w3d_cameras.len() as i32
+                    } else { 1 };
+                    Ok(player.alloc_datum(Datum::Int(count)))
+                })
+            }
             "addcamera" => {
                 reserve_player_mut(|player| {
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
@@ -205,9 +215,19 @@ impl SpriteDatumHandlers {
                         match player.get_datum(&args[0]) {
                             Datum::Shockwave3dObjectRef(r) => r.name.clone(),
                             Datum::String(s) => s.clone(),
-                            _ => String::new(),
+                            _ => {
+                                web_sys::console::warn_1(&format!(
+                                    "[SPRITE] addCamera: arg0 is {:?}, not a camera ref",
+                                    player.get_datum(&args[0]).type_str()
+                                ).into());
+                                String::new()
+                            },
                         }
                     } else { String::new() };
+                    web_sys::console::warn_1(&format!(
+                        "[SPRITE] addCamera called: sprite={}, cam='{}', args={}",
+                        sprite_num, cam_name, args.len()
+                    ).into());
                     if !cam_name.is_empty() {
                         let sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
                         sprite.w3d_cameras.push(cam_name);

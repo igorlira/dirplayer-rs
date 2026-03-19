@@ -91,12 +91,12 @@ impl Transform3dDatumHandlers {
     pub fn call(datum: &DatumRef, handler_name: &str, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         match handler_name {
             "identity" => Self::identity(datum),
-            "translate" => Self::translate(datum, args, false),
-            "preTranslate" => Self::translate(datum, args, true),
-            "rotate" => Self::rotate(datum, args, false),
-            "preRotate" => Self::rotate(datum, args, true),
-            "scale" => Self::scale(datum, args, false),
-            "preScale" => Self::scale(datum, args, true),
+            "translate" => Self::translate(datum, args, true),    // Director translate = pre-multiply (moves in local space)
+            "preTranslate" => Self::translate(datum, args, false),
+            "rotate" => Self::rotate(datum, args, true),     // Director rotate = pre-multiply (R*M, transforms position)
+            "preRotate" => Self::rotate(datum, args, false), // Director preRotate = post-multiply (M*R, doesn't transform position)
+            "scale" => Self::scale(datum, args, true),
+            "preScale" => Self::scale(datum, args, false),
             "inverse" => Self::inverse(datum),
             "duplicate" => Self::duplicate(datum),
             "multiply" => Self::multiply(datum, args),
@@ -334,7 +334,7 @@ fn mat4_invert_affine(m: &[f64; 16]) -> [f64; 16] {
 /// Euler angles to column-major rotation matrix
 pub fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
     let rx = rx_deg.to_radians();
-    let ry = ry_deg.to_radians();
+    let ry = (-ry_deg).to_radians(); // Director uses left-handed Y rotation
     let rz = rz_deg.to_radians();
 
     let (sx, cx) = (rx.sin(), rx.cos());
@@ -369,5 +369,5 @@ fn matrix_to_euler(m: &[f64; 16]) -> (f64, f64, f64) {
         rz = m[1].atan2(m[5]);
     }
 
-    (rx.to_degrees(), ry.to_degrees(), rz.to_degrees())
+    (rx.to_degrees(), -ry.to_degrees(), rz.to_degrees()) // Negate Y to match Director's left-handed convention
 }

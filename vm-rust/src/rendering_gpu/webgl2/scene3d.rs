@@ -1024,9 +1024,27 @@ void main() {
                 .map(|rs| rs.detached_nodes.iter().map(|s| s.as_str()).collect())
                 .unwrap_or_default();
 
+            // Check if active camera has a rootNode filter
+            let root_node_filter: Option<String> = runtime_state.and_then(|rs| {
+                self.active_camera.as_ref()
+                    .and_then(|cam| rs.camera_root_nodes.get(cam))
+                    .cloned()
+            });
+
             let model_nodes: Vec<&W3dNode> = scene.nodes.iter()
                 .filter(|n| n.node_type == W3dNodeType::Model)
-                .filter(|n| !detached_nodes.contains(n.name.as_str()))
+                .filter(|n| {
+                    // Skip directly detached nodes
+                    if detached_nodes.contains(n.name.as_str()) { return false; }
+
+                    if let Some(ref root) = root_node_filter {
+                        // Camera has rootNode: only render nodes in that subtree
+                        self.is_child_of(scene, &n.name, root)
+                    } else {
+                        // No rootNode: render all non-detached models
+                        true
+                    }
+                })
                 .collect();
 
             // One-time diagnostic logging per member
@@ -1655,6 +1673,22 @@ void main() {
             } else {
                 return false;
             }
+        }
+        false
+    }
+
+    /// Check if any ancestor in the parent chain is in the detached set
+    fn has_detached_ancestor(&self, scene: &W3dScene, parent_name: &str, detached: &std::collections::HashSet<&str>) -> bool {
+        if parent_name.is_empty() || parent_name == "World" { return false; }
+        if detached.contains(parent_name) { return true; }
+        // Walk up parent chain
+        for _ in 0..10 {
+            if let Some(node) = scene.nodes.iter().find(|n| n.name == parent_name) {
+                if node.parent_name.is_empty() || node.parent_name == "World" { return false; }
+                if detached.contains(node.parent_name.as_str()) { return true; }
+                return self.has_detached_ancestor(scene, &node.parent_name, detached);
+            }
+            return false;
         }
         false
     }
