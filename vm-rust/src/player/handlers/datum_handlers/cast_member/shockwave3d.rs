@@ -173,7 +173,7 @@ impl Shockwave3dMemberHandlers {
 
 /// Render a Shockwave3D scene to RGBA pixels using a temporary offscreen WebGL2 context.
 fn render_3d_to_rgba(
-    scene_data: &Option<crate::director::chunks::w3d::types::W3dScene>,
+    scene_data: &Option<std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>>,
     runtime_state: &crate::player::cast_member::Shockwave3dRuntimeState,
     width: u32,
     height: u32,

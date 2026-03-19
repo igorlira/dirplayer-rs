@@ -3553,7 +3553,19 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 }
             },
             |sprite, cursor_ref| {
-                sprite.cursor_ref = Some(cursor_ref?);
+                let cr = cursor_ref?;
+                // Track pointer lock: cursor 200 = lock (hidden), cursor 0 = release
+                match &cr {
+                    crate::player::sprite::CursorRef::System(id) => {
+                        if *id == 200 || *id == -1 {
+                            reserve_player_mut(|p| { p.wants_pointer_lock = true; });
+                        } else {
+                            reserve_player_mut(|p| { p.wants_pointer_lock = false; });
+                        }
+                    }
+                    _ => {}
+                }
+                sprite.cursor_ref = Some(cr);
                 Ok(())
             },
         ),

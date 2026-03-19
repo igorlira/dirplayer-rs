@@ -78,6 +78,8 @@ pub struct Scene3dRenderer {
     member_data: HashMap<(i32, i32), MemberGpuData>,
     pub fbo: Option<WebGlFramebuffer>,
     pub fbo_texture: Option<WebGlTexture>,
+    overlay_quad_vbo: Option<web_sys::WebGlBuffer>,
+    overlay_quad_uv: Option<web_sys::WebGlBuffer>,
     fbo_depth: Option<web_sys::WebGlRenderbuffer>,
     fbo_width: u32,
     fbo_height: u32,
@@ -102,6 +104,8 @@ impl Scene3dRenderer {
             animation_time: 0.0,
             motion_transforms: HashMap::new(),
             active_camera: None,
+            overlay_quad_vbo: None,
+            overlay_quad_uv: None,
         }
     }
 
@@ -1015,9 +1019,8 @@ void main() {
 
         // Traverse scene graph and draw model nodes
         if self.member_data.contains_key(&member_key) {
-            let model_nodes: Vec<_> = scene.nodes.iter()
+            let model_nodes: Vec<&W3dNode> = scene.nodes.iter()
                 .filter(|n| n.node_type == W3dNodeType::Model)
-                .cloned()
                 .collect();
 
             // One-time diagnostic logging per member
@@ -1153,9 +1156,43 @@ void main() {
         Ok(self.fbo_texture.as_ref())
     }
 
+    /// Ensure overlay quad buffers exist (created once, reused every frame)
+    fn ensure_overlay_quad(&mut self, gl: &WebGl2RenderingContext) {
+        if self.overlay_quad_vbo.is_some() { return; }
+        let verts: [f32; 36] = [
+            0.0, 0.0, 0.0,  0.0, 0.0, 1.0,
+            1.0, 0.0, 0.0,  0.0, 0.0, 1.0,
+            1.0, 1.0, 0.0,  0.0, 0.0, 1.0,
+            0.0, 0.0, 0.0,  0.0, 0.0, 1.0,
+            1.0, 1.0, 0.0,  0.0, 0.0, 1.0,
+            0.0, 1.0, 0.0,  0.0, 0.0, 1.0,
+        ];
+        let uvs: [f32; 12] = [
+            0.0, 0.0,  1.0, 0.0,  1.0, 1.0,
+            0.0, 0.0,  1.0, 1.0,  0.0, 1.0,
+        ];
+        let vbo = gl.create_buffer();
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, vbo.as_ref());
+        unsafe {
+            let view = js_sys::Float32Array::view(&verts);
+            gl.buffer_data_with_array_buffer_view(
+                WebGl2RenderingContext::ARRAY_BUFFER, &view, WebGl2RenderingContext::STATIC_DRAW);
+        }
+        self.overlay_quad_vbo = vbo;
+
+        let uv_buf = gl.create_buffer();
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, uv_buf.as_ref());
+        unsafe {
+            let view = js_sys::Float32Array::view(&uvs);
+            gl.buffer_data_with_array_buffer_view(
+                WebGl2RenderingContext::ARRAY_BUFFER, &view, WebGl2RenderingContext::STATIC_DRAW);
+        }
+        self.overlay_quad_uv = uv_buf;
+    }
+
     /// Render overlays to the existing FBO (called after all camera passes)
     pub fn render_overlays_to_fbo(
-        &self,
+        &mut self,
         context: &WebGL2Context,
         member_key: &(i32, i32),
         overlays: &[crate::player::cast_member::CameraOverlay],
@@ -1164,6 +1201,7 @@ void main() {
     ) {
         if overlays.is_empty() { return; }
         let gl = context.gl();
+        self.ensure_overlay_quad(&gl);
         let shader = match self.shader.as_ref() { Some(s) => s, None => return };
         let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return };
         let fbo = match self.fbo.as_ref() { Some(f) => f, None => return };
@@ -1172,28 +1210,12 @@ void main() {
         gl.viewport(0, 0, width as i32, height as i32);
         gl.use_program(Some(&shader.program));
 
-        Self::render_overlays_static(gl, shader, overlays, gpu_data, width, height);
-
-        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
-    }
-
-    /// Render camera overlays as 2D textured quads on top of the 3D scene
-    fn render_overlays_static(
-        gl: &WebGl2RenderingContext,
-        shader: &Shader3d,
-        overlays: &[crate::player::cast_member::CameraOverlay],
-        gpu_data: &MemberGpuData,
-        width: u32,
-        height: u32,
-    ) {
-
-        // Switch to orthographic 2D projection (pixel coordinates, origin top-left)
+        // Set up 2D orthographic state
         gl.disable(WebGl2RenderingContext::DEPTH_TEST);
         gl.disable(WebGl2RenderingContext::CULL_FACE);
         gl.enable(WebGl2RenderingContext::BLEND);
         gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
 
-        // Ortho projection: map (0,0)-(width,height) to clip space
         let w = width as f32;
         let h = height as f32;
         let ortho: [f32; 16] = [
@@ -1202,16 +1224,9 @@ void main() {
             0.0,    0.0,   -1.0, 0.0,
            -1.0,    1.0,    0.0, 1.0,
         ];
-        let identity: [f32; 16] = [
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
-        ];
-
+        let identity: [f32; 16] = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &ortho);
         gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &identity);
-        // Disable lighting for overlays
         gl.uniform1i(shader.u_num_lights.as_ref(), 0);
         gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
         gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
@@ -1219,26 +1234,34 @@ void main() {
         gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
         gl.uniform4f(shader.u_ambient_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
 
-        let mut rendered_count = 0u32;
-        let mut skipped_empty = 0u32;
-        let mut skipped_no_tex = 0u32;
+        // Bind quad VBOs once
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, self.overlay_quad_vbo.as_ref());
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 3, WebGl2RenderingContext::FLOAT, false, 24, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_with_i32(1, 3, WebGl2RenderingContext::FLOAT, false, 24, 12);
+
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, self.overlay_quad_uv.as_ref());
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_with_i32(2, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
+
         for overlay in overlays {
-            if overlay.source_texture.is_empty() || overlay.blend <= 0.0 { skipped_empty += 1; continue; }
+            if overlay.source_texture.is_empty() || overlay.blend <= 0.0 { continue; }
+            let tex = match gpu_data.textures.get(&overlay.source_texture_lower) {
+                Some(t) => t,
+                None => continue,
+            };
+            let (tex_w, tex_h) = gpu_data.texture_sizes
+                .get(&overlay.source_texture_lower)
+                .map(|&(w, h)| (w as f32, h as f32))
+                .unwrap_or((64.0, 64.0));
 
-            let tex = gpu_data.textures.get(&overlay.source_texture.to_lowercase());
-            if tex.is_none() { skipped_no_tex += 1; continue; }
-            let tex = tex.unwrap();
-
-            // Bind texture
             gl.active_texture(WebGl2RenderingContext::TEXTURE0);
             gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
             gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
             gl.uniform1i(shader.u_has_texture.as_ref(), 1);
-
-            // Set opacity from blend (0-100 -> 0.0-1.0)
             gl.uniform1f(shader.u_opacity.as_ref(), (overlay.blend / 100.0) as f32);
 
-            // Compute quad model matrix from overlay properties
             let x = overlay.loc[0] as f32;
             let y = overlay.loc[1] as f32;
             let sx = (overlay.scale * overlay.scale_x) as f32;
@@ -1246,13 +1269,6 @@ void main() {
             let rx = overlay.reg_point[0] as f32;
             let ry = overlay.reg_point[1] as f32;
 
-            // Get actual texture dimensions for quad size
-            let (tex_w, tex_h) = gpu_data.texture_sizes
-                .get(&overlay.source_texture.to_lowercase())
-                .map(|&(w, h)| (w as f32, h as f32))
-                .unwrap_or((64.0, 64.0));
-
-            // Build model matrix: translate to loc, apply scale, offset by regPoint
             let model: [f32; 16] = [
                 sx * tex_w, 0.0,        0.0, 0.0,
                 0.0,        sy * tex_h, 0.0, 0.0,
@@ -1260,62 +1276,18 @@ void main() {
                 x - rx * sx, y - ry * sy, 0.0, 1.0,
             ];
             gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &model);
-
-            // Draw a quad (two triangles) using gl.draw_arrays
-            // We need a simple quad VAO — reuse positions from a temporary buffer
-            let verts: [f32; 36] = [
-                // pos(x,y,z) + normal(0,0,1) for 2 triangles
-                0.0, 0.0, 0.0,  0.0, 0.0, 1.0,
-                1.0, 0.0, 0.0,  0.0, 0.0, 1.0,
-                1.0, 1.0, 0.0,  0.0, 0.0, 1.0,
-                0.0, 0.0, 0.0,  0.0, 0.0, 1.0,
-                1.0, 1.0, 0.0,  0.0, 0.0, 1.0,
-                0.0, 1.0, 0.0,  0.0, 0.0, 1.0,
-            ];
-            let uvs: [f32; 12] = [
-                0.0, 0.0,
-                1.0, 0.0,
-                1.0, 1.0,
-                0.0, 0.0,
-                1.0, 1.0,
-                0.0, 1.0,
-            ];
-
-            let vert_buf = gl.create_buffer();
-            gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, vert_buf.as_ref());
-            unsafe {
-                let vert_view = js_sys::Float32Array::view(&verts);
-                gl.buffer_data_with_array_buffer_view(
-                    WebGl2RenderingContext::ARRAY_BUFFER, &vert_view, WebGl2RenderingContext::STREAM_DRAW);
-            }
-            gl.enable_vertex_attrib_array(0); // a_position
-            gl.vertex_attrib_pointer_with_i32(0, 3, WebGl2RenderingContext::FLOAT, false, 24, 0);
-            gl.enable_vertex_attrib_array(1); // a_normal
-            gl.vertex_attrib_pointer_with_i32(1, 3, WebGl2RenderingContext::FLOAT, false, 24, 12);
-
-            let uv_buf = gl.create_buffer();
-            gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, uv_buf.as_ref());
-            unsafe {
-                let uv_view = js_sys::Float32Array::view(&uvs);
-                gl.buffer_data_with_array_buffer_view(
-                    WebGl2RenderingContext::ARRAY_BUFFER, &uv_view, WebGl2RenderingContext::STREAM_DRAW);
-            }
-            gl.enable_vertex_attrib_array(2); // a_texcoord
-            gl.vertex_attrib_pointer_with_i32(2, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
-
             gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 6);
-            rendered_count += 1;
+        }
 
-            gl.delete_buffer(vert_buf.as_ref());
-            gl.delete_buffer(uv_buf.as_ref());
-        }
-        if rendered_count > 0 || skipped_no_tex > 0 {
-            web_sys::console::warn_1(&format!(
-                "[W3D-OVERLAY] rendered={}, skipped_empty={}, skipped_no_tex={}, total={}",
-                rendered_count, skipped_empty, skipped_no_tex, overlays.len()
-            ).into());
-        }
+        // Restore state
+        gl.disable_vertex_attrib_array(0);
+        gl.disable_vertex_attrib_array(1);
+        gl.disable_vertex_attrib_array(2);
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, None);
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
     }
+
+    // Old render_overlays_static removed — functionality merged into render_overlays_to_fbo
 
     /// Fallback: draw all meshes with identity transform when no scene graph
     fn draw_all_meshes_fallback(
@@ -1663,6 +1635,22 @@ void main() {
             gl.uniform1f(shader.u_opacity.as_ref(), 1.0);
         }
         gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+    }
+
+    /// Check if a node is a child (direct or indirect) of a given root node
+    fn is_child_of(&self, scene: &W3dScene, node_name: &str, root_name: &str) -> bool {
+        if node_name == root_name { return true; }
+        let mut current = node_name;
+        for _ in 0..20 { // max depth to prevent infinite loops
+            if let Some(node) = scene.nodes.iter().find(|n| n.name == current) {
+                if node.parent_name == root_name { return true; }
+                if node.parent_name.is_empty() { return false; }
+                current = &node.parent_name;
+            } else {
+                return false;
+            }
+        }
+        false
     }
 
     /// Build view matrix from scene's ViewNode (or default camera)

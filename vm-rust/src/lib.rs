@@ -271,6 +271,24 @@ pub fn mouse_move(x: f64, y: f64) {
     )));
 }
 
+/// Check if the game wants pointer lock (for FPS mouse look)
+#[wasm_bindgen]
+pub fn wants_pointer_lock() -> bool {
+    reserve_player_ref(|player| player.wants_pointer_lock)
+}
+
+/// Mouse move with delta values (for pointer lock mode)
+/// The delta is added to the current mouse_loc (which the game resets to center each frame)
+#[wasm_bindgen]
+pub fn mouse_move_delta(dx: f64, dy: f64) {
+    reserve_player_mut(|player| {
+        player.mouse_loc.0 += dx.to_i32().unwrap();
+        player.mouse_loc.1 += dy.to_i32().unwrap();
+    });
+    let (x, y) = reserve_player_ref(|player| player.mouse_loc);
+    player_dispatch(PlayerVMCommand::MouseMove((x, y)));
+}
+
 #[wasm_bindgen]
 pub fn key_down(key: String, code: u16) {
     // Update keyboard state immediately so keyPressed() reflects
