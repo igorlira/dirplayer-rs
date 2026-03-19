@@ -586,7 +586,31 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 }
-                "shininess" | "blend" | "transparent" | "flat" | "renderStyle"
+                "blend" if s3d_ref.object_type == "shader" => {
+                    // blend = 0-100 → opacity 0.0-1.0
+                    let blend_val = value.to_float().unwrap_or(100.0) as f32;
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some(scene) = w3d.scene_mut() {
+                                let mat_name = scene.shaders.iter()
+                                    .find(|s| s.name == s3d_ref.name)
+                                    .map(|s| s.material_name.clone());
+                                if let Some(ref mn) = mat_name {
+                                    if let Some(mat) = scene.materials.iter_mut().find(|m| m.name == *mn) {
+                                        mat.opacity = blend_val / 100.0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+                "transparent" if s3d_ref.object_type == "shader" => {
+                    // transparent = 1 means use alpha blending
+                    // Just store in the material opacity if needed
+                    Ok(())
+                }
+                "shininess" | "flat" | "renderStyle"
                 | "useDiffuseWithTexture" if s3d_ref.object_type == "shader" => {
                     // Accept these shader properties silently
                     Ok(())
