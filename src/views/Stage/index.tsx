@@ -66,7 +66,37 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     set_stage_size(width, height);
   }, [width, height]);
 
-  // No synthetic ESC on pointer lock release — the game's own ESC key detection handles it
+  // Handle pointer-locked mouse movement (events fire on document, not the div)
+  useEffect(() => {
+    const handleLockedMouseMove = (e: MouseEvent) => {
+      if (document.pointerLockElement) {
+        mouse_move_delta(e.movementX, e.movementY);
+      }
+    };
+    // Handle keyboard during pointer lock (focus may be on canvas, not the div)
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (document.pointerLockElement) {
+        // Don't prevent ESC — browser needs it to exit pointer lock
+        if (e.key !== "Escape") e.preventDefault();
+        if (!e.repeat) {
+          key_down(e.key, e.keyCode);
+        }
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (document.pointerLockElement) {
+        key_up(e.key, e.keyCode);
+      }
+    };
+    document.addEventListener("mousemove", handleLockedMouseMove);
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("keyup", handleKeyUp);
+    return () => {
+      document.removeEventListener("mousemove", handleLockedMouseMove);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keyup", handleKeyUp);
+    };
+  }, []);
 
   useEffect(() => {
     player_set_picking_mode(pickingMode);
@@ -94,11 +124,8 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
 
     switch (name) {
       case "move":
-        // When pointer is locked, use movementX/Y as deltas
-        if (document.pointerLockElement) {
-          const nativeEvent = e.nativeEvent as MouseEvent;
-          mouse_move_delta(nativeEvent.movementX, nativeEvent.movementY);
-        } else {
+        // When pointer is locked, skip — handled by document-level listener
+        if (!document.pointerLockElement) {
           mouse_move(x, y);
         }
         break;

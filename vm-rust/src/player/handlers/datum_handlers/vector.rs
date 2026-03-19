@@ -184,6 +184,31 @@ impl VectorDatumHandlers {
         }
 
         *player.get_datum_mut(datum) = Datum::Vector(vec);
+
+        // Write back to parent transform if this vector came from transform.position/rotation
+        if let Some((_, parent_ref, sub_prop)) = player.transform_sub_refs.iter()
+            .find(|(vec_ref, _, _)| vec_ref == datum).cloned() {
+            if let Datum::Transform3d(ref mut m) = player.get_datum_mut(&parent_ref) {
+                match sub_prop.as_str() {
+                    "position" => {
+                        m[12] = vec[0]; m[13] = vec[1]; m[14] = vec[2];
+                    }
+                    "rotation" => {
+                        let pos = [m[12], m[13], m[14]];
+                        let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
+                        let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
+                        let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
+                        let rot = crate::player::handlers::datum_handlers::transform3d::euler_to_matrix(vec[0], vec[1], vec[2]);
+                        m[0] = rot[0]*sx;  m[1] = rot[1]*sx;  m[2] = rot[2]*sx;
+                        m[4] = rot[4]*sy;  m[5] = rot[5]*sy;  m[6] = rot[6]*sy;
+                        m[8] = rot[8]*sz;  m[9] = rot[9]*sz;  m[10] = rot[10]*sz;
+                        m[12] = pos[0]; m[13] = pos[1]; m[14] = pos[2];
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         Ok(())
     }
 

@@ -209,6 +209,9 @@ pub struct DirPlayer {
     pub text_selection_end: u16,
     pub mouse_loc: (i32, i32),
     pub wants_pointer_lock: bool,
+    /// Track parent DatumRef for chained property access (transform.position.z = value)
+    /// (vector DatumRef, parent transform DatumRef, sub-property name)
+    pub transform_sub_refs: Vec<(DatumRef, DatumRef, String)>,
     pub last_mouse_down_time: i64,
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
@@ -367,6 +370,7 @@ impl DirPlayer {
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
             wants_pointer_lock: false,
+            transform_sub_refs: Vec::new(),
             last_mouse_down_time: 0,
             is_double_click: false,
             mouse_down_sprite: 0,
