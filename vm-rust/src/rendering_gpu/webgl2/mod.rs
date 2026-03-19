@@ -2342,6 +2342,12 @@ impl WebGL2Renderer {
                 let _ = self.scene3d.render_scene_with_state(&self.context, member_key, &scene, width, height, Some(&runtime_state));
 
                 // Render additional cameras on top (multi-camera: skybox + game world)
+                if extra_cameras.is_empty() {
+                    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        web_sys::console::warn_1(&"[3D] No extra cameras — Main camera not added via addCamera".into());
+                    }
+                }
                 for cam_name in &extra_cameras {
                     let should_clear = runtime_state.camera_clear_at_render
                         .get(cam_name).copied().unwrap_or(true);
