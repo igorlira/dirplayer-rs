@@ -515,6 +515,22 @@ impl Shockwave3dObjectDatumHandlers {
                         _ => String::new(),
                     };
                     if !tex_name.is_empty() && s3d_ref.object_type == "shader" {
+                        // Get persistent textureList ref if it exists (read before mutable borrow)
+                        let list_ref = {
+                            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                            member.and_then(|m| m.member_type.as_shockwave3d())
+                                .and_then(|w3d| w3d.runtime_state.shader_texture_lists.get(&s3d_ref.name))
+                                .cloned()
+                        };
+                        // Update persistent textureList first (prevents sync from overwriting)
+                        if let Some(list_ref) = list_ref {
+                            let new_val = player.alloc_datum(Datum::String(tex_name.clone()));
+                            if let Datum::List(_, ref mut items, _) = player.get_datum_mut(&list_ref) {
+                                if !items.is_empty() {
+                                    items[0] = new_val;
+                                }
+                            }
+                        }
                         // Update the shader's first texture layer in the parsed scene
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
