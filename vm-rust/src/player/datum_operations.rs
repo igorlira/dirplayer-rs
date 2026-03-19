@@ -851,13 +851,13 @@ pub fn divide_datums(
     let result = match (&left, &right) {
         (Datum::Void, _) => Datum::Int(0),
         (Datum::Int(_), Datum::Void) | (Datum::Float(_), Datum::Void) => Datum::Int(0), // div by VOID → 0
-        (Datum::Int(left), Datum::Int(right)) => Datum::Int(left / right),
-        (Datum::Int(left), Datum::Float(right)) => Datum::Float((*left as f64) / right),
-        (Datum::Float(left), Datum::Int(right)) => Datum::Float(left / (*right as f64)),
-        (Datum::Float(left), Datum::Float(right)) => Datum::Float(left / right),
+        (Datum::Int(left), Datum::Int(right)) => if *right == 0 { Datum::Int(0) } else { Datum::Int(left / right) },
+        (Datum::Int(left), Datum::Float(right)) => Datum::Float(if *right == 0.0 { 0.0 } else { (*left as f64) / right }),
+        (Datum::Float(left), Datum::Int(right)) => Datum::Float(if *right == 0 { 0.0 } else { left / (*right as f64) }),
+        (Datum::Float(left), Datum::Float(right)) => Datum::Float(if *right == 0.0 { 0.0 } else { left / right }),
         // Vector / scalar
-        (Datum::Vector(v), Datum::Int(s)) => { let s = *s as f64; Datum::Vector([v[0] / s, v[1] / s, v[2] / s]) }
-        (Datum::Vector(v), Datum::Float(s)) => Datum::Vector([v[0] / s, v[1] / s, v[2] / s]),
+        (Datum::Vector(v), Datum::Int(s)) => { let s = *s as f64; if s == 0.0 { Datum::Vector([0.0, 0.0, 0.0]) } else { Datum::Vector([v[0] / s, v[1] / s, v[2] / s]) } }
+        (Datum::Vector(v), Datum::Float(s)) => if *s == 0.0 { Datum::Vector([0.0, 0.0, 0.0]) } else { Datum::Vector([v[0] / s, v[1] / s, v[2] / s]) },
         (Datum::Point(a), Datum::Int(right)) => {
             let right_ref = player.alloc_datum(Datum::Int(*right));
             let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);

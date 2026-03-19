@@ -634,7 +634,23 @@ impl GetSetBytecodeHandler {
                             s_clone,
                         ))
                     }
-                    _ => get_obj_prop(player, &obj_ref, &prop_name.to_owned())?,
+                    _ => {
+                        let result = get_obj_prop(player, &obj_ref, &prop_name.to_owned())?;
+                        // Track sub-property refs for Transform3D compound assignment
+                        // (e.g., transform.position.z = value needs to write back to transform)
+                        let is_transform = matches!(obj_type, crate::director::lingo::datum::DatumType::Transform3d);
+                        let is_pos_rot = matches!(prop_name.as_str(), "position" | "rotation" | "x" | "y" | "z");
+                        if is_transform && is_pos_rot {
+                            let result_type = player.get_datum(&result).type_enum();
+                            if matches!(result_type, crate::director::lingo::datum::DatumType::Vector) {
+                                if player.transform_sub_refs.len() > 32 {
+                                    player.transform_sub_refs.drain(0..16);
+                                }
+                                player.transform_sub_refs.push((result.clone(), obj_ref.clone(), prop_name.clone()));
+                            }
+                        }
+                        result
+                    }
                 },
                 crate::director::lingo::datum::DatumType::List => {
                     // Handle numeric indices for lists
@@ -714,7 +730,21 @@ impl GetSetBytecodeHandler {
                     }
                 }
                 _ => {
-                    get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+                    let result = get_obj_prop(player, &obj_ref, &prop_name.to_owned())?;
+                    // Track sub-property refs for Transform3D compound assignment
+                    // (e.g., transform.position.z = value needs to write back to transform)
+                    if matches!(obj_type, crate::director::lingo::datum::DatumType::Transform3d) {
+                        if matches!(prop_name.as_str(), "position" | "rotation") {
+                            let result_type = player.get_datum(&result).type_enum();
+                            if matches!(result_type, crate::director::lingo::datum::DatumType::Vector) {
+                                if player.transform_sub_refs.len() > 32 {
+                                    player.transform_sub_refs.drain(0..16);
+                                }
+                                player.transform_sub_refs.push((result.clone(), obj_ref.clone(), prop_name.clone()));
+                            }
+                        }
+                    }
+                    result
                 },
             };
 

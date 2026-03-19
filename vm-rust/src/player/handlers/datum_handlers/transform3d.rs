@@ -332,7 +332,7 @@ fn mat4_invert_affine(m: &[f64; 16]) -> [f64; 16] {
 }
 
 /// Euler angles to column-major rotation matrix
-fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
+pub fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
     let rx = rx_deg.to_radians();
     let ry = ry_deg.to_radians();
     let rz = rz_deg.to_radians();

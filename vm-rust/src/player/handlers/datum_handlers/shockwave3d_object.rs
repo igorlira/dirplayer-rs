@@ -520,10 +520,6 @@ impl Shockwave3dObjectDatumHandlers {
                                         } else {
                                             shader.texture_layers[0].name = tex_name.clone();
                                         }
-                                        web_sys::console::log_1(&format!(
-                                            "[W3D] shader(\"{}\").texture = \"{}\"",
-                                            s3d_ref.name, tex_name
-                                        ).into());
                                     }
                                 }
                             }

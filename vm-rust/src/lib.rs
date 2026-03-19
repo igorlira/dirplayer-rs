@@ -282,7 +282,7 @@ pub fn wants_pointer_lock() -> bool {
 #[wasm_bindgen]
 pub fn mouse_move_delta(dx: f64, dy: f64) {
     reserve_player_mut(|player| {
-        player.mouse_loc.0 += dx.to_i32().unwrap();
+        player.mouse_loc.0 -= dx.to_i32().unwrap();
         player.mouse_loc.1 += dy.to_i32().unwrap();
     });
     let (x, y) = reserve_player_ref(|player| player.mouse_loc);
