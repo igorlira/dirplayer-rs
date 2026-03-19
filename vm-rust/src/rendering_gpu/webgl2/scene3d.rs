@@ -1019,8 +1019,14 @@ void main() {
 
         // Traverse scene graph and draw model nodes
         if self.member_data.contains_key(&member_key) {
+            // Get set of nodes explicitly detached by Lingo (parent = VOID)
+            let detached_nodes: std::collections::HashSet<&str> = runtime_state
+                .map(|rs| rs.detached_nodes.iter().map(|s| s.as_str()).collect())
+                .unwrap_or_default();
+
             let model_nodes: Vec<&W3dNode> = scene.nodes.iter()
                 .filter(|n| n.node_type == W3dNodeType::Model)
+                .filter(|n| !detached_nodes.contains(n.name.as_str()))
                 .collect();
 
             // One-time diagnostic logging per member
