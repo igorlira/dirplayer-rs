@@ -53,41 +53,96 @@ pub fn screen_to_ray(
     }
 }
 
-/// Test ray against all meshes in a scene, returning the closest hit.
+/// Test ray against all meshes in a scene, returning hits sorted by distance.
 pub fn raycast_scene(
     ray: &Ray,
     scene: &W3dScene,
     max_dist: f32,
 ) -> Option<RayHit> {
-    let mut closest: Option<RayHit> = None;
+    raycast_scene_multi(ray, scene, max_dist, 1, None).into_iter().next()
+}
 
-    // Test against CLOD meshes
-    for (resource_name, meshes) in &scene.clod_meshes {
-        // Find the model node that uses this resource
-        let model_name = scene.nodes.iter()
-            .find(|n| n.node_type == W3dNodeType::Model && (n.model_resource_name == *resource_name || n.resource_name == *resource_name))
-            .map(|n| n.name.clone())
-            .unwrap_or_else(|| resource_name.clone());
+/// Test ray against all meshes in a scene, returning up to max_hits sorted by distance.
+/// If node_transforms is provided, meshes are tested in world space using model transforms.
+pub fn raycast_scene_multi(
+    ray: &Ray,
+    scene: &W3dScene,
+    max_dist: f32,
+    max_hits: usize,
+    node_transforms: Option<&std::collections::HashMap<String, [f32; 16]>>,
+) -> Vec<RayHit> {
+    let mut all_hits: Vec<RayHit> = Vec::new();
 
-        for mesh in meshes {
-            if let Some(hit) = raycast_mesh(ray, &mesh.positions, &mesh.normals, &mesh.faces, &model_name, max_dist) {
-                if closest.as_ref().map_or(true, |c| hit.distance < c.distance) {
-                    closest = Some(hit);
+    // For each model node, find its mesh data and test
+    for node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
+        let resource = if !node.model_resource_name.is_empty() {
+            &node.model_resource_name
+        } else {
+            &node.resource_name
+        };
+
+        // Get model transform (for transforming ray to local space)
+        let world_transform = if let Some(nt) = node_transforms {
+            nt.get(&node.name).cloned().unwrap_or(node.transform)
+        } else {
+            node.transform
+        };
+        let inv_transform = invert_4x4(&world_transform);
+        let local_ray = Ray {
+            origin: transform_point_4x4(&inv_transform, ray.origin[0], ray.origin[1], ray.origin[2]),
+            direction: transform_dir_4x4(&inv_transform, ray.direction[0], ray.direction[1], ray.direction[2]),
+        };
+
+        // Test CLOD meshes
+        if let Some(meshes) = scene.clod_meshes.get(resource.as_str()) {
+            for mesh in meshes {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, &node.name, max_dist) {
+                    // Transform hit position back to world space
+                    hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
+                    hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
+                    // Recompute distance in world space
+                    let dx = hit.position[0] - ray.origin[0];
+                    let dy = hit.position[1] - ray.origin[1];
+                    let dz = hit.position[2] - ray.origin[2];
+                    hit.distance = (dx*dx + dy*dy + dz*dz).sqrt();
+                    if hit.distance <= max_dist {
+                        all_hits.push(hit);
+                    }
+                }
+            }
+        }
+
+        // Test raw meshes
+        for mesh in &scene.raw_meshes {
+            if mesh.name == *resource {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, &node.name, max_dist) {
+                    hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
+                    hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
+                    let dx = hit.position[0] - ray.origin[0];
+                    let dy = hit.position[1] - ray.origin[1];
+                    let dz = hit.position[2] - ray.origin[2];
+                    hit.distance = (dx*dx + dy*dy + dz*dz).sqrt();
+                    if hit.distance <= max_dist {
+                        all_hits.push(hit);
+                    }
                 }
             }
         }
     }
 
-    // Test against raw meshes
-    for mesh in &scene.raw_meshes {
-        if let Some(hit) = raycast_mesh(ray, &mesh.positions, &mesh.normals, &mesh.faces, &mesh.name, max_dist) {
-            if closest.as_ref().map_or(true, |c| hit.distance < c.distance) {
-                closest = Some(hit);
-            }
-        }
-    }
+    // Sort by distance, take max_hits
+    all_hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+    all_hits.truncate(max_hits);
+    all_hits
+}
 
-    closest
+/// Transform a direction vector (no translation) by a 4x4 matrix
+fn transform_dir_4x4(m: &[f32; 16], x: f32, y: f32, z: f32) -> [f32; 3] {
+    normalize([
+        m[0] * x + m[4] * y + m[8] * z,
+        m[1] * x + m[5] * y + m[9] * z,
+        m[2] * x + m[6] * y + m[10] * z,
+    ])
 }
 
 /// Test ray against a single mesh
