@@ -373,7 +373,7 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         // PropList comparisons - Director compares property lists by their first value.
         // This is essential for sorted lists used as priority queues (e.g. A* pathfinding).
         (Datum::PropList(left_pairs, ..), Datum::PropList(right_pairs, ..)) => {
-            if let (Some((_, left_val)), Some((_, right_val))) = (left_pairs.first(), right_pairs.first()) {
+            if let (Some((_, left_val)), Some((_, right_val))) = (left_pairs.front(), right_pairs.front()) {
                 let left_datum = allocator.get_datum(left_val);
                 let right_datum = allocator.get_datum(right_val);
                 datum_less_than(left_datum, right_datum, allocator)

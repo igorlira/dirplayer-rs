@@ -16,7 +16,7 @@ use super::{
     string::StringHandlers,
     types::TypeHandlers,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
@@ -267,10 +267,10 @@ impl BuiltInHandlerManager {
             let obj = player.get_datum(&args[0]);
             match obj {
                 Datum::List(_, list, ..) => {
-                    Ok(list.last().cloned().unwrap_or(DatumRef::Void))
+                    Ok(list.back().cloned().unwrap_or(DatumRef::Void))
                 }
                 Datum::PropList(prop_list, ..) => {
-                    Ok(prop_list.last().map(|(_, v)| v.clone()).unwrap_or(DatumRef::Void))
+                    Ok(prop_list.back().map(|(_, v)| v.clone()).unwrap_or(DatumRef::Void))
                 }
                 _ => {
                     Err(ScriptError::new(format!(
@@ -746,7 +746,7 @@ impl BuiltInHandlerManager {
                     // rendererDeviceList
                     let rdl_key = make_sym(player, "rendererDeviceList");
                     let device = make_str(player, "WebGL2");
-                    let rdl_val = player.alloc_datum(Datum::List(DatumType::List, vec![device], false));
+                    let rdl_val = player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(vec![device]), false));
 
                     // renderer
                     let rend_key = make_sym(player, "renderer");
@@ -763,7 +763,7 @@ impl BuiltInHandlerManager {
                     let max_tex_v = make_int(player, 4096);
                     let tex_fmt_k = make_sym(player, "supportedTextureRenderFormats");
                     let fmt = make_str(player, "rgba8880");
-                    let tex_fmt_v = player.alloc_datum(Datum::List(DatumType::List, vec![fmt], false));
+                    let tex_fmt_v = player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(vec![fmt]), false));
                     let tex_units_k = make_sym(player, "textureUnits");
                     let tex_units_v = make_int(player, 8);
                     let depth_k = make_sym(player, "depthBufferRange");
@@ -771,16 +771,16 @@ impl BuiltInHandlerManager {
                     let color_k = make_sym(player, "colorBufferRange");
                     let color_v = make_int(player, 32);
 
-                    let hw_info = player.alloc_datum(Datum::PropList(vec![
+                    let hw_info = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                         (vendor_k, vendor_v), (model_k, model_v), (version_k, version_v),
                         (max_tex_k, max_tex_v), (tex_fmt_k, tex_fmt_v), (tex_units_k, tex_units_v),
                         (depth_k, depth_v), (color_k, color_v),
-                    ], false));
+                    ]), false));
                     let hw_key = make_sym(player, "hardwareInfo");
 
-                    let result = player.alloc_datum(Datum::PropList(vec![
+                    let result = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                         (rdl_key, rdl_val), (rend_key, rend_val), (hw_key, hw_info),
-                    ], false));
+                    ]), false));
                     Ok(result)
                 })
             }
@@ -1386,7 +1386,7 @@ impl BuiltInHandlerManager {
 
             Ok(player.alloc_datum(Datum::List(
                 crate::director::lingo::datum::DatumType::List,
-                matching_nodes,
+                VecDeque::from(matching_nodes),
                 false,
             )))
         })

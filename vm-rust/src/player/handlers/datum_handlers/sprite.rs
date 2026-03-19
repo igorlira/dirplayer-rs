@@ -197,6 +197,40 @@ impl SpriteDatumHandlers {
                     Ok(player.alloc_datum(Datum::Int(if intersects { 1 } else { 0 })))
                 })
             }
+            "addcamera" => {
+                reserve_player_mut(|player| {
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    // addCamera(cameraRef, index)
+                    let cam_name = if !args.is_empty() {
+                        match player.get_datum(&args[0]) {
+                            Datum::Shockwave3dObjectRef(r) => r.name.clone(),
+                            Datum::String(s) => s.clone(),
+                            _ => String::new(),
+                        }
+                    } else { String::new() };
+                    if !cam_name.is_empty() {
+                        let sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
+                        sprite.w3d_cameras.push(cam_name);
+                    }
+                    Ok(player.alloc_datum(Datum::Void))
+                })
+            }
+            "removecamera" => {
+                reserve_player_mut(|player| {
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let index = if !args.is_empty() {
+                        player.get_datum(&args[0]).int_value().unwrap_or(1) as usize
+                    } else { 1 };
+                    let sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
+                    if index >= 2 {
+                        let idx = index - 2;
+                        if idx < sprite.w3d_cameras.len() {
+                            sprite.w3d_cameras.remove(idx);
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Void))
+                })
+            }
             "getprop" => {
                 reserve_player_mut(|player| {
                     if args.is_empty() {

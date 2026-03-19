@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use num_derive::FromPrimitive;
@@ -177,8 +178,8 @@ pub enum Datum {
     StringChunk(StringChunkSource, StringChunkExpr, String),
     Void,
     VarRef(VarRef),
-    List(DatumType, Vec<DatumRef>, bool), // bool is for whether the list is sorted
-    PropList(Vec<PropListPair>, bool),    // bool is for whether the map is sorted
+    List(DatumType, VecDeque<DatumRef>, bool), // bool is for whether the list is sorted
+    PropList(VecDeque<PropListPair>, bool),    // bool is for whether the map is sorted
     Symbol(String),
     CastLib(u32),
     Stage,
@@ -495,14 +496,14 @@ impl Datum {
         }
     }
 
-    pub fn to_list(&self) -> Result<&Vec<DatumRef>, ScriptError> {
+    pub fn to_list(&self) -> Result<&VecDeque<DatumRef>, ScriptError> {
         match self {
             Datum::List(_, items, _) => Ok(items),
             _ => Err(ScriptError::new("Cannot convert datum to list".to_string())),
         }
     }
 
-    pub fn to_list_tuple(&self) -> Result<(&DatumType, &Vec<DatumRef>, bool), ScriptError> {
+    pub fn to_list_tuple(&self) -> Result<(&DatumType, &VecDeque<DatumRef>, bool), ScriptError> {
         match self {
             Datum::List(t, items, sorted) => Ok((t, items, *sorted)),
             _ => Err(ScriptError::new("Cannot convert datum to list".to_string())),
@@ -511,7 +512,7 @@ impl Datum {
 
     pub fn to_list_mut(
         &mut self,
-    ) -> Result<(&mut DatumType, &mut Vec<DatumRef>, &mut bool), ScriptError> {
+    ) -> Result<(&mut DatumType, &mut VecDeque<DatumRef>, &mut bool), ScriptError> {
         match self {
             Datum::List(t, items, sorted) => Ok((t, items, sorted)),
             _ => Err(ScriptError::new("Cannot convert datum to list".to_string())),
@@ -519,21 +520,21 @@ impl Datum {
     }
 
     #[allow(dead_code)]
-    pub fn to_map(&self) -> Result<&Vec<(DatumRef, DatumRef)>, ScriptError> {
+    pub fn to_map(&self) -> Result<&VecDeque<(DatumRef, DatumRef)>, ScriptError> {
         match self {
             Datum::PropList(items, ..) => Ok(items),
             _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
         }
     }
 
-    pub fn to_map_tuple(&self) -> Result<(&Vec<(DatumRef, DatumRef)>, bool), ScriptError> {
+    pub fn to_map_tuple(&self) -> Result<(&VecDeque<(DatumRef, DatumRef)>, bool), ScriptError> {
         match self {
             Datum::PropList(items, sorted) => Ok((items, *sorted)),
             _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
         }
     }
 
-    pub fn to_map_mut(&mut self) -> Result<&mut Vec<(DatumRef, DatumRef)>, ScriptError> {
+    pub fn to_map_mut(&mut self) -> Result<&mut VecDeque<(DatumRef, DatumRef)>, ScriptError> {
         match self {
             Datum::PropList(items, ..) => Ok(items),
             _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
@@ -542,7 +543,7 @@ impl Datum {
 
     pub fn to_map_tuple_mut(
         &mut self,
-    ) -> Result<(&mut Vec<(DatumRef, DatumRef)>, &mut bool), ScriptError> {
+    ) -> Result<(&mut VecDeque<(DatumRef, DatumRef)>, &mut bool), ScriptError> {
         match self {
             Datum::PropList(items, sorted) => Ok((items, sorted)),
             _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),

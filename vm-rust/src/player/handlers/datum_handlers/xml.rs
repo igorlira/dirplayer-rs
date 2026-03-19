@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::Datum,
     player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
@@ -954,14 +956,14 @@ impl XmlDatumHandlers {
                         let root_ref = player.alloc_datum(Datum::XmlRef(root_id));
                         return Ok(player.alloc_datum(Datum::List(
                             crate::director::lingo::datum::DatumType::XmlChildNodes,
-                            vec![root_ref],
+                            VecDeque::from(vec![root_ref]),
                             false,
                         )));
                     } else {
                         // Document has no root element
                         return Ok(player.alloc_datum(Datum::List(
                             crate::director::lingo::datum::DatumType::XmlChildNodes,
-                            vec![],
+                            VecDeque::new(),
                             false,
                         )));
                     }
@@ -971,7 +973,7 @@ impl XmlDatumHandlers {
                 let children = XmlHelper::get_node_children(player, xml_id);
                 Ok(player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::XmlChildNodes,
-                    children,
+                    VecDeque::from(children),
                     false,
                 )))
             }

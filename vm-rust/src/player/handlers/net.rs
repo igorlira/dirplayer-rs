@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
     player::{reserve_player_mut, DatumRef, ScriptError},
@@ -82,7 +83,7 @@ impl NetHandlers {
                 )
             };
             let result_map = Datum::PropList(
-                vec![
+                VecDeque::from(vec![
                     (
                         player.alloc_datum(Datum::String("URL".to_owned())),
                         player.alloc_datum(Datum::String(url)),
@@ -103,7 +104,7 @@ impl NetHandlers {
                         player.alloc_datum(Datum::String("error".to_owned())),
                         player.alloc_datum(Datum::String(error)),
                     ),
-                ],
+                ]),
                 false,
             );
             Ok(player.alloc_datum(result_map))

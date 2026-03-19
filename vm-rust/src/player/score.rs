@@ -3,7 +3,7 @@ use std::cmp::max;
 use itertools::Itertools;
 use log::debug;
 use wasm_bindgen::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{
     console_warn,
@@ -2910,7 +2910,12 @@ pub fn sprite_get_prop(
                 name: cam_name,
             }))
         }
-        "cameraCount" => Ok(Datum::Int(1)),
+        "cameraCount" => {
+            let count = sprite.map_or(1, |s| {
+                1 + s.w3d_cameras.len() as i32
+            });
+            Ok(Datum::Int(count))
+        }
         "flipH" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_h))),
         "flipV" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_v))),
         "rotation" => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.rotation))),
@@ -2938,7 +2943,7 @@ pub fn sprite_get_prop(
                 Ok(datum)
             } else {
                 let instance_ids = sprite.map_or(vec![], |x| x.script_instance_list.clone());
-                let instance_ids: Vec<DatumRef> = instance_ids
+                let instance_ids: VecDeque<DatumRef> = instance_ids
                     .iter()
                     .map(|x| player.alloc_datum(Datum::ScriptInstanceRef(x.clone())))
                     .collect();
@@ -2983,7 +2988,7 @@ pub fn sprite_get_prop(
             match cursor_ref {
                 Some(CursorRef::System(id)) => Ok(Datum::Int(id)),
                 Some(CursorRef::Member(ids)) => {
-                    let id_refs = ids
+                    let id_refs: VecDeque<DatumRef> = ids
                         .iter()
                         .map(|id| {
                             let member_ref = CastMemberRefHandlers::member_ref_from_slot_number(*id as u32);

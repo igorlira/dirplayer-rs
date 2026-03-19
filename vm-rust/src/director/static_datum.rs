@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
-use log::warn;
+use std::collections::VecDeque;
+
 use crate::director::lingo::datum::{Datum, DatumType};
 use crate::player::datum_ref::DatumRef;
 
@@ -148,7 +149,7 @@ fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocator) 
         StaticDatum::Float(f) => allocator.alloc_datum(Datum::Float(*f)).unwrap(),
         StaticDatum::Symbol(s) => allocator.alloc_datum(Datum::Symbol(s.clone())).unwrap(),
         StaticDatum::List(items) => {
-            let datum_refs: Vec<DatumRef> = items
+            let datum_refs: VecDeque<DatumRef> = items
                 .iter()
                 .map(|item| static_datum_to_runtime(item, allocator))
                 .collect();
@@ -157,7 +158,7 @@ fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocator) 
                 .unwrap()
         }
         StaticDatum::PropList(items) => {
-            let datum_refs: Vec<(DatumRef, DatumRef)> = items
+            let datum_refs: VecDeque<(DatumRef, DatumRef)> = items
                 .iter()
                 .map(|(key, val)| {
                     let key_ref = static_datum_to_runtime(key, allocator);
@@ -185,7 +186,7 @@ fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocator) 
         }
         StaticDatum::Void => DatumRef::Void,
         _ => {
-            warn!("⚠️ Unhandled StaticDatum type, using Void");
+            web_sys::console::log_1(&format!("⚠️ Unhandled StaticDatum type, using Void").into());
             DatumRef::Void
         }
         StaticDatum::IntRect(left, top, right, bottom) => {

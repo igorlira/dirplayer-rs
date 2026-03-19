@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use fxhash::FxHashMap;
 use xml::reader::{EventReader, XmlEvent};
 
@@ -114,15 +115,15 @@ impl XmlParserXtraInstance {
 
             // Create #attributes property list and #attributeName/#attributeValue lists
             let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
-            let mut attr_pairs: Vec<(DatumRef, DatumRef)> = Vec::new();
-            let mut attr_name_refs: Vec<DatumRef> = Vec::new();
-            let mut attr_value_refs: Vec<DatumRef> = Vec::new();
+            let mut attr_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
+            let mut attr_name_refs: VecDeque<DatumRef> = VecDeque::new();
+            let mut attr_value_refs: VecDeque<DatumRef> = VecDeque::new();
             for (attr_name, attr_value) in &node.attributes {
                 let attr_key = player.alloc_datum(Datum::Symbol(attr_name.clone()));
                 let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
-                attr_pairs.push((attr_key, attr_val));
-                attr_name_refs.push(player.alloc_datum(Datum::String(attr_name.clone())));
-                attr_value_refs.push(player.alloc_datum(Datum::String(attr_value.clone())));
+                attr_pairs.push_back((attr_key, attr_val));
+                attr_name_refs.push_back(player.alloc_datum(Datum::String(attr_name.clone())));
+                attr_value_refs.push_back(player.alloc_datum(Datum::String(attr_value.clone())));
             }
             let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
             let attr_name_key = player.alloc_datum(Datum::Symbol("attributeName".to_string()));
@@ -132,20 +133,20 @@ impl XmlParserXtraInstance {
 
             // Create #child list and collect #charData
             let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
-            let mut children_refs: Vec<DatumRef> = Vec::new();
+            let mut children_refs: VecDeque<DatumRef> = VecDeque::new();
             let mut char_data = String::new();
 
             for child in &node.children {
                 match child {
                     XmlNodeChild::Element(child_node) => {
                         let child_ref = Self::node_to_prop_list_inner(player, child_node)?;
-                        children_refs.push(child_ref);
+                        children_refs.push_back(child_ref);
                     }
                     XmlNodeChild::Text(text) => {
                         char_data.push_str(text);
                         if !text.trim().is_empty() {
                             let text_ref = Self::text_node_to_prop_list_inner(player, text);
-                            children_refs.push(text_ref);
+                            children_refs.push_back(text_ref);
                         }
                     }
                 }
@@ -158,14 +159,14 @@ impl XmlParserXtraInstance {
             let chardata_value = player.alloc_datum(Datum::String(char_data));
 
             let prop_list = Datum::PropList(
-                vec![
+                VecDeque::from(vec![
                     (name_key, name_value),
                     (attributes_key, attributes_value),
                     (attr_name_key, attr_name_value),
                     (attr_value_key, attr_value_value),
                     (child_key, children_value),
                     (chardata_key, chardata_value),
-                ],
+                ]),
                 false,
             );
 
@@ -184,15 +185,15 @@ impl XmlParserXtraInstance {
 
         // Create #attributes property list and #attributeName/#attributeValue lists
         let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
-        let mut attr_pairs: Vec<(DatumRef, DatumRef)> = Vec::new();
-        let mut attr_name_refs: Vec<DatumRef> = Vec::new();
-        let mut attr_value_refs: Vec<DatumRef> = Vec::new();
+        let mut attr_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
+        let mut attr_name_refs: VecDeque<DatumRef> = VecDeque::new();
+        let mut attr_value_refs: VecDeque<DatumRef> = VecDeque::new();
         for (attr_name, attr_value) in &node.attributes {
             let attr_key = player.alloc_datum(Datum::Symbol(attr_name.clone()));
             let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
-            attr_pairs.push((attr_key, attr_val));
-            attr_name_refs.push(player.alloc_datum(Datum::String(attr_name.clone())));
-            attr_value_refs.push(player.alloc_datum(Datum::String(attr_value.clone())));
+            attr_pairs.push_back((attr_key, attr_val));
+            attr_name_refs.push_back(player.alloc_datum(Datum::String(attr_name.clone())));
+            attr_value_refs.push_back(player.alloc_datum(Datum::String(attr_value.clone())));
         }
         let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
         let attr_name_key = player.alloc_datum(Datum::Symbol("attributeName".to_string()));
@@ -202,20 +203,20 @@ impl XmlParserXtraInstance {
 
         // Create #child list and collect #charData
         let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
-        let mut children_refs: Vec<DatumRef> = Vec::new();
+        let mut children_refs: VecDeque<DatumRef> = VecDeque::new();
         let mut char_data = String::new();
 
         for child in &node.children {
             match child {
                 XmlNodeChild::Element(child_node) => {
                     let child_ref = Self::node_to_prop_list_inner(player, child_node)?;
-                    children_refs.push(child_ref);
+                    children_refs.push_back(child_ref);
                 }
                 XmlNodeChild::Text(text) => {
                     char_data.push_str(text);
                     if !text.trim().is_empty() {
                         let text_ref = Self::text_node_to_prop_list_inner(player, text);
-                        children_refs.push(text_ref);
+                        children_refs.push_back(text_ref);
                     }
                 }
             }
@@ -228,14 +229,14 @@ impl XmlParserXtraInstance {
         let chardata_value = player.alloc_datum(Datum::String(char_data));
 
         let prop_list = Datum::PropList(
-            vec![
+            VecDeque::from(vec![
                 (name_key, name_value),
                 (attributes_key, attributes_value),
                 (attr_name_key, attr_name_value),
                 (attr_value_key, attr_value_value),
                 (child_key, children_value),
                 (chardata_key, chardata_value),
-            ],
+            ]),
             false,
         );
 
@@ -260,7 +261,7 @@ impl XmlParserXtraInstance {
         let name_value = player.alloc_datum(Datum::String(String::new()));
 
         let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
-        let attributes_value = player.alloc_datum(Datum::PropList(vec![], false));
+        let attributes_value = player.alloc_datum(Datum::PropList(VecDeque::new(), false));
 
         let chardata_key = player.alloc_datum(Datum::Symbol("charData".to_string()));
         let chardata_value = player.alloc_datum(Datum::String(text.to_string()));
@@ -270,16 +271,16 @@ impl XmlParserXtraInstance {
 
         let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
         let child_value =
-            player.alloc_datum(Datum::List(DatumType::List, vec![], false));
+            player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
 
         let prop_list = Datum::PropList(
-            vec![
+            VecDeque::from(vec![
                 (name_key, name_value),
                 (attributes_key, attributes_value),
                 (chardata_key, chardata_value),
                 (text_key, text_value),
                 (child_key, child_value),
-            ],
+            ]),
             false,
         );
 
@@ -543,7 +544,7 @@ impl XmlParserXtraManager {
                                         player.alloc_datum(Datum::String(value.clone()));
                                     Ok(player.alloc_datum(Datum::List(
                                         DatumType::List,
-                                        vec![name_ref, value_ref],
+                                        VecDeque::from(vec![name_ref, value_ref]),
                                         false,
                                     )))
                                 })

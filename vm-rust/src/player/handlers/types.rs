@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use itertools::Itertools;
 use log::{debug, warn};
 
@@ -855,7 +856,7 @@ impl TypeHandlers {
 
     pub fn list(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            Ok(player.alloc_datum(Datum::List(DatumType::List, args.clone(), false)))
+            Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(args.clone()), false)))
         })
     }
 
@@ -1238,8 +1239,10 @@ impl TypeHandlers {
             if args.len() == 0 {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
+            let args_vec;
             let args = if player.get_datum(&args[0]).is_list() {
-                player.get_datum(&args[0]).to_list()?
+                args_vec = Vec::from(player.get_datum(&args[0]).to_list()?.clone());
+                &args_vec
             } else {
                 args
             };
@@ -1258,8 +1261,10 @@ impl TypeHandlers {
             if args.len() == 0 {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
+            let args_vec;
             let args = if player.get_datum(&args[0]).is_list() {
-                player.get_datum(&args[0]).to_list()?
+                args_vec = Vec::from(player.get_datum(&args[0]).to_list()?.clone());
+                &args_vec
             } else {
                 args
             };
@@ -1488,7 +1493,7 @@ impl TypeHandlers {
             let instance_list = match list_or_script_instance {
                 Datum::List(_, list, _) => list.to_owned(),
                 Datum::ScriptInstanceRef(_) => {
-                    vec![args[1].clone()]
+                    VecDeque::from(vec![args[1].clone()])
                 }
                 _ => {
                     return Err(ScriptError::new(format!(
@@ -1665,7 +1670,7 @@ impl TypeHandlers {
             "object" => {
                 reserve_player_mut(|player| {
                     // Allocate an empty prop list, unsorted
-                    let obj = Datum::PropList(Vec::new(), false);
+                    let obj = Datum::PropList(VecDeque::new(), false);
                     Ok(player.alloc_datum(obj))
                 })
             }
@@ -1681,7 +1686,7 @@ impl TypeHandlers {
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::List(
                         crate::director::lingo::datum::DatumType::XmlChildNodes,
-                        Vec::new(),
+                        VecDeque::new(),
                         false,
                     )))
                 })

@@ -1,5 +1,6 @@
 use log::{debug, warn};
 
+use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
@@ -731,7 +732,7 @@ impl MovieHandlers {
                 Datum::List(_, items, _) => {
                     items.clone()
                 },
-                _ => vec![],
+                _ => VecDeque::new(),
             }
         });
 

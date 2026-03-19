@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use log::error;
 use pest::{
     iterators::{Pair, Pairs},
@@ -127,10 +128,10 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             eval_lingo_pair_static(inner)
         },
         Rule::multi_list => {
-            let mut result_vec = vec![];
+            let mut result_vec = VecDeque::new();
             for inner_pair in pair.into_inner() {
                 let result = eval_lingo_pair_static(inner_pair)?;
-                result_vec.push(result);
+                result_vec.push_back(result);
             }
             reserve_player_mut(|player| {
                 Ok(player.alloc_datum(Datum::List(DatumType::List, result_vec, false)))
@@ -148,7 +149,7 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             eval_lingo_pair_static(inner)
         },
         Rule::multi_prop_list => {
-            let mut result_vec = vec![];
+            let mut result_vec = VecDeque::new();
             for inner_pair in pair.into_inner() {
                 let mut pair_inner = inner_pair.into_inner();
                 let key = eval_lingo_pair_static(pair_inner.next()
@@ -156,12 +157,12 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 let value = eval_lingo_pair_static(pair_inner.next()
                     .ok_or_else(|| ScriptError::new("Expected prop list value".to_string()))?)?;
 
-                result_vec.push((key, value));
+                result_vec.push_back((key, value));
             }
             reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(result_vec, false))))
         }
         Rule::empty_prop_list => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(vec![], false))))
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false))))
         }
         Rule::number_int => reserve_player_mut(|player| {
             let val = pair.as_str().parse::<i32>()
@@ -243,7 +244,7 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             })
         }
         Rule::empty_list => reserve_player_mut(|player| {
-            Ok(player.alloc_datum(Datum::List(DatumType::List, vec![], false)))
+            Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false)))
         }),
         Rule::the_prop => {
             // For multi-word properties like "the long time", we need to get the full text
@@ -1260,10 +1261,10 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(s.to_string()))))
         }
         LingoExpr::ListLiteral(items) => {
-            let mut datum_items = vec![];
+            let mut datum_items = VecDeque::new();
             for item in items {
                 let datum = Box::pin(eval_lingo_expr_ast_runtime(item)).await?;
-                datum_items.push(datum);
+                datum_items.push_back(datum);
             }
             reserve_player_mut(|player| {
                 Ok(player.alloc_datum(Datum::List(DatumType::List, datum_items, false)))
@@ -1280,11 +1281,11 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Float(*f))))
         }
         LingoExpr::PropListLiteral(pairs) => {
-            let mut datum_pairs = vec![];
+            let mut datum_pairs = VecDeque::new();
             for (key_expr, value_expr) in pairs {
                 let key_datum = Box::pin(eval_lingo_expr_ast_runtime(key_expr)).await?;
                 let value_datum = Box::pin(eval_lingo_expr_ast_runtime(value_expr)).await?;
-                datum_pairs.push((key_datum, value_datum));
+                datum_pairs.push_back((key_datum, value_datum));
             }
             reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(datum_pairs, false))))
         }
