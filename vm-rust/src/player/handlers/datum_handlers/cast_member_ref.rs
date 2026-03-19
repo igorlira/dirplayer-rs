@@ -794,16 +794,25 @@ impl CastMemberRefHandlers {
                             .and_then(|w3d| w3d.parsed_scene.clone())
                     };
 
+                    // Get runtime node transforms for world-space raycasting
+                    let node_transforms = {
+                        let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                        member.and_then(|m| m.member_type.as_shockwave3d())
+                            .map(|w3d| w3d.runtime_state.node_transforms.clone())
+                    };
+
                     let mut results = Vec::new();
                     if let Some(scene) = scene {
-                        use crate::director::chunks::w3d::raycast::{Ray, raycast_scene};
+                        use crate::director::chunks::w3d::raycast::{Ray, raycast_scene_multi};
                         let ray = Ray {
                             origin: [origin[0] as f32, origin[1] as f32, origin[2] as f32],
                             direction: [direction[0] as f32, direction[1] as f32, direction[2] as f32],
                         };
-                        // Collect all hits (raycast_scene returns only the closest)
-                        // For now, just return the one closest hit
-                        if let Some(hit) = raycast_scene(&ray, &scene, 100000.0) {
+                        let hits = raycast_scene_multi(
+                            &ray, &scene, 100000.0, max_models as usize,
+                            node_transforms.as_ref(),
+                        );
+                        for hit in &hits {
                             if detailed {
                                 let model_key = player.alloc_datum(Datum::Symbol("model".to_string()));
                                 let model_val = player.alloc_datum(Datum::Shockwave3dObjectRef(
