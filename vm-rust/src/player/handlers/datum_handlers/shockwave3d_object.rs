@@ -418,7 +418,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let fov = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 45.0 };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            if let Some(ref mut scene) = w3d.parsed_scene {
+                            if let Some(scene) = w3d.scene_mut() {
                                 if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
                                     node.fov = fov;
                                 }
@@ -431,7 +431,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let v = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 1.0 };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            if let Some(ref mut scene) = w3d.parsed_scene {
+                            if let Some(scene) = w3d.scene_mut() {
                                 if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
                                     node.near_plane = v;
                                 }
@@ -444,7 +444,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let v = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 10000.0 };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            if let Some(ref mut scene) = w3d.parsed_scene {
+                            if let Some(scene) = w3d.scene_mut() {
                                 if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
                                     node.far_plane = v;
                                 }
@@ -461,7 +461,7 @@ impl Shockwave3dObjectDatumHandlers {
                     };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            if let Some(ref mut scene) = w3d.parsed_scene {
+                            if let Some(scene) = w3d.scene_mut() {
                                 if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
                                     node.parent_name = parent_name;
                                 }
@@ -510,7 +510,7 @@ impl Shockwave3dObjectDatumHandlers {
                         // Update the shader's first texture layer in the parsed scene
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                if let Some(ref mut scene) = w3d.parsed_scene {
+                                if let Some(scene) = w3d.scene_mut() {
                                     if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
                                         if shader.texture_layers.is_empty() {
                                             shader.texture_layers.push(crate::director::chunks::w3d::types::W3dTextureLayer {
@@ -544,7 +544,7 @@ impl Shockwave3dObjectDatumHandlers {
                     };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            if let Some(ref mut scene) = w3d.parsed_scene {
+                            if let Some(scene) = w3d.scene_mut() {
                                 // Find the shader's material and update it
                                 let mat_name = scene.shaders.iter()
                                     .find(|s| s.name == s3d_ref.name)
@@ -656,6 +656,7 @@ impl Shockwave3dObjectDatumHandlers {
                                                 Datum::String(s) => s.clone(),
                                                 _ => String::new(),
                                             };
+                                            ov.source_texture_lower = ov.source_texture.to_lowercase();
                                         }
                                         "loc" => { if let Some(v) = loc_vals { ov.loc = v; } }
                                         "blend" => ov.blend = value.to_float().unwrap_or(100.0),
@@ -875,7 +876,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            if let Some(ref mut scene) = w3d.parsed_scene {
+                            if let Some(scene) = w3d.scene_mut() {
                                 let source_node = scene.nodes.iter().find(|n| n.name == s3d_ref.name).cloned();
                                 if let Some(mut new_node) = source_node {
                                     new_node.name = clone_name.clone();
@@ -1078,7 +1079,7 @@ impl Shockwave3dObjectDatumHandlers {
                     // Find next OverlayShader-copyN number and create shader + overlay
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            let shader_name = if let Some(ref mut scene) = w3d.parsed_scene {
+                            let shader_name = if let Some(scene) = w3d.scene_mut() {
                                 let prefix = "OverlayShader-copy";
                                 let max_n = scene.shaders.iter()
                                     .filter_map(|s| {
@@ -1096,6 +1097,7 @@ impl Shockwave3dObjectDatumHandlers {
                             } else { String::new() };
 
                             let overlay = crate::player::cast_member::CameraOverlay {
+                                source_texture_lower: tex_name.to_lowercase(),
                                 source_texture: tex_name,
                                 loc,
                                 rotation,
@@ -1133,7 +1135,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 if idx < list.len() {
                                     let removed = list.remove(idx);
                                     // Remove associated shader
-                                    if let Some(ref mut scene) = w3d.parsed_scene {
+                                    if let Some(scene) = w3d.scene_mut() {
                                         scene.shaders.retain(|s| s.name != removed.shader_name);
                                     }
                                 }
@@ -3012,7 +3014,7 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
         let member_ref = CastMemberRef { cast_lib, cast_member: cast_member as i32 };
         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                if let Some(ref mut scene) = w3d.parsed_scene {
+                if let Some(scene) = w3d.scene_mut() {
                     if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == shader_name) {
                         // Extend texture_layers if needed
                         use crate::director::chunks::w3d::types::W3dTextureLayer;

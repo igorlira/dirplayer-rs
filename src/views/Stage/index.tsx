@@ -4,10 +4,12 @@ import {
   set_stage_size,
   player_create_canvas,
   mouse_move,
+  mouse_move_delta,
   mouse_down,
   mouse_up,
   key_down,
   key_up,
+  wants_pointer_lock,
   player_set_picking_mode,
   player_get_sprite_at,
   player_set_debug_selected_channel,
@@ -64,6 +66,8 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     set_stage_size(width, height);
   }, [width, height]);
 
+  // No synthetic ESC on pointer lock release — the game's own ESC key detection handles it
+
   useEffect(() => {
     player_set_picking_mode(pickingMode);
   }, [pickingMode]);
@@ -90,10 +94,24 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
 
     switch (name) {
       case "move":
-        mouse_move(x, y);
+        // When pointer is locked, use movementX/Y as deltas
+        if (document.pointerLockElement) {
+          const nativeEvent = e.nativeEvent as MouseEvent;
+          mouse_move_delta(nativeEvent.movementX, nativeEvent.movementY);
+        } else {
+          mouse_move(x, y);
+        }
         break;
       case "down":
         mouse_down(x, y);
+        // Request pointer lock if the game wants it (cursor=200)
+        if (wants_pointer_lock() && !document.pointerLockElement) {
+          const target = e.currentTarget as HTMLElement;
+          const canvas = target.querySelector("canvas");
+          if (canvas) {
+            canvas.requestPointerLock();
+          }
+        }
         break;
       case "up":
         mouse_up(x, y);

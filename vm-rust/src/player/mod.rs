@@ -59,6 +59,7 @@ use datum_ref::DatumRef;
 use fxhash::FxHashMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
 use log::{debug, warn};
+use wasm_bindgen::JsCast;
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use net_manager::NetManager;
 use profiling::{end_profiling, start_profiling};
@@ -207,6 +208,7 @@ pub struct DirPlayer {
     pub text_selection_start: u16,
     pub text_selection_end: u16,
     pub mouse_loc: (i32, i32),
+    pub wants_pointer_lock: bool,
     pub last_mouse_down_time: i64,
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
@@ -364,6 +366,7 @@ impl DirPlayer {
             bg_color: ColorRef::Rgb(0, 0, 0),
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
+            wants_pointer_lock: false,
             last_mouse_down_time: 0,
             is_double_click: false,
             mouse_down_sprite: 0,
@@ -1565,6 +1568,7 @@ impl DirPlayer {
                         let x = self.get_datum(&refs[0]).int_value()?;
                         let y = self.get_datum(&refs[1]).int_value()?;
                         self.mouse_loc = (x, y);
+                        // mouseLoc is being set by the game — pointer lock is handled by cursor=200
                         Ok(())
                     }
                     _ => Err(ScriptError::new("mouseLoc requires a point value".to_string())),

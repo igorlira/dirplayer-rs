@@ -371,8 +371,15 @@ pub struct FlashMember {
 pub struct Shockwave3dMember {
     pub info: Shockwave3dInfo,
     pub w3d_data: Vec<u8>,
-    pub parsed_scene: Option<crate::director::chunks::w3d::types::W3dScene>,
+    pub parsed_scene: Option<std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>>,
     pub runtime_state: Shockwave3dRuntimeState,
+}
+
+impl Shockwave3dMember {
+    /// Get mutable access to the parsed scene (uses Rc::make_mut for copy-on-write)
+    pub fn scene_mut(&mut self) -> Option<&mut crate::director::chunks::w3d::types::W3dScene> {
+        self.parsed_scene.as_mut().map(|rc| std::rc::Rc::make_mut(rc))
+    }
 }
 
 /// Mutable runtime state for a Shockwave 3D member (animation, transforms, etc.)
@@ -450,6 +457,7 @@ pub struct Shockwave3dRuntimeState {
 #[derive(Clone, Debug)]
 pub struct CameraOverlay {
     pub source_texture: String,
+    pub source_texture_lower: String, // pre-lowercased for GPU texture lookup
     pub loc: [f64; 2],
     pub rotation: f64,
     pub blend: f64,
@@ -464,6 +472,7 @@ impl Default for CameraOverlay {
     fn default() -> Self {
         Self {
             source_texture: String::new(),
+            source_texture_lower: String::new(),
             loc: [0.0, 0.0],
             rotation: 0.0,
             blend: 100.0,
@@ -1944,15 +1953,15 @@ impl CastMember {
                                     ..Default::default()
                                 });
                             }
-                            Some(scene)
+                            Some(std::rc::Rc::new(scene))
                         }
                         Err(e) => {
                             web_sys::console::log_1(&format!("W3D parse error: {}", e).into());
-                            Some(Self::create_empty_w3d_scene())
+                            Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                         }
                     }
                 } else {
-                    Some(Self::create_empty_w3d_scene())
+                    Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                 };
                 let info = Shockwave3dInfo {
                     loops: false, duration: 0, direct_to_stage: false,
@@ -2715,16 +2724,16 @@ impl CastMember {
                                 Ok(scene) => {
                                     web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes",
                                         scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len()).into());
-                                    Some(scene)
+                                    Some(std::rc::Rc::new(scene))
                                 }
                                 Err(e) => {
                                     web_sys::console::error_1(&format!("W3D parse error: {}", e).into());
-                                    Some(Self::create_empty_w3d_scene())
+                                    Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                                 }
                             }
                         } else {
                             // Empty W3D data — create empty scene for Lingo-created content
-                            Some(Self::create_empty_w3d_scene())
+                            Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                         },
                         runtime_state: Shockwave3dRuntimeState::from_info(&info),
                         info,

@@ -341,7 +341,7 @@ impl CastMemberRefHandlers {
 
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                    if let Some(ref mut scene) = w3d.parsed_scene {
+                                    if let Some(scene) = w3d.scene_mut() {
                                         for shader in &src_shaders {
                                             if !scene.shaders.iter().any(|s| s.name == shader.name) {
                                                 scene.shaders.push(shader.clone());
@@ -387,7 +387,7 @@ impl CastMemberRefHandlers {
                         // Add the cloned object to the target scene
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                if let Some(ref mut scene) = w3d.parsed_scene {
+                                if let Some(scene) = w3d.scene_mut() {
                                     use crate::director::chunks::w3d::types::*;
                                     if obj_type == "model" {
                                         scene.nodes.push(W3dNode {
@@ -442,7 +442,7 @@ impl CastMemberRefHandlers {
                             // Remove from parsed scene
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                    if let Some(ref mut scene) = w3d.parsed_scene {
+                                    if let Some(scene) = w3d.scene_mut() {
                                         match obj_type {
                                             "model" | "group" | "camera" | "light" => {
                                                 scene.nodes.retain(|n| n.name != obj_name);
@@ -472,7 +472,7 @@ impl CastMemberRefHandlers {
                         // Add to parsed scene
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                if let Some(ref mut scene) = w3d.parsed_scene {
+                                if let Some(scene) = w3d.scene_mut() {
                                     use crate::director::chunks::w3d::types::*;
                                     let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
                                     match obj_type {
@@ -603,7 +603,7 @@ impl CastMemberRefHandlers {
                                         let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref);
                                         if let Some(member) = member {
                                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                                if let Some(ref mut scene) = w3d.parsed_scene {
+                                                if let Some(scene) = w3d.scene_mut() {
                                                     let mut tex_data = Vec::with_capacity(8 + rgba.len());
                                                     tex_data.extend_from_slice(&(w as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&(h as u32).to_le_bytes());
@@ -645,7 +645,7 @@ impl CastMemberRefHandlers {
                                         let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref);
                                         if let Some(member) = member {
                                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                                if let Some(ref mut scene) = w3d.parsed_scene {
+                                                if let Some(scene) = w3d.scene_mut() {
                                                     // Store raw RGBA with width/height prefix
                                                     let mut tex_data = Vec::with_capacity(8 + rgba.len());
                                                     tex_data.extend_from_slice(&(w as u32).to_le_bytes());
@@ -728,7 +728,7 @@ impl CastMemberRefHandlers {
                         let member_mut = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d_mut) = member_mut.member_type.as_shockwave3d_mut() {
-                            w3d_mut.parsed_scene = Some(empty_scene);
+                            w3d_mut.parsed_scene = Some(std::rc::Rc::new(empty_scene));
                         }
                     }
                     // Re-fetch after potential mutation

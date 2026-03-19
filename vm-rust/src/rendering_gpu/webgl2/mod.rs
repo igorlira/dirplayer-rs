@@ -1081,7 +1081,7 @@ impl WebGL2Renderer {
                 width: u32,
                 height: u32,
                 member_key: (i32, i32),
-                scene: crate::director::chunks::w3d::types::W3dScene,
+                scene: std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>,
                 runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
                 active_camera: Option<String>,
                 extra_cameras: Vec<String>,
@@ -2337,13 +2337,11 @@ impl WebGL2Renderer {
                 texture
             }
             TextureSource::Shockwave3dScene { width, height, member_key, scene, runtime_state, active_camera, extra_cameras } => {
-                // Render 3D scene to offscreen FBO, then use FBO texture as sprite
-                // First camera (primary) — clears FBO
-                let primary_cam_name = active_camera.clone().unwrap_or_else(|| "DefaultView".to_string());
+                // Render primary camera
                 self.scene3d.active_camera = active_camera;
                 let _ = self.scene3d.render_scene_with_state(&self.context, member_key, &scene, width, height, Some(&runtime_state));
 
-                // Render additional cameras on top (without clearing if clearAtRender=false)
+                // Render additional cameras on top (multi-camera: skybox + game world)
                 for cam_name in &extra_cameras {
                     let should_clear = runtime_state.camera_clear_at_render
                         .get(cam_name).copied().unwrap_or(true);
@@ -2354,8 +2352,7 @@ impl WebGL2Renderer {
                     );
                 }
 
-                // Render overlays LAST (on top of all camera passes)
-                // Check ALL cameras for overlays (game may attach overlays to any camera)
+                // Render overlays on top of everything
                 for (_, overlays) in &runtime_state.camera_overlays {
                     if !overlays.is_empty() {
                         self.scene3d.render_overlays_to_fbo(
@@ -2364,7 +2361,7 @@ impl WebGL2Renderer {
                     }
                 }
 
-                // Get the final FBO texture (all cameras rendered into it)
+                // Get the final FBO texture
                 let fbo_tex = match self.scene3d.fbo_texture.as_ref() {
                     Some(tex) => tex.clone(),
                     None => {
