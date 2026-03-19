@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::Datum,
     player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
@@ -43,7 +45,7 @@ impl VoidDatumHandlers {
                 // Return empty list for childNodes on void
                 Ok(player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List,
-                    vec![],
+                    VecDeque::new(),
                     false,
                 )))
             }

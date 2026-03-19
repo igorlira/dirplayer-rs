@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
@@ -115,9 +116,9 @@ impl ArithmeticsBytecodeHandler {
             };
                         new_list.push(result_datum);
                     }
-                    let mut ref_list = vec![];
+                    let mut ref_list = VecDeque::new();
                     for item in new_list {
-                        ref_list.push(player.alloc_datum(item));
+                        ref_list.push_back(player.alloc_datum(item));
                     }
                     Datum::List(DatumType::List, ref_list, false)
                 }
@@ -132,9 +133,9 @@ impl ArithmeticsBytecodeHandler {
             };
                         new_list.push(result_datum);
                     }
-                    let mut ref_list = vec![];
+                    let mut ref_list = VecDeque::new();
                     for item in new_list {
-                        ref_list.push(player.alloc_datum(item));
+                        ref_list.push_back(player.alloc_datum(item));
                     }
                     Datum::List(DatumType::List, ref_list, false)
                 }
@@ -220,7 +221,7 @@ impl ArithmeticsBytecodeHandler {
                     Datum::Vector([-v[0], -v[1], -v[2]])
                 }
                 Datum::List(list_type, items, sorted) => {
-                    let mut negated_items = Vec::with_capacity(items.len());
+                    let mut negated_items = VecDeque::with_capacity(items.len());
                     for item_ref in &items {
                         let item = player.get_datum(item_ref).clone();
                         let negated = match item {
@@ -231,7 +232,7 @@ impl ArithmeticsBytecodeHandler {
                                 item.type_str()
                             ))),
                         };
-                        negated_items.push(negated);
+                        negated_items.push_back(negated);
                     }
                     Datum::List(list_type, negated_items, sorted)
                 }

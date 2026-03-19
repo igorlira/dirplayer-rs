@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::player::datum_formatting::format_concrete_datum;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
@@ -15,7 +17,7 @@ pub struct ListDatumUtils {}
 
 impl ListDatumUtils {
     fn find_index_to_add(
-        list_vec: &Vec<DatumRef>,
+        list_vec: &VecDeque<DatumRef>,
         item: &DatumRef,
         allocator: &DatumAllocator,
     ) -> Result<i32, ScriptError> {
@@ -37,7 +39,7 @@ impl ListDatumUtils {
     }
 
     pub fn get_prop(
-        list_vec: &Vec<DatumRef>,
+        list_vec: &VecDeque<DatumRef>,
         prop_name: &String,
         _datums: &DatumAllocator,
     ) -> Result<Datum, ScriptError> {
@@ -106,9 +108,9 @@ impl ListDatumHandlers {
                 let padding_size = index - list_vec.len() as i32;
                 for _ in 0..padding_size {
                     // TODO: should this be filled with zeroes instead?
-                    list_vec.push(DatumRef::Void);
+                    list_vec.push_back(DatumRef::Void);
                 }
-                list_vec.push(item_ref.clone());
+                list_vec.push_back(item_ref.clone());
             }
             Ok(DatumRef::Void)
         })
@@ -205,7 +207,7 @@ impl ListDatumHandlers {
     fn get_last(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let list_vec = player.get_datum(datum).to_list()?;
-            let last = list_vec.last().map(|x| x.clone()).unwrap_or(DatumRef::Void);
+            let last = list_vec.back().map(|x| x.clone()).unwrap_or(DatumRef::Void);
             Ok(last)
         })
     }
@@ -249,11 +251,11 @@ impl ListDatumHandlers {
                 // This is used by meshDeform.mesh[m].textureLayer.add()
                 let key = player.alloc_datum(Datum::Symbol("textureCoordinateList".to_string()));
                 let val = player.alloc_datum(Datum::List(
-                    crate::director::lingo::datum::DatumType::List, vec![], false,
+                    crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
                 ));
-                let prop_list = player.alloc_datum(Datum::PropList(vec![(key, val)], false));
+                let prop_list = player.alloc_datum(Datum::PropList(VecDeque::from(vec![(key, val)]), false));
                 let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-                list_vec.push(prop_list);
+                list_vec.push_back(prop_list);
                 return Ok(DatumRef::Void);
             }
 
@@ -269,7 +271,7 @@ impl ListDatumHandlers {
             if is_sorted {
                 list_vec.insert(index_to_add as usize, item.clone());
             } else {
-                list_vec.push(item.clone());
+                list_vec.push_back(item.clone());
             }
             Ok(DatumRef::Void)
         })
@@ -361,7 +363,7 @@ impl ListDatumHandlers {
             
             let item = &args[0];
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-            list_vec.push(item.clone());
+            list_vec.push_back(item.clone());
             Ok(DatumRef::Void)
         })
     }
@@ -370,7 +372,7 @@ impl ListDatumHandlers {
         let sorted_list = reserve_player_ref(|player| {
             let list_vec = player.get_datum(datum).to_list()?;
             let mut sorted_list = list_vec.clone();
-            sorted_list.sort_by(|a, b| {
+            sorted_list.make_contiguous().sort_by(|a, b| {
                 let left = player.get_datum(a);
                 let right = player.get_datum(b);
 

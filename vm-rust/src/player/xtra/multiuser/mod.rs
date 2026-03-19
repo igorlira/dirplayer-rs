@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use async_std::{channel::Sender, task::spawn_local};
 use fxhash::FxHashMap;
 use wasm_bindgen::{closure::Closure, JsCast};
@@ -309,7 +310,7 @@ impl MultiuserXtraManager {
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 if let Some(message) = instance.next_message() {
                     reserve_player_mut(|player| {
-                        let recipient_refs = message
+                        let recipient_refs: VecDeque<DatumRef> = message
                             .recipients
                             .iter()
                             .map(|recipient| player.alloc_datum(Datum::String(recipient.clone())))
@@ -335,14 +336,14 @@ impl MultiuserXtraManager {
                             player.alloc_datum(Datum::String("timeStamp".to_string()));
 
                         Ok(player.alloc_datum(Datum::PropList(
-                            vec![
+                            VecDeque::from(vec![
                                 (error_code_key, error_code),
                                 (recipients_key, recipients),
                                 (sender_id_key, sender_id),
                                 (subject_key, subject),
                                 (content_key, content),
                                 (time_stamp_key, time_stamp),
-                            ],
+                            ]),
                             false,
                         )))
                     })
@@ -413,7 +414,7 @@ impl MultiuserXtraManager {
             "getpeerconnectionlist" => {
                 // Return an empty list — we don't track peer connections in the client
                 reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::List(DatumType::List, vec![], false)))
+                    Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false)))
                 })
             }
             "waitfornetconnection" => {

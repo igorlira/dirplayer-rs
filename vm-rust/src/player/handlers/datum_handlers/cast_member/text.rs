@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use log::debug;
 use crate::{
     director::enums::TextInfo,
@@ -134,7 +136,7 @@ impl TextMemberHandlers {
             "text" => Ok(Datum::String(text_data.text.to_owned())),
             "line" => {
                 let lines: Vec<&str> = text_data.text.split('\r').collect();
-                let line_datums = lines.into_iter().map(|l| Datum::String(l.to_string())).map(|d| player.alloc_datum(d)).collect();
+                let line_datums: VecDeque<_> = lines.into_iter().map(|l| Datum::String(l.to_string())).map(|d| player.alloc_datum(d)).collect();
                 Ok(Datum::List(DatumType::List, line_datums, false))
             }
             "alignment" => Ok(Datum::String(text_data.alignment.to_owned())),
@@ -143,9 +145,9 @@ impl TextMemberHandlers {
             "font" => Ok(Datum::String(text_data.font.to_owned())),
             "fontsize" => Ok(Datum::Int(text_data.font_size as i32)),
             "fontstyle" => {
-                let mut item_refs = Vec::new();
+                let mut item_refs = VecDeque::new();
                 for item in &text_data.font_style {
-                    item_refs.push(player.alloc_datum(Datum::Symbol(item.to_owned())));
+                    item_refs.push_back(player.alloc_datum(Datum::Symbol(item.to_owned())));
                 }
                 Ok(Datum::List(DatumType::List, item_refs, false))
             }
@@ -301,9 +303,9 @@ impl TextMemberHandlers {
             "displayface" => {
                 if let Some(ref info) = text_data.info {
                     let faces = info.display_face_list();
-                    let mut item_refs = Vec::new();
+                    let mut item_refs = VecDeque::new();
                     for face in faces {
-                        item_refs.push(player.alloc_datum(Datum::Symbol(face.trim_start_matches('#').to_string())));
+                        item_refs.push_back(player.alloc_datum(Datum::Symbol(face.trim_start_matches('#').to_string())));
                     }
                     Ok(Datum::List(DatumType::List, item_refs, false))
                 } else {
@@ -399,7 +401,7 @@ impl TextMemberHandlers {
                     let x_ref = player.alloc_datum(Datum::Float(info.camera_position_x as f64));
                     let y_ref = player.alloc_datum(Datum::Float(info.camera_position_y as f64));
                     let z_ref = player.alloc_datum(Datum::Float(info.camera_position_z as f64));
-                    Ok(Datum::List(DatumType::Vector, vec![x_ref, y_ref, z_ref], false))
+                    Ok(Datum::List(DatumType::Vector, VecDeque::from(vec![x_ref, y_ref, z_ref]), false))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
@@ -410,7 +412,7 @@ impl TextMemberHandlers {
                     let x_ref = player.alloc_datum(Datum::Float(info.camera_rotation_x as f64));
                     let y_ref = player.alloc_datum(Datum::Float(info.camera_rotation_y as f64));
                     let z_ref = player.alloc_datum(Datum::Float(info.camera_rotation_z as f64));
-                    Ok(Datum::List(DatumType::Vector, vec![x_ref, y_ref, z_ref], false))
+                    Ok(Datum::List(DatumType::Vector, VecDeque::from(vec![x_ref, y_ref, z_ref]), false))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
@@ -505,7 +507,7 @@ impl TextMemberHandlers {
                 if let Some(ref info) = text_data.info {
                     let x_ref = player.alloc_datum(Datum::Int(info.reg_x));
                     let y_ref = player.alloc_datum(Datum::Int(info.reg_y));
-                    Ok(Datum::List(DatumType::Point, vec![x_ref, y_ref], false))
+                    Ok(Datum::List(DatumType::Point, VecDeque::from(vec![x_ref, y_ref]), false))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
@@ -1754,7 +1756,7 @@ impl TextMemberHandlers {
                         let tab_items = if let Ok((_, items, _)) = list_result {
                             items.clone()
                         } else {
-                            Vec::new()
+                            VecDeque::new()
                         };
                         let mut tab_stops = Vec::new();
                         for item_ref in &tab_items {

@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::{
         datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
@@ -1299,7 +1301,7 @@ impl FontMemberHandlers {
                     "fontSize" => Ok(Datum::Int(text_data.font_size as i32)),
                     "fontStyle" => {
                         let font_styles: Vec<String> = text_data.font_style.clone();
-                        let item_refs: Vec<_> = font_styles
+                        let item_refs: VecDeque<_> = font_styles
                             .into_iter()
                             .map(|s| player.alloc_datum(Datum::Symbol(s)))
                             .collect();
@@ -1471,7 +1473,7 @@ impl FontMemberHandlers {
                         .collect();
                     Ok(Datum::String(html_string))
                 }
-                "fontStyle" => Ok(Datum::List(DatumType::List, vec![], false)),
+                "fontStyle" => Ok(Datum::List(DatumType::List, VecDeque::new(), false)),
                 "name" => Ok(Datum::String(font_data.font_info.name.clone())),
                 "size" => Ok(Datum::Int(font_data.font_info.size as i32)),
                 _ => Err(ScriptError::new(format!(

@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use log::{warn, debug};
 
 use crate::{
@@ -336,6 +338,7 @@ impl CastMemberRefHandlers {
                                     .cloned().collect()).unwrap_or_default();
                                 (shaders, resources, meshes, raw, textures, lights, light_nodes)
                             };
+
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(ref mut scene) = w3d.parsed_scene {
@@ -390,7 +393,8 @@ impl CastMemberRefHandlers {
                                         scene.nodes.push(W3dNode {
                                             name: obj_name.clone(), node_type: W3dNodeType::Model,
                                             parent_name: "World".to_string(),
-                                            resource_name: source_resource_name, model_resource_name: source_model_resource_name,
+                                            resource_name: source_resource_name,
+                                            model_resource_name: source_model_resource_name,
                                             shader_name: source_shader_name,
                                             near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
                                             screen_width: 640, screen_height: 480,
@@ -448,6 +452,9 @@ impl CastMemberRefHandlers {
                                             }
                                             "motion" => {
                                                 scene.motions.retain(|m| m.name != obj_name);
+                                            }
+                                            "texture" => {
+                                                scene.texture_images.remove(&obj_name);
                                             }
                                             _ => {}
                                         }
@@ -713,6 +720,11 @@ impl CastMemberRefHandlers {
                             screen_height: player.movie.rect.bottom as i32,
                             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0],
                         });
+                        // Add DefaultShader
+                        empty_scene.shaders.push(W3dShader {
+                            name: "DefaultShader".to_string(),
+                            ..Default::default()
+                        });
                         let member_mut = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d_mut) = member_mut.member_type.as_shockwave3d_mut() {
@@ -766,7 +778,7 @@ impl CastMemberRefHandlers {
                     };
                     if args.len() < 2 {
                         return Ok(player.alloc_datum(Datum::List(
-                            crate::director::lingo::datum::DatumType::List, vec![], false,
+                            crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
                         )));
                     }
                     let origin = player.get_datum(&args[0]).to_vector()?;
@@ -816,11 +828,11 @@ impl CastMemberRefHandlers {
                                 let face_key = player.alloc_datum(Datum::Symbol("faceID".to_string()));
                                 let face_val = player.alloc_datum(Datum::Int(hit.face_index as i32));
 
-                                let hit_proplist = player.alloc_datum(Datum::PropList(vec![
+                                let hit_proplist = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                                     (model_key, model_val), (dist_key, dist_val),
                                     (pos_key, pos_val), (norm_key, norm_val),
                                     (mesh_key, mesh_val), (face_key, face_val),
-                                ], false));
+                                ]), false));
                                 results.push(hit_proplist);
                             } else {
                                 results.push(player.alloc_datum(Datum::Shockwave3dObjectRef(
@@ -834,7 +846,7 @@ impl CastMemberRefHandlers {
                         }
                     }
                     Ok(player.alloc_datum(Datum::List(
-                        crate::director::lingo::datum::DatumType::List, results, false,
+                        crate::director::lingo::datum::DatumType::List, VecDeque::from(results), false,
                     )))
                 })
             }
@@ -846,7 +858,7 @@ impl CastMemberRefHandlers {
                         Ok(player.alloc_datum(Datum::Void))
                     } else {
                         Ok(player.alloc_datum(Datum::List(
-                            crate::director::lingo::datum::DatumType::List, vec![], false,
+                            crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
                         )))
                     }
                 })
@@ -1192,7 +1204,7 @@ impl CastMemberRefHandlers {
                             ))
                             .collect();
                         drop(cast_member);
-                        let list: Vec<DatumRef> = vert_data.iter().map(|(vx, vy, h1x, h1y, h2x, h2y)| {
+                        let list: VecDeque<DatumRef> = vert_data.iter().map(|(vx, vy, h1x, h1y, h2x, h2y)| {
                             let vertex_key = player.alloc_datum(Datum::Symbol("vertex".to_string()));
                             let vx_ref = player.alloc_datum(Datum::Int(*vx));
                             let vy_ref = player.alloc_datum(Datum::Int(*vy));
@@ -1208,13 +1220,13 @@ impl CastMemberRefHandlers {
                             let h2y_ref = player.alloc_datum(Datum::Int(*h2y));
                             let h2_val = player.alloc_datum(Datum::Point([h2x_ref, h2y_ref]));
 
-                            let prop_list = Datum::PropList(vec![
+                            let prop_list = Datum::PropList(VecDeque::from(vec![
                                 (vertex_key, vertex_val),
                                 (h1_key, h1_val),
                                 (h2_key, h2_val),
-                            ], false);
+                            ]), false);
                             player.alloc_datum(prop_list)
-                        }).collect();
+                        }).collect::<VecDeque<_>>();
                         Ok(Datum::List(DatumType::List, list, false))
                     } else {
                         result

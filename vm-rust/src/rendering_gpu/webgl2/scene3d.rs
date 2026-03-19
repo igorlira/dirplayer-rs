@@ -75,7 +75,7 @@ pub struct Scene3dRenderer {
     particle_shader: Option<ParticleShader>,
     member_data: HashMap<(i32, i32), MemberGpuData>,
     pub fbo: Option<WebGlFramebuffer>,
-    fbo_texture: Option<WebGlTexture>,
+    pub fbo_texture: Option<WebGlTexture>,
     fbo_depth: Option<web_sys::WebGlRenderbuffer>,
     fbo_width: u32,
     fbo_height: u32,
@@ -908,6 +908,20 @@ void main() {
         height: u32,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> Result<Option<&WebGlTexture>, JsValue> {
+        self.render_scene_with_state_ex(context, member_key, scene, width, height, runtime_state, true)
+    }
+
+    /// Render with optional clearing control (for multi-camera setups)
+    pub fn render_scene_with_state_ex(
+        &mut self,
+        context: &WebGL2Context,
+        member_key: (i32, i32),
+        scene: &W3dScene,
+        width: u32,
+        height: u32,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        clear_fbo: bool,
+    ) -> Result<Option<&WebGlTexture>, JsValue> {
         self.ensure_shader(context)?;
         self.ensure_fbo(context, width, height)?;
         self.ensure_member_data(context, member_key, scene)?;
@@ -920,11 +934,15 @@ void main() {
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(fbo));
         gl.viewport(0, 0, width as i32, height as i32);
 
-        // Clear with dark background
-        gl.clear_color(0.2, 0.2, 0.2, 1.0);
         gl.enable(WebGl2RenderingContext::DEPTH_TEST);
         gl.depth_func(WebGl2RenderingContext::LEQUAL);
-        gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
+        if clear_fbo {
+            gl.clear_color(0.2, 0.2, 0.2, 1.0);
+            gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
+        } else {
+            // Only clear depth for additional cameras (so new geometry occludes properly)
+            gl.clear(WebGl2RenderingContext::DEPTH_BUFFER_BIT);
+        }
 
         // Enable backface culling
         // Y-flip in projection inverts winding → cull FRONT instead of BACK
@@ -1121,12 +1139,158 @@ void main() {
         // Render particles (after opaque geometry, with additive blending)
         let _ = self.render_particles(context, runtime_state, &view_matrix, &projection_matrix);
 
+        // Render camera overlays (2D textures on top of 3D scene)
+        {
+            let shader_ref = self.shader.as_ref().unwrap();
+            if let Some(rs) = runtime_state {
+                let cam_name = self.active_camera.clone();
+                if let Some(ref cam) = cam_name {
+                    if let Some(overlays) = rs.camera_overlays.get(cam.as_str()) {
+                        if !overlays.is_empty() {
+                            if let Some(gpu_data) = self.member_data.get(&member_key) {
+                                Self::render_overlays_static(gl, shader_ref, overlays, gpu_data, width, height);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Restore state
         gl.disable(WebGl2RenderingContext::DEPTH_TEST);
         gl.disable(WebGl2RenderingContext::CULL_FACE);
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
 
         Ok(self.fbo_texture.as_ref())
+    }
+
+    /// Render camera overlays as 2D textured quads on top of the 3D scene
+    fn render_overlays_static(
+        gl: &WebGl2RenderingContext,
+        shader: &Shader3d,
+        overlays: &[crate::player::cast_member::CameraOverlay],
+        gpu_data: &MemberGpuData,
+        width: u32,
+        height: u32,
+    ) {
+
+        // Switch to orthographic 2D projection (pixel coordinates, origin top-left)
+        gl.disable(WebGl2RenderingContext::DEPTH_TEST);
+        gl.disable(WebGl2RenderingContext::CULL_FACE);
+        gl.enable(WebGl2RenderingContext::BLEND);
+        gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+
+        // Ortho projection: map (0,0)-(width,height) to clip space
+        let w = width as f32;
+        let h = height as f32;
+        let ortho: [f32; 16] = [
+            2.0/w,  0.0,    0.0, 0.0,
+            0.0,   -2.0/h,  0.0, 0.0,
+            0.0,    0.0,   -1.0, 0.0,
+           -1.0,    1.0,    0.0, 1.0,
+        ];
+        let identity: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &ortho);
+        gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &identity);
+        // Disable lighting for overlays
+        gl.uniform1i(shader.u_num_lights.as_ref(), 0);
+        gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
+        gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
+        gl.uniform4f(shader.u_emissive_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
+        gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
+        gl.uniform4f(shader.u_ambient_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
+
+        for overlay in overlays {
+            if overlay.source_texture.is_empty() || overlay.blend <= 0.0 { continue; }
+
+            let tex = gpu_data.textures.get(&overlay.source_texture.to_lowercase());
+            if tex.is_none() { continue; }
+            let tex = tex.unwrap();
+
+            // Bind texture
+            gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+            gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
+            gl.uniform1i(shader.u_has_texture.as_ref(), 1);
+
+            // Set opacity from blend (0-100 -> 0.0-1.0)
+            gl.uniform1f(shader.u_opacity.as_ref(), (overlay.blend / 100.0) as f32);
+
+            // Compute quad model matrix from overlay properties
+            let x = overlay.loc[0] as f32;
+            let y = overlay.loc[1] as f32;
+            let sx = (overlay.scale * overlay.scale_x) as f32;
+            let sy = (overlay.scale * overlay.scale_y) as f32;
+            let rx = overlay.reg_point[0] as f32;
+            let ry = overlay.reg_point[1] as f32;
+
+            // Get texture dimensions for quad size (default 64x64)
+            // We'll use a unit quad scaled by texture size
+            let tex_w = 64.0f32; // TODO: track actual texture dimensions
+            let tex_h = 64.0f32;
+
+            // Build model matrix: translate to loc, apply scale, offset by regPoint
+            let model: [f32; 16] = [
+                sx * tex_w, 0.0,        0.0, 0.0,
+                0.0,        sy * tex_h, 0.0, 0.0,
+                0.0,        0.0,        1.0, 0.0,
+                x - rx * sx, y - ry * sy, 0.0, 1.0,
+            ];
+            gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &model);
+
+            // Draw a quad (two triangles) using gl.draw_arrays
+            // We need a simple quad VAO — reuse positions from a temporary buffer
+            let verts: [f32; 36] = [
+                // pos(x,y,z) + normal(0,0,1) for 2 triangles
+                0.0, 0.0, 0.0,  0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0,  0.0, 0.0, 1.0,
+                1.0, 1.0, 0.0,  0.0, 0.0, 1.0,
+                0.0, 0.0, 0.0,  0.0, 0.0, 1.0,
+                1.0, 1.0, 0.0,  0.0, 0.0, 1.0,
+                0.0, 1.0, 0.0,  0.0, 0.0, 1.0,
+            ];
+            let uvs: [f32; 12] = [
+                0.0, 0.0,
+                1.0, 0.0,
+                1.0, 1.0,
+                0.0, 0.0,
+                1.0, 1.0,
+                0.0, 1.0,
+            ];
+
+            let vert_buf = gl.create_buffer();
+            gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, vert_buf.as_ref());
+            unsafe {
+                let vert_view = js_sys::Float32Array::view(&verts);
+                gl.buffer_data_with_array_buffer_view(
+                    WebGl2RenderingContext::ARRAY_BUFFER, &vert_view, WebGl2RenderingContext::STREAM_DRAW);
+            }
+            gl.enable_vertex_attrib_array(0); // a_position
+            gl.vertex_attrib_pointer_with_i32(0, 3, WebGl2RenderingContext::FLOAT, false, 24, 0);
+            gl.enable_vertex_attrib_array(1); // a_normal
+            gl.vertex_attrib_pointer_with_i32(1, 3, WebGl2RenderingContext::FLOAT, false, 24, 12);
+
+            let uv_buf = gl.create_buffer();
+            gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, uv_buf.as_ref());
+            unsafe {
+                let uv_view = js_sys::Float32Array::view(&uvs);
+                gl.buffer_data_with_array_buffer_view(
+                    WebGl2RenderingContext::ARRAY_BUFFER, &uv_view, WebGl2RenderingContext::STREAM_DRAW);
+            }
+            gl.enable_vertex_attrib_array(2); // a_texcoord
+            gl.vertex_attrib_pointer_with_i32(2, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
+
+            gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 6);
+
+            gl.delete_buffer(vert_buf.as_ref());
+            gl.delete_buffer(uv_buf.as_ref());
+        }
     }
 
     /// Fallback: draw all meshes with identity transform when no scene graph
@@ -1483,35 +1647,18 @@ void main() {
         scene: &W3dScene,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> ([f32; 16], [f32; 3]) {
-        // 1. If sprite.camera is set, use that specific camera
-        if let Some(ref cam_name) = self.active_camera {
-            // Check runtime transform first, then static
-            if let Some(rs) = runtime_state {
-                if let Some(cam_t) = rs.node_transforms.get(cam_name) {
-                    let cam_pos = [cam_t[12], cam_t[13], cam_t[14]];
-                    return (invert_transform(cam_t), cam_pos);
-                }
-            }
-            if let Some(node) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name == *cam_name) {
-                let world_t = self.accumulate_transform_with_state(scene, node, runtime_state);
-                let cam_pos = [world_t[12], world_t[13], world_t[14]];
-                return (invert_transform(&world_t), cam_pos);
-            }
-        }
+        // 1. Determine which camera to use
+        let default_cam = "DefaultView".to_string();
+        let cam_name = self.active_camera.as_ref().unwrap_or(&default_cam);
 
-        // 2. Find camera: if multiple cameras exist, prefer the non-DefaultView one
-        let view_nodes: Vec<&W3dNode> = scene.nodes.iter()
-            .filter(|n| n.node_type == W3dNodeType::View)
-            .collect();
-        let view_node = if view_nodes.len() > 1 {
-            // Multiple cameras: pick the one that ISN'T DefaultView
-            view_nodes.iter()
-                .find(|n| n.name.to_lowercase() != "defaultview")
-                .copied()
-                .or(view_nodes.first().copied())
-        } else {
-            view_nodes.first().copied()
-        };
+        // 2. Find the camera node and accumulate its full world transform (including parent chain)
+        if let Some(node) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name == *cam_name) {
+            let world_t = self.accumulate_transform_with_state(scene, node, runtime_state);
+            let cam_pos = [world_t[12], world_t[13], world_t[14]];
+            return (invert_transform(&world_t), cam_pos);
+        }
+        // Fallback: try any view node
+        let view_node = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View);
         let cam_name = view_node.map(|n| n.name.as_str()).unwrap_or("DefaultView");
 
         // 3. Check runtime transform for this camera

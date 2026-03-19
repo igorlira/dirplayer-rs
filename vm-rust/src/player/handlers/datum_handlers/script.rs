@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType},
     player::{
@@ -125,7 +127,7 @@ impl ScriptDatumHandlers {
                 .get_script_by_ref(script_ref)
                 .unwrap();
             let handler_names = script.handler_names.clone();
-            let handler_name_datums = handler_names
+            let handler_name_datums: VecDeque<_> = handler_names
                 .iter()
                 .map(|name| player.alloc_datum(Datum::Symbol(name.clone())))
                 .collect();

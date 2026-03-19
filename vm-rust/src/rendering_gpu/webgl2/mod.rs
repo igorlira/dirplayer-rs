@@ -986,7 +986,7 @@ impl WebGL2Renderer {
     /// Render a single sprite
     fn render_sprite(&mut self, player: &mut DirPlayer, channel_num: i16) {
         // Get sprite and member info
-        let (member_ref, mut sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height, w3d_camera) = {
+        let (member_ref, mut sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height, w3d_camera, w3d_extra_cams) = {
             let score = &player.movie.score;
             let sprite = match score.get_sprite(channel_num) {
                 Some(s) => s,
@@ -999,6 +999,7 @@ impl WebGL2Renderer {
             };
 
             let w3d_cam = sprite.w3d_camera.clone();
+            let w3d_extra_cams = sprite.w3d_cameras.clone();
             let rect = get_concrete_sprite_rect(player, sprite);
             (
                 member_ref,
@@ -1018,6 +1019,7 @@ impl WebGL2Renderer {
                 sprite.width,
                 sprite.height,
                 w3d_cam,
+                w3d_extra_cams,
             )
         };
 
@@ -1082,6 +1084,7 @@ impl WebGL2Renderer {
                 scene: crate::director::chunks::w3d::types::W3dScene,
                 runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
                 active_camera: Option<String>,
+                extra_cameras: Vec<String>,
             },
         }
 
@@ -1691,6 +1694,7 @@ impl WebGL2Renderer {
                             scene: parsed_scene.clone(),
                             runtime_state: w3d.runtime_state.clone(),
                             active_camera: w3d_camera.clone(),
+                            extra_cameras: w3d_extra_cams.clone(),
                         }
                     } else {
                         return;
@@ -2332,18 +2336,28 @@ impl WebGL2Renderer {
                 }
                 texture
             }
-            TextureSource::Shockwave3dScene { width, height, member_key, scene, runtime_state, active_camera } => {
+            TextureSource::Shockwave3dScene { width, height, member_key, scene, runtime_state, active_camera, extra_cameras } => {
                 // Render 3D scene to offscreen FBO, then use FBO texture as sprite
+                // First camera (primary) — clears FBO
                 self.scene3d.active_camera = active_camera;
-                let render_result = self.scene3d.render_scene_with_state(&self.context, member_key, &scene, width, height, Some(&runtime_state));
-                let fbo_tex = match render_result {
-                    Ok(Some(fbo_tex)) => fbo_tex.clone(),
-                    Ok(None) => {
-                        web_sys::console::warn_1(&format!("[3D] render_scene_with_state returned None for member {:?}", member_key).into());
-                        return;
-                    }
-                    Err(ref e) => {
-                        web_sys::console::error_1(&format!("[3D] render_scene_with_state error for member {:?}: {:?}", member_key, e).into());
+                let _ = self.scene3d.render_scene_with_state(&self.context, member_key, &scene, width, height, Some(&runtime_state));
+
+                // Render additional cameras on top (without clearing if clearAtRender=false)
+                for cam_name in &extra_cameras {
+                    let should_clear = runtime_state.camera_clear_at_render
+                        .get(cam_name).copied().unwrap_or(true);
+                    self.scene3d.active_camera = Some(cam_name.clone());
+                    let _ = self.scene3d.render_scene_with_state_ex(
+                        &self.context, member_key, &scene, width, height,
+                        Some(&runtime_state), should_clear,
+                    );
+                }
+
+                // Get the final FBO texture (all cameras rendered into it)
+                let fbo_tex = match self.scene3d.fbo_texture.as_ref() {
+                    Some(tex) => tex.clone(),
+                    None => {
+                        web_sys::console::warn_1(&format!("[3D] No FBO texture for member {:?}", member_key).into());
                         return;
                     }
                 };

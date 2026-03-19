@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use itertools::Itertools;
 
 use crate::{
@@ -135,12 +136,12 @@ impl FieldMemberHandlers {
             }
             "line" => {
                 let lines = string_get_lines(&field.text);
-                let line_datums = lines.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect_vec();
+                let line_datums: VecDeque<_> = lines.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect();
                 Ok(Datum::List(DatumType::List, line_datums, false))
             }
             "word" => {
                 let words = string_get_words(&field.text);
-                let word_datums = words.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect_vec();
+                let word_datums: VecDeque<_> = words.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect();
                 Ok(Datum::List(DatumType::List, word_datums, false))
             }
             "pageHeight" => {

@@ -1,4 +1,5 @@
 use std::cmp::min;
+use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
@@ -77,7 +78,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             Ok(Datum::Vector(result))
         }
         (Datum::List(_, list, _), Datum::Vector(b)) if list.len() == 3 => {
-            let mut result = Vec::with_capacity(3);
+            let mut result = VecDeque::with_capacity(3);
             for i in 0..3 {
                 let val = match player.get_datum(&list[i]) {
                     Datum::Int(n) => Datum::Float(*n as f64 + b[i]),
@@ -88,23 +89,23 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
                         ))
                     }
                 };
-                result.push(player.alloc_datum(val));
+                result.push_back(player.alloc_datum(val));
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
         (Datum::List(_, list_a, _), Datum::List(_, list_b, _)) => {
             let intersection_count = min(list_a.len(), list_b.len());
-            let mut result = Vec::with_capacity(intersection_count);
+            let mut result = VecDeque::with_capacity(intersection_count);
             for i in 0..intersection_count {
                 let a = player.get_datum(&list_a[i]).clone();
                 let b = player.get_datum(&list_b[i]).clone();
                 let result_datum = add_datums(a, b, player)?;
-                result.push(player.alloc_datum(result_datum));
+                result.push_back(player.alloc_datum(result_datum));
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
         (Datum::List(_, list, _), Datum::Int(i)) => {
-            let mut result_refs = vec![];
+            let mut result_refs = VecDeque::new();
             for r in list {
                 let datum = player.get_datum(r);
                 let result_datum = match datum {
@@ -117,7 +118,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
                         )))
                     }
                 };
-                result_refs.push(player.alloc_datum(result_datum));
+                result_refs.push_back(player.alloc_datum(result_datum));
             }
             Ok(Datum::List(DatumType::List, result_refs, false))
         }
@@ -310,7 +311,7 @@ pub fn subtract_datums(
             Ok(Datum::Vector(result))
         }
         (Datum::List(_, list, _), Datum::Vector(b)) if list.len() == 3 => {
-            let mut result = Vec::with_capacity(3);
+            let mut result = VecDeque::with_capacity(3);
             for i in 0..3 {
                 let val = match player.get_datum(&list[i]) {
                     Datum::Int(n) => Datum::Float(*n as f64 - b[i]),
@@ -321,18 +322,18 @@ pub fn subtract_datums(
                         ))
                     }
                 };
-                result.push(player.alloc_datum(val));
+                result.push_back(player.alloc_datum(val));
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
         (Datum::List(_, list_a, _), Datum::List(_, list_b, _)) => {
             let intersection_count = min(list_a.len(), list_b.len());
-            let mut result = Vec::with_capacity(intersection_count);
+            let mut result = VecDeque::with_capacity(intersection_count);
             for i in 0..intersection_count {
                 let a = player.get_datum(&list_a[i]).clone();
                 let b = player.get_datum(&list_b[i]).clone();
                 let result_datum = subtract_datums(a, b, player)?;
-                result.push(player.alloc_datum(result_datum));
+                result.push_back(player.alloc_datum(result_datum));
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
@@ -655,9 +656,9 @@ pub fn multiply_datums(
                 };
                 new_list.push(result_datum);
             }
-            let mut ref_list = vec![];
+            let mut ref_list = VecDeque::new();
             for item in new_list {
-                ref_list.push(player.alloc_datum(item));
+                ref_list.push_back(player.alloc_datum(item));
             }
             Datum::List(DatumType::List, ref_list, false)
         }
@@ -780,7 +781,7 @@ pub fn multiply_datums(
                 )?;
                 result[i] = player.alloc_datum(prod);
             }
-            Datum::List(DatumType::List, result.to_vec(), false)
+            Datum::List(DatumType::List, VecDeque::from(result.to_vec()), false)
         }
         (Datum::List(_, list, _), Datum::Float(right)) if list.len() == 2 => {
             let right_ref = player.alloc_datum(Datum::Float(*right));
@@ -795,7 +796,7 @@ pub fn multiply_datums(
                 )?;
                 result[i] = player.alloc_datum(prod);
             }
-            Datum::List(DatumType::List, result.to_vec(), false)
+            Datum::List(DatumType::List, VecDeque::from(result.to_vec()), false)
         }
         (Datum::Int(left), Datum::List(_, list, _)) if list.len() == 2 => {
             let left_ref = player.alloc_datum(Datum::Int(*left));
@@ -810,7 +811,7 @@ pub fn multiply_datums(
                 )?;
                 result[i] = player.alloc_datum(prod);
             }
-            Datum::List(DatumType::List, result.to_vec(), false)
+            Datum::List(DatumType::List, VecDeque::from(result.to_vec()), false)
         }
         (Datum::Float(left), Datum::List(_, list, _)) if list.len() == 2 => {
             let left_ref = player.alloc_datum(Datum::Float(*left));
@@ -825,7 +826,7 @@ pub fn multiply_datums(
                 )?;
                 result[i] = player.alloc_datum(prod);
             }
-            Datum::List(DatumType::List, result.to_vec(), false)
+            Datum::List(DatumType::List, VecDeque::from(result.to_vec()), false)
         }
 
         _ => {
@@ -984,7 +985,7 @@ pub fn divide_datums(
         // List / scalar: element-wise division
         (Datum::List(list_type, items, sorted), Datum::Int(_)) | (Datum::List(list_type, items, sorted), Datum::Float(_)) => {
             let scalar_ref = player.alloc_datum(right.clone());
-            let mut result_items = Vec::with_capacity(items.len());
+            let mut result_items = VecDeque::with_capacity(items.len());
             for item_ref in items {
                 let item_val = player.get_datum(item_ref).clone();
                 let quot = divide_datums(
@@ -992,7 +993,7 @@ pub fn divide_datums(
                     scalar_ref.clone(),
                     player,
                 )?;
-                result_items.push(player.alloc_datum(quot));
+                result_items.push_back(player.alloc_datum(quot));
             }
             Datum::List(list_type.clone(), result_items, *sorted)
         }

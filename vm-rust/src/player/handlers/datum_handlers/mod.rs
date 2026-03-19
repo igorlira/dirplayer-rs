@@ -42,6 +42,8 @@ use self::{
     sound_channel::SoundChannelDatumHandlers, sprite::SpriteDatumHandlers,
     string::StringDatumHandlers, string_chunk::StringChunkHandlers, timeout::TimeoutDatumHandlers,
 };
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::DatumType,
     player::{
@@ -85,7 +87,7 @@ pub async fn player_call_datum_handler(
             // Return empty property list
             web_sys::console::warn_1(&"Returning empty property list to prevent recursion".into());
             return reserve_player_mut(|player| {
-                Ok(player.alloc_datum(crate::director::lingo::datum::Datum::PropList(vec![], false)))
+                Ok(player.alloc_datum(crate::director::lingo::datum::Datum::PropList(VecDeque::new(), false)))
             });
         }
     }

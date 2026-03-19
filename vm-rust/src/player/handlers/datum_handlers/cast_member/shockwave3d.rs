@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::Datum,
     player::{cast_lib::CastMemberRef, DirPlayer, ScriptError},
@@ -76,7 +78,7 @@ impl Shockwave3dMemberHandlers {
                     return Ok(Datum::Int(names.len() as i32));
                 }
                 // Return a list of Shockwave3dObjectRefs
-                let items: Vec<_> = names.iter().map(|name| {
+                let items: VecDeque<_> = names.iter().map(|name| {
                     player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                         cast_lib: cast_member_ref.cast_lib,
                         cast_member: cast_member_ref.cast_member,

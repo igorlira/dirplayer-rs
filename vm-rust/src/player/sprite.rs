@@ -103,6 +103,8 @@ pub struct Sprite {
     pub base_bg_color: ColorRef,
     /// Active camera name(s) for Shockwave3D sprites (set via sprite.camera(1) = ...)
     pub w3d_camera: Option<String>,
+    /// Additional cameras for multi-camera rendering (index 2+)
+    pub w3d_cameras: Vec<String>,
 }
 
 /// Threshold for detecting skew flip (in degrees)
@@ -173,6 +175,7 @@ impl Sprite {
             base_color: ColorRef::PaletteIndex(255),
             base_bg_color: ColorRef::PaletteIndex(0),
             w3d_camera: None,
+            w3d_cameras: Vec::new(),
         }
     }
 

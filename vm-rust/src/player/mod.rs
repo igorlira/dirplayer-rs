@@ -36,7 +36,7 @@ pub mod score_keyframes;
 pub mod virtual_scripts;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     rc::Rc,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -909,7 +909,7 @@ impl DirPlayer {
 
     pub fn initialize_globals(&mut self) {
         // Initialize the actorList as a global variable
-        let actor_list_datum = self.alloc_datum(Datum::List(DatumType::List, vec![], false));
+        let actor_list_datum = self.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
         self.globals.insert("actorList".to_string(), actor_list_datum);
 
         // Mathematical constant
@@ -1413,7 +1413,7 @@ impl DirPlayer {
             "clickOn" => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
             "environment" | "environmentPropList" => {
                 // Build the environment property list
-                let props = vec![
+                let props = VecDeque::from(vec![
                     (
                         self.alloc_datum(Datum::Symbol("shockMachine".to_string())),
                         self.alloc_datum(Datum::Int(0))
@@ -1474,7 +1474,7 @@ impl DirPlayer {
                         self.alloc_datum(Datum::Symbol("trialTime".to_string())),
                         self.alloc_datum(Datum::Int(0))
                     ),
-                ];
+                ]);
                 Ok(self.alloc_datum(Datum::PropList(props, false)))
             },
             "clickLoc" => {
@@ -1487,7 +1487,7 @@ impl DirPlayer {
                     .iter()
                     .map(|fl| (fl.label.clone(), fl.frame_num))
                     .collect();
-                let props: Vec<(DatumRef, DatumRef)> = labels
+                let props: VecDeque<(DatumRef, DatumRef)> = labels
                     .into_iter()
                     .map(|(label, frame_num)| {
                         let label = self.alloc_datum(Datum::String(label));
@@ -1499,12 +1499,12 @@ impl DirPlayer {
             }
             "xtraList" => {
                 let xtra_names = xtra::manager::get_registered_xtra_names();
-                let xtra_list: Vec<DatumRef> = xtra_names
+                let xtra_list: VecDeque<DatumRef> = xtra_names
                     .iter()
                     .map(|name| {
                         let name_key = self.alloc_datum(Datum::Symbol("name".to_string()));
                         let name_val = self.alloc_datum(Datum::String(name.to_string()));
-                        self.alloc_datum(Datum::PropList(vec![(name_key, name_val)], false))
+                        self.alloc_datum(Datum::PropList(VecDeque::from(vec![(name_key, name_val)]), false))
                     })
                     .collect();
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
@@ -1532,6 +1532,14 @@ impl DirPlayer {
                     .unwrap_or_else(|| "Plugin".to_string());
                 Ok(self.alloc_datum(Datum::String(mode)))
             }
+            // Key state properties (also accessible via _key.optionDown etc.)
+            "optionDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+            "commandDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_command_down()))),
+            "controlDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_control_down()))),
+            "shiftDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_shift_down()))),
+            "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+            "keyCode" => Ok(self.alloc_datum(Datum::Int(self.keyboard_manager.key_code() as i32))),
+            "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
             _ => Err(ScriptError::new(format!("Unknown player prop {}", prop))),
         }
     }
@@ -2731,7 +2739,7 @@ async fn run_movie_init_sequence() {
             Datum::List(_, items, _) => {
                 items.clone()
             },
-            _ => vec![],
+            _ => VecDeque::new(),
         }
     });
 
@@ -3516,11 +3524,11 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
                 let (props, sorted) = player.get_datum(datum).to_map_tuple().unwrap();
                 (props.clone(), sorted)
             });
-            let mut new_props = Vec::new();
+            let mut new_props = VecDeque::new();
             for (key, value) in props {
                 let new_key = player_duplicate_datum(&key);
                 let new_value = player_duplicate_datum(&value);
-                new_props.push((new_key, new_value));
+                new_props.push_back((new_key, new_value));
             }
             Datum::PropList(new_props, sorted)
         }
@@ -3529,10 +3537,10 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
                 let (a, b, c) = player.get_datum(datum).to_list_tuple().unwrap();
                 (a.clone(), b.clone(), c)
             });
-            let mut new_list = Vec::new();
+            let mut new_list = VecDeque::new();
             for item in list {
                 let new_item = player_duplicate_datum(&item);
-                new_list.push(new_item);
+                new_list.push_back(new_item);
             }
             Datum::List(list_type.clone(), new_list, sorted)
         }

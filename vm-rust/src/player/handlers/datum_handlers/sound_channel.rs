@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{DatumRef, DirPlayer, ScriptError},
@@ -550,7 +552,7 @@ impl SoundChannelDatumHandlers {
             Datum::PropList(items, _) => {
                 // Empty proplist [:] means clear the playlist
                 if items.is_empty() {
-                    vec![]
+                    VecDeque::new()
                 } else {
                     // Non-empty proplist is not valid for setPlayList
                     return Err(ScriptError::new(
@@ -692,7 +694,7 @@ impl SoundChannelDatumHandlers {
         // 3️⃣ Convert the Vec<DatumRef> into a Datum::List
         Ok(player.alloc_datum(Datum::List(
             DatumType::List, // or appropriate type
-            playlist,
+            VecDeque::from(playlist),
             false, // sorted = false
         )))
     }

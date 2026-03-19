@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::{Datum, FlashObjectRef},
     player::{
@@ -213,11 +215,11 @@ fn convert_js_result_to_lingo_datum(
     // Check for arrays before generic objects (arrays are objects in JS)
     if js_sys::Array::is_array(&result) {
         let array = js_sys::Array::from(&result);
-        let mut items = Vec::new();
+        let mut items = VecDeque::new();
         for i in 0..array.length() {
             let item = array.get(i);
             let item_ref = convert_js_result_to_lingo_datum(player, item, context_path, cast_lib, cast_member)?;
-            items.push(item_ref);
+            items.push_back(item_ref);
         }
         return Ok(player.alloc_datum(Datum::List(
             crate::director::lingo::datum::DatumType::XmlChildNodes, // 0-based indexing for Flash arrays

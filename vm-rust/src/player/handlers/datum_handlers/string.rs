@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::{
         Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
@@ -167,7 +169,7 @@ impl StringDatumHandlers {
                 player.get_datum(&args[0]).string_value()?
             };
 
-            let parts: Vec<DatumRef> = value
+            let parts: VecDeque<DatumRef> = value
                 .split(&delimiter)
                 .map(|s| player.alloc_datum(Datum::String(s.to_string())))
                 .collect();

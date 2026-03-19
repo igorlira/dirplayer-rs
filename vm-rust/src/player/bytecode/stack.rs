@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
@@ -50,7 +51,7 @@ impl StackBytecodeHandler {
                     "Not enough items in stack to create arglist".to_string(),
                 ));
             }
-            let items = scope.pop_n(bytecode_obj as usize);
+            let items = VecDeque::from(scope.pop_n(bytecode_obj as usize));
             let datum_ref = player.alloc_datum(Datum::List(DatumType::ArgList, items, false));
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -71,7 +72,7 @@ impl StackBytecodeHandler {
                     "Not enough items in stack to create arglist".to_string(),
                 ));
             }
-            let items = scope.pop_n(bytecode_obj as usize);
+            let items = VecDeque::from(scope.pop_n(bytecode_obj as usize));
             let datum_ref = player.alloc_datum(Datum::List(DatumType::ArgListNoRet, items, false));
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -137,7 +138,7 @@ impl StackBytecodeHandler {
                     let value = arg_list[base_index + 1].to_owned();
                     (key, value)
                 })
-                .collect::<Vec<(DatumRef, DatumRef)>>();
+                .collect::<VecDeque<(DatumRef, DatumRef)>>();
             let datum_ref = player.alloc_datum(Datum::PropList(entries, false));
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(datum_ref);
@@ -248,7 +249,7 @@ impl StackBytecodeHandler {
             };
             let arg_list = player.get_datum(&arg_list).to_list()?;
             let script_arg = player.get_datum(&arg_list[0]);
-            let extra_args = arg_list[1..].to_vec();
+            let extra_args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
             let script_ref = match script_arg {
                 Datum::String(script_name) => {
                     if let Some(script_ref) = player

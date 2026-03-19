@@ -551,10 +551,10 @@ fn js_value_to_datum_ref_with_flash(item: &JsValue, flash_cast_lib: i32, flash_c
     // Check for arrays before objects (arrays are also objects in JS)
     if js_sys::Array::is_array(item) {
         let array = js_sys::Array::from(item);
-        let mut items = Vec::new();
+        let mut items = std::collections::VecDeque::new();
         for i in 0..array.length() {
             let val = array.get(i);
-            items.push(js_value_to_datum_ref_with_flash(&val, flash_cast_lib, flash_cast_member));
+            items.push_back(js_value_to_datum_ref_with_flash(&val, flash_cast_lib, flash_cast_member));
         }
         // Use XmlChildNodes type for 0-based indexing (Flash arrays are 0-based)
         return player::player_alloc_datum(Datum::List(DatumType::XmlChildNodes, items, false));
@@ -572,7 +572,7 @@ fn js_value_to_datum_ref_with_flash(item: &JsValue, flash_cast_lib: i32, flash_c
 
         // Convert JS object to PropList
         let entries = js_sys::Object::entries(&obj);
-        let mut props: Vec<(player::datum_ref::DatumRef, player::datum_ref::DatumRef)> = Vec::new();
+        let mut props: std::collections::VecDeque<(player::datum_ref::DatumRef, player::datum_ref::DatumRef)> = std::collections::VecDeque::new();
         let mut flash_type: Option<String> = None;
 
         for i in 0..entries.length() {
@@ -587,14 +587,14 @@ fn js_value_to_datum_ref_with_flash(item: &JsValue, flash_cast_lib: i32, flash_c
 
             let key_ref = player::player_alloc_datum(Datum::Symbol(key));
             let val_ref = js_value_to_datum_ref_with_flash(&val, flash_cast_lib, flash_cast_member);
-            props.push((key_ref, val_ref));
+            props.push_back((key_ref, val_ref));
         }
 
         // Store the type as a #type property if present
         if let Some(t) = flash_type {
             let key_ref = player::player_alloc_datum(Datum::Symbol("#type".to_string()));
             let val_ref = player::player_alloc_datum(Datum::String(t));
-            props.insert(0, (key_ref, val_ref));
+            props.push_front((key_ref, val_ref));
         }
 
         return player::player_alloc_datum(Datum::PropList(props, false));

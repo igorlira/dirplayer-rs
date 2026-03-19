@@ -434,6 +434,46 @@ pub struct Shockwave3dRuntimeState {
 
     // ─── Reset tracking ───
     pub world_reset: bool,
+
+    // ─── Camera properties ───
+    /// Per-camera rootNode: camera_name -> node_name (limits which subtree to render)
+    pub camera_root_nodes: std::collections::HashMap<String, String>,
+    /// Per-camera colorBuffer.clearAtRender: camera_name -> bool
+    pub camera_clear_at_render: std::collections::HashMap<String, bool>,
+
+    // ─── Camera overlays/backdrops ───
+    /// Per-camera overlay list: camera_name -> Vec<CameraOverlay>
+    pub camera_overlays: std::collections::HashMap<String, Vec<CameraOverlay>>,
+    pub camera_backdrops: std::collections::HashMap<String, Vec<CameraOverlay>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CameraOverlay {
+    pub source_texture: String,
+    pub loc: [f64; 2],
+    pub rotation: f64,
+    pub blend: f64,
+    pub scale: f64,
+    pub scale_x: f64,
+    pub scale_y: f64,
+    pub reg_point: [f64; 2],
+    pub shader_name: String,
+}
+
+impl Default for CameraOverlay {
+    fn default() -> Self {
+        Self {
+            source_texture: String::new(),
+            loc: [0.0, 0.0],
+            rotation: 0.0,
+            blend: 100.0,
+            scale: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            reg_point: [0.0, 0.0],
+            shader_name: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1894,9 +1934,16 @@ impl CastMember {
                 let w3d_data = xm.raw_data.clone();
                 let parsed_scene = if !w3d_data.is_empty() {
                     match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
-                        Ok(scene) => {
+                        Ok(mut scene) => {
                             web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes",
                                 scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len()).into());
+                            // Ensure DefaultShader exists
+                            if !scene.shaders.iter().any(|s| s.name == "DefaultShader") {
+                                scene.shaders.push(crate::director::chunks::w3d::types::W3dShader {
+                                    name: "DefaultShader".to_string(),
+                                    ..Default::default()
+                                });
+                            }
                             Some(scene)
                         }
                         Err(e) => {

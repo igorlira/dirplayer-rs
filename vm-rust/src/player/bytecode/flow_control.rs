@@ -49,7 +49,7 @@ impl FlowControlBytecodeHandler {
                     DatumType::ArgListNoRet => true,
                     _ => false,
                 };
-                (name, list.to_owned(), is_no_ret)
+                (name, Vec::from(list.to_owned()), is_no_ret)
             } else {
                 return Err(ScriptError::new(format!(
                     "ext_call '{}': expected arg list on stack",
@@ -93,7 +93,7 @@ impl FlowControlBytecodeHandler {
                 Datum::List(DatumType::ArgListNoRet, _, _) => true,
                 _ => false,
             };
-            let args = arg_list_datum.to_list()?.clone();
+            let args: Vec<DatumRef> = arg_list_datum.to_list()?.iter().cloned().collect();
 
             let mut handler_ref = script
                 .get_own_handler_ref_at(player.get_ctx_current_bytecode(&ctx).obj as usize)
@@ -214,7 +214,7 @@ impl FlowControlBytecodeHandler {
             };
             let arg_list = arg_list_datum.to_list()?;
             let obj = arg_list[0].clone();
-            let args = arg_list[1..].to_vec();
+            let args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
 
             Ok((obj, target_handler_name, args, is_no_ret))
         })?;
@@ -257,7 +257,7 @@ impl FlowControlBytecodeHandler {
             };
             let arg_list = arg_list_datum.to_list()?;
             let mut obj = arg_list[0].clone();
-            let args = arg_list[1..].to_vec();
+            let args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
 
             // In Director 4 calling convention, the receiver is often passed as a
             // symbol (e.g. #oTrackControl). Resolve it by looking up the symbol

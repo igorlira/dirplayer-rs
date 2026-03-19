@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use log::{warn, debug};
 
 use crate::PLAYER_OPT;
@@ -19,7 +21,7 @@ pub struct PropListUtils {}
 
 impl PropListUtils {
     fn find_index_to_add(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         item: (&DatumRef, &DatumRef),
         allocator: &DatumAllocator,
     ) -> Result<i32, ScriptError> {
@@ -41,7 +43,7 @@ impl PropListUtils {
     }
 
     fn get_key_index(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key: &Datum,
         allocator: &DatumAllocator,
     ) -> Result<i32, ScriptError> {
@@ -78,7 +80,7 @@ impl PropListUtils {
 
     pub fn get_prop_or_built_in(
         player: &mut DirPlayer,
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key: &String,
     ) -> Result<DatumRef, ScriptError> {
         let key_index =
@@ -99,7 +101,7 @@ impl PropListUtils {
     }
 
     pub fn get_built_in_prop(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         prop: &String,
     ) -> Result<Datum, ScriptError> {
         match prop.as_str() {
@@ -115,7 +117,7 @@ impl PropListUtils {
     }
 
     pub fn get_prop(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key_ref: &DatumRef,
         allocator: &DatumAllocator,
         is_required: bool,
@@ -171,13 +173,13 @@ impl PropListUtils {
         } else if is_sorted {
             prop_list.insert(index_to_add as usize, (key_ref.clone(), value_ref.clone()));
         } else {
-            prop_list.push((key_ref.clone(), value_ref.clone()));
+            prop_list.push_back((key_ref.clone(), value_ref.clone()));
         }
         Ok(())
     }
 
     pub fn get_at(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key_ref: &DatumRef,
         allocator: &DatumAllocator,
     ) -> Result<DatumRef, ScriptError> {
@@ -197,7 +199,7 @@ impl PropListUtils {
     }
 
     pub fn get_by_key(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key_ref: &DatumRef,
         allocator: &DatumAllocator,
     ) -> Result<DatumRef, ScriptError> {
@@ -206,7 +208,7 @@ impl PropListUtils {
     }
 
     pub fn get_by_concrete_key(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key: &Datum,
         allocator: &DatumAllocator,
     ) -> Result<DatumRef, ScriptError> {
@@ -233,7 +235,7 @@ impl PropListUtils {
                 if index < prop_list.len() {
                     prop_list[index].1 = value_ref.clone();
                 } else if index <= prop_list.len() {
-                    prop_list.push((key_ref.clone(), value_ref.clone()));
+                    prop_list.push_back((key_ref.clone(), value_ref.clone()));
                 } else {
                     return Err(ScriptError::new(format!("Index out of range: {}", index)));
                 }
@@ -525,7 +527,7 @@ impl PropListDatumHandlers {
                     ))
                 }
             };
-            let last = prop_list.last().map(|(_, v)| v).unwrap();
+            let last = prop_list.back().map(|(_, v)| v).unwrap();
             Ok(last.clone())
         })
     }
@@ -665,7 +667,7 @@ impl PropListDatumHandlers {
                     (prop_name_ref.clone(), value_ref.clone()),
                 );
             } else {
-                prop_list.push((prop_name_ref.clone(), value_ref.clone()));
+                prop_list.push_back((prop_name_ref.clone(), value_ref.clone()));
             }
 
             Ok(DatumRef::Void)
@@ -807,7 +809,7 @@ impl PropListDatumHandlers {
     pub fn sort(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let sorted_prop_list = reserve_player_ref(|player| {
             let mut sorted_prop_list = player.get_datum(datum).to_map()?.clone();
-            sorted_prop_list.sort_by(|a, b| {
+            sorted_prop_list.make_contiguous().sort_by(|a, b| {
                 let (left_key_ref, _) = a;
                 let (right_key_ref, _) = b;
 

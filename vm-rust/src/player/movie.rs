@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use chrono::Local;
 
@@ -195,16 +195,16 @@ impl Movie {
                 use crate::player::xtra::manager::get_registered_xtra_names;
                 reserve_player_mut(|player| {
                     let names = get_registered_xtra_names();
-                    let mut items = Vec::new();
+                    let mut items = VecDeque::new();
                     for name in names {
                         let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
                         let name_val = player.alloc_datum(Datum::String(name.to_string()));
                         let file_key = player.alloc_datum(Datum::Symbol("fileName".to_string()));
                         let file_val = player.alloc_datum(Datum::String(format!("{}.x32", name)));
-                        let entry = player.alloc_datum(Datum::PropList(vec![
+                        let entry = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                             (name_key, name_val), (file_key, file_val),
-                        ], false));
-                        items.push(entry);
+                        ]), false));
+                        items.push_back(entry);
                     }
                     Ok(Datum::List(
                         crate::director::lingo::datum::DatumType::List,
@@ -219,7 +219,7 @@ impl Movie {
                     let device = player.alloc_datum(Datum::String("WebAudio".to_string()));
                     Ok(Datum::List(
                         crate::director::lingo::datum::DatumType::List,
-                        vec![device],
+                        VecDeque::from(vec![device]),
                         false,
                     ))
                 })
@@ -235,7 +235,7 @@ impl Movie {
                     let rect = player.alloc_datum(Datum::Rect([l, t, r, b]));
                     Ok(Datum::List(
                         crate::director::lingo::datum::DatumType::List,
-                        vec![rect],
+                        VecDeque::from(vec![rect]),
                         false,
                     ))
                 })
