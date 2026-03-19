@@ -22,6 +22,8 @@ struct MemberGpuData {
     all_meshes: Vec<Mesh3dBuffers>,
     /// Texture images decoded and uploaded to GPU
     textures: HashMap<String, WebGlTexture>,
+    /// Texture dimensions (width, height) keyed by lowercase name
+    texture_sizes: HashMap<String, (u32, u32)>,
     /// Snapshot of scene content counts when GPU data was built
     scene_version: (usize, usize, usize, usize), // (nodes, clod_meshes, texture_images, shaders)
 }
@@ -705,6 +707,7 @@ void main() {
         // Upload textures (decode JPEG/PNG or raw RGBA)
         // Store with lowercase keys for case-insensitive lookup
         let mut textures = HashMap::new();
+        let mut texture_sizes: HashMap<String, (u32, u32)> = HashMap::new();
         let mut map_tex_log = 0u32;
         for (tex_name, image_data) in &scene.texture_images {
             // Log "Map #" texture data sizes
@@ -715,17 +718,18 @@ void main() {
                 ).into());
                 map_tex_log += 1;
             }
-            if let Some(tex) = self.decode_and_upload_texture(context, image_data) {
+            if let Some((tex, w, h)) = self.decode_and_upload_texture(context, image_data) {
+                texture_sizes.insert(tex_name.to_lowercase(), (w, h));
                 textures.insert(tex_name.to_lowercase(), tex);
             }
         }
 
-        self.member_data.insert(key, MemberGpuData { mesh_groups, all_meshes, textures, scene_version: current_version });
+        self.member_data.insert(key, MemberGpuData { mesh_groups, all_meshes, textures, texture_sizes, scene_version: current_version });
         Ok(())
     }
 
     /// Decode JPEG/PNG image data and upload as WebGL texture
-    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8]) -> Option<WebGlTexture> {
+    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32)> {
         // Check for raw RGBA format (from newTexture #fromImageObject):
         // first 4 bytes = width LE, next 4 bytes = height LE, rest = RGBA
         let (width, height, rgba_data) = if data.len() >= 8 {
@@ -794,7 +798,7 @@ void main() {
         }
         gl.generate_mipmap(WebGl2RenderingContext::TEXTURE_2D);
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
-        Some(texture)
+        Some((texture, width, height))
     }
 
     /// Render directly to the default framebuffer (for offscreen canvas readPixels)
@@ -1139,22 +1143,7 @@ void main() {
         // Render particles (after opaque geometry, with additive blending)
         let _ = self.render_particles(context, runtime_state, &view_matrix, &projection_matrix);
 
-        // Render camera overlays (2D textures on top of 3D scene)
-        {
-            let shader_ref = self.shader.as_ref().unwrap();
-            if let Some(rs) = runtime_state {
-                let cam_name = self.active_camera.clone();
-                if let Some(ref cam) = cam_name {
-                    if let Some(overlays) = rs.camera_overlays.get(cam.as_str()) {
-                        if !overlays.is_empty() {
-                            if let Some(gpu_data) = self.member_data.get(&member_key) {
-                                Self::render_overlays_static(gl, shader_ref, overlays, gpu_data, width, height);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Note: overlays are rendered AFTER all camera passes, not per-camera
 
         // Restore state
         gl.disable(WebGl2RenderingContext::DEPTH_TEST);
@@ -1162,6 +1151,30 @@ void main() {
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
 
         Ok(self.fbo_texture.as_ref())
+    }
+
+    /// Render overlays to the existing FBO (called after all camera passes)
+    pub fn render_overlays_to_fbo(
+        &self,
+        context: &WebGL2Context,
+        member_key: &(i32, i32),
+        overlays: &[crate::player::cast_member::CameraOverlay],
+        width: u32,
+        height: u32,
+    ) {
+        if overlays.is_empty() { return; }
+        let gl = context.gl();
+        let shader = match self.shader.as_ref() { Some(s) => s, None => return };
+        let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return };
+        let fbo = match self.fbo.as_ref() { Some(f) => f, None => return };
+
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(fbo));
+        gl.viewport(0, 0, width as i32, height as i32);
+        gl.use_program(Some(&shader.program));
+
+        Self::render_overlays_static(gl, shader, overlays, gpu_data, width, height);
+
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
     }
 
     /// Render camera overlays as 2D textured quads on top of the 3D scene
@@ -1206,11 +1219,14 @@ void main() {
         gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
         gl.uniform4f(shader.u_ambient_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
 
+        let mut rendered_count = 0u32;
+        let mut skipped_empty = 0u32;
+        let mut skipped_no_tex = 0u32;
         for overlay in overlays {
-            if overlay.source_texture.is_empty() || overlay.blend <= 0.0 { continue; }
+            if overlay.source_texture.is_empty() || overlay.blend <= 0.0 { skipped_empty += 1; continue; }
 
             let tex = gpu_data.textures.get(&overlay.source_texture.to_lowercase());
-            if tex.is_none() { continue; }
+            if tex.is_none() { skipped_no_tex += 1; continue; }
             let tex = tex.unwrap();
 
             // Bind texture
@@ -1230,10 +1246,11 @@ void main() {
             let rx = overlay.reg_point[0] as f32;
             let ry = overlay.reg_point[1] as f32;
 
-            // Get texture dimensions for quad size (default 64x64)
-            // We'll use a unit quad scaled by texture size
-            let tex_w = 64.0f32; // TODO: track actual texture dimensions
-            let tex_h = 64.0f32;
+            // Get actual texture dimensions for quad size
+            let (tex_w, tex_h) = gpu_data.texture_sizes
+                .get(&overlay.source_texture.to_lowercase())
+                .map(|&(w, h)| (w as f32, h as f32))
+                .unwrap_or((64.0, 64.0));
 
             // Build model matrix: translate to loc, apply scale, offset by regPoint
             let model: [f32; 16] = [
@@ -1287,9 +1304,16 @@ void main() {
             gl.vertex_attrib_pointer_with_i32(2, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
 
             gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 6);
+            rendered_count += 1;
 
             gl.delete_buffer(vert_buf.as_ref());
             gl.delete_buffer(uv_buf.as_ref());
+        }
+        if rendered_count > 0 || skipped_no_tex > 0 {
+            web_sys::console::warn_1(&format!(
+                "[W3D-OVERLAY] rendered={}, skipped_empty={}, skipped_no_tex={}, total={}",
+                rendered_count, skipped_empty, skipped_no_tex, overlays.len()
+            ).into());
         }
     }
 

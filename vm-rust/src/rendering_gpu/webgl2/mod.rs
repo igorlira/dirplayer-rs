@@ -2339,6 +2339,7 @@ impl WebGL2Renderer {
             TextureSource::Shockwave3dScene { width, height, member_key, scene, runtime_state, active_camera, extra_cameras } => {
                 // Render 3D scene to offscreen FBO, then use FBO texture as sprite
                 // First camera (primary) — clears FBO
+                let primary_cam_name = active_camera.clone().unwrap_or_else(|| "DefaultView".to_string());
                 self.scene3d.active_camera = active_camera;
                 let _ = self.scene3d.render_scene_with_state(&self.context, member_key, &scene, width, height, Some(&runtime_state));
 
@@ -2351,6 +2352,16 @@ impl WebGL2Renderer {
                         &self.context, member_key, &scene, width, height,
                         Some(&runtime_state), should_clear,
                     );
+                }
+
+                // Render overlays LAST (on top of all camera passes)
+                // Check ALL cameras for overlays (game may attach overlays to any camera)
+                for (_, overlays) in &runtime_state.camera_overlays {
+                    if !overlays.is_empty() {
+                        self.scene3d.render_overlays_to_fbo(
+                            &self.context, &member_key, overlays, width, height,
+                        );
+                    }
                 }
 
                 // Get the final FBO texture (all cameras rendered into it)
