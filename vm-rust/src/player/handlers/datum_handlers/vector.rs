@@ -15,7 +15,8 @@ impl VectorDatumHandlers {
                 player.get_datum(&list[1]).float_value()?,
                 player.get_datum(&list[2]).float_value()?,
             ]),
-            _ => Err(ScriptError::new("Expected a vector".to_string())),
+            Datum::Void | Datum::Int(0) => Ok([0.0, 0.0, 0.0]),
+            _ => Err(ScriptError::new(format!("Expected a vector, got {}", datum.type_str()))),
         }
     }
 

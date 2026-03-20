@@ -31,6 +31,8 @@ impl FloatDatumHandlers {
             }
             "string" => Ok(player.alloc_datum(Datum::String(float_value.to_string()))),
             "magnitude" => Ok(player.alloc_datum(Datum::Float(float_value.abs()))),
+            // Vector-like access: return 0.0 for x/y/z when a float is used where a vector was expected
+            "x" | "y" | "z" => Ok(player.alloc_datum(Datum::Float(0.0))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get float property {}",
                 prop
