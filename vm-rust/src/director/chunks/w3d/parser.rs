@@ -178,7 +178,7 @@ impl W3dFileParser {
     // ─── Block Parsers ───
 
     fn parse_material(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
         let attrs = r.read_u32()?;
 
         let mut mat = W3dMaterial { name: name.clone(), ..Default::default() };
@@ -197,7 +197,7 @@ impl W3dFileParser {
     }
 
     fn parse_light_resource(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
         let light_type_raw = r.read_u8()?;
         let enabled = r.read_u8()? != 0;
         let cr = r.read_f32()?;
@@ -239,9 +239,9 @@ impl W3dFileParser {
     }
 
     fn parse_group_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
-        let parent = r.read_ifx_name()?;
-        let resource = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
+        let parent = r.read_ifx_string()?;
+        let resource = r.read_ifx_string()?;
         let transform = self.parse_node_header(r, has_bounds)?;
 
         log(&format!("  GroupNode: \"{}\" parent=\"{}\"", name, parent));
@@ -257,11 +257,11 @@ impl W3dFileParser {
     }
 
     fn parse_light_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
-        let parent = r.read_ifx_name()?;
-        let resource = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
+        let parent = r.read_ifx_string()?;
+        let resource = r.read_ifx_string()?;
         let transform = self.parse_node_header(r, has_bounds)?;
-        if r.remaining() >= 2 { let _light_res = r.read_ifx_name()?; }
+        if r.remaining() >= 2 { let _light_res = r.read_ifx_string()?; }
 
         self.scene.nodes.push(W3dNode {
             name,
@@ -275,9 +275,9 @@ impl W3dFileParser {
     }
 
     fn parse_model_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
-        let parent = r.read_ifx_name()?;
-        let resource = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
+        let parent = r.read_ifx_string()?;
+        let resource = r.read_ifx_string()?;
         let transform = self.parse_node_header(r, has_bounds)?;
 
         let mut node = W3dNode {
@@ -289,10 +289,10 @@ impl W3dFileParser {
             ..Default::default()
         };
 
-        if r.remaining() >= 2 { node.model_resource_name = r.read_ifx_name()?; }
-        if r.remaining() >= 2 { let _style = r.read_ifx_name()?; }
+        if r.remaining() >= 2 { node.model_resource_name = r.read_ifx_string()?; }
+        if r.remaining() >= 2 { let _style = r.read_ifx_string()?; }
         if r.remaining() >= 4 { let _render_pass = r.read_u32()?; }
-        if r.remaining() >= 2 { node.shader_name = r.read_ifx_name()?; }
+        if r.remaining() >= 2 { node.shader_name = r.read_ifx_string()?; }
 
         log(&format!("  ModelNode: \"{}\" resource=\"{}\"", name, node.model_resource_name));
         self.scene.nodes.push(node);
@@ -300,9 +300,9 @@ impl W3dFileParser {
     }
 
     fn parse_view_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
-        let parent = r.read_ifx_name()?;
-        let resource = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
+        let parent = r.read_ifx_string()?;
+        let resource = r.read_ifx_string()?;
         let transform = self.parse_node_header(r, has_bounds)?;
 
         let mut node = W3dNode {
@@ -334,7 +334,7 @@ impl W3dFileParser {
 
     fn parse_shader_lit_texture(&mut self, r: &mut W3dBlockReader, block_type: u32) -> Result<(), String> {
         let is_v200 = block_type == SHADER_LIT_TEXTURE; // -200
-        let name = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
         let attrs = r.read_u32()?;
         let render_pass = r.read_u32()?;
 
@@ -346,12 +346,12 @@ impl W3dFileParser {
         };
 
         if (attrs & 0x01) != 0 {
-            shader.material_name = r.read_ifx_name()?;
+            shader.material_name = r.read_ifx_string()?;
         }
 
         for layer in 0..8u32 {
             if (attrs & (1 << (16 + layer))) != 0 {
-                let tex_name = r.read_ifx_name()?;
+                let tex_name = r.read_ifx_string()?;
                 let intensity = r.read_f32()?;
                 let blend_func = r.read_u8()?;
                 let blend_src = r.read_u8()?;
@@ -383,12 +383,12 @@ impl W3dFileParser {
     }
 
     fn parse_texture_declaration(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let _name = r.read_ifx_name()?;
+        let _name = r.read_ifx_string()?;
         Ok(())
     }
 
     fn parse_texture_continuation(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
         let _cont_index = r.read_u8()?;
         let image_size = r.remaining();
         if image_size > 0 {
@@ -410,7 +410,7 @@ impl W3dFileParser {
     }
 
     fn parse_texture_info(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
         let render_format = r.read_u8()?;
         let mip_mode = r.read_u8()?;
         let mag_filter = r.read_u8()?;
@@ -420,7 +420,7 @@ impl W3dFileParser {
     }
 
     fn parse_model_block2(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
         let description_attrs = r.read_u32()?;
         let has_neighbor_mesh = (description_attrs & 2) != 0;
         let num_meshes = r.read_u32()?;
@@ -454,11 +454,11 @@ impl W3dFileParser {
         res_info.shading_count = num_shaders;
         for _ in 0..num_shaders {
             if r.remaining() < 2 { break; }
-            let shader_name = r.read_ifx_name()?;
+            let shader_name = r.read_ifx_string()?;
             let mut binding = ModelShaderBinding { name: shader_name, mesh_bindings: Vec::new() };
             for _ in 0..num_meshes {
                 if r.remaining() < 2 { break; }
-                binding.mesh_bindings.push(r.read_ifx_name()?);
+                binding.mesh_bindings.push(r.read_ifx_string()?);
             }
             res_info.shader_bindings.push(binding);
         }
@@ -494,7 +494,7 @@ impl W3dFileParser {
     }
 
     fn parse_raw_mesh(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = r.read_ifx_name()?;
+        let name = r.read_ifx_string()?;
         let chain_index = r.read_u32()?;
 
         let num_faces = r.read_u32()?;
@@ -564,14 +564,14 @@ impl W3dFileParser {
     }
 
     fn parse_bones_block(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let skel_name = r.read_ifx_name()?;
+        let skel_name = r.read_ifx_string()?;
         let num_bones = r.read_u32()?;
 
         let mut skeleton = W3dSkeleton { name: skel_name.clone(), bones: Vec::with_capacity(num_bones as usize) };
 
         for _ in 0..num_bones {
             if r.remaining() < 2 { break; }
-            let bone_name = r.read_ifx_name()?;
+            let bone_name = r.read_ifx_string()?;
             let parent_idx = r.read_u32()?;
             let length = r.read_f32()?;
             let dx = r.read_f32()?;
@@ -607,7 +607,7 @@ impl W3dFileParser {
         let block_data = r.read_bytes(r.remaining())?;
         let mut bs = IFXBitStreamCompressed::new(&block_data);
 
-        let motion_name = bs.read_ifx_string().to_lowercase();
+        let motion_name = bs.read_ifx_string();
         let track_count = bs.read_u32();
         let time_iq = bs.read_f32();
         let rot_iq = bs.read_f32();
@@ -615,7 +615,7 @@ impl W3dFileParser {
         let mut motion = W3dMotion { name: motion_name.clone(), tracks: Vec::with_capacity(track_count as usize) };
 
         for _ in 0..track_count {
-            let bone_name = bs.read_ifx_string().to_lowercase();
+            let bone_name = bs.read_ifx_string();
             let keyframe_count = bs.read_u32();
 
             if keyframe_count > 0x5D1745D {
@@ -739,7 +739,7 @@ impl W3dFileParser {
 
     fn parse_comp_synch_table(&mut self, data: &[u8]) -> Result<(), String> {
         let mut bs = IFXBitStreamCompressed::new(data);
-        let name = bs.read_ifx_string().to_lowercase();
+        let name = bs.read_ifx_string();
 
         let res_info = match self.model_resources.get_mut(&name) {
             Some(r) => r,
@@ -769,7 +769,7 @@ impl W3dFileParser {
 
     fn parse_distal_edge_merge(&mut self, data: &[u8]) -> Result<(), String> {
         let mut bs = IFXBitStreamCompressed::new(data);
-        let name = bs.read_ifx_string().to_lowercase();
+        let name = bs.read_ifx_string();
 
         let res_info = match self.model_resources.get_mut(&name) {
             Some(r) => r,
@@ -806,7 +806,7 @@ impl W3dFileParser {
     fn parse_compressed_geom(&mut self, data: &[u8]) -> Result<(), String> {
         // Peek name from block data to look up correct model resource
         let mut peek_bs = IFXBitStreamCompressed::new(data);
-        let clod_name = peek_bs.read_ifx_string().to_lowercase();
+        let clod_name = peek_bs.read_ifx_string();
 
         // Get or create decoder for this resource
         if !self.clod_decoders.contains_key(&clod_name) {
@@ -824,7 +824,7 @@ impl W3dFileParser {
     }
 
     fn parse_skeleton_modifier(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let _name = r.read_ifx_name()?;
+        let _name = r.read_ifx_string()?;
         // Consume remaining data to avoid trailing-bytes warnings
         Ok(())
     }

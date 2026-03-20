@@ -114,7 +114,7 @@ pub fn raycast_scene_multi(
 
         // Test raw meshes
         for mesh in &scene.raw_meshes {
-            if mesh.name.eq_ignore_ascii_case(resource) {
+            if mesh.name == *resource {
                 if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, &node.name, max_dist) {
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
