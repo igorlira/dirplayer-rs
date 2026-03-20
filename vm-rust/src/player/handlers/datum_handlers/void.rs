@@ -15,7 +15,9 @@ impl VoidDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
-            "addAt" | "add" | "append" | "duplicate" | "getAt" | "getOne" | "getLast" | "getFirst" => {
+            "addAt" | "add" | "append" | "duplicate" | "getAt" | "getOne" | "getLast" | "getFirst"
+            | "distanceTo" | "getNormalized" | "normalize" | "crossProduct" | "dotProduct"
+            | "cross" | "dot" | "angleBetween" | "getWorldTransform" | "addToWorld" | "removeFromWorld" | "isInWorld" => {
                 // Calling these on void should just return void
                 Ok(DatumRef::Void)
             }
@@ -39,6 +41,8 @@ impl VoidDatumHandlers {
         match prop.as_str() {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("void".to_owned()))),
             "count" | "length" => Ok(player.alloc_datum(Datum::Int(0))),
+            "x" | "y" | "z" | "magnitude" => Ok(player.alloc_datum(Datum::Float(0.0))),
+            "position" | "rotation" | "scale" => Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0]))),
             "string" => Ok(player.alloc_datum(Datum::String("".to_owned()))),
             // XML-related properties on Void should return empty/void values
             "childNodes" => {
