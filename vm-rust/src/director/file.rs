@@ -319,13 +319,6 @@ fn parse_font_table(
         }
     }
 
-    web_sys::console::log_1(&format!(
-        "[Fmap] {} entries (from {} chunks): {:?}",
-        merged_table.len(),
-        chunk_ids.len(),
-        merged_table.iter().map(|(id, name)| format!("{}='{}'", id, name)).collect::<Vec<_>>()
-    ).into());
-
     merged_table
 }
 
@@ -876,6 +869,7 @@ fn read_after_burner_map(
         // info!("Loading ILS resource {}: '{}', {} bytes", res_id, fourcc_to_string(info.fourcc), info.len);
         cached_chunk_views.insert(res_id, ils_reader.read_bytes(info.len).unwrap().to_vec());
     }
+
     return Ok(ils_body_offset);
 }
 
@@ -952,11 +946,9 @@ fn read_memory_map(
             reader.jmp(entry_start + extra);
         }
 
-        // Skip free and junk entries
-        if fourcc == FOURCC("free") || fourcc == FOURCC("junk") {
-            continue;
-        }
-
+        // Include free/junk entries in chunk_info — their data may still be
+        // at the original offset and referenced by the Key Table. The Director
+        // player accesses reclaimed entries when the Key Table still points to them.
         let info = ChunkInfo {
             id: i,
             fourcc,
@@ -1105,15 +1097,15 @@ fn get_chunk_data(
         Some(info) => {
             // Allow chunks where the FOURCC has a null byte replacing a character
             // (e.g., CAS\0 matching CASt). Some Director files use null-terminated FOURCCs.
-            let fourcc_match = if fourcc != info.fourcc {
+            // Also allow "free"/"junk" entries — the data may still be valid at the
+            // original offset even though the mmap slot was reclaimed.
+            let is_reclaimed = info.fourcc == FOURCC("free") || info.fourcc == FOURCC("junk");
+            let fourcc_match = if is_reclaimed {
+                true // Trust the Key Table's fourcc over the mmap's "free"/"junk" marker
+            } else if fourcc != info.fourcc {
                 // Mask: if either FOURCC has a zero byte in any position, ignore that position
                 let a = fourcc.to_be_bytes();
                 let b = info.fourcc.to_be_bytes();
-                web_sys::console::log_1(&format!(
-                    "FOURCC mismatch: expected 0x{:08x} [{},{},{},{}] got 0x{:08x} [{},{},{},{}]",
-                    fourcc, a[0], a[1], a[2], a[3],
-                    info.fourcc, b[0], b[1], b[2], b[3]
-                ).into());
                 let mut match_count = 0;
                 for i in 0..4 {
                     if a[i] == b[i] || a[i] == 0 || b[i] == 0 {

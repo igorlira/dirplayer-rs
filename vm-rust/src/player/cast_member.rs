@@ -1251,35 +1251,77 @@ impl CastMember {
             .find_map(|c| c.as_ref().and_then(|chunk| chunk.as_bitmap()));
 
         if let Some(bitd_chunk) = bitd_chunk {
-            let decompressed =
-                decompress_bitmap(&bitd_chunk.data, &bitmap_info, cast_lib, bitd_chunk.version);
-            match decompressed {
-                Ok(new_bitmap) => bitmap_manager.add_bitmap(new_bitmap),
-                Err(e) => {
-                    warn!(
-                        "Failed to decompress bitmap {}: {:?}. Using empty image.",
-                        number, e
-                    );
-                    bitmap_manager.add_bitmap(Bitmap::new(
-                        1,
-                        1,
-                        8,
-                        8,
-                        0,
-                        PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
-                    ))
+            // Check if BITD contains JPEG data with a separate ALFA chunk
+            let is_jpeg = bitd_chunk.data.len() >= 3
+                && bitd_chunk.data[0] == 0xFF
+                && bitd_chunk.data[1] == 0xD8
+                && bitd_chunk.data[2] == 0xFF;
+
+            let alfa_data: Option<&Vec<u8>> = member_def.children.iter().find_map(|c| {
+                c.as_ref().and_then(|chunk| match chunk {
+                    Chunk::Raw(data) if !data.is_empty() => Some(data),
+                    _ => None,
+                })
+            });
+
+            if is_jpeg && alfa_data.is_some() {
+                // JPEG in BITD + separate ALFA chunk: use decode_jpeg_bitmap which
+                // correctly combines JPEG RGB with ALFA alpha channel.
+                // decode_jpeg_bitd only looks for alpha AFTER FFD9 inside the BITD data,
+                // missing the separate ALFA chunk entirely.
+                match decode_jpeg_bitmap(&bitd_chunk.data, bitmap_info, alfa_data) {
+                    Ok(new_bitmap) => bitmap_manager.add_bitmap(new_bitmap),
+                    Err(e) => {
+                        warn!(
+                            "Failed to decode JPEG+ALFA bitmap {}: {:?}. Using empty image.",
+                            number, e
+                        );
+                        bitmap_manager.add_bitmap(Bitmap::new(
+                            1, 1, 8, 8, 0,
+                            PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
+                        ))
+                    }
+                }
+            } else {
+                let decompressed =
+                    decompress_bitmap(&bitd_chunk.data, bitmap_info, cast_lib, bitd_chunk.version);
+                match decompressed {
+                    Ok(new_bitmap) => bitmap_manager.add_bitmap(new_bitmap),
+                    Err(e) => {
+                        warn!(
+                            "Failed to decompress bitmap {}: {:?}. Using empty image.",
+                            number, e
+                        );
+                        bitmap_manager.add_bitmap(Bitmap::new(
+                            1, 1, 8, 8, 0,
+                            PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
+                        ))
+                    }
                 }
             }
         } else {
-            warn!("No bitmap chunk found for member {}", number);
-            bitmap_manager.add_bitmap(Bitmap::new(
-                1,
-                1,
-                8,
-                8,
-                0,
-                PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
-            ))
+            // No BITD chunk — try Raw chunk data as bitmap pixel data.
+            // Chunk::Raw can be either ALFA data or an unrecognized chunk type
+            // that contains actual bitmap pixel data, so we must try decompression.
+            let raw_data = member_def.children.iter().find_map(|c| {
+                c.as_ref().and_then(|chunk| match chunk {
+                    Chunk::Raw(data) if !data.is_empty() => Some(data.as_slice()),
+                    _ => None,
+                })
+            });
+            if let Some(data) = raw_data {
+                let decompressed = decompress_bitmap(data, bitmap_info, cast_lib, 0);
+                match decompressed {
+                    Ok(new_bitmap) => bitmap_manager.add_bitmap(new_bitmap),
+                    Err(e) => {
+                        warn!("[BMP] Failed to decode Raw data for member {}:{}: {}", cast_lib, number, e);
+                        bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+                    }
+                }
+            } else {
+                warn!("No bitmap chunk found for member {}", number);
+                bitmap_manager.add_bitmap(Bitmap::new(1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale)))
+            }
         }
     }
 
