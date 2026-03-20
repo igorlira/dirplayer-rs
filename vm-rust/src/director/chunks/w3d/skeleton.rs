@@ -5,22 +5,39 @@ use super::types::*;
 
 /// Build world matrices for all bones at a given time.
 /// Returns column-major matrices (ready for GPU upload).
+/// If root_lock is true, root bone translation is zeroed (character stays in place).
 pub fn build_bone_matrices(
     skeleton: &W3dSkeleton,
     motion: Option<&W3dMotion>,
     time: f32,
+) -> Vec<[f32; 16]> {
+    build_bone_matrices_ex(skeleton, motion, time, false)
+}
+
+/// Build bone matrices with optional root lock.
+pub fn build_bone_matrices_ex(
+    skeleton: &W3dSkeleton,
+    motion: Option<&W3dMotion>,
+    time: f32,
+    root_lock: bool,
 ) -> Vec<[f32; 16]> {
     let count = skeleton.bones.len();
     let mut local_matrices = Vec::with_capacity(count);
     let mut world_matrices = vec![[0.0f32; 16]; count];
 
     // Build local matrices from motion tracks or rest pose
-    for bone in &skeleton.bones {
+    for (bone_idx, bone) in skeleton.bones.iter().enumerate() {
         if let Some(mot) = motion {
             if let Some(track) = mot.find_track_by_bone(&bone.name) {
                 let kf = track.evaluate(time);
+                // Root lock: zero translation on root bones to keep character in place
+                let (px, py, pz) = if root_lock && bone.parent_index < 0 {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    (kf.pos_x, kf.pos_y, kf.pos_z)
+                };
                 local_matrices.push(compose_matrix(
-                    kf.pos_x, kf.pos_y, kf.pos_z,
+                    px, py, pz,
                     kf.rot_x, kf.rot_y, kf.rot_z, kf.rot_w,
                     kf.scale_x, kf.scale_y, kf.scale_z,
                 ));
