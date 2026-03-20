@@ -362,6 +362,9 @@ impl Movie {
             "randomseed" => {
                 self.random_seed = Some(value.int_value()?);
             }
+            "preferred3drenderer" | "milesfast" => {
+                // 3D renderer preference / sound settings — accept silently in WASM
+            }
             "stagecolor" => {
                 match value {
                     Datum::Int(color_index) => {
