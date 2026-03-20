@@ -629,7 +629,7 @@ impl W3dScene {
             let res = if !node.model_resource_name.is_empty() { &node.model_resource_name } else { &node.resource_name };
             if res != resource_name { continue; }
             if !node.shader_name.is_empty() {
-                if let Some(shader) = self.shaders.iter().find(|s| s.name == node.shader_name) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&node.shader_name)) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }
@@ -640,24 +640,24 @@ impl W3dScene {
         if let Some(res) = self.model_resources.get(resource_name) {
             for binding in &res.shader_bindings {
                 // Try binding name as shader name
-                if let Some(shader) = self.shaders.iter().find(|s| s.name == binding.name) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&binding.name)) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }
                 }
                 // Try binding name as direct material name
-                if self.materials.iter().any(|m| m.name == binding.name) {
+                if self.materials.iter().any(|m| m.name.eq_ignore_ascii_case(&binding.name)) {
                     return Some(binding.name.clone());
                 }
                 // Try mesh binding names
                 for mesh_binding in &binding.mesh_bindings {
                     if mesh_binding.is_empty() { continue; }
-                    if let Some(shader) = self.shaders.iter().find(|s| s.name == *mesh_binding) {
+                    if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(mesh_binding)) {
                         if !shader.material_name.is_empty() {
                             return Some(shader.material_name.clone());
                         }
                     }
-                    if self.materials.iter().any(|m| m.name == *mesh_binding) {
+                    if self.materials.iter().any(|m| m.name.eq_ignore_ascii_case(mesh_binding)) {
                         return Some(mesh_binding.clone());
                     }
                 }
@@ -665,7 +665,7 @@ impl W3dScene {
         }
         // Fallback: if there's only one non-default material, use it
         let non_default: Vec<_> = self.materials.iter()
-            .filter(|m| !m.name.contains("Default"))
+            .filter(|m| !m.name.to_lowercase().contains("default"))
             .collect();
         if non_default.len() == 1 {
             return Some(non_default[0].name.clone());
@@ -681,18 +681,18 @@ impl W3dScene {
                     let binding_name = &binding.mesh_bindings[mesh_idx];
                     if binding_name.is_empty() { continue; }
                     // Try as shader name → material
-                    if let Some(shader) = self.shaders.iter().find(|s| s.name == *binding_name) {
+                    if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(binding_name)) {
                         if !shader.material_name.is_empty() {
                             return Some(shader.material_name.clone());
                         }
                     }
                     // Try as direct material name
-                    if self.materials.iter().any(|m| m.name == *binding_name) {
+                    if self.materials.iter().any(|m| m.name.eq_ignore_ascii_case(binding_name)) {
                         return Some(binding_name.clone());
                     }
                 }
                 // Try binding.name as shader for all meshes
-                if let Some(shader) = self.shaders.iter().find(|s| s.name == binding.name) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&binding.name)) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }

@@ -48,6 +48,11 @@ impl<'a> W3dBlockReader<'a> {
         Ok(f32::from_bits(bits))
     }
 
+    /// Read an IFX string and lowercase it (Director normalizes W3D names to lowercase)
+    pub fn read_ifx_name(&mut self) -> Result<String, String> {
+        self.read_ifx_string().map(|s| s.to_lowercase())
+    }
+
     pub fn read_ifx_string(&mut self) -> Result<String, String> {
         let len = self.read_u16()? as usize;
         if len == 0 {
