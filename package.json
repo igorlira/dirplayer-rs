@@ -57,6 +57,7 @@
     "start:proxy": "concurrently \"react-scripts start\" \"node ws-tcp-proxy-all.cjs\"",
     "build": "react-scripts build",
     "build-extension": "vite build -c vite.config.extension.js",
+    "build-extension-firefox": "vite build -c vite.config.extension-firefox.js",
     "build-polyfill": "vite build -c vite.config.polyfill.js",
     "build-vm": "cd vm-rust && wasm-pack build --target web",
     "test": "react-scripts test",

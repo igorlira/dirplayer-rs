@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "DirPlayer - Shockwave Emulator",
+  "short_name": "DirPlayer",
+  "version": "0.4.1",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "dirplayer@dirplayer.com",
+      "strict_min_version": "109.0"
+    }
+  },
+  "action": {
+    "default_title": "DirPlayer",
+    "default_popup": "extension/index.html",
+    "default_icon": "logo192.png"
+  },
+  "description": "Play Shockwave content directly from your browser.",
+  "homepage_url": "https://github.com/igorlira/dirplayer-rs",
+  "icons": {
+    "128": "logo128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "css": ["content-script.css"],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ],
+  "host_permissions": ["<all_urls>"],
+  "permissions": [],
+  "web_accessible_resources": [{
+    "resources": ["vm-rust/pkg/*", "charmap-system.png"],
+    "matches": ["<all_urls>"]
+  }]
+}
