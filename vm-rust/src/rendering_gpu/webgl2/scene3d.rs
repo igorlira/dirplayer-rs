@@ -952,16 +952,7 @@ void main() {
         // Store with lowercase keys for case-insensitive lookup
         let mut textures = HashMap::new();
         let mut texture_sizes: HashMap<String, (u32, u32)> = HashMap::new();
-        let mut map_tex_log = 0u32;
         for (tex_name, image_data) in &scene.texture_images {
-            // Log "Map #" texture data sizes
-            if map_tex_log < 8 && tex_name.to_lowercase().starts_with("map #") {
-                web_sys::console::log_1(&format!(
-                    "[3D-TEX] '{}': {} bytes raw data",
-                    tex_name, image_data.len()
-                ).into());
-                map_tex_log += 1;
-            }
             if let Some((tex, w, h)) = self.decode_and_upload_texture(context, image_data) {
                 texture_sizes.insert(tex_name.to_lowercase(), (w, h));
                 textures.insert(tex_name.to_lowercase(), tex);
@@ -3019,27 +3010,49 @@ void main() {
 /// Decode image data (raw RGBA, DXT, JPEG/PNG) and upload as a WebGL2 texture.
 /// Free function to avoid borrow conflicts when called during incremental updates.
 fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32)> {
-    // Check for raw RGBA format (from newTexture #fromImageObject):
-    // first 4 bytes = width LE, next 4 bytes = height LE, rest = RGBA
-    let (width, height, rgba_data) = if data.len() >= 8 {
+    if data.len() < 4 { return None; }
+
+    // Detection priority: JPEG/PNG magic → DXT header → raw RGBA (our own format)
+    // Raw RGBA must be checked LAST because its 8-byte header (u32 w, u32 h) can
+    // accidentally match the first bytes of DXT/JPEG/PNG data, causing misidentification
+    // (e.g., a DXT texture whose first 8 bytes happen to decode as valid small dimensions).
+    let (width, height, rgba_data) = if data.len() >= 2
+        && (data[0] == 0xFF && data[1] == 0xD8       // JPEG magic
+            || data[0] == 0x89 && data[1] == 0x50)    // PNG magic
+    {
+        let img = match image::load_from_memory(data) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                let header: Vec<String> = data.iter().take(8).map(|b| format!("{:02X}", b)).collect();
+                web_sys::console::warn_1(&format!(
+                    "[3D-TEX-DECODE] Failed to decode {} bytes, header=[{}]: {}",
+                    data.len(), header.join(" "), e
+                ).into());
+                return None;
+            }
+        };
+        let w = img.width();
+        let h = img.height();
+        (w, h, img.into_raw())
+    } else if is_dxt_texture(data) {
+        // DXT compressed texture — decode to RGBA
+        match decode_dxt_to_rgba(data) {
+            Some((w, h, rgba)) => (w, h, rgba),
+            None => return None,
+        }
+    } else if data.len() >= 8 {
+        // Raw RGBA format (from newTexture #fromImageObject):
+        // first 4 bytes = width LE, next 4 bytes = height LE, rest = RGBA
         let w = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let h = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let expected = 8 + (w as usize) * (h as usize) * 4;
         if w > 0 && w <= 4096 && h > 0 && h <= 4096 && data.len() == expected {
-            // Raw RGBA from Lingo image
             (w, h, data[8..].to_vec())
-        } else if is_dxt_texture(data) {
-            // DXT compressed texture — decode to RGBA
-            match decode_dxt_to_rgba(data) {
-                Some((w, h, rgba)) => (w, h, rgba),
-                None => return None,
-            }
         } else {
-            // Try JPEG/PNG decode
+            // Last resort: try image library decode for other formats
             let img = match image::load_from_memory(data) {
                 Ok(img) => img.to_rgba8(),
                 Err(e) => {
-                    // Log first few bytes to diagnose format
                     let header: Vec<String> = data.iter().take(8).map(|b| format!("{:02X}", b)).collect();
                     web_sys::console::warn_1(&format!(
                         "[3D-TEX-DECODE] Failed to decode {} bytes, header=[{}]: {}",
