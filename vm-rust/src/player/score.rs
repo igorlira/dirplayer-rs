@@ -3107,10 +3107,11 @@ pub fn sprite_get_prop(
             match datum_ref {
                 Some(ref_) => Ok(player.get_datum(&ref_).clone()),
                 None => {
-                    return Err(ScriptError::new(format!(
-                        "Cannot get prop {} of sprite",
-                        prop_name
-                    )))
+                    // Unknown sprite props may be custom behavior properties — return VOID
+                    web_sys::console::warn_1(&format!(
+                        "Unknown sprite prop '{}' — returning VOID", prop_name
+                    ).into());
+                    Ok(Datum::Void)
                 }
             }
         }
