@@ -417,6 +417,8 @@ pub struct W3dScene {
     pub model_resources: HashMap<String, ModelResourceInfo>,
     pub clod_meshes: HashMap<String, Vec<ClodDecodedMesh>>,
     pub raw_meshes: Vec<W3dRawMesh>,
+    /// Monotonically increasing counter; bumped whenever texture_images is mutated
+    pub texture_content_version: u64,
 }
 
 impl W3dScene {

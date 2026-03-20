@@ -40,6 +40,7 @@ pub use geometry::QuadGeometry;
 pub use shaders::{InkMode, ShaderManager};
 pub use texture_cache::{TextureCache, TextureCacheKey, RenderedTextCache, RenderedTextCacheKey};
 const DEBUG_WEBGL2_TEXT: bool = false;
+static SPRITE_DEBUG_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// WebGL2 hardware-accelerated renderer
 ///
@@ -330,6 +331,8 @@ impl WebGL2Renderer {
     /// Draw the current frame
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
         self.frame_count += 1;
+        // Increment sprite debug frame counter
+        let df = SPRITE_DEBUG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Sync persistent 3D state to scene data for the renderer
         crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
@@ -1127,6 +1130,7 @@ impl WebGL2Renderer {
                 Some(m) => m,
                 None => return,
             };
+
 
             match &member.member_type {
                 CastMemberType::Bitmap(bitmap_member) => {
@@ -2358,6 +2362,9 @@ impl WebGL2Renderer {
                     );
                 }
 
+                // TODO: Backdrops should render BEFORE 3D scene (need separate clear logic)
+                // For now, only overlays are rendered (on top of 3D scene)
+
                 // Render overlays on top of everything
                 for (_, overlays) in &runtime_state.camera_overlays {
                     if !overlays.is_empty() {
@@ -2400,7 +2407,8 @@ impl WebGL2Renderer {
         // For indexed ink 36 bitmaps: transparency is baked into texture alpha,
         // so use Copy shader (whose discard works reliably) instead of BackgroundTransparent
         let is_ink36_indexed_baked = ink == 36 && bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8;
-        let ink_mode = if is_rendered_text && ink == 36 {
+        let text_needs_alpha = is_rendered_text && (ink == 36 || bg_color_rgb == (255, 255, 255));
+        let ink_mode = if text_needs_alpha {
             InkMode::Copy
         } else if is_button_alpha_matte {
             InkMode::Copy
@@ -4589,11 +4597,12 @@ impl WebGL2Renderer {
         // Filling background with bg_color at alpha=255 would make the entire
         // text area opaque, producing solid colored rectangles instead of text.
         let is_transparency_ink = ink == 7 || ink == 8 || ink == 9 || ink == 36;
-        // For non-transparency inks (e.g. ink 0 Copy), always fill the background
-        // with bgColor at alpha=255. This matches Director behavior where ink 0
-        // for field/text members renders as an opaque rectangle. Only transparency
-        // inks (36, 7, 8, 9) leave the background transparent.
-        let has_bg_fill = !is_transparency_ink;
+        // When bgColor is default white, leave background transparent even for ink 0.
+        // This matches Director behavior where text/field members with default white
+        // bgColor appear transparent when composited over other content (e.g., 3D scenes).
+        // Only fill background when bgColor is explicitly non-white.
+        let bg_is_default_white = bg_rgb == (255, 255, 255);
+        let has_bg_fill = !is_transparency_ink && !bg_is_default_white;
 
         // After drawing text, handle background pixels.
         // The bitmap was pre-filled with alpha=0 (transparent).

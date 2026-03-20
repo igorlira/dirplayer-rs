@@ -2236,6 +2236,20 @@ impl Bitmap {
                     continue;
                 }
 
+                // When copying a non-alpha source (e.g., text member image) onto a 32-bit
+                // use_alpha destination (e.g., image created with setAlpha(0)), skip white
+                // background pixels so the destination's transparency is preserved.
+                // This matches Director behavior where copyPixels ink 0 to an alpha-enabled
+                // destination preserves transparency for the source's background color.
+                if ink == 0
+                    && !src.use_alpha
+                    && self.bit_depth == 32
+                    && self.use_alpha
+                    && (sr, sg, sb) == (255, 255, 255)
+                {
+                    continue;
+                }
+
                 let mut src_color = (sr, sg, sb);
 
                 // ----------------------------------------------------------
