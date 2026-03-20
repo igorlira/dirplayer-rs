@@ -230,7 +230,7 @@ impl SpriteDatumHandlers {
                     ).into());
                     if !cam_name.is_empty() {
                         let sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
-                        sprite.w3d_cameras.push(cam_name);
+                        sprite.w3d_cameras.push(cam_name.to_lowercase());
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 })

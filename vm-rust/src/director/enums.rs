@@ -616,7 +616,7 @@ impl Shockwave3dInfo {
                     scan += 4;
                     if scan + slen > bytes.len() { break; }
                     let s: String = bytes[scan..scan+slen].iter().map(|&b| b as char).collect();
-                    if s == "DefaultView" || s.ends_with("View") || s.ends_with("view") {
+                    if s.eq_ignore_ascii_case("DefaultView") || s.to_lowercase().ends_with("view") {
                         found_view_name = true;
                     }
                     scan += slen;

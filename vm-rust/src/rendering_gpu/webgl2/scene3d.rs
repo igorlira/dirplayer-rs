@@ -848,7 +848,9 @@ void main() {
         gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
 
         gl.enable(WebGl2RenderingContext::CULL_FACE);
-        gl.cull_face(WebGl2RenderingContext::BACK);
+        // Y-flip in projection inverts winding → cull FRONT instead of BACK
+        gl.cull_face(WebGl2RenderingContext::FRONT);
+        gl.front_face(WebGl2RenderingContext::CCW);
 
         gl.use_program(Some(&shader.program));
 
@@ -871,7 +873,7 @@ void main() {
 
             // Try to find and bind material + texture from scene shaders
             let mut tex_bound = false;
-            if let Some(mat) = scene.materials.iter().find(|m| !m.name.contains("Default")) {
+            if let Some(mat) = scene.materials.iter().find(|m| !m.name.to_lowercase().contains("default")) {
                 self.set_material_uniforms(gl, shader, mat);
             } else {
                 self.bind_default_material(gl, shader, scene);
@@ -1181,6 +1183,20 @@ void main() {
                 }
 
 
+                // One-time draw diagnostic
+                {
+                    static DRAW_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !DRAW_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        let m0 = model_nodes.first().map(|n| n.transform).unwrap_or([0.0;16]);
+                        web_sys::console::warn_1(&format!(
+                            "[3D-DRAW] drawn={} view_t=({:.1},{:.1},{:.1}) model0_t=({:.1},{:.1},{:.1}) proj=({:.3},{:.3},{:.3},{:.3})",
+                            draw_stats.0,
+                            view_matrix[12], view_matrix[13], view_matrix[14],
+                            m0[12], m0[13], m0[14],
+                            projection_matrix[0], projection_matrix[5], projection_matrix[10], projection_matrix[11],
+                        ).into());
+                    }
+                }
             }
         }
 
@@ -1565,7 +1581,7 @@ void main() {
         let first_blend_func = self.get_first_blend_func(scene, model_node, runtime_state);
         let opacity = scene.shaders.iter()
             .find(|s| s.name.eq_ignore_ascii_case(&effective_shader_name))
-            .and_then(|s| scene.materials.iter().find(|m| m.name == s.material_name))
+            .and_then(|s| scene.materials.iter().find(|m| m.name.eq_ignore_ascii_case(&s.material_name)))
             .map(|m| m.opacity)
             .unwrap_or(1.0);
         Self::apply_blend_mode(gl, opacity, first_blend_func);
@@ -1760,7 +1776,7 @@ void main() {
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> ([f32; 16], [f32; 3]) {
         // 1. Determine which camera to use
-        let default_cam = "DefaultView".to_string();
+        let default_cam = "defaultview".to_string();
         let cam_name = self.active_camera.as_ref().unwrap_or(&default_cam);
 
         // 2. Find the camera node and accumulate its full world transform (including parent chain)
@@ -1771,7 +1787,7 @@ void main() {
         }
         // Fallback: try any view node
         let view_node = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View);
-        let cam_name = view_node.map(|n| n.name.as_str()).unwrap_or("DefaultView");
+        let cam_name = view_node.map(|n| n.name.as_str()).unwrap_or("defaultview");
 
         // 3. Check runtime transform for this camera
         if let Some(rs) = runtime_state {

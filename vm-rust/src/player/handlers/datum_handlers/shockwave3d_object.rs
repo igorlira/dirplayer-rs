@@ -255,7 +255,11 @@ impl Shockwave3dObjectDatumHandlers {
                             .copied().collect();
 
                         for key in &keys_to_try {
-                            if let Some(meshes) = scene.clod_meshes.get(*key) {
+                            let key_lower = key.to_lowercase();
+                            let found = scene.clod_meshes.get(*key)
+                                .or_else(|| scene.clod_meshes.get(&key_lower))
+                                .or_else(|| scene.clod_meshes.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v));
+                            if let Some(meshes) = found {
                                 if let Some(mesh) = meshes.get(mesh_idx) {
                                     for pos in &mesh.positions {
                                         items.push_back(player.alloc_datum(Datum::Vector([pos[0] as f64, pos[1] as f64, pos[2] as f64])));
@@ -268,7 +272,7 @@ impl Shockwave3dObjectDatumHandlers {
                         if items.is_empty() {
                             for key in &keys_to_try {
                                 for raw in &scene.raw_meshes {
-                                    if raw.name == *key && raw.chain_index as usize == mesh_idx {
+                                    if raw.name.eq_ignore_ascii_case(key) && raw.chain_index as usize == mesh_idx {
                                         for pos in &raw.positions {
                                             items.push_back(player.alloc_datum(Datum::Vector([pos[0] as f64, pos[1] as f64, pos[2] as f64])));
                                         }
@@ -459,15 +463,15 @@ impl Shockwave3dObjectDatumHandlers {
                         Datum::Shockwave3dObjectRef(r) => r.name.clone(),
                         Datum::String(s) => s.clone(),
                         Datum::Void => String::new(), // VOID = detach from world
-                        _ => "World".to_string(),
+                        _ => "world".to_string(),
                     };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             // Track detached nodes for renderer filtering
                             if is_detach {
-                                w3d.runtime_state.detached_nodes.insert(s3d_ref.name.clone());
+                                w3d.runtime_state.detached_nodes.insert(s3d_ref.name.to_lowercase());
                             } else {
-                                w3d.runtime_state.detached_nodes.remove(&s3d_ref.name);
+                                w3d.runtime_state.detached_nodes.remove(&s3d_ref.name.to_lowercase());
                             }
                             if let Some(scene) = w3d.scene_mut() {
                                 if let Some(node) = scene.nodes.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name)) {
@@ -641,9 +645,9 @@ impl Shockwave3dObjectDatumHandlers {
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(name) = root_name {
-                                w3d.runtime_state.camera_root_nodes.insert(cam_name, name);
+                                w3d.runtime_state.camera_root_nodes.insert(cam_name.to_lowercase(), name.to_lowercase());
                             } else {
-                                w3d.runtime_state.camera_root_nodes.remove(&cam_name);
+                                w3d.runtime_state.camera_root_nodes.remove(&cam_name.to_lowercase());
                             }
                         }
                     }
@@ -657,7 +661,7 @@ impl Shockwave3dObjectDatumHandlers {
                     };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.camera_clear_at_render.insert(cam_name, val);
+                            w3d.runtime_state.camera_clear_at_render.insert(cam_name.to_lowercase(), val);
                         }
                     }
                     Ok(())
@@ -929,7 +933,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     use crate::director::chunks::w3d::types::*;
                                     scene.nodes.push(W3dNode {
                                         name: clone_name.clone(), node_type: W3dNodeType::Model,
-                                        parent_name: "World".to_string(),
+                                        parent_name: "world".to_string(),
                                         resource_name: String::new(), model_resource_name: String::new(),
                                         shader_name: String::new(),
                                         near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
@@ -1149,9 +1153,9 @@ impl Shockwave3dObjectDatumHandlers {
                                 ..Default::default()
                             };
                             let list = if is_overlay {
-                                w3d.runtime_state.camera_overlays.entry(camera_name).or_insert_with(Vec::new)
+                                w3d.runtime_state.camera_overlays.entry(camera_name.to_lowercase()).or_insert_with(Vec::new)
                             } else {
-                                w3d.runtime_state.camera_backdrops.entry(camera_name).or_insert_with(Vec::new)
+                                w3d.runtime_state.camera_backdrops.entry(camera_name.to_lowercase()).or_insert_with(Vec::new)
                             };
                             list.push(overlay);
                         }
@@ -1164,7 +1168,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let index = if !args.is_empty() {
                         player.get_datum(&args[0]).int_value().unwrap_or(1) as usize
                     } else { 1 };
-                    let camera_name = s3d_ref.name.clone();
+                    let camera_name = s3d_ref.name.to_lowercase();
                     let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
 
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
@@ -1697,7 +1701,11 @@ impl Shockwave3dObjectDatumHandlers {
                                     .copied().collect();
 
                                 for key in &keys {
-                                    if let Some(meshes) = scene.clod_meshes.get(*key) {
+                                    let key_lower = key.to_lowercase();
+                                    let found = scene.clod_meshes.get(*key)
+                                        .or_else(|| scene.clod_meshes.get(&key_lower))
+                                        .or_else(|| scene.clod_meshes.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v));
+                                    if let Some(meshes) = found {
                                         if let Some(mesh) = meshes.get(mesh_idx) {
                                             if idx < mesh.positions.len() {
                                                 let pos = &mesh.positions[idx];
@@ -1709,7 +1717,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 // Fallback to raw_meshes with both keys
                                 for key in &keys {
                                     for raw in &scene.raw_meshes {
-                                        if raw.name == *key && raw.chain_index as usize == mesh_idx {
+                                        if raw.name.eq_ignore_ascii_case(key) && raw.chain_index as usize == mesh_idx {
                                             if idx < raw.positions.len() {
                                                 let pos = &raw.positions[idx];
                                                 return Ok(player.alloc_datum(Datum::Vector([pos[0] as f64, pos[1] as f64, pos[2] as f64])));
@@ -1881,7 +1889,11 @@ impl Shockwave3dObjectDatumHandlers {
 
                                 let mut count = 0usize;
                                 for key in &keys {
-                                    if let Some(meshes) = scene.clod_meshes.get(*key) {
+                                    let key_lower = key.to_lowercase();
+                                    let found = scene.clod_meshes.get(*key)
+                                        .or_else(|| scene.clod_meshes.get(&key_lower))
+                                        .or_else(|| scene.clod_meshes.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v));
+                                    if let Some(meshes) = found {
                                         if let Some(mesh) = meshes.get(m_idx) {
                                             count = mesh.positions.len();
                                         }
@@ -1891,7 +1903,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 if count == 0 {
                                     for key in &keys {
                                         for raw in &scene.raw_meshes {
-                                            if raw.name == *key && raw.chain_index as usize == m_idx {
+                                            if raw.name.eq_ignore_ascii_case(key) && raw.chain_index as usize == m_idx {
                                                 count = raw.positions.len();
                                                 break;
                                             }
@@ -2033,7 +2045,7 @@ impl Shockwave3dObjectDatumHandlers {
         member_ref: &CastMemberRef,
     ) -> Result<DatumRef, ScriptError> {
         let node = scene.nodes.iter()
-            .find(|n| n.node_type == W3dNodeType::Model && n.name == model_name);
+            .find(|n| n.node_type == W3dNodeType::Model && n.name.eq_ignore_ascii_case(&model_name));
 
         match prop {
             "name" => Ok(player.alloc_datum(Datum::String(model_name.to_string()))),
@@ -2980,7 +2992,7 @@ fn get_or_init_node_transform(
     let from_persistent = {
         let member = player.movie.cast_manager.find_member_by_ref(member_ref);
         member.and_then(|m| m.member_type.as_shockwave3d())
-            .and_then(|w3d| w3d.runtime_state.node_transform_datums.get(node_name))
+            .and_then(|w3d| w3d.runtime_state.node_transform_datums.get(&node_name.to_lowercase()))
             .cloned()
     };
     if let Some(datum_ref) = from_persistent {
@@ -2989,7 +3001,7 @@ fn get_or_init_node_transform(
             // Ensure node_transforms is up to date
             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                    w3d.runtime_state.node_transforms.insert(node_name.to_string(), m32);
+                    w3d.runtime_state.node_transforms.insert(node_name.to_lowercase(), m32);
                 }
             }
             return m32;
@@ -3002,7 +3014,7 @@ fn get_or_init_node_transform(
     // Ensure it's in the runtime overrides
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-            w3d.runtime_state.node_transforms.entry(node_name.to_string()).or_insert(current);
+            w3d.runtime_state.node_transforms.entry(node_name.to_lowercase()).or_insert(current);
         }
     }
     current
@@ -3016,9 +3028,9 @@ fn set_node_transform(
 ) {
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-            w3d.runtime_state.node_transforms.insert(node_name.to_string(), m);
+            w3d.runtime_state.node_transforms.insert(node_name.to_lowercase(), m);
             // Also update persistent datum if it exists
-            if let Some(datum_ref) = w3d.runtime_state.node_transform_datums.get(node_name) {
+            if let Some(datum_ref) = w3d.runtime_state.node_transform_datums.get(&node_name.to_lowercase()) {
                 let m64: [f64; 16] = m.map(|v| v as f64);
                 let datum_ref = datum_ref.clone();
                 *player.get_datum_mut(&datum_ref) = Datum::Transform3d(m64);
@@ -3039,7 +3051,7 @@ fn get_persistent_node_transform(
     let existing = {
         let member = player.movie.cast_manager.find_member_by_ref(member_ref);
         member.and_then(|m| m.member_type.as_shockwave3d())
-            .and_then(|w3d| w3d.runtime_state.node_transform_datums.get(node_name))
+            .and_then(|w3d| w3d.runtime_state.node_transform_datums.get(&node_name.to_lowercase()))
             .cloned()
     };
     if let Some(datum_ref) = existing {
@@ -3052,7 +3064,7 @@ fn get_persistent_node_transform(
     let datum_ref = player.alloc_datum(Datum::Transform3d(m64));
 
     // Store in runtime state
-    let node_key = node_name.to_string();
+    let node_key = node_name.to_lowercase();
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
             w3d.runtime_state.node_transform_datums.insert(node_key, datum_ref.clone());
