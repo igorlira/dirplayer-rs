@@ -229,7 +229,7 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                     }
                     "face" => {
-                        let face_count = scene.nodes.iter().find(|n| n.name == *model_name)
+                        let face_count = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&model_name))
                             .and_then(|n| {
                                 let rn = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
                                 scene.model_resources.get(rn.as_str())
@@ -245,7 +245,7 @@ impl Shockwave3dObjectDatumHandlers {
                     "vertexList" => {
                         // Return a list of vertex vectors from clod_meshes or raw_meshes
                         let mut items = VecDeque::new();
-                        let node = scene.nodes.iter().find(|n| n.name == *model_name);
+                        let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&model_name));
                         let model_res_name = node.map(|n| n.model_resource_name.as_str()).unwrap_or("");
                         let res_name = node.map(|n| n.resource_name.as_str()).unwrap_or("");
 
@@ -419,7 +419,7 @@ impl Shockwave3dObjectDatumHandlers {
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
-                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
+                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name)) {
                                     node.fov = fov;
                                 }
                             }
@@ -432,7 +432,7 @@ impl Shockwave3dObjectDatumHandlers {
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
-                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
+                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name)) {
                                     node.near_plane = v;
                                 }
                             }
@@ -445,7 +445,7 @@ impl Shockwave3dObjectDatumHandlers {
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
-                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
+                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name)) {
                                     node.far_plane = v;
                                 }
                             }
@@ -470,7 +470,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 w3d.runtime_state.detached_nodes.remove(&s3d_ref.name);
                             }
                             if let Some(scene) = w3d.scene_mut() {
-                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
+                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name)) {
                                     node.parent_name = parent_name;
                                 }
                             }
@@ -535,7 +535,7 @@ impl Shockwave3dObjectDatumHandlers {
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d.scene_mut() {
-                                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name)) {
                                         if shader.texture_layers.is_empty() {
                                             shader.texture_layers.push(crate::director::chunks::w3d::types::W3dTextureLayer {
                                                 name: tex_name.clone(),
@@ -567,17 +567,17 @@ impl Shockwave3dObjectDatumHandlers {
                             if let Some(scene) = w3d.scene_mut() {
                                 // Find the shader's material and update it
                                 let mat_name = scene.shaders.iter()
-                                    .find(|s| s.name == s3d_ref.name)
+                                    .find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name))
                                     .map(|s| s.material_name.clone())
                                     .unwrap_or_default();
                                 // Find material by: 1) material_name, 2) shader name, 3) create with shader name
                                 let mat = if !mat_name.is_empty() {
-                                    if let Some(m) = scene.materials.iter_mut().find(|m| m.name == mat_name) {
+                                    if let Some(m) = scene.materials.iter_mut().find(|m| m.name.eq_ignore_ascii_case(&mat_name)) {
                                         Some(m)
                                     } else { None }
                                 } else { None };
                                 let mat = if let Some(m) = mat { m }
-                                else if let Some(m) = scene.materials.iter_mut().find(|m| m.name == s3d_ref.name) { m }
+                                else if let Some(m) = scene.materials.iter_mut().find(|m| m.name.eq_ignore_ascii_case(&s3d_ref.name)) { m }
                                 else {
                                     // Create material with the SHADER name so the renderer can find it
                                     let shader_name = s3d_ref.name.clone();
@@ -585,7 +585,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         name: shader_name.clone(),
                                         ..Default::default()
                                     });
-                                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == shader_name) {
+                                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name.eq_ignore_ascii_case(&shader_name)) {
                                         shader.material_name = shader_name;
                                     }
                                     scene.materials.last_mut().unwrap()
@@ -609,10 +609,10 @@ impl Shockwave3dObjectDatumHandlers {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
                                 let mat_name = scene.shaders.iter()
-                                    .find(|s| s.name == s3d_ref.name)
+                                    .find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name))
                                     .map(|s| s.material_name.clone());
                                 if let Some(ref mn) = mat_name {
-                                    if let Some(mat) = scene.materials.iter_mut().find(|m| m.name == *mn) {
+                                    if let Some(mat) = scene.materials.iter_mut().find(|m| m.name.eq_ignore_ascii_case(mn)) {
                                         mat.opacity = blend_val / 100.0;
                                     }
                                 }
@@ -921,7 +921,7 @@ impl Shockwave3dObjectDatumHandlers {
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
-                                let source_node = scene.nodes.iter().find(|n| n.name == s3d_ref.name).cloned();
+                                let source_node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name)).cloned();
                                 if let Some(mut new_node) = source_node {
                                     new_node.name = clone_name.clone();
                                     scene.nodes.push(new_node);
@@ -959,7 +959,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 member.and_then(|m| m.member_type.as_shockwave3d())
                                     .and_then(|w3d| w3d.parsed_scene.as_ref())
                                     .map(|scene| {
-                                        let node = scene.nodes.iter().find(|n| n.name == s3d_ref.name);
+                                        let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name));
                                         let res_name = node.map(|n| if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name });
                                         res_name.and_then(|rn| scene.model_resources.get(rn.as_str()))
                                             .map(|res| res.mesh_infos.len())
@@ -1271,7 +1271,7 @@ impl Shockwave3dObjectDatumHandlers {
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
-                                        if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                        if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name)) {
                                             while shader.texture_layers.len() <= idx {
                                                 shader.texture_layers.push(crate::director::chunks::w3d::types::W3dTextureLayer::default());
                                             }
@@ -1300,7 +1300,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 };
                                 let mut items = VecDeque::new();
                                 if let Some(ref scene) = scene {
-                                    let shader = scene.shaders.iter().find(|s| s.name == s3d_ref.name);
+                                    let shader = scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name));
                                     if let Some(s) = shader {
                                         for layer in &s.texture_layers {
                                             if !layer.name.is_empty() {
@@ -1380,7 +1380,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 use crate::director::chunks::w3d::types::W3dNodeType;
                                 let mut shader_names: Vec<String> = Vec::new();
 
-                                let node = scene.nodes.iter().find(|n| n.name == s3d_ref.name);
+                                let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name));
                                 if let Some(n) = node {
                                     let resource = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
                                     if let Some(res) = scene.model_resources.get(resource) {
@@ -1396,8 +1396,8 @@ impl Shockwave3dObjectDatumHandlers {
                                             for binding in &res.shader_bindings {
                                                 if mesh_idx < binding.mesh_bindings.len() {
                                                     let name = &binding.mesh_bindings[mesh_idx];
-                                                    if !name.is_empty() && scene.shaders.iter().any(|s| s.name == *name) {
-                                                        let is_default = binding.name == "default" || name == "DefaultShader";
+                                                    if !name.is_empty() && scene.shaders.iter().any(|s| s.name.eq_ignore_ascii_case(name)) {
+                                                        let is_default = binding.name == "default" || name.eq_ignore_ascii_case("DefaultShader");
                                                         if is_default {
                                                             if default_name.is_empty() { default_name = name.clone(); }
                                                         } else {
@@ -1471,7 +1471,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                 } else {
                                     // Lazily create the persistent textureList from scene data
-                                    let shader = scene.shaders.iter().find(|s| s.name == s3d_ref.name);
+                                    let shader = scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name));
                                     let mut items = VecDeque::new();
                                     if let Some(s) = shader {
                                         for layer in &s.texture_layers {
@@ -1568,7 +1568,7 @@ impl Shockwave3dObjectDatumHandlers {
                             }
                             "blendFunctionList" => {
                                 // Return the blend function at index from texture layers
-                                let shader = scene.shaders.iter().find(|s| s.name == s3d_ref.name);
+                                let shader = scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name));
                                 if let Some(s) = shader {
                                     if let Some(layer) = s.texture_layers.get(idx) {
                                         let sym = match layer.blend_func {
@@ -1689,7 +1689,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
                                 let model_name = parts.get(0).unwrap_or(&"").to_string();
                                 let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                                let node = scene.nodes.iter().find(|n| n.name == *model_name);
+                                let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&model_name));
                                 let model_res = node.map(|n| n.model_resource_name.as_str()).unwrap_or("");
                                 let res = node.map(|n| n.resource_name.as_str()).unwrap_or("");
                                 let keys: Vec<&str> = [model_res, res].iter()
@@ -1818,7 +1818,7 @@ impl Shockwave3dObjectDatumHandlers {
                         let count = match prop_name.as_str() {
                             "shaderList" => {
                                 // Count = number of meshes in the model resource
-                                let node = scene.nodes.iter().find(|n| n.name == s3d_ref.name);
+                                let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name));
                                 let resource_name = node.map(|n| {
                                     if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name }
                                 }).unwrap_or(&s3d_ref.name);
@@ -1832,12 +1832,12 @@ impl Shockwave3dObjectDatumHandlers {
                             "textureList" | "textureModeList" | "textureRepeatList"
                             | "blendFunctionList" | "blendSourceList" | "blendConstantList"
                             | "textureTransformList" | "wrapTransformList" => {
-                                let shader = scene.shaders.iter().find(|s| s.name == s3d_ref.name);
+                                let shader = scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name));
                                 shader.map(|s| s.texture_layers.len().max(1)).unwrap_or(1)
                             }
                             "mesh" => {
                                 // meshDeform.mesh.count
-                                let node = scene.nodes.iter().find(|n| n.name == s3d_ref.name);
+                                let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name));
                                 let resource_name = node.map(|n| {
                                     if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name }
                                 });
@@ -1872,7 +1872,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
                                 let mdl_name = parts.get(0).unwrap_or(&"").to_string();
                                 let m_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                                let node = scene.nodes.iter().find(|n| n.name == *mdl_name);
+                                let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&mdl_name));
                                 let model_res = node.map(|n| n.model_resource_name.as_str()).unwrap_or("");
                                 let res = node.map(|n| n.resource_name.as_str()).unwrap_or("");
                                 let keys: Vec<&str> = [model_res, res].iter()
@@ -1944,7 +1944,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let vw = player.movie.rect.width() as f32;
                     let vh = player.movie.rect.height() as f32;
                     let fov = scene.nodes.iter()
-                        .find(|n| n.name == s3d_ref.name)
+                        .find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name))
                         .map(|n| n.fov)
                         .unwrap_or(45.0);
                     let aspect = vw / vh;
@@ -1996,7 +1996,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let vw = player.movie.rect.width() as f32;
                     let vh = player.movie.rect.height() as f32;
                     let fov = scene.nodes.iter()
-                        .find(|n| n.name == s3d_ref.name)
+                        .find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name))
                         .map(|n| n.fov)
                         .unwrap_or(45.0);
                     // Distance at which 1 pixel = 1 world unit
@@ -2096,7 +2096,7 @@ impl Shockwave3dObjectDatumHandlers {
                 // 1) Model index → shader index
                 let model_index = scene.nodes.iter()
                     .filter(|n| n.node_type == W3dNodeType::Model)
-                    .position(|n| n.name == model_name);
+                    .position(|n| n.name.eq_ignore_ascii_case(&model_name));
                 if let Some(mi) = model_index {
                     if mi < scene.shaders.len() {
                         shader_name = scene.shaders[mi].name.clone();
@@ -2153,7 +2153,7 @@ impl Shockwave3dObjectDatumHandlers {
                         for binding in &res_info.shader_bindings {
                             if mesh_idx < binding.mesh_bindings.len() && !binding.mesh_bindings[mesh_idx].is_empty() {
                                 let name = &binding.mesh_bindings[mesh_idx];
-                                let is_default = binding.name == "default" || name == "DefaultShader";
+                                let is_default = binding.name == "default" || name.eq_ignore_ascii_case("DefaultShader");
                                 if is_default {
                                     if default_name.is_empty() {
                                         default_name = name.clone();
@@ -2270,9 +2270,9 @@ impl Shockwave3dObjectDatumHandlers {
         prop: &str,
         member_ref: &CastMemberRef,
     ) -> Result<DatumRef, ScriptError> {
-        let shader = scene.shaders.iter().find(|s| s.name == shader_name);
+        let shader = scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&shader_name));
         let material = shader.and_then(|s| {
-            scene.materials.iter().find(|m| m.name == s.material_name)
+            scene.materials.iter().find(|m| m.name.eq_ignore_ascii_case(&s.material_name))
         });
 
         match prop {
@@ -2467,7 +2467,7 @@ impl Shockwave3dObjectDatumHandlers {
             Ok(list_ref)
         } else {
             let layer_count = scene.shaders.iter()
-                .find(|s| s.name == shader_name)
+                .find(|s| s.name.eq_ignore_ascii_case(&shader_name))
                 .map(|s| s.texture_layers.len().max(1))
                 .unwrap_or(1);
             let mut items = VecDeque::new();
@@ -2497,7 +2497,7 @@ impl Shockwave3dObjectDatumHandlers {
         member_ref: &CastMemberRef,
     ) -> Result<DatumRef, ScriptError> {
         let node = scene.nodes.iter()
-            .find(|n| n.node_type == W3dNodeType::View && n.name == camera_name);
+            .find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case(&camera_name));
 
         match prop {
             "name" => Ok(player.alloc_datum(Datum::String(camera_name.to_string()))),
@@ -2614,7 +2614,7 @@ impl Shockwave3dObjectDatumHandlers {
         prop: &str,
         member_ref: &CastMemberRef,
     ) -> Result<DatumRef, ScriptError> {
-        let light = scene.lights.iter().find(|l| l.name == light_name);
+        let light = scene.lights.iter().find(|l| l.name.eq_ignore_ascii_case(&light_name));
 
         match prop {
             "name" => Ok(player.alloc_datum(Datum::String(light_name.to_string()))),
@@ -2665,7 +2665,7 @@ impl Shockwave3dObjectDatumHandlers {
         match prop {
             "name" => Ok(player.alloc_datum(Datum::String(node_name.to_string()))),
             "parent" => {
-                let parent = scene.nodes.iter().find(|n| n.name == node_name)
+                let parent = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&node_name))
                     .map(|n| n.parent_name.clone())
                     .unwrap_or_default();
                 Ok(player.alloc_datum(Datum::String(parent)))
@@ -2822,7 +2822,7 @@ impl Shockwave3dObjectDatumHandlers {
         member_ref: &CastMemberRef,
     ) -> Result<DatumRef, ScriptError> {
         // Find the model's resource to get mesh info
-        let node = scene.nodes.iter().find(|n| n.name == model_name);
+        let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&model_name));
         let resource_name = node.map(|n| {
             if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name }
         });
@@ -2874,7 +2874,7 @@ impl Shockwave3dObjectDatumHandlers {
         motion_name: &str,
         prop: &str,
     ) -> Result<DatumRef, ScriptError> {
-        let motion = scene.motions.iter().find(|m| m.name == motion_name);
+        let motion = scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(&motion_name));
 
         match prop {
             "name" => Ok(player.alloc_datum(Datum::String(motion_name.to_string()))),
@@ -2962,7 +2962,7 @@ fn get_node_transform(
             }
             // Fall back to parsed scene
             if let Some(scene) = &w3d.parsed_scene {
-                if let Some(node) = scene.nodes.iter().find(|n| n.name == node_name) {
+                if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&node_name)) {
                     return node.transform;
                 }
             }
@@ -3123,7 +3123,7 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                 if let Some(scene) = w3d.scene_mut() {
-                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == shader_name) {
+                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name.eq_ignore_ascii_case(&shader_name)) {
                         // Extend texture_layers if needed
                         use crate::director::chunks::w3d::types::W3dTextureLayer;
                         while shader.texture_layers.len() < tex_names.len() {

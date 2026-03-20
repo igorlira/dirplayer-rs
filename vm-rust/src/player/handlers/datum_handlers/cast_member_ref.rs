@@ -318,6 +318,9 @@ impl CastMemberRefHandlers {
                             (String::new(), identity, String::new(), String::new())
                         };
 
+                        // Track shader renames for name conflict resolution
+                        let mut shader_renames: Vec<(String, String)> = Vec::new();
+
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
                             let (src_shaders, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes) = {
@@ -343,13 +346,49 @@ impl CastMemberRefHandlers {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
                                         for shader in &src_shaders {
-                                            if !scene.shaders.iter().any(|s| s.name == shader.name) {
+                                            if let Some(existing) = scene.shaders.iter().find(|s| s.name == shader.name) {
+                                                // Same name exists — check if textures or materials differ
+                                                let existing_tex = existing.texture_layers.first().map(|l| l.name.as_str()).unwrap_or("");
+                                                let new_tex = shader.texture_layers.first().map(|l| l.name.as_str()).unwrap_or("");
+                                                let same_material = existing.material_name == shader.material_name;
+                                                if existing_tex != new_tex || !same_material {
+                                                    // Different texture/material — rename the incoming shader
+                                                    web_sys::console::warn_1(&format!(
+                                                        "[W3D] Shader conflict: '{}' existing_tex='{}' new_tex='{}' existing_mat='{}' new_mat='{}'",
+                                                        shader.name, existing_tex, new_tex, existing.material_name, shader.material_name
+                                                    ).into());
+                                                    let mut renamed = shader.clone();
+                                                    let mut suffix = 1;
+                                                    loop {
+                                                        let new_name = format!("{}_src{}", shader.name, suffix);
+                                                        if !scene.shaders.iter().any(|s| s.name == new_name) {
+                                                            shader_renames.push((shader.name.clone(), new_name.clone()));
+                                                            renamed.name = new_name;
+                                                            break;
+                                                        }
+                                                        suffix += 1;
+                                                    }
+                                                    scene.shaders.push(renamed);
+                                                }
+                                                // Same texture — skip (shader already exists)
+                                            } else {
                                                 scene.shaders.push(shader.clone());
                                             }
                                         }
                                         for (res_name, res_info) in &src_model_resources {
                                             if !scene.model_resources.contains_key(res_name) {
-                                                scene.model_resources.insert(res_name.clone(), res_info.clone());
+                                                let mut res = res_info.clone();
+                                                // Apply shader renames to bindings
+                                                if !shader_renames.is_empty() {
+                                                    for binding in &mut res.shader_bindings {
+                                                        for mb in &mut binding.mesh_bindings {
+                                                            for (old, new) in &shader_renames {
+                                                                if mb == old { *mb = new.clone(); }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                scene.model_resources.insert(res_name.clone(), res);
                                             }
                                         }
                                         for (mesh_name, mesh_data) in &src_clod_meshes {
@@ -395,7 +434,13 @@ impl CastMemberRefHandlers {
                                             parent_name: "World".to_string(),
                                             resource_name: source_resource_name,
                                             model_resource_name: source_model_resource_name,
-                                            shader_name: source_shader_name,
+                                            shader_name: {
+                                                let mut sn = source_shader_name;
+                                                for (old, new) in &shader_renames {
+                                                    if sn == *old { sn = new.clone(); break; }
+                                                }
+                                                sn
+                                            },
                                             near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
