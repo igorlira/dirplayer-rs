@@ -319,12 +319,12 @@ fn parse_font_table(
         }
     }
 
-    web_sys::console::log_1(&format!(
+    debug!(
         "[Fmap] {} entries (from {} chunks): {:?}",
         merged_table.len(),
         chunk_ids.len(),
         merged_table.iter().map(|(id, name)| format!("{}='{}'", id, name)).collect::<Vec<_>>()
-    ).into());
+    );
 
     merged_table
 }

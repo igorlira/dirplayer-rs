@@ -504,7 +504,7 @@ impl TextMemberHandlers {
             }
             "image" => {
                 if DEBUG_TEXT_IMAGE {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[text.image] member={}:{} text_len={} spans={} font='{}' size={} wrap={} align='{}'",
                         cast_member_ref.cast_lib,
                         cast_member_ref.cast_member,
@@ -514,7 +514,7 @@ impl TextMemberHandlers {
                         text_data.font_size,
                         text_data.word_wrap,
                         text_data.alignment
-                    ).into());
+                    );
                 }
                 // Use the same rendering approach as sprite display
                 // Get dimensions - use styled spans if available for accurate measurement
@@ -539,10 +539,10 @@ impl TextMemberHandlers {
                     preferred_font_name = Some(font_name.clone());
                     preferred_font_size = Some(font_size);
                     if DEBUG_TEXT_IMAGE {
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[text.image] styled first span font='{}' size={}",
                             font_name, font_size
-                        ).into());
+                        );
                     }
 
                     // Get font for measurement
