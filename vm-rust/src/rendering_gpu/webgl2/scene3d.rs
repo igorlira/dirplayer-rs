@@ -30,6 +30,10 @@ struct MemberGpuData {
     inverse_bind_cache: HashMap<String, Vec<[f32; 16]>>,
     /// Snapshot of scene content counts when GPU data was built
     scene_version: (usize, usize, usize, usize), // (nodes, clod_meshes, texture_images, shaders)
+    /// Per-texture data length at upload time (for incremental re-upload detection)
+    texture_versions: HashMap<String, u64>,
+    /// Scene's texture_content_version at last check
+    texture_content_version: u64,
 }
 
 /// 3D shader program with uniform locations
@@ -259,10 +263,19 @@ void main() {
     v_normal = mat3(u_model) * local_normal;
     // W3D CLOD UVs are in [-0.5, 0.5] range — remap to [0, 1]
     // IFX applies V-flip via texture matrix: new_v = 1 - v
-    vec2 base_uv = vec2(a_texcoord.x + 0.5, 0.5 - a_texcoord.y);
-    // Apply per-layer texture coordinate transform (scrolling, rotation, etc.)
+    // UV coordinate handling:
+    // 3D meshes (u_skinning_enabled >= 0): CLOD UVs in [-0.5, 0.5] → remap to [0, 1]
+    // Overlays (u_skinning_enabled == -1): UVs already [0,1], just flip V for OpenGL
+    vec2 base_uv;
+    if (u_skinning_enabled == -1) {
+        base_uv = a_texcoord;  // overlay: pass through as-is
+    } else {
+        base_uv = vec2(a_texcoord.x + 0.5, 0.5 - a_texcoord.y);  // CLOD remap
+    }
     v_texcoord = (u_tex_transform * vec4(base_uv, 0.0, 1.0)).xy;
-    v_texcoord2 = vec2(a_texcoord2.x + 0.5, 0.5 - a_texcoord2.y);
+    v_texcoord2 = (u_skinning_enabled == -1)
+        ? a_texcoord2
+        : vec2(a_texcoord2.x + 0.5, 0.5 - a_texcoord2.y);
     v_view_dist = -view_pos.z;
     gl_Position = u_projection * view_pos;
 }
@@ -815,6 +828,10 @@ void main() {
         let current_version = (scene.nodes.len(), scene.clod_meshes.len(), scene.texture_images.len(), scene.shaders.len());
         if let Some(existing) = self.member_data.get(&key) {
             if existing.scene_version == current_version {
+                // Structure unchanged — check for texture content updates
+                if existing.texture_content_version != scene.texture_content_version {
+                    self.update_textures_incremental(context, key, scene);
+                }
                 return Ok(());
             }
             // Scene changed — remove stale data and rebuild
@@ -961,87 +978,52 @@ void main() {
         // Detect and create cubemap textures from 6-face naming convention
         let cube_maps = self.detect_and_create_cubemaps(context, scene);
 
-        self.member_data.insert(key, MemberGpuData { mesh_groups, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache, scene_version: current_version });
+        let mut texture_versions = HashMap::new();
+        for (tex_name, image_data) in &scene.texture_images {
+            texture_versions.insert(tex_name.to_lowercase(), image_data.len() as u64);
+        }
+        self.member_data.insert(key, MemberGpuData {
+            mesh_groups, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
+            scene_version: current_version,
+            texture_versions,
+            texture_content_version: scene.texture_content_version,
+        });
         Ok(())
     }
 
-    /// Decode JPEG/PNG image data and upload as WebGL texture
+    /// Decode JPEG/PNG image data and upload as WebGL texture (delegates to free function)
     fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32)> {
-        // Check for raw RGBA format (from newTexture #fromImageObject):
-        // first 4 bytes = width LE, next 4 bytes = height LE, rest = RGBA
-        let (width, height, rgba_data) = if data.len() >= 8 {
-            let w = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            let h = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-            let expected = 8 + (w as usize) * (h as usize) * 4;
-            if w > 0 && w <= 4096 && h > 0 && h <= 4096 && data.len() == expected {
-                // Raw RGBA from Lingo image
-                (w, h, data[8..].to_vec())
-            } else if is_dxt_texture(data) {
-                // DXT compressed texture — decode to RGBA
-                match decode_dxt_to_rgba(data) {
-                    Some((w, h, rgba)) => (w, h, rgba),
-                    None => return None,
+        decode_and_upload_texture_impl(context, data)
+    }
+
+    /// Incrementally re-upload only changed/new textures to GPU
+    fn update_textures_incremental(&mut self, context: &WebGL2Context, key: (i32, i32), scene: &W3dScene) {
+        let gpu_data = match self.member_data.get_mut(&key) { Some(d) => d, None => return };
+
+        for (tex_name, image_data) in &scene.texture_images {
+            let lower = tex_name.to_lowercase();
+            let data_len = image_data.len() as u64;
+            let needs_upload = match gpu_data.texture_versions.get(&lower) {
+                None => true,
+                Some(&old_len) => old_len != data_len,
+            };
+            if needs_upload {
+                if let Some((tex, w, h)) = decode_and_upload_texture_impl(context, image_data) {
+                    gpu_data.texture_sizes.insert(lower.clone(), (w, h));
+                    gpu_data.textures.insert(lower.clone(), tex);
+                    gpu_data.texture_versions.insert(lower, data_len);
                 }
-            } else {
-                // Try JPEG/PNG decode
-                let img = match image::load_from_memory(data) {
-                    Ok(img) => img.to_rgba8(),
-                    Err(e) => {
-                        // Log first few bytes to diagnose format
-                        let header: Vec<String> = data.iter().take(8).map(|b| format!("{:02X}", b)).collect();
-                        web_sys::console::warn_1(&format!(
-                            "[3D-TEX-DECODE] Failed to decode {} bytes, header=[{}]: {}",
-                            data.len(), header.join(" "), e
-                        ).into());
-                        return None;
-                    }
-                };
-                let w = img.width();
-                let h = img.height();
-                (w, h, img.into_raw())
             }
-        } else {
-            return None;
-        };
-
-        let gl = context.gl();
-        let texture = gl.create_texture()?;
-        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
-
-        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR as i32);
-        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
-        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::REPEAT as i32);
-        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::REPEAT as i32);
-
-        gl.pixel_storei(WebGl2RenderingContext::UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
-
-        // Verify data size matches expected
-        let expected_size = (width as usize) * (height as usize) * 4;
-        if rgba_data.len() != expected_size {
-            web_sys::console::error_1(&format!(
-                "[3D-TEX] Size mismatch! {}x{} expects {} bytes but got {}",
-                width, height, expected_size, rgba_data.len()
-            ).into());
-            return None;
         }
 
-        let upload_result = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-            WebGl2RenderingContext::TEXTURE_2D,
-            0,
-            WebGl2RenderingContext::RGBA as i32,
-            width as i32,
-            height as i32,
-            0,
-            WebGl2RenderingContext::RGBA,
-            WebGl2RenderingContext::UNSIGNED_BYTE,
-            Some(&rgba_data),
-        );
-        if let Err(ref e) = upload_result {
-            web_sys::console::error_1(&format!("[3D-TEX] tex_image_2d failed: {:?}", e).into());
-        }
-        gl.generate_mipmap(WebGl2RenderingContext::TEXTURE_2D);
-        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
-        Some((texture, width, height))
+        // Remove GPU textures no longer in the scene
+        let scene_keys: std::collections::HashSet<String> = scene.texture_images.keys()
+            .map(|k| k.to_lowercase()).collect();
+        gpu_data.textures.retain(|k, _| scene_keys.contains(k));
+        gpu_data.texture_sizes.retain(|k, _| scene_keys.contains(k));
+        gpu_data.texture_versions.retain(|k, _| scene_keys.contains(k));
+
+        gpu_data.texture_content_version = scene.texture_content_version;
     }
 
     /// Render directly to the default framebuffer (for offscreen canvas readPixels)
@@ -1518,11 +1500,13 @@ void main() {
 
         let w = width as f32;
         let h = height as f32;
+        // Ortho projection: (0,0)=top-left in screen space
+        // FBO is Y-flipped when composited, so use positive Y (no flip here)
         let ortho: [f32; 16] = [
             2.0/w,  0.0,    0.0, 0.0,
-            0.0,   -2.0/h,  0.0, 0.0,
+            0.0,    2.0/h,  0.0, 0.0,
             0.0,    0.0,   -1.0, 0.0,
-           -1.0,    1.0,    0.0, 1.0,
+           -1.0,   -1.0,    0.0, 1.0,
         ];
         let identity: [f32; 16] = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &ortho);
@@ -1532,6 +1516,13 @@ void main() {
         gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
         gl.uniform1i(shader.u_layer2_blend.as_ref(), 0);
         gl.uniform1i(shader.u_has_specular_map.as_ref(), 0);
+        gl.uniform1i(shader.u_shader_mode.as_ref(), 0);
+        gl.uniform1i(shader.u_has_vertex_color.as_ref(), 0);
+        // Signal overlay mode: u_skinning_enabled = -1 → skip CLOD UV remap in vertex shader
+        gl.uniform1i(shader.u_skinning_enabled.as_ref(), -1);
+        // Reset texture transform to identity for overlays
+        let ov_identity = [1.0f32,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
+        gl.uniform_matrix4fv_with_f32_array(shader.u_tex_transform.as_ref(), false, &ov_identity);
         gl.uniform4f(shader.u_emissive_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
         gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
         gl.uniform4f(shader.u_ambient_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
@@ -1560,6 +1551,9 @@ void main() {
 
             gl.active_texture(WebGl2RenderingContext::TEXTURE0);
             gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+            // Use NEAREST filtering for overlays — crisp pixel-perfect text/HUD rendering
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::NEAREST as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::NEAREST as i32);
             gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
             gl.uniform1i(shader.u_has_texture.as_ref(), 1);
             gl.uniform1f(shader.u_opacity.as_ref(), (overlay.blend / 100.0) as f32);
@@ -1570,15 +1564,26 @@ void main() {
             let sy = (overlay.scale * overlay.scale_y) as f32;
             let rx = overlay.reg_point[0] as f32;
             let ry = overlay.reg_point[1] as f32;
+            let rot_rad = (overlay.rotation as f32).to_radians();
+            let cos_r = rot_rad.cos();
+            let sin_r = rot_rad.sin();
 
+            // 2D transform: Scale → Rotate → Translate (with regPoint offset)
+            let sw = sx * tex_w;
+            let sh = sy * tex_h;
             let model: [f32; 16] = [
-                sx * tex_w, 0.0,        0.0, 0.0,
-                0.0,        sy * tex_h, 0.0, 0.0,
+                cos_r * sw, sin_r * sw, 0.0, 0.0,
+               -sin_r * sh, cos_r * sh, 0.0, 0.0,
                 0.0,        0.0,        1.0, 0.0,
-                x - rx * sx, y - ry * sy, 0.0, 1.0,
+                x - rx * sx * cos_r + ry * sy * sin_r,
+                y - rx * sx * sin_r - ry * sy * cos_r,
+                0.0, 1.0,
             ];
             gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &model);
             gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 6);
+            // Restore texture filtering so 3D rendering is not affected
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
         }
 
         // Restore state
@@ -3007,6 +3012,88 @@ void main() {
     pub fn fbo_size(&self) -> (u32, u32) {
         (self.fbo_width, self.fbo_height)
     }
+}
+
+// ─── Texture decode + upload (free function) ───
+
+/// Decode image data (raw RGBA, DXT, JPEG/PNG) and upload as a WebGL2 texture.
+/// Free function to avoid borrow conflicts when called during incremental updates.
+fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32)> {
+    // Check for raw RGBA format (from newTexture #fromImageObject):
+    // first 4 bytes = width LE, next 4 bytes = height LE, rest = RGBA
+    let (width, height, rgba_data) = if data.len() >= 8 {
+        let w = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let h = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let expected = 8 + (w as usize) * (h as usize) * 4;
+        if w > 0 && w <= 4096 && h > 0 && h <= 4096 && data.len() == expected {
+            // Raw RGBA from Lingo image
+            (w, h, data[8..].to_vec())
+        } else if is_dxt_texture(data) {
+            // DXT compressed texture — decode to RGBA
+            match decode_dxt_to_rgba(data) {
+                Some((w, h, rgba)) => (w, h, rgba),
+                None => return None,
+            }
+        } else {
+            // Try JPEG/PNG decode
+            let img = match image::load_from_memory(data) {
+                Ok(img) => img.to_rgba8(),
+                Err(e) => {
+                    // Log first few bytes to diagnose format
+                    let header: Vec<String> = data.iter().take(8).map(|b| format!("{:02X}", b)).collect();
+                    web_sys::console::warn_1(&format!(
+                        "[3D-TEX-DECODE] Failed to decode {} bytes, header=[{}]: {}",
+                        data.len(), header.join(" "), e
+                    ).into());
+                    return None;
+                }
+            };
+            let w = img.width();
+            let h = img.height();
+            (w, h, img.into_raw())
+        }
+    } else {
+        return None;
+    };
+
+    let gl = context.gl();
+    let texture = gl.create_texture()?;
+    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
+
+    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR as i32);
+    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
+    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::REPEAT as i32);
+    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::REPEAT as i32);
+
+    gl.pixel_storei(WebGl2RenderingContext::UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+
+    // Verify data size matches expected
+    let expected_size = (width as usize) * (height as usize) * 4;
+    if rgba_data.len() != expected_size {
+        web_sys::console::error_1(&format!(
+            "[3D-TEX] Size mismatch! {}x{} expects {} bytes but got {}",
+            width, height, expected_size, rgba_data.len()
+        ).into());
+        return None;
+    }
+
+    let upload_result = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+        WebGl2RenderingContext::TEXTURE_2D,
+        0,
+        WebGl2RenderingContext::RGBA as i32,
+        width as i32,
+        height as i32,
+        0,
+        WebGl2RenderingContext::RGBA,
+        WebGl2RenderingContext::UNSIGNED_BYTE,
+        Some(&rgba_data),
+    );
+    if let Err(ref e) = upload_result {
+        web_sys::console::error_1(&format!("[3D-TEX] tex_image_2d failed: {:?}", e).into());
+    }
+    gl.generate_mipmap(WebGl2RenderingContext::TEXTURE_2D);
+    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+    Some((texture, width, height))
 }
 
 // ─── DXT texture decompression ───

@@ -360,6 +360,7 @@ impl CastMemberRefHandlers {
                                         for (tex_name, tex_data) in &src_textures {
                                             if !scene.texture_images.contains_key(tex_name) {
                                                 scene.texture_images.insert(tex_name.clone(), tex_data.clone());
+                                                scene.texture_content_version += 1;
                                             }
                                         }
                                         for raw_mesh in &src_raw_meshes {
@@ -455,6 +456,7 @@ impl CastMemberRefHandlers {
                                             }
                                             "texture" => {
                                                 scene.texture_images.remove(&obj_name);
+                                                scene.texture_content_version += 1;
                                             }
                                             _ => {}
                                         }
@@ -575,28 +577,45 @@ impl CastMemberRefHandlers {
                                     let rgba_data = {
                                         let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
                                         src_member.and_then(|m| {
-                                            match &m.member_type {
+                                            let bmp_ref = match &m.member_type {
                                                 CastMemberType::Bitmap(bmp_member) => {
-                                                    let bmp = player.bitmap_manager.get_bitmap(bmp_member.image_ref)?;
-                                                    let w = bmp.width;
-                                                    let h = bmp.height;
-                                                    let palettes = player.movie.cast_manager.palettes();
-                                                    let mut rgba = vec![255u8; (w as usize) * (h as usize) * 4];
-                                                    for y in 0..h as usize {
-                                                        for x in 0..w as usize {
-                                                            let (r, g, b) = bmp.get_pixel_color(&palettes, x as u16, y as u16);
-                                                            let idx = (y * w as usize + x) * 4;
-                                                            rgba[idx] = r;
-                                                            rgba[idx + 1] = g;
-                                                            rgba[idx + 2] = b;
-                                                        }
-                                                    }
-                                                    Some((w, h, rgba))
+                                                    Some(bmp_member.image_ref)
                                                 }
                                                 _ => None,
+                                            };
+                                            if let Some(image_ref) = bmp_ref {
+                                                let bmp = player.bitmap_manager.get_bitmap(image_ref)?;
+                                                let w = bmp.width;
+                                                let h = bmp.height;
+                                                let palettes = player.movie.cast_manager.palettes();
+                                                let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                                                for y in 0..h as usize {
+                                                    for x in 0..w as usize {
+                                                        let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
+                                                        let idx = (y * w as usize + x) * 4;
+                                                        rgba[idx] = r;
+                                                        rgba[idx + 1] = g;
+                                                        rgba[idx + 2] = b;
+                                                        rgba[idx + 3] = a;
+                                                    }
+                                                }
+                                                Some((w, h, rgba))
+                                            } else {
+                                                web_sys::console::warn_1(&format!(
+                                                    "[W3D] newTexture #fromCastMember: member {}:{} '{}' is not a Bitmap (type={:?}), skipping",
+                                                    src_ref.cast_lib, src_ref.cast_member, m.name,
+                                                    m.member_type.type_string()
+                                                ).into());
+                                                None
                                             }
                                         })
                                     };
+                                    if rgba_data.is_none() {
+                                        web_sys::console::warn_1(&format!(
+                                            "[W3D] newTexture(\"{}\", #fromCastMember): FAILED for member {}:{}",
+                                            obj_name, src_ref.cast_lib, src_ref.cast_member
+                                        ).into());
+                                    }
                                     if let Some((w, h, rgba)) = rgba_data {
                                         let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref);
                                         if let Some(member) = member {
@@ -607,7 +626,8 @@ impl CastMemberRefHandlers {
                                                     tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&rgba);
                                                     scene.texture_images.insert(obj_name.clone(), tex_data);
-                                                    web_sys::console::log_1(&format!(
+                                                    scene.texture_content_version += 1;
+                                                    web_sys::console::warn_1(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): stored {}x{} RGBA",
                                                         obj_name, w, h
                                                     ).into());
@@ -623,15 +643,15 @@ impl CastMemberRefHandlers {
                                         let w = bmp.width;
                                         let h = bmp.height;
                                         let palettes = player.movie.cast_manager.palettes();
-                                        let mut rgba = vec![255u8; (w as usize) * (h as usize) * 4];
+                                        let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
                                         for y in 0..h as usize {
                                             for x in 0..w as usize {
-                                                let (r, g, b) = bmp.get_pixel_color(&palettes, x as u16, y as u16);
+                                                let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
                                                 let idx = (y * w as usize + x) * 4;
                                                 rgba[idx] = r;
                                                 rgba[idx + 1] = g;
                                                 rgba[idx + 2] = b;
-                                                // Alpha stays 255 (opaque)
+                                                rgba[idx + 3] = a;
                                             }
                                         }
                                         Some((w, h, rgba))
@@ -650,6 +670,7 @@ impl CastMemberRefHandlers {
                                                     tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&rgba);
                                                     scene.texture_images.insert(obj_name.clone(), tex_data);
+                                                    scene.texture_content_version += 1;
                                                     web_sys::console::log_1(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromImageObject): stored {}x{} RGBA",
                                                         obj_name, w, h
@@ -693,6 +714,7 @@ impl CastMemberRefHandlers {
                             lights: Vec::new(), texture_images: HashMap::new(), texture_infos: Vec::new(),
                             skeletons: Vec::new(), motions: Vec::new(), model_resources: HashMap::new(),
                             clod_meshes: HashMap::new(), raw_meshes: Vec::new(),
+                            texture_content_version: 0,
                         };
                         empty_scene.nodes.push(W3dNode {
                             name: "World".to_string(),

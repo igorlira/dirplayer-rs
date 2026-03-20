@@ -768,6 +768,65 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 }
+                "image" if s3d_ref.object_type == "texture" => {
+                    // texture("name").image = bitmapObject
+                    // Convert bitmap to RGBA and store in scene.texture_images
+                    let bitmap_ref = match value {
+                        Datum::BitmapRef(r) => Some(*r),
+                        _ => None,
+                    };
+                    if let Some(bmp_ref) = bitmap_ref {
+                        let rgba_data = if let Some(bmp) = player.bitmap_manager.get_bitmap(bmp_ref) {
+                            let w = bmp.width;
+                            let h = bmp.height;
+                            let palettes = player.movie.cast_manager.palettes();
+                            let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                            for y in 0..h as usize {
+                                for x in 0..w as usize {
+                                    let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
+                                    let idx = (y * w as usize + x) * 4;
+                                    rgba[idx] = r;
+                                    rgba[idx + 1] = g;
+                                    rgba[idx + 2] = b;
+                                    rgba[idx + 3] = a;
+                                }
+                            }
+                            Some((w, h, rgba))
+                        } else {
+                            None
+                        };
+                        if let Some((w, h, mut rgba)) = rgba_data {
+                            // When use_alpha bitmap has white opaque pixels (255,255,255,255),
+                            // make them transparent. This handles the case where setAlpha(0)
+                            // set background transparent but copyPixels overwrote alpha to 255.
+                            // White background pixels should remain transparent for overlay compositing.
+                            if let Some(bmp) = player.bitmap_manager.get_bitmap(bmp_ref) {
+                                if bmp.use_alpha {
+                                    let total = (w as usize) * (h as usize);
+                                    for i in 0..total {
+                                        let idx = i * 4;
+                                        if rgba[idx] == 255 && rgba[idx+1] == 255 && rgba[idx+2] == 255 && rgba[idx+3] == 255 {
+                                            rgba[idx+3] = 0; // Make white background transparent
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        let mut tex_data = Vec::with_capacity(8 + rgba.len());
+                                        tex_data.extend_from_slice(&(w as u32).to_le_bytes());
+                                        tex_data.extend_from_slice(&(h as u32).to_le_bytes());
+                                        tex_data.extend_from_slice(&rgba);
+                                        scene.texture_images.insert(s3d_ref.name.clone(), tex_data);
+                                        scene.texture_content_version += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                }
                 _ => {
                     // Handle meshDeformTexLayer.textureCoordinateList = data
                     if s3d_ref.object_type == "emitter" {
