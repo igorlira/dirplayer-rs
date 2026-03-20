@@ -596,7 +596,6 @@ impl Shockwave3dRuntimeState {
                 cx*sy,   -sx,   cx*cy,   0.0,
                 px,       py,   pz,      1.0,
             ];
-            state.node_transforms.insert("DefaultView".to_string(), m);
             state.node_transforms.insert("defaultview".to_string(), m);
         }
         if let Some(bg) = info.bg_color {
@@ -1526,9 +1525,9 @@ impl CastMember {
         let mut scene = W3dScene::default();
         // Director always creates a DefaultView camera in empty 3D members
         scene.nodes.push(W3dNode {
-            name: "DefaultView".to_string(),
+            name: "defaultview".to_string(),
             node_type: W3dNodeType::View,
-            parent_name: "World".to_string(),
+            parent_name: "world".to_string(),
             resource_name: String::new(),
             model_resource_name: String::new(),
             shader_name: String::new(),
@@ -1541,7 +1540,7 @@ impl CastMember {
         });
         // Default ambient light
         scene.lights.push(W3dLight {
-            name: "DefaultAmbient".to_string(),
+            name: "defaultambient".to_string(),
             light_type: W3dLightType::Ambient,
             color: [0.3, 0.3, 0.3],
             enabled: true,
@@ -1550,7 +1549,7 @@ impl CastMember {
         });
         // Default directional light (IFX default: 0.75)
         scene.lights.push(W3dLight {
-            name: "DefaultDirectional".to_string(),
+            name: "defaultdirectional".to_string(),
             light_type: W3dLightType::Directional,
             color: [0.75, 0.75, 0.75],
             enabled: true,
@@ -1559,10 +1558,10 @@ impl CastMember {
         });
         // Light node for the directional light — rotated to point from upper-right
         scene.nodes.push(W3dNode {
-            name: "DefaultDirectional".to_string(),
+            name: "defaultdirectional".to_string(),
             node_type: W3dNodeType::Light,
-            parent_name: "World".to_string(),
-            resource_name: "DefaultDirectional".to_string(),
+            parent_name: "world".to_string(),
+            resource_name: "defaultdirectional".to_string(),
             model_resource_name: String::new(),
             shader_name: String::new(),
             near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
@@ -1950,9 +1949,9 @@ impl CastMember {
                             web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes",
                                 scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len()).into());
                             // Ensure DefaultShader exists
-                            if !scene.shaders.iter().any(|s| s.name == "DefaultShader") {
+                            if !scene.shaders.iter().any(|s| s.name.eq_ignore_ascii_case("DefaultShader")) {
                                 scene.shaders.push(crate::director::chunks::w3d::types::W3dShader {
-                                    name: "DefaultShader".to_string(),
+                                    name: "defaultshader".to_string(),
                                     ..Default::default()
                                 });
                             }
