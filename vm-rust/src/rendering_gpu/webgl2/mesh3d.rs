@@ -20,8 +20,16 @@ pub struct Mesh3dBuffers {
     #[allow(dead_code)]
     vbo_texcoords2: Option<WebGlBuffer>,
     #[allow(dead_code)]
+    vbo_bone_indices: Option<WebGlBuffer>,
+    #[allow(dead_code)]
+    vbo_bone_weights: Option<WebGlBuffer>,
+    #[allow(dead_code)]
+    vbo_vertex_colors: Option<WebGlBuffer>,
+    #[allow(dead_code)]
     ibo: WebGlBuffer,
     pub index_count: i32,
+    pub has_bones: bool,
+    pub has_vertex_colors: bool,
 }
 
 impl Mesh3dBuffers {
@@ -32,6 +40,8 @@ impl Mesh3dBuffers {
     /// - Location 1: normal (vec3)
     /// - Location 2: texcoord (vec2) - primary UV set
     /// - Location 3: texcoord2 (vec2) - secondary UV set (lightmap/shadow)
+    /// - Location 4: bone_indices (vec4) - up to 4 bone indices per vertex
+    /// - Location 5: bone_weights (vec4) - up to 4 bone weights per vertex
     pub fn new(
         context: &WebGL2Context,
         positions: &[[f32; 3]],
@@ -39,6 +49,35 @@ impl Mesh3dBuffers {
         texcoords: Option<&[[f32; 2]]>,
         texcoords2: Option<&[[f32; 2]]>,
         faces: &[[u32; 3]],
+    ) -> Result<Self, JsValue> {
+        Self::new_with_bones(context, positions, normals, texcoords, texcoords2, faces, None, None)
+    }
+
+    /// Upload mesh data with optional bone indices/weights for skeletal skinning.
+    pub fn new_with_bones(
+        context: &WebGL2Context,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        texcoords: Option<&[[f32; 2]]>,
+        texcoords2: Option<&[[f32; 2]]>,
+        faces: &[[u32; 3]],
+        bone_indices: Option<&[[f32; 4]]>,
+        bone_weights: Option<&[[f32; 4]]>,
+    ) -> Result<Self, JsValue> {
+        Self::new_full(context, positions, normals, texcoords, texcoords2, faces, bone_indices, bone_weights, None)
+    }
+
+    /// Upload mesh data with all optional attributes.
+    pub fn new_full(
+        context: &WebGL2Context,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        texcoords: Option<&[[f32; 2]]>,
+        texcoords2: Option<&[[f32; 2]]>,
+        faces: &[[u32; 3]],
+        bone_indices: Option<&[[f32; 4]]>,
+        bone_weights: Option<&[[f32; 4]]>,
+        vertex_colors: Option<&[[f32; 4]]>,
     ) -> Result<Self, JsValue> {
         let gl = context.gl();
 
@@ -117,6 +156,70 @@ impl Mesh3dBuffers {
             None
         };
 
+        // Bone indices (location 4) - packed as vec4 of floats
+        let has_bones = bone_indices.is_some() && bone_weights.is_some();
+        let vbo_bone_indices = if let Some(bi) = bone_indices {
+            let vbo = context.create_buffer()?;
+            gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&vbo));
+            let bi_flat: Vec<f32> = bi.iter().flat_map(|b| b.iter().copied()).collect();
+            unsafe {
+                let array = js_sys::Float32Array::view(&bi_flat);
+                gl.buffer_data_with_array_buffer_view(
+                    WebGl2RenderingContext::ARRAY_BUFFER,
+                    &array,
+                    WebGl2RenderingContext::STATIC_DRAW,
+                );
+            }
+            gl.enable_vertex_attrib_array(4);
+            gl.vertex_attrib_pointer_with_i32(4, 4, WebGl2RenderingContext::FLOAT, false, 0, 0);
+            Some(vbo)
+        } else {
+            gl.disable_vertex_attrib_array(4);
+            None
+        };
+
+        // Bone weights (location 5) - vec4
+        let vbo_bone_weights = if let Some(bw) = bone_weights {
+            let vbo = context.create_buffer()?;
+            gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&vbo));
+            let bw_flat: Vec<f32> = bw.iter().flat_map(|b| b.iter().copied()).collect();
+            unsafe {
+                let array = js_sys::Float32Array::view(&bw_flat);
+                gl.buffer_data_with_array_buffer_view(
+                    WebGl2RenderingContext::ARRAY_BUFFER,
+                    &array,
+                    WebGl2RenderingContext::STATIC_DRAW,
+                );
+            }
+            gl.enable_vertex_attrib_array(5);
+            gl.vertex_attrib_pointer_with_i32(5, 4, WebGl2RenderingContext::FLOAT, false, 0, 0);
+            Some(vbo)
+        } else {
+            gl.disable_vertex_attrib_array(5);
+            None
+        };
+
+        // Vertex colors (location 6) - vec4 RGBA
+        let vbo_vertex_colors = if let Some(vc) = vertex_colors {
+            let vbo = context.create_buffer()?;
+            gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&vbo));
+            let vc_flat: Vec<f32> = vc.iter().flat_map(|c| c.iter().copied()).collect();
+            unsafe {
+                let array = js_sys::Float32Array::view(&vc_flat);
+                gl.buffer_data_with_array_buffer_view(
+                    WebGl2RenderingContext::ARRAY_BUFFER,
+                    &array,
+                    WebGl2RenderingContext::STATIC_DRAW,
+                );
+            }
+            gl.enable_vertex_attrib_array(6);
+            gl.vertex_attrib_pointer_with_i32(6, 4, WebGl2RenderingContext::FLOAT, false, 0, 0);
+            Some(vbo)
+        } else {
+            gl.disable_vertex_attrib_array(6);
+            None
+        };
+
         // Index buffer
         let ibo = context.create_buffer()?;
         gl.bind_buffer(WebGl2RenderingContext::ELEMENT_ARRAY_BUFFER, Some(&ibo));
@@ -139,8 +242,13 @@ impl Mesh3dBuffers {
             vbo_normals,
             vbo_texcoords,
             vbo_texcoords2,
+            vbo_bone_indices,
+            vbo_bone_weights,
+            vbo_vertex_colors,
             ibo,
             index_count,
+            has_bones,
+            has_vertex_colors: vertex_colors.is_some(),
         })
     }
 
