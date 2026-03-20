@@ -161,12 +161,18 @@ impl W3dFileParser {
             // Parse minimally to consume bitstream correctly
             SKELETON_MODIFIER | MODIFIER_PARAM_92 | MODIFIER_PARAM_97 =>
                 self.parse_skeleton_modifier(&mut r)?,
-            MODIFIER_PARAM_94 => { /* MRM modifier param - skip */ }
-            MODIFIER_PARAM_95 => { /* Physics modifier param - skip */ }
-            SHADER_PAINTER_V0 | SHADER_PAINTER | SHADER_INKER => { /* Painter/Inker shader - skip */ }
-            SHADER_ENGRAVER | SHADER_NEWSPRINT | SHADER_PARTICLE => { /* Other shaders - skip */ }
-            UV_GENERATOR | SUBDIV_SURFACE | PHYSICS_MODIFIER | DEFORM_MODIFIER | INKER_MODIFIER => { /* Modifiers - skip */ }
-            ORIG_TEX_COORDS | TEX_COORDS => { /* Extra texcoord blocks - skip */ }
+            MODIFIER_PARAM_94 => self.parse_modifier_param(&mut r, "MRM")?,
+            MODIFIER_PARAM_95 => self.parse_modifier_param(&mut r, "Physics")?,
+            SHADER_PAINTER_V0 | SHADER_PAINTER | SHADER_INKER |
+            SHADER_ENGRAVER | SHADER_NEWSPRINT | SHADER_PARTICLE =>
+                self.parse_npr_shader(&mut r, block.block_type)?,
+            UV_GENERATOR => self.parse_uv_generator(&mut r)?,
+            SUBDIV_SURFACE => self.parse_subdiv_surface(&mut r)?,
+            PHYSICS_MODIFIER => self.parse_modifier_param(&mut r, "PhysicsMod")?,
+            DEFORM_MODIFIER => self.parse_modifier_param(&mut r, "DeformMod")?,
+            INKER_MODIFIER => self.parse_inker_modifier(&mut r)?,
+            ORIG_TEX_COORDS => self.parse_extra_texcoords(&mut r, "OrigTexCoords")?,
+            TEX_COORDS => self.parse_extra_texcoords(&mut r, "TexCoords")?,
 
             CONTEXT_SEP => { /* Context separator */ }
             _ => {}
@@ -378,6 +384,83 @@ impl W3dFileParser {
         }
 
         log(&format!("  Shader: \"{}\" material=\"{}\" layers={}", name, shader.material_name, shader.texture_layers.len()));
+        self.scene.shaders.push(shader);
+        Ok(())
+    }
+
+    /// Parse NPR shader blocks (Painter, Inker, Engraver, Newsprint, Particle).
+    /// These share the LitTexture base format (name, attrs, material, texture layers).
+    /// We parse what we can and tag the shader type for the renderer.
+    fn parse_npr_shader(&mut self, r: &mut W3dBlockReader, block_type: u32) -> Result<(), String> {
+        use crate::director::chunks::w3d::types::W3dShaderType;
+
+        let shader_type = match block_type {
+            SHADER_PAINTER_V0 | SHADER_PAINTER => W3dShaderType::Painter,
+            SHADER_INKER => W3dShaderType::Inker,
+            SHADER_ENGRAVER => W3dShaderType::Engraver,
+            SHADER_NEWSPRINT => W3dShaderType::Newsprint,
+            SHADER_PARTICLE => W3dShaderType::Particle,
+            _ => W3dShaderType::LitTexture,
+        };
+
+        // NPR shaders start with the same header as LitTexture
+        if r.remaining() < 4 { return Ok(()); } // too short
+        let name = match r.read_ifx_string() {
+            Ok(s) => s,
+            Err(_) => return Ok(()), // malformed — skip gracefully
+        };
+        let attrs = if r.remaining() >= 4 { r.read_u32()? } else { 0 };
+        let render_pass = if r.remaining() >= 4 { r.read_u32()? } else { 0 };
+
+        let mut shader = W3dShader {
+            name: name.clone(),
+            attrs,
+            render_pass,
+            shader_type,
+            ..Default::default()
+        };
+
+        // Try to read material name
+        if (attrs & 0x01) != 0 && r.remaining() >= 2 {
+            shader.material_name = r.read_ifx_string().unwrap_or_default();
+        }
+
+        // Try to read texture layers (same format as LitTexture)
+        let is_v200 = block_type == SHADER_PAINTER;
+        for layer in 0..8u32 {
+            if (attrs & (1 << (16 + layer))) == 0 { continue; }
+            if r.remaining() < 10 { break; } // not enough data
+            let tex_name = match r.read_ifx_string() {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            if r.remaining() < 4 + 1 + 1 + 4 + 1 + 64 + 64 + 1 { break; }
+            let intensity = r.read_f32()?;
+            let blend_func = r.read_u8()?;
+            let blend_src = r.read_u8()?;
+            let blend_const = r.read_f32()?;
+            let tex_mode = r.read_u8()?;
+            let tex_transform = r.read_matrix4x4()?;
+            let wrap_transform = r.read_matrix4x4()?;
+            let repeat_s = r.read_u8()?;
+            let repeat_t = if is_v200 { r.read_u8().unwrap_or(1) } else { 1 };
+
+            shader.texture_layers.push(W3dTextureLayer {
+                name: tex_name,
+                intensity,
+                blend_func,
+                blend_src,
+                blend_const,
+                tex_mode,
+                tex_transform,
+                wrap_transform,
+                repeat_s,
+                repeat_t,
+            });
+        }
+
+        log(&format!("  NPR Shader ({:?}): \"{}\" material=\"{}\" layers={}",
+            shader.shader_type, name, shader.material_name, shader.texture_layers.len()));
         self.scene.shaders.push(shader);
         Ok(())
     }
@@ -823,9 +906,66 @@ impl W3dFileParser {
         Ok(())
     }
 
+    fn parse_uv_generator(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
+        // UV Generator block: contains orientation mode + transform matrix
+        if r.remaining() < 4 { return Ok(()); }
+        let name = r.read_ifx_string().unwrap_or_default();
+        // Read orientation mode: 0=planar, 1=spherical, 2=cylindrical, 3=reflection
+        let mode = if r.remaining() >= 4 { r.read_u32().unwrap_or(0) as u8 } else { 0 };
+        log(&format!("  UV Generator: \"{}\" mode={}", name, mode));
+
+        // Store on the last model resource (UV generators follow their parent resource)
+        if let Some((_name, res)) = self.scene.model_resources.iter_mut().last() {
+            res.uv_gen_mode = Some(mode);
+        }
+        Ok(())
+    }
+
     fn parse_skeleton_modifier(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
         let _name = r.read_ifx_string()?;
-        // Consume remaining data to avoid trailing-bytes warnings
+        Ok(())
+    }
+
+    /// Parse generic modifier param blocks (MRM, Physics, etc.)
+    /// These have a name + variable data that we log but don't process.
+    fn parse_modifier_param(&mut self, r: &mut W3dBlockReader, kind: &str) -> Result<(), String> {
+        let name = if r.remaining() >= 2 {
+            r.read_ifx_string().unwrap_or_default()
+        } else { String::new() };
+        log(&format!("  {} modifier: \"{}\" ({} bytes)", kind, name, r.remaining()));
+        Ok(())
+    }
+
+    /// Parse subdivision surface block: stores depth/tension/error parameters.
+    fn parse_subdiv_surface(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
+        let name = if r.remaining() >= 2 {
+            r.read_ifx_string().unwrap_or_default()
+        } else { String::new() };
+        // Read SDS parameters if available
+        let depth = if r.remaining() >= 4 { r.read_u32().unwrap_or(1) } else { 1 };
+        let tension = if r.remaining() >= 4 { r.read_f32().unwrap_or(0.0) } else { 0.0 };
+        let error = if r.remaining() >= 4 { r.read_f32().unwrap_or(0.0) } else { 0.0 };
+        log(&format!("  Subdiv Surface: \"{}\" depth={} tension={:.2} error={:.2}", name, depth, tension, error));
+        Ok(())
+    }
+
+    /// Parse inker modifier: outline parameters for ShaderInker.
+    fn parse_inker_modifier(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
+        let name = if r.remaining() >= 2 {
+            r.read_ifx_string().unwrap_or_default()
+        } else { String::new() };
+        // Read inker parameters
+        let line_width = if r.remaining() >= 4 { r.read_f32().unwrap_or(1.0) } else { 1.0 };
+        log(&format!("  Inker Modifier: \"{}\" lineWidth={:.2} ({} bytes remaining)", name, line_width, r.remaining()));
+        Ok(())
+    }
+
+    /// Parse extra texcoord blocks (ORIG_TEX_COORDS, TEX_COORDS).
+    fn parse_extra_texcoords(&mut self, r: &mut W3dBlockReader, kind: &str) -> Result<(), String> {
+        let name = if r.remaining() >= 2 {
+            r.read_ifx_string().unwrap_or_default()
+        } else { String::new() };
+        log(&format!("  {}: \"{}\" ({} bytes)", kind, name, r.remaining()));
         Ok(())
     }
 

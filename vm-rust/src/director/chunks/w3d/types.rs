@@ -58,6 +58,20 @@ impl Default for W3dTextureLayer {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum W3dShaderType {
+    LitTexture,
+    Painter,
+    Inker,
+    Engraver,
+    Newsprint,
+    Particle,
+}
+
+impl Default for W3dShaderType {
+    fn default() -> Self { W3dShaderType::LitTexture }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct W3dShader {
     pub name: String,
@@ -65,6 +79,11 @@ pub struct W3dShader {
     pub attrs: u32,
     pub render_pass: u32,
     pub texture_layers: Vec<W3dTextureLayer>,
+    pub shader_type: W3dShaderType,
+    // NPR-specific fields
+    pub toon_steps: u32,      // ShaderPainter: number of quantization steps
+    pub outline_width: f32,   // ShaderInker: outline thickness
+    pub outline_color: [f32; 4], // ShaderInker: outline color (RGBA)
 }
 
 #[derive(Clone, Debug)]
@@ -346,6 +365,8 @@ pub struct ModelResourceInfo {
     pub spec_iq: f32,
     pub has_distal_edge_merge: bool,
     pub has_neighbor_mesh: bool,
+    /// UV generator mode: 0=planar, 1=spherical, 2=cylindrical, 3=reflection
+    pub uv_gen_mode: Option<u8>,
     pub sync_table: Option<Vec<Vec<u32>>>,
     pub distal_edge_merges: Option<Vec<Vec<DistalEdgeMergeRecord>>>,
 }
@@ -430,6 +451,8 @@ impl W3dScene {
             // Per-mesh: (vertex_offset, faces)
             let mut mesh_face_groups: Vec<(u32, Vec<[u32; 3]>)> = Vec::new();
 
+            let mut vertex_colors: Vec<[f32; 4]> = Vec::new();
+
             for mesh in meshes {
                 let vert_off = positions.len() as u32;
                 for pos in &mesh.positions {
@@ -439,6 +462,10 @@ impl W3dScene {
                     for tc in &mesh.tex_coords[0] {
                         texcoords.push(*tc);
                     }
+                }
+                // Collect vertex colors (diffuse)
+                for color in &mesh.diffuse_colors {
+                    vertex_colors.push(*color);
                 }
                 let mut faces = Vec::new();
                 for face in &mesh.faces {
@@ -461,13 +488,20 @@ impl W3dScene {
             let normals = recalculate_smooth_normals(&positions, &all_faces);
 
             // Write vertex data first (all v/vn/vt before any groups/faces)
-            for pos in &positions {
+            let has_vcolors = vertex_colors.len() == positions.len();
+            for (i, pos) in positions.iter().enumerate() {
                 let (px, py, pz) = if let Some(ref m) = world_transform {
                     transform_point(m, pos[0], pos[1], pos[2])
                 } else {
                     (pos[0], pos[1], pos[2])
                 };
-                obj.push_str(&format!("v {:.6} {:.6} {:.6}\n", px, py, pz));
+                if has_vcolors {
+                    let c = &vertex_colors[i];
+                    // Extended OBJ: v x y z r g b (supported by MeshLab, Blender, etc.)
+                    obj.push_str(&format!("v {:.6} {:.6} {:.6} {:.4} {:.4} {:.4}\n", px, py, pz, c[0], c[1], c[2]));
+                } else {
+                    obj.push_str(&format!("v {:.6} {:.6} {:.6}\n", px, py, pz));
+                }
             }
             for n in &normals {
                 let (nx, ny, nz) = if let Some(ref m) = world_transform {
@@ -528,9 +562,15 @@ impl W3dScene {
         for mesh in &self.raw_meshes {
             let safe_name = mesh.name.replace(' ', "_");
 
-            // Vertex data first
-            for pos in &mesh.positions {
-                obj.push_str(&format!("v {:.6} {:.6} {:.6}\n", pos[0], pos[1], pos[2]));
+            // Vertex data first (with optional vertex colors)
+            let has_raw_vcolors = mesh.vertex_colors.len() == mesh.positions.len();
+            for (i, pos) in mesh.positions.iter().enumerate() {
+                if has_raw_vcolors {
+                    let c = &mesh.vertex_colors[i];
+                    obj.push_str(&format!("v {:.6} {:.6} {:.6} {:.4} {:.4} {:.4}\n", pos[0], pos[1], pos[2], c[0], c[1], c[2]));
+                } else {
+                    obj.push_str(&format!("v {:.6} {:.6} {:.6}\n", pos[0], pos[1], pos[2]));
+                }
             }
             for norm in &mesh.normals {
                 obj.push_str(&format!("vn {:.6} {:.6} {:.6}\n", norm[0], norm[1], norm[2]));
@@ -545,6 +585,12 @@ impl W3dScene {
 
             // Group header after vertex data
             obj.push_str(&format!("\no {}\ng {}\n", safe_name, safe_name));
+
+            // Try to resolve material for raw mesh by name
+            let raw_mat = self.resolve_raw_mesh_material(&mesh.name);
+            if let Some(ref mat) = raw_mat {
+                obj.push_str(&format!("usemtl {}\n", mat.replace(' ', "_")));
+            }
 
             let has_normals = !mesh.normals.is_empty();
             for face in &mesh.faces {
@@ -596,7 +642,7 @@ impl W3dScene {
             mtl.push_str(&format!("d {:.4}\n", mat.opacity));
 
             // Find texture maps from shaders
-            if let Some(shader) = self.shaders.iter().find(|s| s.material_name == mat.name) {
+            if let Some(shader) = self.shaders.iter().find(|s| s.material_name.eq_ignore_ascii_case(&mat.name)) {
                 for layer in &shader.texture_layers {
                     if layer.name.is_empty() { continue; }
                     let ext = self.get_texture_extension(&layer.name);
@@ -613,6 +659,37 @@ impl W3dScene {
         mtl
     }
 
+    /// Export all texture images as a list of (filename, raw_bytes) pairs.
+    /// The raw bytes are in their original format (JPEG/PNG) or raw RGBA.
+    /// Raw RGBA textures (4-byte header: width_le16, height_le16, then RGBA pixels)
+    /// are converted to a simple TGA format for broader tool compatibility.
+    pub fn export_textures(&self) -> Vec<(String, Vec<u8>)> {
+        let mut result = Vec::new();
+        for (name, data) in &self.texture_images {
+            if data.is_empty() { continue; }
+            let ext = self.get_texture_extension(name);
+            let filename = format!("{}.{}", name, ext);
+
+            if ext == "jpg" || ext == "png" {
+                // Already in a standard format — pass through
+                result.push((filename, data.clone()));
+            } else if data.len() >= 4 {
+                // Raw RGBA: first 4 bytes are width(u16 LE) + height(u16 LE), rest is RGBA pixels
+                let w = u16::from_le_bytes([data[0], data[1]]) as u32;
+                let h = u16::from_le_bytes([data[2], data[3]]) as u32;
+                let pixel_data = &data[4..];
+                let expected = (w * h * 4) as usize;
+                if pixel_data.len() >= expected {
+                    // Convert to uncompressed TGA (type 2) for universal compatibility
+                    let tga = encode_tga_rgba(w, h, &pixel_data[..expected]);
+                    let tga_filename = format!("{}.tga", name);
+                    result.push((tga_filename, tga));
+                }
+            }
+        }
+        result
+    }
+
     fn get_texture_extension(&self, tex_name: &str) -> &str {
         if let Some(data) = self.texture_images.get(tex_name) {
             if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 { return "jpg"; }
@@ -622,14 +699,14 @@ impl W3dScene {
     }
 
     /// Resolve material name for a model resource via shader bindings and model nodes.
-    fn resolve_material_for_resource(&self, resource_name: &str) -> Option<String> {
+    pub fn resolve_material_for_resource(&self, resource_name: &str) -> Option<String> {
         // Try model node shader → material chain
         for node in &self.nodes {
             if node.node_type != W3dNodeType::Model { continue; }
             let res = if !node.model_resource_name.is_empty() { &node.model_resource_name } else { &node.resource_name };
             if res != resource_name { continue; }
             if !node.shader_name.is_empty() {
-                if let Some(shader) = self.shaders.iter().find(|s| s.name == node.shader_name) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&node.shader_name)) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }
@@ -640,24 +717,24 @@ impl W3dScene {
         if let Some(res) = self.model_resources.get(resource_name) {
             for binding in &res.shader_bindings {
                 // Try binding name as shader name
-                if let Some(shader) = self.shaders.iter().find(|s| s.name == binding.name) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&binding.name)) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }
                 }
                 // Try binding name as direct material name
-                if self.materials.iter().any(|m| m.name == binding.name) {
+                if self.materials.iter().any(|m| m.name.eq_ignore_ascii_case(&binding.name)) {
                     return Some(binding.name.clone());
                 }
                 // Try mesh binding names
                 for mesh_binding in &binding.mesh_bindings {
                     if mesh_binding.is_empty() { continue; }
-                    if let Some(shader) = self.shaders.iter().find(|s| s.name == *mesh_binding) {
+                    if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(mesh_binding)) {
                         if !shader.material_name.is_empty() {
                             return Some(shader.material_name.clone());
                         }
                     }
-                    if self.materials.iter().any(|m| m.name == *mesh_binding) {
+                    if self.materials.iter().any(|m| m.name.eq_ignore_ascii_case(mesh_binding)) {
                         return Some(mesh_binding.clone());
                     }
                 }
@@ -681,18 +758,18 @@ impl W3dScene {
                     let binding_name = &binding.mesh_bindings[mesh_idx];
                     if binding_name.is_empty() { continue; }
                     // Try as shader name → material
-                    if let Some(shader) = self.shaders.iter().find(|s| s.name == *binding_name) {
+                    if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(binding_name)) {
                         if !shader.material_name.is_empty() {
                             return Some(shader.material_name.clone());
                         }
                     }
                     // Try as direct material name
-                    if self.materials.iter().any(|m| m.name == *binding_name) {
+                    if self.materials.iter().any(|m| m.name.eq_ignore_ascii_case(binding_name)) {
                         return Some(binding_name.clone());
                     }
                 }
                 // Try binding.name as shader for all meshes
-                if let Some(shader) = self.shaders.iter().find(|s| s.name == binding.name) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&binding.name)) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }
@@ -700,6 +777,30 @@ impl W3dScene {
             }
         }
         None
+    }
+
+    /// Resolve material for a raw mesh by matching its name to model nodes and shader bindings.
+    fn resolve_raw_mesh_material(&self, mesh_name: &str) -> Option<String> {
+        // Try to find a model node that references this mesh
+        for node in &self.nodes {
+            if node.node_type != W3dNodeType::Model { continue; }
+            let res = if !node.model_resource_name.is_empty() { &node.model_resource_name } else { &node.resource_name };
+            if res != mesh_name { continue; }
+            if !node.shader_name.is_empty() {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&node.shader_name)) {
+                    if !shader.material_name.is_empty() {
+                        return Some(shader.material_name.clone());
+                    }
+                }
+            }
+        }
+        // Try matching mesh name as a resource name in shader bindings
+        self.resolve_material_for_resource(mesh_name)
+    }
+
+    /// Find world transform for a model resource from the scene graph (public).
+    pub fn find_transform_for_resource_pub(&self, resource_name: &str) -> Option<[f32; 16]> {
+        self.find_transform_for_resource(resource_name)
     }
 
     /// Find world transform for a model resource from the scene graph.
@@ -774,4 +875,31 @@ fn transform_normal(m: &[f32; 16], nx: f32, ny: f32, nz: f32) -> (f32, f32, f32)
 fn is_identity(m: &[f32; 16]) -> bool {
     let id = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
     m.iter().zip(id.iter()).all(|(a, b)| (a - b).abs() < 1e-6)
+}
+
+/// Encode raw RGBA pixel data as an uncompressed TGA file (type 2, 32-bit BGRA).
+fn encode_tga_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let w = width as u16;
+    let h = height as u16;
+    // TGA header: 18 bytes
+    let mut tga = Vec::with_capacity(18 + rgba.len());
+    tga.push(0);           // ID length
+    tga.push(0);           // Color map type (none)
+    tga.push(2);           // Image type (uncompressed true-color)
+    tga.extend_from_slice(&[0, 0, 0, 0, 0]); // Color map spec (unused)
+    tga.extend_from_slice(&[0, 0]); // X origin
+    tga.extend_from_slice(&[0, 0]); // Y origin
+    tga.extend_from_slice(&w.to_le_bytes()); // Width
+    tga.extend_from_slice(&h.to_le_bytes()); // Height
+    tga.push(32);          // Bits per pixel (BGRA)
+    tga.push(0x28);        // Image descriptor: top-left origin + 8 alpha bits
+
+    // Convert RGBA to BGRA (TGA native order)
+    for pixel in rgba.chunks_exact(4) {
+        tga.push(pixel[2]); // B
+        tga.push(pixel[1]); // G
+        tga.push(pixel[0]); // R
+        tga.push(pixel[3]); // A
+    }
+    tga
 }
