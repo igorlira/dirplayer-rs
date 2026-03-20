@@ -145,31 +145,30 @@ fn transform_dir_4x4(m: &[f32; 16], x: f32, y: f32, z: f32) -> [f32; 3] {
     ])
 }
 
-/// Test ray against a single mesh
+/// Test ray against a single mesh, using BVH acceleration for large meshes.
 fn raycast_mesh(
     ray: &Ray,
     positions: &[[f32; 3]],
-    normals: &[[f32; 3]],
+    _normals: &[[f32; 3]],
     faces: &[[u32; 3]],
     model_name: &str,
     max_dist: f32,
 ) -> Option<RayHit> {
-    let mut closest: Option<RayHit> = None;
+    // Use BVH for meshes with enough faces to benefit
+    if faces.len() > 32 {
+        let mut indices: Vec<usize> = (0..faces.len()).collect();
+        let bvh = build_bvh(positions, faces, &mut indices);
+        return raycast_bvh(ray, &bvh, positions, faces, model_name, max_dist);
+    }
 
+    // Brute-force for small meshes
+    let mut closest: Option<RayHit> = None;
     for (face_idx, face) in faces.iter().enumerate() {
         let i0 = face[0] as usize;
         let i1 = face[1] as usize;
         let i2 = face[2] as usize;
-
-        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
-            continue;
-        }
-
-        let v0 = positions[i0];
-        let v1 = positions[i1];
-        let v2 = positions[i2];
-
-        if let Some((t, _u, _v)) = ray_triangle_intersect(ray, &v0, &v1, &v2) {
+        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() { continue; }
+        if let Some((t, _u, _v)) = ray_triangle_intersect(ray, &positions[i0], &positions[i1], &positions[i2]) {
             if t > 0.0 && t < max_dist {
                 if closest.as_ref().map_or(true, |c| t < c.distance) {
                     let pos = [
@@ -177,12 +176,9 @@ fn raycast_mesh(
                         ray.origin[1] + ray.direction[1] * t,
                         ray.origin[2] + ray.direction[2] * t,
                     ];
-
-                    // Compute face normal
-                    let edge1 = sub(v1, v0);
-                    let edge2 = sub(v2, v0);
+                    let edge1 = sub(positions[i1], positions[i0]);
+                    let edge2 = sub(positions[i2], positions[i0]);
                     let normal = normalize(cross(edge1, edge2));
-
                     closest = Some(RayHit {
                         model_name: model_name.to_string(),
                         distance: t,
@@ -194,7 +190,6 @@ fn raycast_mesh(
             }
         }
     }
-
     closest
 }
 
@@ -236,6 +231,185 @@ fn ray_triangle_intersect(
         Some((t, u, v))
     } else {
         None
+    }
+}
+
+// ─── AABB BVH for accelerated ray casting ───
+
+struct Aabb {
+    min: [f32; 3],
+    max: [f32; 3],
+}
+
+impl Aabb {
+    fn new() -> Self {
+        Self {
+            min: [f32::MAX; 3],
+            max: [f32::MIN; 3],
+        }
+    }
+
+    fn expand_point(&mut self, p: &[f32; 3]) {
+        for i in 0..3 {
+            if p[i] < self.min[i] { self.min[i] = p[i]; }
+            if p[i] > self.max[i] { self.max[i] = p[i]; }
+        }
+    }
+
+    fn merge(&mut self, other: &Aabb) {
+        for i in 0..3 {
+            if other.min[i] < self.min[i] { self.min[i] = other.min[i]; }
+            if other.max[i] > self.max[i] { self.max[i] = other.max[i]; }
+        }
+    }
+
+    fn largest_axis(&self) -> usize {
+        let dx = self.max[0] - self.min[0];
+        let dy = self.max[1] - self.min[1];
+        let dz = self.max[2] - self.min[2];
+        if dx >= dy && dx >= dz { 0 } else if dy >= dz { 1 } else { 2 }
+    }
+
+    fn centroid(&self) -> [f32; 3] {
+        [
+            (self.min[0] + self.max[0]) * 0.5,
+            (self.min[1] + self.max[1]) * 0.5,
+            (self.min[2] + self.max[2]) * 0.5,
+        ]
+    }
+
+    /// Ray-AABB intersection using the slab method.
+    fn ray_intersect(&self, ray: &Ray, max_dist: f32) -> bool {
+        let mut tmin = 0.0f32;
+        let mut tmax = max_dist;
+        for i in 0..3 {
+            let inv_d = if ray.direction[i].abs() > 1e-12 { 1.0 / ray.direction[i] } else { 1e12 };
+            let mut t0 = (self.min[i] - ray.origin[i]) * inv_d;
+            let mut t1 = (self.max[i] - ray.origin[i]) * inv_d;
+            if inv_d < 0.0 { std::mem::swap(&mut t0, &mut t1); }
+            if t0 > tmin { tmin = t0; }
+            if t1 < tmax { tmax = t1; }
+            if tmax < tmin { return false; }
+        }
+        true
+    }
+}
+
+enum BvhNode {
+    Leaf { face_indices: Vec<usize> },
+    Inner { bounds: Aabb, left: Box<BvhNode>, right: Box<BvhNode> },
+}
+
+/// Build a BVH from face centroids using top-down median split.
+fn build_bvh(positions: &[[f32; 3]], faces: &[[u32; 3]], indices: &mut [usize]) -> BvhNode {
+    const MAX_LEAF_SIZE: usize = 8;
+
+    if indices.len() <= MAX_LEAF_SIZE {
+        return BvhNode::Leaf { face_indices: indices.to_vec() };
+    }
+
+    // Compute bounds of all face centroids
+    let mut bounds = Aabb::new();
+    for &fi in indices.iter() {
+        let f = &faces[fi];
+        for &vi in f {
+            if (vi as usize) < positions.len() {
+                bounds.expand_point(&positions[vi as usize]);
+            }
+        }
+    }
+
+    let axis = bounds.largest_axis();
+
+    // Sort by centroid along largest axis
+    indices.sort_by(|&a, &b| {
+        let ca = face_centroid(positions, &faces[a]);
+        let cb = face_centroid(positions, &faces[b]);
+        ca[axis].partial_cmp(&cb[axis]).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mid = indices.len() / 2;
+    let (left_idx, right_idx) = indices.split_at_mut(mid);
+
+    let left = build_bvh(positions, faces, left_idx);
+    let right = build_bvh(positions, faces, right_idx);
+
+    BvhNode::Inner {
+        bounds,
+        left: Box::new(left),
+        right: Box::new(right),
+    }
+}
+
+fn face_centroid(positions: &[[f32; 3]], face: &[u32; 3]) -> [f32; 3] {
+    let i0 = face[0] as usize;
+    let i1 = face[1] as usize;
+    let i2 = face[2] as usize;
+    if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+        return [0.0; 3];
+    }
+    [
+        (positions[i0][0] + positions[i1][0] + positions[i2][0]) / 3.0,
+        (positions[i0][1] + positions[i1][1] + positions[i2][1]) / 3.0,
+        (positions[i0][2] + positions[i1][2] + positions[i2][2]) / 3.0,
+    ]
+}
+
+/// Raycast against a BVH tree, returning closest hit.
+fn raycast_bvh(
+    ray: &Ray,
+    node: &BvhNode,
+    positions: &[[f32; 3]],
+    faces: &[[u32; 3]],
+    model_name: &str,
+    max_dist: f32,
+) -> Option<RayHit> {
+    match node {
+        BvhNode::Leaf { face_indices } => {
+            let mut closest: Option<RayHit> = None;
+            for &fi in face_indices {
+                let face = &faces[fi];
+                let i0 = face[0] as usize;
+                let i1 = face[1] as usize;
+                let i2 = face[2] as usize;
+                if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() { continue; }
+                if let Some((t, _u, _v)) = ray_triangle_intersect(ray, &positions[i0], &positions[i1], &positions[i2]) {
+                    let cdist = closest.as_ref().map(|c| c.distance).unwrap_or(max_dist);
+                    if t > 0.0 && t < cdist {
+                        let pos = [
+                            ray.origin[0] + ray.direction[0] * t,
+                            ray.origin[1] + ray.direction[1] * t,
+                            ray.origin[2] + ray.direction[2] * t,
+                        ];
+                        let edge1 = sub(positions[i1], positions[i0]);
+                        let edge2 = sub(positions[i2], positions[i0]);
+                        let normal = normalize(cross(edge1, edge2));
+                        closest = Some(RayHit {
+                            model_name: model_name.to_string(),
+                            distance: t,
+                            position: pos,
+                            normal,
+                            face_index: fi as u32,
+                        });
+                    }
+                }
+            }
+            closest
+        }
+        BvhNode::Inner { bounds, left, right } => {
+            if !bounds.ray_intersect(ray, max_dist) {
+                return None;
+            }
+            let hit_left = raycast_bvh(ray, left, positions, faces, model_name, max_dist);
+            let new_max = hit_left.as_ref().map(|h| h.distance).unwrap_or(max_dist);
+            let hit_right = raycast_bvh(ray, right, positions, faces, model_name, new_max);
+
+            match (hit_left, hit_right) {
+                (Some(l), Some(r)) => if l.distance <= r.distance { Some(l) } else { Some(r) },
+                (Some(h), None) | (None, Some(h)) => Some(h),
+                (None, None) => None,
+            }
+        }
     }
 }
 
