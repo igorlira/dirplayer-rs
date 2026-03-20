@@ -824,21 +824,26 @@ pub fn export_w3d_obj(cast_lib: i32, cast_member: i32) {
             member.name.replace(' ', "_")
         };
 
-        // Build ZIP containing OBJ + MTL + textures
+        // Build ZIP containing OBJ + MTL + GLB + textures
         let mtl_filename = format!("{}.mtl", name);
         let obj_data = scene.export_obj_with_mtl(&mtl_filename);
         let mtl_data = scene.export_mtl(&mtl_filename);
+        let glb_data = crate::director::chunks::w3d::gltf_export::export_glb(scene);
 
         let obj_filename = format!("{}.obj", name);
-        let zip_data = build_zip(&obj_filename, obj_data.as_bytes(),
-                                 &mtl_filename, mtl_data.as_bytes(),
-                                 &scene.texture_images);
+        let glb_filename = format!("{}.glb", name);
+        let zip_data = build_zip_with_glb(
+            &obj_filename, obj_data.as_bytes(),
+            &mtl_filename, mtl_data.as_bytes(),
+            &glb_filename, &glb_data,
+            &scene.texture_images,
+        );
 
         trigger_browser_download(&format!("{}.zip", name), &zip_data, "application/zip");
 
         web_sys::console::log_1(&format!(
-            "Exported {}.obj ({} bytes), {}.mtl ({} bytes), {} textures",
-            name, obj_data.len(), name, mtl_data.len(), scene.texture_images.len()
+            "Exported {}.obj ({} bytes), {}.mtl ({} bytes), {}.glb ({} bytes), {} textures",
+            name, obj_data.len(), name, mtl_data.len(), name, glb_data.len(), scene.texture_images.len()
         ).into());
     });
 }
@@ -869,14 +874,16 @@ pub fn list_w3d_members() -> String {
 }
 
 /// Build a minimal uncompressed ZIP file containing OBJ + MTL + textures
-fn build_zip(
+fn build_zip_with_glb(
     obj_name: &str, obj_data: &[u8],
     mtl_name: &str, mtl_data: &[u8],
+    glb_name: &str, glb_data: &[u8],
     textures: &std::collections::HashMap<String, Vec<u8>>,
 ) -> Vec<u8> {
     let mut files: Vec<(String, &[u8])> = Vec::new();
     files.push((obj_name.to_string(), obj_data));
     files.push((mtl_name.to_string(), mtl_data));
+    files.push((glb_name.to_string(), glb_data));
 
     for (tex_name, image_data) in textures {
         let ext = if image_data.len() >= 2 && image_data[0] == 0xFF && image_data[1] == 0xD8 {

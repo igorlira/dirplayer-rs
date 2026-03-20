@@ -14,6 +14,8 @@ pub mod primitives;
 pub mod parser;
 pub mod raycast;
 pub mod skeleton;
+pub mod gltf_export;
+pub mod subdivision;
 
 pub use types::W3dScene;
 
