@@ -848,9 +848,7 @@ void main() {
         gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
 
         gl.enable(WebGl2RenderingContext::CULL_FACE);
-        // Y-flip in projection inverts winding → cull FRONT instead of BACK
-        gl.cull_face(WebGl2RenderingContext::FRONT);
-        gl.front_face(WebGl2RenderingContext::CCW);
+        gl.cull_face(WebGl2RenderingContext::BACK);
 
         gl.use_program(Some(&shader.program));
 
@@ -873,7 +871,7 @@ void main() {
 
             // Try to find and bind material + texture from scene shaders
             let mut tex_bound = false;
-            if let Some(mat) = scene.materials.iter().find(|m| !m.name.to_lowercase().contains("default")) {
+            if let Some(mat) = scene.materials.iter().find(|m| !m.name.contains("Default")) {
                 self.set_material_uniforms(gl, shader, mat);
             } else {
                 self.bind_default_material(gl, shader, scene);
@@ -1087,7 +1085,7 @@ void main() {
                         mi, motion.name, motion.tracks.len(), motion.duration()
                     ).into());
                     for track in &motion.tracks {
-                        let node_type = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&track.bone_name))
+                        let node_type = scene.nodes.iter().find(|n| n.name == track.bone_name)
                             .map(|n| format!("{:?}", n.node_type)).unwrap_or("NOT_FOUND".into());
                         web_sys::console::log_1(&format!(
                             "[3D-MOTION]   track '{}' ({}) {} keyframes, first_kf=[pos=({:.1},{:.1},{:.1}) rot=({:.3},{:.3},{:.3},{:.3})]",
@@ -1183,20 +1181,6 @@ void main() {
                 }
 
 
-                // One-time draw diagnostic
-                {
-                    static DRAW_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !DRAW_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        let m0 = model_nodes.first().map(|n| n.transform).unwrap_or([0.0;16]);
-                        web_sys::console::warn_1(&format!(
-                            "[3D-DRAW] drawn={} view_t=({:.1},{:.1},{:.1}) model0_t=({:.1},{:.1},{:.1}) proj=({:.3},{:.3},{:.3},{:.3})",
-                            draw_stats.0,
-                            view_matrix[12], view_matrix[13], view_matrix[14],
-                            m0[12], m0[13], m0[14],
-                            projection_matrix[0], projection_matrix[5], projection_matrix[10], projection_matrix[11],
-                        ).into());
-                    }
-                }
             }
         }
 
@@ -1402,7 +1386,7 @@ void main() {
 
         // Walk up parent chain
         while !current_parent.is_empty() && current_parent != "<world>" {
-            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(current_parent)) {
+            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
                 let parent_t = runtime_state
                     .and_then(|rs| rs.node_transforms.get(&parent_node.name))
                     .copied()
@@ -1498,12 +1482,12 @@ void main() {
             .unwrap_or_else(|| model_node.shader_name.clone());
 
         if !effective_shader_name.is_empty() {
-            if let Some(w3d_shader) = scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&effective_shader_name)) {
+            if let Some(w3d_shader) = scene.shaders.iter().find(|s| s.name == effective_shader_name) {
                 // Find material: try shader's material_name, then shader name itself
                 let mat = if !w3d_shader.material_name.is_empty() {
-                    scene.materials.iter().find(|m| m.name.eq_ignore_ascii_case(&w3d_shader.material_name))
+                    scene.materials.iter().find(|m| m.name == w3d_shader.material_name)
                 } else { None }
-                    .or_else(|| scene.materials.iter().find(|m| m.name.eq_ignore_ascii_case(&w3d_shader.name)));
+                    .or_else(|| scene.materials.iter().find(|m| m.name == w3d_shader.name));
                 if let Some(mat) = mat {
                     self.set_material_uniforms(gl, shader, mat);
                     mat_found = true;
@@ -1540,8 +1524,8 @@ void main() {
             if let Some(res_info) = scene.model_resources.get(resource) {
                 if let Some(binding) = res_info.shader_bindings.first() {
                     // Resolve binding name → shader → material
-                    if let Some(w3d_shader) = scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&binding.name)) {
-                        if let Some(mat) = scene.materials.iter().find(|m| m.name.eq_ignore_ascii_case(&w3d_shader.material_name)) {
+                    if let Some(w3d_shader) = scene.shaders.iter().find(|s| s.name == binding.name) {
+                        if let Some(mat) = scene.materials.iter().find(|m| m.name == w3d_shader.material_name) {
                             self.set_material_uniforms(gl, shader, mat);
                             mat_found = true;
                         }
@@ -1580,8 +1564,8 @@ void main() {
         // Apply blend mode based on material opacity and first texture layer's blend function
         let first_blend_func = self.get_first_blend_func(scene, model_node, runtime_state);
         let opacity = scene.shaders.iter()
-            .find(|s| s.name.eq_ignore_ascii_case(&effective_shader_name))
-            .and_then(|s| scene.materials.iter().find(|m| m.name.eq_ignore_ascii_case(&s.material_name)))
+            .find(|s| s.name == effective_shader_name)
+            .and_then(|s| scene.materials.iter().find(|m| m.name == s.material_name))
             .map(|m| m.opacity)
             .unwrap_or(1.0);
         Self::apply_blend_mode(gl, opacity, first_blend_func);
@@ -1594,7 +1578,7 @@ void main() {
             .cloned()
             .unwrap_or_else(|| node.shader_name.clone());
         scene.shaders.iter()
-            .find(|s| s.name.eq_ignore_ascii_case(&effective_shader))
+            .find(|s| s.name == effective_shader)
             .and_then(|s| s.texture_layers.first())
             .map(|l| l.blend_func)
             .unwrap_or(0)
@@ -1629,10 +1613,10 @@ void main() {
                 &binding.name
             };
             let w3d_shader = if !mesh_binding_name.is_empty() {
-                scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(mesh_binding_name))
+                scene.shaders.iter().find(|s| s.name == *mesh_binding_name)
             } else {
                 None
-            }.or_else(|| scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&binding.name)));
+            }.or_else(|| scene.shaders.iter().find(|s| s.name == binding.name));
 
             if w3d_shader.is_none() { continue; }
             let w3d_shader = w3d_shader.unwrap();
@@ -1643,11 +1627,11 @@ void main() {
             } else {
                 None
             };
-            let mat = mesh_bind_name.and_then(|n| scene.materials.iter().find(|m| m.name.eq_ignore_ascii_case(n)))
+            let mat = mesh_bind_name.and_then(|n| scene.materials.iter().find(|m| m.name == *n))
                 .or_else(|| if !w3d_shader.material_name.is_empty() {
-                    scene.materials.iter().find(|m| m.name.eq_ignore_ascii_case(&w3d_shader.material_name))
+                    scene.materials.iter().find(|m| m.name == w3d_shader.material_name)
                 } else { None })
-                .or_else(|| scene.materials.iter().find(|m| m.name.eq_ignore_ascii_case(&w3d_shader.name)));
+                .or_else(|| scene.materials.iter().find(|m| m.name == w3d_shader.name));
 
             // Try binding texture layers from this shader
             let mut tex_bound = false;
@@ -1742,7 +1726,7 @@ void main() {
         if node_name == root_name { return true; }
         let mut current = node_name;
         for _ in 0..20 { // max depth to prevent infinite loops
-            if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&current)) {
+            if let Some(node) = scene.nodes.iter().find(|n| n.name == current) {
                 if node.parent_name == root_name { return true; }
                 if node.parent_name.is_empty() { return false; }
                 current = &node.parent_name;
@@ -1755,12 +1739,12 @@ void main() {
 
     /// Check if any ancestor in the parent chain is in the detached set
     fn has_detached_ancestor(&self, scene: &W3dScene, parent_name: &str, detached: &std::collections::HashSet<&str>) -> bool {
-        if parent_name.is_empty() || parent_name.eq_ignore_ascii_case("World") { return false; }
+        if parent_name.is_empty() || parent_name == "World" { return false; }
         if detached.contains(parent_name) { return true; }
         // Walk up parent chain
         for _ in 0..10 {
-            if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(parent_name)) {
-                if node.parent_name.is_empty() || node.parent_name.eq_ignore_ascii_case("World") { return false; }
+            if let Some(node) = scene.nodes.iter().find(|n| n.name == parent_name) {
+                if node.parent_name.is_empty() || node.parent_name == "World" { return false; }
                 if detached.contains(node.parent_name.as_str()) { return true; }
                 return self.has_detached_ancestor(scene, &node.parent_name, detached);
             }
@@ -1776,18 +1760,18 @@ void main() {
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> ([f32; 16], [f32; 3]) {
         // 1. Determine which camera to use
-        let default_cam = "defaultview".to_string();
+        let default_cam = "DefaultView".to_string();
         let cam_name = self.active_camera.as_ref().unwrap_or(&default_cam);
 
         // 2. Find the camera node and accumulate its full world transform (including parent chain)
-        if let Some(node) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case(cam_name)) {
+        if let Some(node) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name == *cam_name) {
             let world_t = self.accumulate_transform_with_state(scene, node, runtime_state);
             let cam_pos = [world_t[12], world_t[13], world_t[14]];
             return (invert_transform(&world_t), cam_pos);
         }
         // Fallback: try any view node
         let view_node = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View);
-        let cam_name = view_node.map(|n| n.name.as_str()).unwrap_or("defaultview");
+        let cam_name = view_node.map(|n| n.name.as_str()).unwrap_or("DefaultView");
 
         // 3. Check runtime transform for this camera
         if let Some(rs) = runtime_state {
@@ -1885,7 +1869,7 @@ void main() {
                     W3dLightType::Spot => 3,
                 };
                 if let Some(light_node) = scene.nodes.iter().find(|n| {
-                    n.node_type == W3dNodeType::Light && (n.resource_name.eq_ignore_ascii_case(&light.name) || n.name.eq_ignore_ascii_case(&light.name))
+                    n.node_type == W3dNodeType::Light && (n.resource_name == light.name || n.name == light.name)
                 }) {
                     // Get light's world transform (accumulated through parent chain)
                     let world_t = self.accumulate_transform_with_state(scene, light_node, None);

@@ -275,12 +275,12 @@ impl CastMemberRefHandlers {
                     // Returns a model/motion ref in this 3D world
                     if handler_name == "cloneModelFromCastmember" || handler_name == "cloneMotionFromCastmember" || handler_name == "cloneDeep" {
                         let obj_name = if !args.is_empty() {
-                            player.get_datum(&args[0]).string_value().unwrap_or_default().to_lowercase()
+                            player.get_datum(&args[0]).string_value().unwrap_or_default()
                         } else {
                             String::new()
                         };
                         let source_model_name = if args.len() > 1 {
-                            player.get_datum(&args[1]).string_value().unwrap_or_default().to_lowercase()
+                            player.get_datum(&args[1]).string_value().unwrap_or_default()
                         } else {
                             String::new()
                         };
@@ -305,7 +305,7 @@ impl CastMemberRefHandlers {
                             if let Some(sm) = src_member {
                                 if let Some(sw3d) = sm.member_type.as_shockwave3d() {
                                     if let Some(ref scene) = sw3d.parsed_scene {
-                                        let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&source_model_name));
+                                        let node = scene.nodes.iter().find(|n| n.name == source_model_name);
                                         if let Some(n) = node {
                                             (n.shader_name.clone(), n.transform, n.resource_name.clone(), n.model_resource_name.clone())
                                         } else {
@@ -317,9 +317,6 @@ impl CastMemberRefHandlers {
                         } else {
                             (String::new(), identity, String::new(), String::new())
                         };
-
-                        // Track shader renames for name conflict resolution
-                        let mut shader_renames: Vec<(String, String)> = Vec::new();
 
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
@@ -346,49 +343,13 @@ impl CastMemberRefHandlers {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
                                         for shader in &src_shaders {
-                                            if let Some(existing) = scene.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&shader.name)) {
-                                                // Same name exists — check if textures or materials differ
-                                                let existing_tex = existing.texture_layers.first().map(|l| l.name.as_str()).unwrap_or("");
-                                                let new_tex = shader.texture_layers.first().map(|l| l.name.as_str()).unwrap_or("");
-                                                let same_material = existing.material_name == shader.material_name;
-                                                if existing_tex != new_tex || !same_material {
-                                                    // Different texture/material — rename the incoming shader
-                                                    web_sys::console::warn_1(&format!(
-                                                        "[W3D] Shader conflict: '{}' existing_tex='{}' new_tex='{}' existing_mat='{}' new_mat='{}'",
-                                                        shader.name, existing_tex, new_tex, existing.material_name, shader.material_name
-                                                    ).into());
-                                                    let mut renamed = shader.clone();
-                                                    let mut suffix = 1;
-                                                    loop {
-                                                        let new_name = format!("{}_src{}", shader.name, suffix);
-                                                        if !scene.shaders.iter().any(|s| s.name.eq_ignore_ascii_case(&new_name)) {
-                                                            shader_renames.push((shader.name.clone(), new_name.clone()));
-                                                            renamed.name = new_name;
-                                                            break;
-                                                        }
-                                                        suffix += 1;
-                                                    }
-                                                    scene.shaders.push(renamed);
-                                                }
-                                                // Same texture — skip (shader already exists)
-                                            } else {
+                                            if !scene.shaders.iter().any(|s| s.name == shader.name) {
                                                 scene.shaders.push(shader.clone());
                                             }
                                         }
                                         for (res_name, res_info) in &src_model_resources {
                                             if !scene.model_resources.contains_key(res_name) {
-                                                let mut res = res_info.clone();
-                                                // Apply shader renames to bindings
-                                                if !shader_renames.is_empty() {
-                                                    for binding in &mut res.shader_bindings {
-                                                        for mb in &mut binding.mesh_bindings {
-                                                            for (old, new) in &shader_renames {
-                                                                if mb == old { *mb = new.clone(); }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                scene.model_resources.insert(res_name.clone(), res);
+                                                scene.model_resources.insert(res_name.clone(), res_info.clone());
                                             }
                                         }
                                         for (mesh_name, mesh_data) in &src_clod_meshes {
@@ -402,19 +363,19 @@ impl CastMemberRefHandlers {
                                             }
                                         }
                                         for raw_mesh in &src_raw_meshes {
-                                            if !scene.raw_meshes.iter().any(|m| m.name.eq_ignore_ascii_case(&raw_mesh.name)) {
+                                            if !scene.raw_meshes.iter().any(|m| m.name == raw_mesh.name) {
                                                 scene.raw_meshes.push(raw_mesh.clone());
                                             }
                                         }
                                         // Copy lights from source scene
                                         for light in &src_lights {
-                                            if !scene.lights.iter().any(|l| l.name.eq_ignore_ascii_case(&light.name)) {
+                                            if !scene.lights.iter().any(|l| l.name == light.name) {
                                                 scene.lights.push(light.clone());
                                             }
                                         }
                                         // Copy light nodes from source scene
                                         for node in &src_light_nodes {
-                                            if !scene.nodes.iter().any(|n| n.name.eq_ignore_ascii_case(&node.name)) {
+                                            if !scene.nodes.iter().any(|n| n.name == node.name) {
                                                 scene.nodes.push(node.clone());
                                             }
                                         }
@@ -431,25 +392,14 @@ impl CastMemberRefHandlers {
                                     if obj_type == "model" {
                                         scene.nodes.push(W3dNode {
                                             name: obj_name.clone(), node_type: W3dNodeType::Model,
-                                            parent_name: "world".to_string(),
+                                            parent_name: "World".to_string(),
                                             resource_name: source_resource_name,
                                             model_resource_name: source_model_resource_name,
-                                            shader_name: {
-                                                let mut sn = source_shader_name;
-                                                for (old, new) in &shader_renames {
-                                                    if sn == *old { sn = new.clone(); break; }
-                                                }
-                                                sn
-                                            },
+                                            shader_name: source_shader_name,
                                             near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
                                         });
-                                        web_sys::console::log_1(&format!(
-                                            "[CLONE] Added model '{}' to scene, total nodes={}, rc_strong={}",
-                                            obj_name, scene.nodes.len(),
-                                            std::rc::Rc::strong_count(w3d.parsed_scene.as_ref().unwrap())
-                                        ).into());
                                     } else if obj_type == "motion" {
                                         scene.motions.push(W3dMotion {
                                             name: obj_name.clone(),
@@ -481,9 +431,9 @@ impl CastMemberRefHandlers {
                             "newMotion" | "deleteMotion" => "motion",
                             _ => "unknown",
                         };
-                        // Get name from first arg (lowercase to match Director convention)
+                        // Get name from first arg
                         let obj_name = if !args.is_empty() {
-                            player.get_datum(&args[0]).string_value().unwrap_or_default().to_lowercase()
+                            player.get_datum(&args[0]).string_value().unwrap_or_default()
                         } else {
                             String::new()
                         };
@@ -529,7 +479,7 @@ impl CastMemberRefHandlers {
                                         "model" => {
                                             scene.nodes.push(W3dNode {
                                                 name: obj_name.clone(), node_type: W3dNodeType::Model,
-                                                parent_name: "world".to_string(),
+                                                parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
@@ -540,7 +490,7 @@ impl CastMemberRefHandlers {
                                         "group" => {
                                             scene.nodes.push(W3dNode {
                                                 name: obj_name.clone(), node_type: W3dNodeType::Group,
-                                                parent_name: "world".to_string(),
+                                                parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
@@ -551,7 +501,7 @@ impl CastMemberRefHandlers {
                                         "camera" => {
                                             scene.nodes.push(W3dNode {
                                                 name: obj_name.clone(), node_type: W3dNodeType::View,
-                                                parent_name: "world".to_string(),
+                                                parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
@@ -571,7 +521,7 @@ impl CastMemberRefHandlers {
                                             // Also add as a node so it can be transformed
                                             scene.nodes.push(W3dNode {
                                                 name: obj_name.clone(), node_type: W3dNodeType::Light,
-                                                parent_name: "world".to_string(),
+                                                parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
@@ -747,7 +697,7 @@ impl CastMemberRefHandlers {
                             clod_meshes: HashMap::new(), raw_meshes: Vec::new(),
                         };
                         empty_scene.nodes.push(W3dNode {
-                            name: "world".to_string(),
+                            name: "World".to_string(),
                             node_type: W3dNodeType::Group,
                             parent_name: String::new(),
                             resource_name: String::new(),
@@ -759,9 +709,9 @@ impl CastMemberRefHandlers {
                             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
                         });
                         empty_scene.nodes.push(W3dNode {
-                            name: "defaultview".to_string(),
+                            name: "DefaultView".to_string(),
                             node_type: W3dNodeType::View,
-                            parent_name: "world".to_string(),
+                            parent_name: "World".to_string(),
                             resource_name: String::new(),
                             model_resource_name: String::new(),
                             shader_name: String::new(),
@@ -772,7 +722,7 @@ impl CastMemberRefHandlers {
                         });
                         // Add DefaultShader
                         empty_scene.shaders.push(W3dShader {
-                            name: "defaultshader".to_string(),
+                            name: "DefaultShader".to_string(),
                             ..Default::default()
                         });
                         let member_mut = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
