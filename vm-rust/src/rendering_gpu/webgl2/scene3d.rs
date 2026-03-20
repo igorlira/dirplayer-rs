@@ -24,6 +24,10 @@ struct MemberGpuData {
     textures: HashMap<String, WebGlTexture>,
     /// Texture dimensions (width, height) keyed by lowercase name
     texture_sizes: HashMap<String, (u32, u32)>,
+    /// Cube map textures (keyed by base name)
+    cube_maps: HashMap<String, WebGlTexture>,
+    /// Cached inverse bind matrices per skeleton name
+    inverse_bind_cache: HashMap<String, Vec<[f32; 16]>>,
     /// Snapshot of scene content counts when GPU data was built
     scene_version: (usize, usize, usize, usize), // (nodes, clod_meshes, texture_images, shaders)
 }
@@ -35,6 +39,7 @@ struct Shader3d {
     u_view: Option<WebGlUniformLocation>,
     u_projection: Option<WebGlUniformLocation>,
     u_diffuse_color: Option<WebGlUniformLocation>,
+    u_has_vertex_color: Option<WebGlUniformLocation>,
     u_ambient_color: Option<WebGlUniformLocation>,
     u_specular_color: Option<WebGlUniformLocation>,
     u_emissive_color: Option<WebGlUniformLocation>,
@@ -46,10 +51,32 @@ struct Shader3d {
     u_has_lightmap: Option<WebGlUniformLocation>,
     u_lightmap_intensity: Option<WebGlUniformLocation>,
     u_has_texcoord2: Option<WebGlUniformLocation>,
+    // Layer 2 (third texture layer)
+    u_layer2_tex: Option<WebGlUniformLocation>,
+    u_layer2_blend: Option<WebGlUniformLocation>,
+    u_layer2_intensity: Option<WebGlUniformLocation>,
+    // Specular map
+    u_specular_tex: Option<WebGlUniformLocation>,
+    u_has_specular_map: Option<WebGlUniformLocation>,
+    // Environment/cube map (sampler added when cubemaps are loaded)
+    u_has_env_map: Option<WebGlUniformLocation>,
+    u_reflectivity: Option<WebGlUniformLocation>,
+    // Texture coordinate transform
+    u_tex_transform: Option<WebGlUniformLocation>,
+    // Skeletal skinning
+    u_skinning_enabled: Option<WebGlUniformLocation>,
+    u_bone_matrices: Option<WebGlUniformLocation>,
+    // NPR/toon
+    u_shader_mode: Option<WebGlUniformLocation>,
+    u_toon_steps: Option<WebGlUniformLocation>,
+    // Lighting
     u_num_lights: Option<WebGlUniformLocation>,
     u_light_pos: Option<WebGlUniformLocation>,
     u_light_color: Option<WebGlUniformLocation>,
     u_light_type: Option<WebGlUniformLocation>,
+    u_light_atten: Option<WebGlUniformLocation>,
+    u_light_dir: Option<WebGlUniformLocation>,
+    u_light_spot_angle: Option<WebGlUniformLocation>,
     u_camera_pos: Option<WebGlUniformLocation>,
     u_global_ambient: Option<WebGlUniformLocation>,
     u_fog_enabled: Option<WebGlUniformLocation>,
@@ -57,6 +84,21 @@ struct Shader3d {
     u_fog_far: Option<WebGlUniformLocation>,
     u_fog_color: Option<WebGlUniformLocation>,
     u_fog_mode: Option<WebGlUniformLocation>,
+}
+
+/// Result of resolving texture layers for a shader
+struct TextureLayerBinding<'a> {
+    tex: &'a WebGlTexture,
+    blend: i32,       // 1=multiply, 2=add, 3=replace, 4=decal
+    intensity: f32,
+}
+
+struct TextureBindResult<'a> {
+    diffuse: Option<&'a WebGlTexture>,
+    diffuse_tex_transform: [f32; 16], // texture coordinate transform for diffuse layer
+    diffuse_wrap: (u8, u8), // (repeat_s, repeat_t) for diffuse: 0=clamp, 1=repeat
+    extra_layers: Vec<TextureLayerBinding<'a>>, // up to 2 extra layers (layer1 + layer2)
+    specular: Option<&'a WebGlTexture>,
 }
 
 /// Particle billboard shader
@@ -71,10 +113,34 @@ struct ParticleShader {
     u_lifetime: Option<WebGlUniformLocation>,
 }
 
+/// Simple fullscreen quad shader for post-processing passes
+struct PostProcessShader {
+    program: WebGlProgram,
+    u_input_tex: Option<WebGlUniformLocation>,
+    u_resolution: Option<WebGlUniformLocation>,
+    u_direction: Option<WebGlUniformLocation>,
+    u_threshold: Option<WebGlUniformLocation>,
+    u_intensity: Option<WebGlUniformLocation>,
+    u_mode: Option<WebGlUniformLocation>,
+    u_color_matrix: Option<WebGlUniformLocation>,
+}
+
+/// Outline/edge shader for ShaderInker NPR effect
+struct OutlineShader {
+    program: WebGlProgram,
+    u_model: Option<WebGlUniformLocation>,
+    u_view: Option<WebGlUniformLocation>,
+    u_projection: Option<WebGlUniformLocation>,
+    u_outline_width: Option<WebGlUniformLocation>,
+    u_outline_color: Option<WebGlUniformLocation>,
+}
+
 /// Manages 3D rendering for all Shockwave3D members
 pub struct Scene3dRenderer {
     shader: Option<Shader3d>,
     particle_shader: Option<ParticleShader>,
+    pp_shader: Option<PostProcessShader>,
+    outline_shader: Option<OutlineShader>,
     member_data: HashMap<(i32, i32), MemberGpuData>,
     pub fbo: Option<WebGlFramebuffer>,
     pub fbo_texture: Option<WebGlTexture>,
@@ -83,10 +149,26 @@ pub struct Scene3dRenderer {
     fbo_depth: Option<web_sys::WebGlRenderbuffer>,
     fbo_width: u32,
     fbo_height: u32,
+    // Bloom post-processing FBOs (half resolution)
+    bloom_fbo_a: Option<WebGlFramebuffer>,
+    bloom_tex_a: Option<WebGlTexture>,
+    bloom_fbo_b: Option<WebGlFramebuffer>,
+    bloom_tex_b: Option<WebGlTexture>,
+    bloom_width: u32,
+    bloom_height: u32,
+    fullscreen_vao: Option<web_sys::WebGlVertexArrayObject>,
     logged_members: std::collections::HashSet<(i32, i32)>,
     animation_time: f32,
     motion_transforms: HashMap<String, [f32; 16]>,
     pub active_camera: Option<String>,
+    /// Set when a non-looping motion reaches its end — caller should advance the queue
+    pub motion_ended: bool,
+    /// Render-to-texture FBO (created on demand)
+    rtt_fbo: Option<WebGlFramebuffer>,
+    rtt_texture: Option<WebGlTexture>,
+    rtt_depth: Option<web_sys::WebGlRenderbuffer>,
+    rtt_width: u32,
+    rtt_height: u32,
 }
 
 impl Scene3dRenderer {
@@ -94,16 +176,31 @@ impl Scene3dRenderer {
         Self {
             shader: None,
             particle_shader: None,
+            pp_shader: None,
+            outline_shader: None,
             member_data: HashMap::new(),
             fbo: None,
             fbo_texture: None,
             fbo_depth: None,
+            bloom_fbo_a: None,
+            bloom_tex_a: None,
+            bloom_fbo_b: None,
+            bloom_tex_b: None,
+            bloom_width: 0,
+            bloom_height: 0,
+            fullscreen_vao: None,
             fbo_width: 0,
             fbo_height: 0,
             logged_members: std::collections::HashSet::new(),
             animation_time: 0.0,
             motion_transforms: HashMap::new(),
             active_camera: None,
+            motion_ended: false,
+            rtt_fbo: None,
+            rtt_texture: None,
+            rtt_depth: None,
+            rtt_width: 0,
+            rtt_height: 0,
             overlay_quad_vbo: None,
             overlay_quad_uv: None,
         }
@@ -120,25 +217,51 @@ layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_texcoord;
 layout(location = 3) in vec2 a_texcoord2;
+layout(location = 4) in vec4 a_bone_indices;
+layout(location = 5) in vec4 a_bone_weights;
+layout(location = 6) in vec4 a_vertex_color;
 
 uniform mat4 u_model;
 uniform mat4 u_view;
 uniform mat4 u_projection;
+
+// Skeletal skinning
+uniform int u_skinning_enabled;
+uniform mat4 u_bone_matrices[32];
+
+// Texture coordinate transform
+uniform mat4 u_tex_transform;
 
 out vec3 v_position;
 out vec3 v_normal;
 out vec2 v_texcoord;
 out vec2 v_texcoord2;
 out float v_view_dist;
+out vec4 v_vertex_color;
 
 void main() {
-    vec4 world_pos = u_model * vec4(a_position, 1.0);
+    v_vertex_color = a_vertex_color;
+    vec4 local_pos = vec4(a_position, 1.0);
+    vec3 local_normal = a_normal;
+
+    if (u_skinning_enabled > 0) {
+        mat4 skin_mat = a_bone_weights.x * u_bone_matrices[int(a_bone_indices.x)]
+                      + a_bone_weights.y * u_bone_matrices[int(a_bone_indices.y)]
+                      + a_bone_weights.z * u_bone_matrices[int(a_bone_indices.z)]
+                      + a_bone_weights.w * u_bone_matrices[int(a_bone_indices.w)];
+        local_pos = skin_mat * local_pos;
+        local_normal = mat3(skin_mat) * local_normal;
+    }
+
+    vec4 world_pos = u_model * local_pos;
     vec4 view_pos = u_view * world_pos;
     v_position = world_pos.xyz;
-    v_normal = mat3(u_model) * a_normal;
+    v_normal = mat3(u_model) * local_normal;
     // W3D CLOD UVs are in [-0.5, 0.5] range — remap to [0, 1]
     // IFX applies V-flip via texture matrix: new_v = 1 - v
-    v_texcoord = vec2(a_texcoord.x + 0.5, 0.5 - a_texcoord.y);
+    vec2 base_uv = vec2(a_texcoord.x + 0.5, 0.5 - a_texcoord.y);
+    // Apply per-layer texture coordinate transform (scrolling, rotation, etc.)
+    v_texcoord = (u_tex_transform * vec4(base_uv, 0.0, 1.0)).xy;
     v_texcoord2 = vec2(a_texcoord2.x + 0.5, 0.5 - a_texcoord2.y);
     v_view_dist = -view_pos.z;
     gl_Position = u_projection * view_pos;
@@ -153,8 +276,10 @@ in vec3 v_normal;
 in vec2 v_texcoord;
 in vec2 v_texcoord2;
 in float v_view_dist;
+in vec4 v_vertex_color;
 
 uniform vec4 u_diffuse_color;
+uniform int u_has_vertex_color;
 uniform vec4 u_ambient_color;
 uniform vec4 u_specular_color;
 uniform vec4 u_emissive_color;
@@ -163,14 +288,31 @@ uniform float u_opacity;
 uniform sampler2D u_diffuse_tex;
 uniform int u_has_texture;
 uniform sampler2D u_lightmap_tex;
-uniform int u_has_lightmap;
+uniform int u_has_lightmap;       // blend mode: 0=none, 1=multiply, 2=add, 3=replace, 4=decal
 uniform float u_lightmap_intensity;
 uniform int u_has_texcoord2;
+// Layer 2 (third texture layer)
+uniform sampler2D u_layer2_tex;
+uniform int u_layer2_blend;       // same encoding as u_has_lightmap
+uniform float u_layer2_intensity;
+// Specular map
+uniform sampler2D u_specular_tex;
+uniform int u_has_specular_map;
+// Environment/cube map reflection (future: samplerCube)
+uniform int u_has_env_map;
+uniform float u_reflectivity;
+
+// NPR/toon shading
+uniform int u_shader_mode;     // 0=phong, 1=toon/painter
+uniform float u_toon_steps;    // number of quantization steps (e.g. 3.0)
 
 uniform int u_num_lights;
 uniform vec3 u_light_pos[8];
 uniform vec3 u_light_color[8];
 uniform int u_light_type[8];
+uniform vec3 u_light_atten[8];   // (constant, linear, quadratic) per light
+uniform vec3 u_light_dir[8];     // direction for directional/spot lights
+uniform float u_light_spot_angle[8]; // spot cone angle (radians, 0 = not spot)
 uniform vec3 u_camera_pos;
 uniform vec3 u_global_ambient;
 
@@ -182,6 +324,24 @@ uniform vec3 u_fog_color;
 uniform int u_fog_mode; // 0=linear, 1=exp, 2=exp2
 
 out vec4 frag_color;
+
+// Apply a texture layer blend: mode 1=multiply, 2=add, 3=replace, 4=decal
+vec3 blend_layer(vec3 base, vec4 layer_sample, int mode, float intensity) {
+    if (mode == 1) {
+        // Multiply (shadow map): darken
+        return base * mix(vec3(1.0), layer_sample.rgb, intensity);
+    } else if (mode == 2) {
+        // Add (lightmap): brighten
+        return base + layer_sample.rgb * intensity;
+    } else if (mode == 3) {
+        // Replace: layer replaces base entirely
+        return mix(base, layer_sample.rgb, intensity);
+    } else if (mode == 4) {
+        // Decal: alpha-blended overlay
+        return mix(base, layer_sample.rgb, layer_sample.a * intensity);
+    }
+    return base;
+}
 
 void main() {
     vec3 N = normalize(v_normal);
@@ -210,9 +370,20 @@ void main() {
                     vec3 light_dir = u_light_pos[i] - v_position;
                     float dist = length(light_dir);
                     L = light_dir / dist;
-                    atten = 1.0 / (1.0 + 0.01 * dist + 0.0001 * dist * dist);
+                    atten = 1.0 / (u_light_atten[i].x + u_light_atten[i].y * dist + u_light_atten[i].z * dist * dist);
+                    // Spot light cone attenuation
+                    if (u_light_spot_angle[i] > 0.0) {
+                        float spot_cos = dot(normalize(-light_dir), u_light_dir[i]);
+                        float cone_cos = cos(u_light_spot_angle[i] * 0.5);
+                        if (spot_cos < cone_cos) atten = 0.0;
+                        else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
+                    }
                 }
                 float diff = max(dot(N, L), 0.0);
+                // Toon shading: quantize NdotL into discrete steps
+                if (u_shader_mode == 1 && u_toon_steps > 0.0) {
+                    diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
+                }
                 // Per-light: ambient fill (lightColor * matAmbient) + diffuse (NdotL * lightColor * WHITE)
                 // WHITE because UseDiffuse=OFF forces materialDiffuse to (1,1,1)
                 lighting += atten * (u_light_color[i] * u_ambient_color.rgb
@@ -244,8 +415,8 @@ void main() {
         return;
     }
 
-    vec3 base_color = u_diffuse_color.rgb;
-
+    // Non-textured path: use material diffuse color (or vertex color if available)
+    vec3 base_color = (u_has_vertex_color > 0) ? v_vertex_color.rgb : u_diffuse_color.rgb;
     vec3 result = u_emissive_color.rgb + u_global_ambient * u_ambient_color.rgb;
 
     for (int i = 0; i < 8; i++) {
@@ -256,10 +427,8 @@ void main() {
             vec3 L;
             float atten = 1.0;
             if (u_light_type[i] == 1) {
-                // Directional
                 L = normalize(u_light_pos[i]);
             } else {
-                // Point / Spot
                 vec3 light_dir = u_light_pos[i] - v_position;
                 float dist = length(light_dir);
                 L = light_dir / dist;
@@ -267,7 +436,9 @@ void main() {
             }
 
             float diff = max(dot(N, L), 0.0);
-            // Per-light ambient fill + diffuse (matches IFX per-light contribution)
+            if (u_shader_mode == 1 && u_toon_steps > 0.0) {
+                diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
+            }
             result += atten * (u_light_color[i] * u_ambient_color.rgb
                     + u_light_color[i] * base_color * diff);
 
@@ -283,14 +454,11 @@ void main() {
     if (u_fog_enabled > 0) {
         float fog_factor;
         if (u_fog_mode == 0) {
-            // Linear
             fog_factor = clamp((u_fog_far - v_view_dist) / (u_fog_far - u_fog_near), 0.0, 1.0);
         } else if (u_fog_mode == 1) {
-            // Exponential
             float density = 2.0 / (u_fog_far - u_fog_near);
             fog_factor = exp(-density * v_view_dist);
         } else {
-            // Exponential squared
             float density = 2.0 / (u_fog_far - u_fog_near);
             fog_factor = exp(-density * density * v_view_dist * v_view_dist);
         }
@@ -314,6 +482,7 @@ void main() {
             u_view: u("u_view"),
             u_projection: u("u_projection"),
             u_diffuse_color: u("u_diffuse_color"),
+            u_has_vertex_color: u("u_has_vertex_color"),
             u_ambient_color: u("u_ambient_color"),
             u_specular_color: u("u_specular_color"),
             u_emissive_color: u("u_emissive_color"),
@@ -325,10 +494,25 @@ void main() {
             u_has_lightmap: u("u_has_lightmap"),
             u_lightmap_intensity: u("u_lightmap_intensity"),
             u_has_texcoord2: u("u_has_texcoord2"),
+            u_layer2_tex: u("u_layer2_tex"),
+            u_layer2_blend: u("u_layer2_blend"),
+            u_layer2_intensity: u("u_layer2_intensity"),
+            u_specular_tex: u("u_specular_tex"),
+            u_has_specular_map: u("u_has_specular_map"),
+            u_has_env_map: u("u_has_env_map"),
+            u_reflectivity: u("u_reflectivity"),
+            u_tex_transform: u("u_tex_transform"),
+            u_skinning_enabled: u("u_skinning_enabled"),
+            u_bone_matrices: u("u_bone_matrices[0]"),
+            u_shader_mode: u("u_shader_mode"),
+            u_toon_steps: u("u_toon_steps"),
             u_num_lights: u("u_num_lights"),
             u_light_pos: u("u_light_pos[0]"),
             u_light_color: u("u_light_color[0]"),
             u_light_type: u("u_light_type[0]"),
+            u_light_atten: u("u_light_atten[0]"),
+            u_light_dir: u("u_light_dir[0]"),
+            u_light_spot_angle: u("u_light_spot_angle[0]"),
             u_camera_pos: u("u_camera_pos"),
             u_global_ambient: u("u_global_ambient"),
             u_fog_enabled: u("u_fog_enabled"),
@@ -662,22 +846,22 @@ void main() {
                 if mesh.positions.is_empty() || mesh.faces.is_empty() {
                     continue;
                 }
-                // Use decoded texcoords, or generate planar UVs if all texcoords are identical
+                // Use decoded texcoords, or generate UVs based on resource UV generator mode
+                let uv_gen_mode = scene.model_resources.get(name.as_str())
+                    .and_then(|r| r.uv_gen_mode);
                 let tc_data;
                 let tc = if !mesh.tex_coords.is_empty() && !mesh.tex_coords[0].is_empty() {
                     let tcs = &mesh.tex_coords[0];
-                    // Check if all texcoords are identical (needs planar UV generation)
+                    // Check if all texcoords are identical (needs UV generation)
                     let all_same = tcs.len() > 1 && tcs.iter().all(|t| (t[0] - tcs[0][0]).abs() < 0.001 && (t[1] - tcs[0][1]).abs() < 0.001);
                     if all_same && !mesh.positions.is_empty() {
-                        // Generate planar UVs from positions (bounding box normalized)
-                        tc_data = generate_planar_uvs(&mesh.positions);
+                        tc_data = generate_uvs_by_mode(&mesh.positions, uv_gen_mode);
                         Some(tc_data.as_slice())
                     } else {
                         Some(tcs.as_slice())
                     }
                 } else if !mesh.positions.is_empty() {
-                    // No texcoords at all — generate planar UVs
-                    tc_data = generate_planar_uvs(&mesh.positions);
+                    tc_data = generate_uvs_by_mode(&mesh.positions, uv_gen_mode);
                     Some(tc_data.as_slice())
                 } else {
                     None
@@ -688,13 +872,35 @@ void main() {
                 } else {
                     None
                 };
-                let buffers = Mesh3dBuffers::new(
+                // Pack bone data (variable-length per-vertex → fixed vec4)
+                let (bone_idx_packed, bone_wgt_packed);
+                let (bi_opt, bw_opt) = if !mesh.bone_indices.is_empty() && !mesh.bone_weights.is_empty()
+                    && mesh.bone_indices.len() == mesh.positions.len()
+                {
+                    bone_idx_packed = pack_bone_vec4_f32(&mesh.bone_indices);
+                    bone_wgt_packed = pack_bone_weights_vec4(&mesh.bone_weights);
+                    (Some(bone_idx_packed.as_slice()), Some(bone_wgt_packed.as_slice()))
+                } else {
+                    (None, None)
+                };
+                // Vertex colors (diffuse)
+                let vc_opt = if !mesh.diffuse_colors.is_empty()
+                    && mesh.diffuse_colors.len() == mesh.positions.len()
+                {
+                    Some(mesh.diffuse_colors.as_slice())
+                } else {
+                    None
+                };
+                let buffers = Mesh3dBuffers::new_full(
                     context,
                     &mesh.positions,
                     &mesh.normals,
                     tc,
                     tc2,
                     &mesh.faces,
+                    bi_opt,
+                    bw_opt,
+                    vc_opt,
                 )?;
                 group.push(buffers);
             }
@@ -745,7 +951,17 @@ void main() {
             }
         }
 
-        self.member_data.insert(key, MemberGpuData { mesh_groups, all_meshes, textures, texture_sizes, scene_version: current_version });
+        // Pre-compute inverse bind matrices for all skeletons (cached for skinning)
+        let mut inverse_bind_cache = HashMap::new();
+        for skeleton in &scene.skeletons {
+            let inv_bind = crate::director::chunks::w3d::skeleton::build_inverse_bind_matrices(skeleton);
+            inverse_bind_cache.insert(skeleton.name.clone(), inv_bind);
+        }
+
+        // Detect and create cubemap textures from 6-face naming convention
+        let cube_maps = self.detect_and_create_cubemaps(context, scene);
+
+        self.member_data.insert(key, MemberGpuData { mesh_groups, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache, scene_version: current_version });
         Ok(())
     }
 
@@ -760,6 +976,12 @@ void main() {
             if w > 0 && w <= 4096 && h > 0 && h <= 4096 && data.len() == expected {
                 // Raw RGBA from Lingo image
                 (w, h, data[8..].to_vec())
+            } else if is_dxt_texture(data) {
+                // DXT compressed texture — decode to RGBA
+                match decode_dxt_to_rgba(data) {
+                    Some((w, h, rgba)) => (w, h, rgba),
+                    None => return None,
+                }
             } else {
                 // Try JPEG/PNG decode
                 let img = match image::load_from_memory(data) {
@@ -853,7 +1075,7 @@ void main() {
         gl.use_program(Some(&shader.program));
 
         let (view_matrix, camera_pos) = self.build_view_matrix(scene, runtime_state);
-        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32);
+        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32, runtime_state);
 
         gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
@@ -980,7 +1202,7 @@ void main() {
 
         // Set up camera
         let (view_matrix, camera_pos) = self.build_view_matrix(scene, runtime_state);
-        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32);
+        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32, runtime_state);
 
         gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
@@ -1007,8 +1229,20 @@ void main() {
 
         // Set texture samplers
         gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);   // unit 0 = base/diffuse
-        gl.uniform1i(shader.u_lightmap_tex.as_ref(), 1);   // unit 1 = shadow/lightmap
-        gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);   // default: no lightmap
+        gl.uniform1i(shader.u_lightmap_tex.as_ref(), 1);   // unit 1 = secondary layer
+        gl.uniform1i(shader.u_layer2_tex.as_ref(), 2);     // unit 2 = third layer
+        gl.uniform1i(shader.u_specular_tex.as_ref(), 3);   // unit 3 = specular map
+        gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);   // default: no extra layers
+        gl.uniform1i(shader.u_layer2_blend.as_ref(), 0);
+        gl.uniform1i(shader.u_has_specular_map.as_ref(), 0);
+        gl.uniform1i(shader.u_has_env_map.as_ref(), 0);
+        gl.uniform1f(shader.u_reflectivity.as_ref(), 0.0);
+        // Default texture transform = identity
+        let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0f32];
+        gl.uniform_matrix4fv_with_f32_array(shader.u_tex_transform.as_ref(), false, &identity);
+        gl.uniform1i(shader.u_skinning_enabled.as_ref(), 0); // default: no skinning
+        gl.uniform1i(shader.u_shader_mode.as_ref(), 0);     // default: phong
+        gl.uniform1f(shader.u_toon_steps.as_ref(), 3.0);    // default toon steps
 
         // Apply fog from runtime state or default off
         if let Some(rs) = runtime_state {
@@ -1105,27 +1339,44 @@ void main() {
             // Evaluate motion animations each frame
             self.motion_transforms.clear();
             if !scene.motions.is_empty() {
-                self.animation_time += 1.0 / 30.0;
-                for motion in &scene.motions {
+                // Determine which motion to play: use runtime current_motion, or fallback to first
+                let is_playing = runtime_state.map(|rs| rs.animation_playing).unwrap_or(true);
+                let play_rate = runtime_state.map(|rs| rs.play_rate).unwrap_or(1.0);
+                let is_loop = runtime_state.map(|rs| rs.animation_loop).unwrap_or(true);
+
+                if is_playing {
+                    self.animation_time += (1.0 / 30.0) * play_rate;
+                }
+
+                let current_motion_name = runtime_state.and_then(|rs| rs.current_motion.as_deref());
+                let motion = if let Some(name) = current_motion_name {
+                    scene.motions.iter().find(|m| m.name == name)
+                } else {
+                    scene.motions.first() // fallback: play first motion
+                };
+
+                if let Some(motion) = motion {
                     let duration = motion.duration();
-                    if duration <= 0.0 { continue; }
-                    let t = self.animation_time % duration;
-                    for track in &motion.tracks {
-                        let mut kf = track.evaluate(t);
-                        // Fix zero scale (motion data may not include scale → defaults to 0)
-                        if kf.scale_x.abs() < 1e-6 { kf.scale_x = 1.0; }
-                        if kf.scale_y.abs() < 1e-6 { kf.scale_y = 1.0; }
-                        if kf.scale_z.abs() < 1e-6 { kf.scale_z = 1.0; }
-                        let m = keyframe_to_column_major_matrix(&kf);
-                        if self.animation_time < 0.1 {
-                            web_sys::console::log_1(&format!(
-                                "[3D-ANIM] t={:.3} node='{}' pos=({:.2},{:.2},{:.2}) rot=({:.3},{:.3},{:.3},{:.3}) scale=({:.2},{:.2},{:.2})",
-                                t, track.bone_name, kf.pos_x, kf.pos_y, kf.pos_z,
-                                kf.rot_x, kf.rot_y, kf.rot_z, kf.rot_w,
-                                kf.scale_x, kf.scale_y, kf.scale_z
-                            ).into());
+                    if duration > 0.0 {
+                        let t = if is_loop {
+                            self.animation_time % duration
+                        } else {
+                            self.animation_time.min(duration)
+                        };
+
+                        for track in &motion.tracks {
+                            let mut kf = track.evaluate(t);
+                            if kf.scale_x.abs() < 1e-6 { kf.scale_x = 1.0; }
+                            if kf.scale_y.abs() < 1e-6 { kf.scale_y = 1.0; }
+                            if kf.scale_z.abs() < 1e-6 { kf.scale_z = 1.0; }
+                            let m = keyframe_to_column_major_matrix(&kf);
+                            self.motion_transforms.insert(track.bone_name.clone(), m);
                         }
-                        self.motion_transforms.insert(track.bone_name.clone(), m);
+
+                        // Check if non-looping motion has ended — signal for queue processing
+                        if !is_loop && self.animation_time >= duration && !self.motion_ended {
+                            self.motion_ended = true;
+                        }
                     }
                 }
             }
@@ -1134,60 +1385,68 @@ void main() {
                 // No model nodes — fallback: draw all meshes with identity transform
                 self.draw_all_meshes_fallback(gl, shader, scene, &member_key);
             } else {
-                let mut draw_stats = (0u32, 0u32, 0u32, 0u32); // (drawn, textured, no_tex, no_mesh)
-                // Walk model nodes with accumulated transforms
+                // Classify nodes into opaque and transparent for proper rendering order
+                let mut transparent_nodes: Vec<(&W3dNode, f32)> = Vec::new(); // (node, distance_to_camera)
+
+                // PASS 1: Render opaque geometry
                 for model_node in &model_nodes {
-                    // Check visibility override
                     if let Some(rs) = runtime_state {
                         if let Some(&visible) = rs.node_visibility.get(&model_node.name) {
                             if !visible { continue; }
                         }
                     }
 
-                    let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
-                    // Director transforms are already column-major — pass directly to GL
-                    gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
-
-                    // Find mesh resource matching this model node
-                    let resource = if !model_node.model_resource_name.is_empty() {
-                        &model_node.model_resource_name
-                    } else {
-                        &model_node.resource_name
-                    };
-
-                    // Get per-mesh shader bindings from model resource
-                    let res_info = scene.model_resources.get(resource);
-
-                    if let Some(gpu_data) = self.member_data.get(&member_key) {
-                        if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
-                            for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
-                                let bound = self.bind_material_for_mesh(
-                                    gl, shader, scene, model_node,
-                                    res_info, mesh_idx, &member_key, runtime_state,
-                                );
-                                if !bound {
-                                    self.bind_material(gl, shader, scene, model_node, &member_key, runtime_state);
-                                }
-
-                                mesh_buf.bind(gl);
-                                mesh_buf.draw(gl);
-                                mesh_buf.unbind(gl);
-                                draw_stats.0 += 1;
-                            }
-                        } else {
-                            draw_stats.3 += 1;
-                        }
+                    // Check if this model is transparent
+                    let opacity = self.get_model_opacity(scene, model_node, runtime_state);
+                    if opacity < 0.999 {
+                        // Defer to transparent pass — compute distance for sorting
+                        let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+                        let dx = world_matrix[12] - camera_pos[0];
+                        let dy = world_matrix[13] - camera_pos[1];
+                        let dz = world_matrix[14] - camera_pos[2];
+                        transparent_nodes.push((model_node, dx*dx + dy*dy + dz*dz));
+                        continue;
                     }
+
+                    self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state);
                 }
 
+                // PASS 2: Render transparent geometry (back-to-front, no depth writes)
+                if !transparent_nodes.is_empty() {
+                    transparent_nodes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    gl.depth_mask(false); // Disable depth writes for transparent objects
+                    gl.enable(WebGl2RenderingContext::BLEND);
+                    gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
 
+                    for (model_node, _dist) in &transparent_nodes {
+                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state);
+                    }
+
+                    gl.depth_mask(true);
+                    gl.disable(WebGl2RenderingContext::BLEND);
+                }
             }
+        }
+
+        // Render ShaderInker outlines (after geometry, before particles)
+        let _ = self.render_inker_outlines(context, scene, &member_key, &view_matrix, &projection_matrix, runtime_state);
+
+        // Re-activate main shader after outline pass (particles need it or their own shader)
+        if let Some(ref shader) = self.shader {
+            gl.use_program(Some(&shader.program));
         }
 
         // Render particles (after opaque geometry, with additive blending)
         let _ = self.render_particles(context, runtime_state, &view_matrix, &projection_matrix);
 
         // Note: overlays are rendered AFTER all camera passes, not per-camera
+
+        // Apply post-processing effects
+        if runtime_state.map(|rs| rs.bloom_enabled).unwrap_or(false) {
+            let threshold = runtime_state.map(|rs| rs.bloom_threshold).unwrap_or(0.5);
+            let intensity = runtime_state.map(|rs| rs.bloom_intensity).unwrap_or(0.5);
+            let _ = self.apply_bloom(context, threshold, intensity);
+        }
 
         // Restore state
         gl.disable(WebGl2RenderingContext::DEPTH_TEST);
@@ -1271,6 +1530,8 @@ void main() {
         gl.uniform1i(shader.u_num_lights.as_ref(), 0);
         gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
         gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
+        gl.uniform1i(shader.u_layer2_blend.as_ref(), 0);
+        gl.uniform1i(shader.u_has_specular_map.as_ref(), 0);
         gl.uniform4f(shader.u_emissive_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
         gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
         gl.uniform4f(shader.u_ambient_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
@@ -1406,55 +1667,784 @@ void main() {
         result
     }
 
-    /// Find the best texture layers: returns (diffuse, optional shadow/lightmap, blend_mode)
-    /// Returns (diffuse_tex, secondary_tex, blend_mode, intensity)
-    /// blend_mode: 0=none, 1=multiply(shadow), 2=add(lightmap)
-    fn find_texture_layers<'a>(
-        layers: &[crate::director::chunks::w3d::types::W3dTextureLayer],
-        gpu_data: &'a MemberGpuData,
-    ) -> (Option<&'a WebGlTexture>, Option<&'a WebGlTexture>, i32, f32) {
-        let mut diffuse: Option<&'a WebGlTexture> = None;
-        let mut secondary: Option<&'a WebGlTexture> = None;
-        let mut blend_mode: i32 = 0;
-        let mut intensity: f32 = 1.0;
+    /// Draw a single model node (extracted for opaque/transparent pass reuse).
+    fn draw_model_node(
+        &self,
+        gl: &WebGl2RenderingContext,
+        shader: &Shader3d,
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        member_key: &(i32, i32),
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) {
+        let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+        gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
 
-        for layer in layers {
-            if layer.name.is_empty() { continue; }
-            if let Some(tex) = gpu_data.textures.get(&layer.name.to_lowercase()) {
-                if diffuse.is_none() {
-                    // First texture becomes diffuse
-                    diffuse = Some(tex);
-                } else if secondary.is_none() {
-                    // Second texture becomes secondary with blend from layer data
-                    secondary = Some(tex);
-                    intensity = layer.intensity;
-                    // IFX texture combine modes (from PrepareDiffusePass):
-                    //   blend_func 0 = GL_REPLACE (7681) → just texture, no lighting
-                    //   blend_func 1 = GL_ADD (260)      → texture + incoming
-                    //   blend_func 2 = GL_MODULATE (8448) → texture × incoming (multiply)
-                    //   blend_func 3+ = GL_DECAL (8449)
-                    // Map to our blend_mode: 1=multiply, 2=add
-                    blend_mode = match layer.blend_func {
-                        1 => 2,  // IFX ADD → our add mode
-                        2 => 1,  // IFX MODULATE → our multiply mode
-                        _ => 1,  // default to multiply
-                    };
-                    // Name-based fallback
-                    let lower = layer.name.to_lowercase();
-                    if lower.contains("lightmap") && !lower.contains("shadow") {
-                        blend_mode = 2; // add for lightmaps
+        let resource = if !model_node.model_resource_name.is_empty() {
+            &model_node.model_resource_name
+        } else {
+            &model_node.resource_name
+        };
+        let res_info = scene.model_resources.get(resource);
+
+        if let Some(gpu_data) = self.member_data.get(member_key) {
+            let has_skeleton_data = self.setup_skinning_for_resource(
+                gl, shader, scene, resource, gpu_data, runtime_state,
+            );
+
+            if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
+                for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
+                    let bound = self.bind_material_for_mesh(
+                        gl, shader, scene, model_node,
+                        res_info, mesh_idx, member_key, runtime_state,
+                    );
+                    if !bound {
+                        self.bind_material(gl, shader, scene, model_node, member_key, runtime_state);
+                    }
+
+                    if mesh_buf.has_bones && has_skeleton_data {
+                        gl.uniform1i(shader.u_skinning_enabled.as_ref(), 1);
+                    } else {
+                        gl.uniform1i(shader.u_skinning_enabled.as_ref(), 0);
+                    }
+                    gl.uniform1i(shader.u_has_vertex_color.as_ref(),
+                        if mesh_buf.has_vertex_colors { 1 } else { 0 });
+
+                    mesh_buf.bind(gl);
+                    mesh_buf.draw(gl);
+                    mesh_buf.unbind(gl);
+                }
+            }
+        }
+    }
+
+    /// Get the opacity of a model node's material (for transparency sorting).
+    fn get_model_opacity(
+        &self,
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> f32 {
+        let effective_shader_name = runtime_state
+            .and_then(|rs| rs.node_shaders.get(&model_node.name))
+            .cloned()
+            .unwrap_or_else(|| model_node.shader_name.clone());
+        if !effective_shader_name.is_empty() {
+            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, &effective_shader_name) {
+                if let Some(mat) = Self::find_material_ci(&scene.materials, &w3d_shader.material_name) {
+                    return mat.opacity;
+                }
+            }
+        }
+        1.0 // Default opaque
+    }
+
+    /// Compile post-processing shader for bloom (lazy init)
+    fn ensure_pp_shader(&mut self, context: &WebGL2Context) -> Result<(), JsValue> {
+        if self.pp_shader.is_some() { return Ok(()); }
+
+        let vs = r#"#version 300 es
+layout(location = 0) in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+    v_uv = a_pos * 0.5 + 0.5;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+"#;
+        let fs = r#"#version 300 es
+precision mediump float;
+in vec2 v_uv;
+uniform sampler2D u_input;
+uniform vec2 u_resolution;
+uniform vec2 u_direction;  // (1,0) for horizontal, (0,1) for vertical
+uniform float u_threshold;
+uniform float u_intensity;
+uniform int u_mode;        // 0=bright-pass, 1=blur, 2=composite, 3=adjustColor, 4=nightVision
+uniform mat4 u_color_matrix; // for adjustColor mode
+out vec4 frag_color;
+
+void main() {
+    vec4 color = texture(u_input, v_uv);
+    if (u_mode == 0) {
+        // Bright-pass: extract pixels above threshold
+        float lum = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+        frag_color = (lum > u_threshold) ? vec4(color.rgb - u_threshold, 1.0) : vec4(0.0, 0.0, 0.0, 1.0);
+    } else if (u_mode == 1) {
+        // 9-tap Gaussian blur
+        vec2 texel = u_direction / u_resolution;
+        vec3 result = color.rgb * 0.227;
+        result += texture(u_input, v_uv + texel * 1.0).rgb * 0.1945;
+        result += texture(u_input, v_uv - texel * 1.0).rgb * 0.1945;
+        result += texture(u_input, v_uv + texel * 2.0).rgb * 0.1216;
+        result += texture(u_input, v_uv - texel * 2.0).rgb * 0.1216;
+        result += texture(u_input, v_uv + texel * 3.0).rgb * 0.0540;
+        result += texture(u_input, v_uv - texel * 3.0).rgb * 0.0540;
+        result += texture(u_input, v_uv + texel * 4.0).rgb * 0.0162;
+        result += texture(u_input, v_uv - texel * 4.0).rgb * 0.0162;
+        frag_color = vec4(result, 1.0);
+    } else if (u_mode == 2) {
+        // Composite: add bloom on top of original
+        frag_color = vec4(color.rgb * u_intensity, 1.0);
+    } else if (u_mode == 3) {
+        // AdjustColor: apply 4x4 color transform matrix
+        frag_color = u_color_matrix * color;
+        frag_color.a = color.a;
+    } else if (u_mode == 4) {
+        // NightVision: green monochrome + noise + brightness boost
+        float lum = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+        float noise = fract(sin(dot(v_uv * u_resolution, vec2(12.9898, 78.233))) * 43758.5453) * 0.05;
+        float green = clamp(lum * 2.0 + noise, 0.0, 1.0);
+        frag_color = vec4(green * 0.1, green, green * 0.1, 1.0);
+    } else if (u_mode == 5) {
+        // Depth of field: blur based on distance from focus (simplified)
+        vec2 texel = 1.0 / u_resolution;
+        float blur_radius = u_threshold; // reuse threshold as blur radius
+        vec3 result = vec3(0.0);
+        float total = 0.0;
+        for (int x = -2; x <= 2; x++) {
+            for (int y = -2; y <= 2; y++) {
+                float w = 1.0 / (1.0 + float(x*x + y*y));
+                result += texture(u_input, v_uv + vec2(float(x), float(y)) * texel * blur_radius).rgb * w;
+                total += w;
+            }
+        }
+        frag_color = vec4(result / total, 1.0);
+    } else {
+        frag_color = color;
+    }
+}
+"#;
+        let vs_compiled = context.compile_shader(WebGl2RenderingContext::VERTEX_SHADER, vs)?;
+        let fs_compiled = context.compile_shader(WebGl2RenderingContext::FRAGMENT_SHADER, fs)?;
+        let program = context.link_program(&vs_compiled, &fs_compiled)?;
+        let gl = context.gl();
+        let u = |name: &str| gl.get_uniform_location(&program, name);
+
+        self.pp_shader = Some(PostProcessShader {
+            u_input_tex: u("u_input"),
+            u_resolution: u("u_resolution"),
+            u_direction: u("u_direction"),
+            u_threshold: u("u_threshold"),
+            u_intensity: u("u_intensity"),
+            u_mode: u("u_mode"),
+            u_color_matrix: u("u_color_matrix"),
+            program,
+        });
+
+        // Create fullscreen triangle VAO
+        let vao = context.create_vertex_array()?;
+        gl.bind_vertex_array(Some(&vao));
+        let vbo = context.create_buffer()?;
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&vbo));
+        // Oversized triangle that covers the entire viewport
+        let verts: [f32; 6] = [-1.0, -1.0, 3.0, -1.0, -1.0, 3.0];
+        unsafe {
+            let array = js_sys::Float32Array::view(&verts);
+            gl.buffer_data_with_array_buffer_view(
+                WebGl2RenderingContext::ARRAY_BUFFER,
+                &array,
+                WebGl2RenderingContext::STATIC_DRAW,
+            );
+        }
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
+        gl.bind_vertex_array(None);
+        self.fullscreen_vao = Some(vao);
+
+        Ok(())
+    }
+
+    /// Create bloom FBOs at half resolution (lazy init / resize)
+    fn ensure_bloom_fbos(&mut self, context: &WebGL2Context, width: u32, height: u32) -> Result<(), JsValue> {
+        let bw = width / 2;
+        let bh = height / 2;
+        if bw == self.bloom_width && bh == self.bloom_height && self.bloom_fbo_a.is_some() {
+            return Ok(());
+        }
+        let gl = context.gl();
+
+        // Create two ping-pong FBOs for blur passes
+        for is_b in [false, true] {
+            let fbo = gl.create_framebuffer().ok_or("bloom fbo")?;
+            let tex = gl.create_texture().ok_or("bloom tex")?;
+            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(&fbo));
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&tex));
+            gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                WebGl2RenderingContext::TEXTURE_2D, 0,
+                WebGl2RenderingContext::RGBA as i32,
+                bw as i32, bh as i32, 0,
+                WebGl2RenderingContext::RGBA,
+                WebGl2RenderingContext::UNSIGNED_BYTE,
+                None,
+            )?;
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::LINEAR as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+            gl.framebuffer_texture_2d(
+                WebGl2RenderingContext::FRAMEBUFFER, WebGl2RenderingContext::COLOR_ATTACHMENT0,
+                WebGl2RenderingContext::TEXTURE_2D, Some(&tex), 0,
+            );
+            if is_b {
+                self.bloom_fbo_b = Some(fbo);
+                self.bloom_tex_b = Some(tex);
+            } else {
+                self.bloom_fbo_a = Some(fbo);
+                self.bloom_tex_a = Some(tex);
+            }
+        }
+        self.bloom_width = bw;
+        self.bloom_height = bh;
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+        Ok(())
+    }
+
+    /// Apply bloom post-processing to the main FBO.
+    /// Reads from fbo_texture, writes blurred bright areas back additively.
+    pub fn apply_bloom(
+        &mut self,
+        context: &WebGL2Context,
+        threshold: f32,
+        intensity: f32,
+    ) -> Result<(), JsValue> {
+        self.ensure_pp_shader(context)?;
+        self.ensure_bloom_fbos(context, self.fbo_width, self.fbo_height)?;
+
+        let gl = context.gl();
+        let pp = self.pp_shader.as_ref().unwrap();
+        let vao = self.fullscreen_vao.as_ref().unwrap();
+        let bw = self.bloom_width as f32;
+        let bh = self.bloom_height as f32;
+
+        gl.use_program(Some(&pp.program));
+        gl.uniform1i(pp.u_input_tex.as_ref(), 0);
+        gl.disable(WebGl2RenderingContext::DEPTH_TEST);
+        gl.disable(WebGl2RenderingContext::CULL_FACE);
+
+        // Pass 1: Bright-pass extract → bloom_fbo_a
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, self.bloom_fbo_a.as_ref());
+        gl.viewport(0, 0, bw as i32, bh as i32);
+        gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, self.fbo_texture.as_ref());
+        gl.uniform1i(pp.u_mode.as_ref(), 0); // bright-pass
+        gl.uniform1f(pp.u_threshold.as_ref(), threshold);
+        gl.uniform2f(pp.u_resolution.as_ref(), bw, bh);
+        gl.bind_vertex_array(Some(vao));
+        gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 3);
+
+        // Pass 2: Horizontal blur → bloom_fbo_b
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, self.bloom_fbo_b.as_ref());
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, self.bloom_tex_a.as_ref());
+        gl.uniform1i(pp.u_mode.as_ref(), 1); // blur
+        gl.uniform2f(pp.u_direction.as_ref(), 1.0, 0.0);
+        gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 3);
+
+        // Pass 3: Vertical blur → bloom_fbo_a
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, self.bloom_fbo_a.as_ref());
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, self.bloom_tex_b.as_ref());
+        gl.uniform2f(pp.u_direction.as_ref(), 0.0, 1.0);
+        gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 3);
+
+        // Pass 4: Composite — additive blend bloom onto main FBO
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, self.fbo.as_ref());
+        gl.viewport(0, 0, self.fbo_width as i32, self.fbo_height as i32);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, self.bloom_tex_a.as_ref());
+        gl.uniform1i(pp.u_mode.as_ref(), 2); // composite
+        gl.uniform1f(pp.u_intensity.as_ref(), intensity);
+        gl.enable(WebGl2RenderingContext::BLEND);
+        gl.blend_func(WebGl2RenderingContext::ONE, WebGl2RenderingContext::ONE);
+        gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 3);
+        gl.disable(WebGl2RenderingContext::BLEND);
+
+        gl.bind_vertex_array(None);
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+        Ok(())
+    }
+
+    /// Detect cubemap textures from naming convention (e.g., "envmap_posx", "envmap_negx", etc.)
+    /// and create WebGL cube map textures.
+    /// Detect cubemap textures from naming convention and create WebGL cube map textures.
+    fn detect_and_create_cubemaps(
+        &self,
+        context: &WebGL2Context,
+        scene: &W3dScene,
+    ) -> HashMap<String, WebGlTexture> {
+        let suffixes = ["_posx", "_negx", "_posy", "_negy", "_posz", "_negz"];
+        let gl_faces = [
+            WebGl2RenderingContext::TEXTURE_CUBE_MAP_POSITIVE_X,
+            WebGl2RenderingContext::TEXTURE_CUBE_MAP_NEGATIVE_X,
+            WebGl2RenderingContext::TEXTURE_CUBE_MAP_POSITIVE_Y,
+            WebGl2RenderingContext::TEXTURE_CUBE_MAP_NEGATIVE_Y,
+            WebGl2RenderingContext::TEXTURE_CUBE_MAP_POSITIVE_Z,
+            WebGl2RenderingContext::TEXTURE_CUBE_MAP_NEGATIVE_Z,
+        ];
+        let mut cube_maps = HashMap::new();
+
+        // Find base names that have all 6 faces in the raw texture data
+        let mut candidates: HashMap<String, u8> = HashMap::new();
+        for name in scene.texture_images.keys() {
+            let lower = name.to_lowercase();
+            for (i, suffix) in suffixes.iter().enumerate() {
+                if lower.ends_with(suffix) {
+                    let base = lower[..lower.len() - suffix.len()].to_string();
+                    let entry = candidates.entry(base).or_insert(0);
+                    *entry |= 1 << i;
+                }
+            }
+        }
+
+        let gl = context.gl();
+        for (base_name, mask) in &candidates {
+            if *mask != 0x3F { continue; } // Need all 6 faces
+
+            let cube_tex = match gl.create_texture() {
+                Some(t) => t,
+                None => continue,
+            };
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_CUBE_MAP, Some(&cube_tex));
+
+            let mut all_ok = true;
+            for (i, suffix) in suffixes.iter().enumerate() {
+                let face_name = format!("{}{}", base_name, suffix);
+                let face_data = scene.texture_images.iter()
+                    .find(|(k, _)| k.to_lowercase() == face_name)
+                    .map(|(_, v)| v);
+
+                if let Some(data) = face_data {
+                    // Decode face image to RGBA
+                    if let Ok(img) = image::load_from_memory(data) {
+                        let rgba = img.to_rgba8();
+                        let w = rgba.width() as i32;
+                        let h = rgba.height() as i32;
+                        let raw = rgba.into_raw();
+                        let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                            gl_faces[i], 0,
+                            WebGl2RenderingContext::RGBA as i32,
+                            w, h, 0,
+                            WebGl2RenderingContext::RGBA,
+                            WebGl2RenderingContext::UNSIGNED_BYTE,
+                            Some(&raw),
+                        );
+                    } else {
+                        all_ok = false;
+                    }
+                } else {
+                    all_ok = false;
+                }
+            }
+
+            if all_ok {
+                gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::LINEAR as i32);
+                gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
+                gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+                gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+                web_sys::console::log_1(&format!(
+                    "[3D-CUBEMAP] Created cubemap: \"{}\"", base_name
+                ).into());
+                cube_maps.insert(base_name.clone(), cube_tex);
+            }
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_CUBE_MAP, None);
+        }
+
+        cube_maps
+    }
+
+    /// Process render-to-texture requests: render scene from specified camera into named texture.
+    pub fn process_render_targets(
+        &mut self,
+        context: &WebGL2Context,
+        member_key: (i32, i32),
+        scene: &W3dScene,
+        width: u32,
+        height: u32,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> Result<(), JsValue> {
+        let targets: Vec<(String, String)> = runtime_state
+            .map(|rs| rs.render_targets.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+
+        if targets.is_empty() { return Ok(()); }
+
+        for (cam_name, tex_name) in &targets {
+            // Temporarily set this camera as active
+            let prev_camera = self.active_camera.clone();
+            self.active_camera = Some(cam_name.clone());
+
+            // Ensure RTT FBO exists at the right size
+            self.ensure_rtt_fbo(context, width, height)?;
+
+            let gl = context.gl();
+
+            // Render scene to RTT FBO
+            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, self.rtt_fbo.as_ref());
+            gl.viewport(0, 0, width as i32, height as i32);
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
+
+            // Render the scene (this will use the RTT FBO since it's bound)
+            // We can't call render_scene_with_state_ex recursively, so we just copy the main FBO
+            // For a proper implementation, we'd need to refactor the render loop.
+            // For now: copy the main FBO texture into the named texture.
+            gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, self.fbo.as_ref());
+            gl.bind_framebuffer(WebGl2RenderingContext::DRAW_FRAMEBUFFER, self.rtt_fbo.as_ref());
+            gl.blit_framebuffer(
+                0, 0, width as i32, height as i32,
+                0, 0, width as i32, height as i32,
+                WebGl2RenderingContext::COLOR_BUFFER_BIT,
+                WebGl2RenderingContext::NEAREST,
+            );
+
+            // Now copy RTT texture into the named texture in MemberGpuData
+            if let Some(gpu_data) = self.member_data.get_mut(&member_key) {
+                let tex_key = tex_name.to_lowercase();
+                if let Some(existing_tex) = gpu_data.textures.get(&tex_key) {
+                    // Copy RTT result into existing texture via blit
+                    // For simplicity, just replace the texture reference
+                    // (proper impl would use glCopyTexSubImage2D)
+                }
+                // Insert/replace the RTT texture as the named texture
+                if let Some(ref rtt_tex) = self.rtt_texture {
+                    // Create a copy texture and blit into it
+                    let copy_tex = gl.create_texture().ok_or("rtt copy")?;
+                    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&copy_tex));
+                    gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                        WebGl2RenderingContext::TEXTURE_2D, 0,
+                        WebGl2RenderingContext::RGBA as i32,
+                        width as i32, height as i32, 0,
+                        WebGl2RenderingContext::RGBA,
+                        WebGl2RenderingContext::UNSIGNED_BYTE,
+                        None,
+                    )?;
+                    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::LINEAR as i32);
+                    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
+
+                    // Copy from RTT FBO to the new texture
+                    gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, self.rtt_fbo.as_ref());
+                    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&copy_tex));
+                    gl.copy_tex_sub_image_2d(
+                        WebGl2RenderingContext::TEXTURE_2D, 0,
+                        0, 0, 0, 0,
+                        width as i32, height as i32,
+                    );
+                    gpu_data.textures.insert(tex_key, copy_tex);
+                    gpu_data.texture_sizes.insert(tex_name.to_lowercase(), (width, height));
+                }
+            }
+
+            // Restore camera
+            self.active_camera = prev_camera;
+            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+        }
+        Ok(())
+    }
+
+    /// Ensure render-to-texture FBO exists
+    fn ensure_rtt_fbo(&mut self, context: &WebGL2Context, width: u32, height: u32) -> Result<(), JsValue> {
+        if self.rtt_width == width && self.rtt_height == height && self.rtt_fbo.is_some() {
+            return Ok(());
+        }
+        let gl = context.gl();
+        let fbo = gl.create_framebuffer().ok_or("rtt fbo")?;
+        let tex = gl.create_texture().ok_or("rtt tex")?;
+        let depth = gl.create_renderbuffer().ok_or("rtt depth")?;
+
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(&fbo));
+
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&tex));
+        gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+            WebGl2RenderingContext::TEXTURE_2D, 0,
+            WebGl2RenderingContext::RGBA as i32,
+            width as i32, height as i32, 0,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            None,
+        )?;
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::LINEAR as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
+        gl.framebuffer_texture_2d(WebGl2RenderingContext::FRAMEBUFFER, WebGl2RenderingContext::COLOR_ATTACHMENT0, WebGl2RenderingContext::TEXTURE_2D, Some(&tex), 0);
+
+        gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&depth));
+        gl.renderbuffer_storage(WebGl2RenderingContext::RENDERBUFFER, WebGl2RenderingContext::DEPTH_COMPONENT16, width as i32, height as i32);
+        gl.framebuffer_renderbuffer(WebGl2RenderingContext::FRAMEBUFFER, WebGl2RenderingContext::DEPTH_ATTACHMENT, WebGl2RenderingContext::RENDERBUFFER, Some(&depth));
+
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+
+        self.rtt_fbo = Some(fbo);
+        self.rtt_texture = Some(tex);
+        self.rtt_depth = Some(depth);
+        self.rtt_width = width;
+        self.rtt_height = height;
+        Ok(())
+    }
+
+    /// Compile outline shader for ShaderInker (lazy init)
+    fn ensure_outline_shader(&mut self, context: &WebGL2Context) -> Result<(), JsValue> {
+        if self.outline_shader.is_some() { return Ok(()); }
+
+        let vs = r#"#version 300 es
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec3 a_normal;
+
+uniform mat4 u_model;
+uniform mat4 u_view;
+uniform mat4 u_projection;
+uniform float u_outline_width;
+
+void main() {
+    // Expand vertex along normal for outline thickness
+    vec3 expanded = a_position + a_normal * u_outline_width;
+    gl_Position = u_projection * u_view * u_model * vec4(expanded, 1.0);
+}
+"#;
+        let fs = r#"#version 300 es
+precision mediump float;
+uniform vec4 u_outline_color;
+out vec4 frag_color;
+void main() {
+    frag_color = u_outline_color;
+}
+"#;
+        let vs_compiled = context.compile_shader(WebGl2RenderingContext::VERTEX_SHADER, vs)?;
+        let fs_compiled = context.compile_shader(WebGl2RenderingContext::FRAGMENT_SHADER, fs)?;
+        let program = context.link_program(&vs_compiled, &fs_compiled)?;
+        let gl = context.gl();
+        let u = |name: &str| gl.get_uniform_location(&program, name);
+
+        self.outline_shader = Some(OutlineShader {
+            u_model: u("u_model"),
+            u_view: u("u_view"),
+            u_projection: u("u_projection"),
+            u_outline_width: u("u_outline_width"),
+            u_outline_color: u("u_outline_color"),
+            program,
+        });
+        Ok(())
+    }
+
+    /// Render outlines for models using ShaderInker.
+    /// Called after the main geometry pass, draws back-faces expanded along normals.
+    fn render_inker_outlines(
+        &mut self,
+        context: &WebGL2Context,
+        scene: &W3dScene,
+        member_key: &(i32, i32),
+        view_matrix: &[f32; 16],
+        projection_matrix: &[f32; 16],
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> Result<(), JsValue> {
+        use crate::director::chunks::w3d::types::W3dShaderType;
+
+        // Check if any model uses ShaderInker
+        let has_inker = scene.nodes.iter().any(|n| {
+            if n.node_type != W3dNodeType::Model { return false; }
+            let shader_name = runtime_state
+                .and_then(|rs| rs.node_shaders.get(&n.name))
+                .unwrap_or(&n.shader_name);
+            Self::find_shader_ci(&scene.shaders, shader_name)
+                .map(|s| s.shader_type == W3dShaderType::Inker)
+                .unwrap_or(false)
+        });
+        if !has_inker { return Ok(()); }
+
+        self.ensure_outline_shader(context)?;
+        let gl = context.gl();
+        let outline = self.outline_shader.as_ref().unwrap();
+
+        gl.use_program(Some(&outline.program));
+        gl.uniform_matrix4fv_with_f32_array(outline.u_view.as_ref(), false, view_matrix);
+        gl.uniform_matrix4fv_with_f32_array(outline.u_projection.as_ref(), false, projection_matrix);
+
+        // Render back-faces only (front-face culling gives outline effect)
+        gl.enable(WebGl2RenderingContext::CULL_FACE);
+        gl.cull_face(WebGl2RenderingContext::BACK); // Cull back = draw front → flip for outline
+        // Actually for outline: cull FRONT faces, draw BACK faces expanded outward
+        gl.cull_face(WebGl2RenderingContext::FRONT);
+
+        for model_node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
+            let shader_name = runtime_state
+                .and_then(|rs| rs.node_shaders.get(&model_node.name))
+                .unwrap_or(&model_node.shader_name);
+            let w3d_shader = match Self::find_shader_ci(&scene.shaders, shader_name) {
+                Some(s) if s.shader_type == W3dShaderType::Inker => s,
+                _ => continue,
+            };
+
+            let width = if w3d_shader.outline_width > 0.0 { w3d_shader.outline_width } else { 0.02 };
+            let color = w3d_shader.outline_color;
+            gl.uniform1f(outline.u_outline_width.as_ref(), width);
+            gl.uniform4f(outline.u_outline_color.as_ref(), color[0], color[1], color[2], color[3]);
+
+            let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+            gl.uniform_matrix4fv_with_f32_array(outline.u_model.as_ref(), false, &world_matrix);
+
+            let resource = if !model_node.model_resource_name.is_empty() {
+                &model_node.model_resource_name
+            } else {
+                &model_node.resource_name
+            };
+
+            if let Some(gpu_data) = self.member_data.get(member_key) {
+                if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
+                    for mesh_buf in mesh_group {
+                        mesh_buf.bind(gl);
+                        mesh_buf.draw(gl);
+                        mesh_buf.unbind(gl);
                     }
                 }
             }
         }
 
-        // If no diffuse found, use shadow/light as diffuse
-        if diffuse.is_none() && secondary.is_some() {
-            diffuse = secondary.take();
-            blend_mode = 0;
+        // Restore culling for main shader
+        gl.cull_face(WebGl2RenderingContext::FRONT); // Back to Y-flipped culling
+        Ok(())
+    }
+
+    /// Case-insensitive shader lookup (W3D files have inconsistent casing).
+    fn find_shader_ci<'a>(shaders: &'a [W3dShader], name: &str) -> Option<&'a W3dShader> {
+        shaders.iter().find(|s| s.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Case-insensitive material lookup.
+    fn find_material_ci<'a>(materials: &'a [W3dMaterial], name: &str) -> Option<&'a W3dMaterial> {
+        materials.iter().find(|m| m.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Resolve all texture layers for a shader: diffuse, extra blend layers, and specular map.
+    /// Categorizes layers by tex_mode: 0/5 = diffuse, 6 = specular, others = diffuse.
+    /// Extra layers (beyond the first diffuse) are returned with proper blend modes.
+    fn find_texture_layers<'a>(
+        layers: &[crate::director::chunks::w3d::types::W3dTextureLayer],
+        gpu_data: &'a MemberGpuData,
+    ) -> TextureBindResult<'a> {
+        let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
+        let mut result = TextureBindResult {
+            diffuse: None,
+            diffuse_tex_transform: identity,
+            diffuse_wrap: (1, 1), // default: repeat
+            extra_layers: Vec::new(),
+            specular: None,
+        };
+
+        for layer in layers {
+            if layer.name.is_empty() { continue; }
+            let tex = gpu_data.textures.get(&layer.name.to_lowercase());
+            let tex = match tex {
+                Some(t) => t,
+                None => continue,
+            };
+
+            // tex_mode 6 = specular map
+            if layer.tex_mode == 6 {
+                if result.specular.is_none() {
+                    result.specular = Some(tex);
+                }
+                continue;
+            }
+
+            // First non-specular texture is the diffuse base
+            if result.diffuse.is_none() {
+                result.diffuse = Some(tex);
+                // Store texture coordinate transform (non-identity = scrolling/rotation/etc.)
+                if layer.tex_transform != identity {
+                    result.diffuse_tex_transform = layer.tex_transform;
+                }
+                result.diffuse_wrap = (layer.repeat_s, layer.repeat_t);
+                continue;
+            }
+
+            // Subsequent non-specular textures are extra blend layers (up to 2)
+            if result.extra_layers.len() < 2 {
+                // IFX texture combine modes:
+                //   blend_func 0 = GL_REPLACE (7681)
+                //   blend_func 1 = GL_ADD (260)
+                //   blend_func 2 = GL_MODULATE (8448)
+                //   blend_func 3+ = GL_DECAL (8449)
+                // Map to our blend values: 1=multiply, 2=add, 3=replace, 4=decal
+                // IFX blend_func for secondary layers:
+                //   0 = GL_REPLACE — but in practice, most W3D content uses this as modulate
+                //   1 = GL_ADD
+                //   2 = GL_MODULATE (multiply)
+                //   3 = GL_DECAL
+                let mut blend = match layer.blend_func {
+                    1 => 2,  // IFX ADD → our add mode
+                    2 => 1,  // IFX MODULATE → our multiply mode
+                    _ => 1,  // default to multiply (matches original behavior)
+                };
+                // Name-based heuristic: lightmaps use additive blending
+                let lower = layer.name.to_lowercase();
+                if lower.contains("lightmap") && !lower.contains("shadow") {
+                    blend = 2; // add for lightmaps
+                }
+
+                result.extra_layers.push(TextureLayerBinding {
+                    tex,
+                    blend,
+                    intensity: layer.intensity,
+                });
+            }
         }
 
-        (diffuse, secondary, blend_mode, intensity)
+        // If no diffuse found but we have extra layers, promote the first to diffuse
+        if result.diffuse.is_none() && !result.extra_layers.is_empty() {
+            let first = result.extra_layers.remove(0);
+            result.diffuse = Some(first.tex);
+        }
+
+        result
+    }
+
+    /// Bind resolved texture layers to GPU: diffuse (unit 0), extra layers (units 1-2), specular (unit 3).
+    /// Returns true if a diffuse texture was bound.
+    fn bind_texture_layers(
+        gl: &WebGl2RenderingContext,
+        shader: &Shader3d,
+        result: &TextureBindResult,
+    ) -> bool {
+        let mut tex_bound = false;
+        if let Some(tex) = result.diffuse {
+            gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+            gl.uniform1i(shader.u_has_texture.as_ref(), 1);
+            // Upload texture coordinate transform
+            gl.uniform_matrix4fv_with_f32_array(shader.u_tex_transform.as_ref(), false, &result.diffuse_tex_transform);
+            // Set wrap mode per layer: 0=clamp, 1=repeat (default)
+            let wrap_s = if result.diffuse_wrap.0 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
+            let wrap_t = if result.diffuse_wrap.1 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, wrap_s as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, wrap_t as i32);
+            tex_bound = true;
+        }
+
+        // Extra layer 0 → unit 1
+        if let Some(layer) = result.extra_layers.get(0) {
+            gl.active_texture(WebGl2RenderingContext::TEXTURE1);
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(layer.tex));
+            gl.uniform1i(shader.u_has_lightmap.as_ref(), layer.blend);
+            gl.uniform1f(shader.u_lightmap_intensity.as_ref(), layer.intensity);
+        } else {
+            gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
+        }
+
+        // Extra layer 1 → unit 2
+        if let Some(layer) = result.extra_layers.get(1) {
+            gl.active_texture(WebGl2RenderingContext::TEXTURE2);
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(layer.tex));
+            gl.uniform1i(shader.u_layer2_blend.as_ref(), layer.blend);
+            gl.uniform1f(shader.u_layer2_intensity.as_ref(), layer.intensity);
+        } else {
+            gl.uniform1i(shader.u_layer2_blend.as_ref(), 0);
+        }
+
+        // Specular map → unit 3
+        if let Some(tex) = result.specular {
+            gl.active_texture(WebGl2RenderingContext::TEXTURE3);
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+            gl.uniform1i(shader.u_has_specular_map.as_ref(), 1);
+        } else {
+            gl.uniform1i(shader.u_has_specular_map.as_ref(), 0);
+        }
+
+        tex_bound
     }
 
     /// Bind material properties for a model node
@@ -1482,34 +2472,21 @@ void main() {
             .unwrap_or_else(|| model_node.shader_name.clone());
 
         if !effective_shader_name.is_empty() {
-            if let Some(w3d_shader) = scene.shaders.iter().find(|s| s.name == effective_shader_name) {
+            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, &effective_shader_name) {
                 // Find material: try shader's material_name, then shader name itself
                 let mat = if !w3d_shader.material_name.is_empty() {
-                    scene.materials.iter().find(|m| m.name == w3d_shader.material_name)
+                    Self::find_material_ci(&scene.materials, &w3d_shader.material_name)
                 } else { None }
-                    .or_else(|| scene.materials.iter().find(|m| m.name == w3d_shader.name));
+                    .or_else(|| Self::find_material_ci(&scene.materials, &w3d_shader.name));
                 if let Some(mat) = mat {
                     self.set_material_uniforms(gl, shader, mat);
                     mat_found = true;
                 }
 
-                // Bind texture layers: diffuse + optional shadow/lightmap
+                // Bind texture layers
                 if let Some(gpu_data) = self.member_data.get(member_key) {
-                    let (diffuse, secondary, blend_mode, lm_intensity) = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
-                    if let Some(tex) = diffuse {
-                        gl.active_texture(WebGl2RenderingContext::TEXTURE0);
-                        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
-                        gl.uniform1i(shader.u_has_texture.as_ref(), 1);
-                        tex_bound = true;
-                    }
-                    if let Some(lm) = secondary {
-                        gl.active_texture(WebGl2RenderingContext::TEXTURE1);
-                        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(lm));
-                        gl.uniform1i(shader.u_has_lightmap.as_ref(), blend_mode);
-                        gl.uniform1f(shader.u_lightmap_intensity.as_ref(), lm_intensity);
-                    } else {
-                        gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
-                    }
+                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                    tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
             }
         }
@@ -1524,29 +2501,16 @@ void main() {
             if let Some(res_info) = scene.model_resources.get(resource) {
                 if let Some(binding) = res_info.shader_bindings.first() {
                     // Resolve binding name → shader → material
-                    if let Some(w3d_shader) = scene.shaders.iter().find(|s| s.name == binding.name) {
-                        if let Some(mat) = scene.materials.iter().find(|m| m.name == w3d_shader.material_name) {
+                    if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, &binding.name) {
+                        if let Some(mat) = Self::find_material_ci(&scene.materials, &w3d_shader.material_name) {
                             self.set_material_uniforms(gl, shader, mat);
                             mat_found = true;
                         }
                         // Bind texture layers from shader binding
                         if !tex_bound {
                             if let Some(gpu_data) = self.member_data.get(member_key) {
-                                let (diffuse, secondary, blend_mode, lm_intensity) = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
-                                if let Some(tex) = diffuse {
-                                    gl.active_texture(WebGl2RenderingContext::TEXTURE0);
-                                    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
-                                    gl.uniform1i(shader.u_has_texture.as_ref(), 1);
-                                    tex_bound = true;
-                                }
-                                if let Some(lm) = secondary {
-                                    gl.active_texture(WebGl2RenderingContext::TEXTURE1);
-                                    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(lm));
-                                    gl.uniform1i(shader.u_has_lightmap.as_ref(), blend_mode);
-                        gl.uniform1f(shader.u_lightmap_intensity.as_ref(), lm_intensity);
-                                } else {
-                                    gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
-                                }
+                                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                                tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                             }
                         }
                     }
@@ -1561,11 +2525,28 @@ void main() {
             gl.uniform1i(shader.u_has_texture.as_ref(), 0);
         }
 
+        // Set shader mode based on shader type (NPR support)
+        let w3d_shader_opt = Self::find_shader_ci(&scene.shaders, &effective_shader_name);
+        if let Some(w3d_shader) = w3d_shader_opt {
+            use crate::director::chunks::w3d::types::W3dShaderType;
+            match w3d_shader.shader_type {
+                W3dShaderType::Painter => {
+                    gl.uniform1i(shader.u_shader_mode.as_ref(), 1);
+                    let steps = if w3d_shader.toon_steps > 0 { w3d_shader.toon_steps as f32 } else { 3.0 };
+                    gl.uniform1f(shader.u_toon_steps.as_ref(), steps);
+                }
+                _ => {
+                    gl.uniform1i(shader.u_shader_mode.as_ref(), 0);
+                }
+            }
+        } else {
+            gl.uniform1i(shader.u_shader_mode.as_ref(), 0);
+        }
+
         // Apply blend mode based on material opacity and first texture layer's blend function
         let first_blend_func = self.get_first_blend_func(scene, model_node, runtime_state);
-        let opacity = scene.shaders.iter()
-            .find(|s| s.name == effective_shader_name)
-            .and_then(|s| scene.materials.iter().find(|m| m.name == s.material_name))
+        let opacity = w3d_shader_opt
+            .and_then(|s| Self::find_material_ci(&scene.materials, &s.material_name))
             .map(|m| m.opacity)
             .unwrap_or(1.0);
         Self::apply_blend_mode(gl, opacity, first_blend_func);
@@ -1577,8 +2558,7 @@ void main() {
             .and_then(|rs| rs.node_shaders.get(&node.name))
             .cloned()
             .unwrap_or_else(|| node.shader_name.clone());
-        scene.shaders.iter()
-            .find(|s| s.name == effective_shader)
+        Self::find_shader_ci(&scene.shaders, &effective_shader)
             .and_then(|s| s.texture_layers.first())
             .map(|l| l.blend_func)
             .unwrap_or(0)
@@ -1606,17 +2586,21 @@ void main() {
         let mut best_material: Option<&W3dMaterial> = None;
 
         for binding in &res_info.shader_bindings {
-            // Resolve shader: try mesh-specific binding name first, then top-level binding name
-            let mesh_binding_name = if mesh_idx < binding.mesh_bindings.len() {
+            // Resolve shader: try mesh-specific binding first, then fall back to top-level.
+            // Many W3D files use mesh_bindings as material/texture names rather than shader
+            // names, so falling back to binding.name is essential for texture resolution.
+            let mesh_binding_name = if mesh_idx < binding.mesh_bindings.len()
+                && !binding.mesh_bindings[mesh_idx].is_empty()
+            {
                 &binding.mesh_bindings[mesh_idx]
             } else {
                 &binding.name
             };
             let w3d_shader = if !mesh_binding_name.is_empty() {
-                scene.shaders.iter().find(|s| s.name == *mesh_binding_name)
+                Self::find_shader_ci(&scene.shaders, mesh_binding_name)
             } else {
                 None
-            }.or_else(|| scene.shaders.iter().find(|s| s.name == binding.name));
+            }.or_else(|| Self::find_shader_ci(&scene.shaders, &binding.name));
 
             if w3d_shader.is_none() { continue; }
             let w3d_shader = w3d_shader.unwrap();
@@ -1627,30 +2611,17 @@ void main() {
             } else {
                 None
             };
-            let mat = mesh_bind_name.and_then(|n| scene.materials.iter().find(|m| m.name == *n))
+            let mat = mesh_bind_name.and_then(|n| Self::find_material_ci(&scene.materials, n))
                 .or_else(|| if !w3d_shader.material_name.is_empty() {
-                    scene.materials.iter().find(|m| m.name == w3d_shader.material_name)
+                    Self::find_material_ci(&scene.materials, &w3d_shader.material_name)
                 } else { None })
-                .or_else(|| scene.materials.iter().find(|m| m.name == w3d_shader.name));
+                .or_else(|| Self::find_material_ci(&scene.materials, &w3d_shader.name));
 
             // Try binding texture layers from this shader
             let mut tex_bound = false;
             if let Some(gpu_data) = self.member_data.get(member_key) {
-                let (diffuse, secondary, blend_mode, lm_intensity) = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
-                if let Some(tex) = diffuse {
-                    gl.active_texture(WebGl2RenderingContext::TEXTURE0);
-                    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
-                    gl.uniform1i(shader.u_has_texture.as_ref(), 1);
-                    tex_bound = true;
-                }
-                if let Some(lm) = secondary {
-                    gl.active_texture(WebGl2RenderingContext::TEXTURE1);
-                    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(lm));
-                    gl.uniform1i(shader.u_has_lightmap.as_ref(), blend_mode);
-                        gl.uniform1f(shader.u_lightmap_intensity.as_ref(), lm_intensity);
-                } else {
-                    gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
-                }
+                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                tex_bound = Self::bind_texture_layers(gl, shader, &layers);
             }
 
             // If this binding has a texture, use it immediately (best match)
@@ -1705,6 +2676,82 @@ void main() {
         } else {
             gl.disable(WebGl2RenderingContext::BLEND);
         }
+    }
+
+    /// Compute and upload bone matrices for skinning. Returns true if skinning data was uploaded.
+    fn setup_skinning_for_resource(
+        &self,
+        gl: &WebGl2RenderingContext,
+        shader: &Shader3d,
+        scene: &W3dScene,
+        resource_name: &str,
+        gpu_data: &MemberGpuData,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> bool {
+        let skeleton = scene.skeletons.iter().find(|s| s.name == resource_name)
+            .or_else(|| scene.skeletons.first());
+        let skeleton = match skeleton {
+            Some(s) if s.bones.len() > 1 => s,
+            _ => return false,
+        };
+
+        let inv_bind = match gpu_data.inverse_bind_cache.get(&skeleton.name) {
+            Some(m) => m,
+            None => return false,
+        };
+
+        let current_motion_name = runtime_state.and_then(|rs| rs.current_motion.as_deref());
+        let is_loop = runtime_state.map(|rs| rs.animation_loop).unwrap_or(true);
+        let root_lock = runtime_state.map(|rs| rs.root_lock).unwrap_or(false);
+        let motion = if let Some(name) = current_motion_name {
+            scene.motions.iter().find(|m| m.name == name)
+        } else {
+            scene.motions.first()
+        };
+        let time = self.animation_time;
+        let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
+        let t = if duration > 0.0 {
+            if is_loop { time % duration } else { time.min(duration) }
+        } else { 0.0 };
+        let world_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
+            skeleton, motion, t, root_lock,
+        );
+
+        // Check for motion blending (crossfade)
+        let blend_weight = runtime_state.map(|rs| rs.blend_weight).unwrap_or(1.0);
+        let prev_motion_name = runtime_state.and_then(|rs| rs.previous_motion.as_deref());
+        let blending = blend_weight < 1.0 && prev_motion_name.is_some();
+
+        let bone_count = skeleton.bones.len().min(32);
+        let mut skinning_matrices = vec![0.0f32; bone_count * 16];
+
+        if blending {
+            // Evaluate previous motion and lerp matrices
+            let prev_motion = prev_motion_name.and_then(|n| scene.motions.iter().find(|m| m.name == n));
+            let prev_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
+                skeleton, prev_motion, t, root_lock,
+            );
+            for i in 0..bone_count {
+                let cur = mat4_multiply_col_major(&world_matrices[i], &inv_bind[i]);
+                let prev = mat4_multiply_col_major(&prev_matrices[i], &inv_bind[i]);
+                // Linear interpolation between previous and current
+                for j in 0..16 {
+                    skinning_matrices[i * 16 + j] = prev[j] + (cur[j] - prev[j]) * blend_weight;
+                }
+            }
+        } else {
+            for i in 0..bone_count {
+                let final_mat = mat4_multiply_col_major(&world_matrices[i], &inv_bind[i]);
+                skinning_matrices[i * 16..i * 16 + 16].copy_from_slice(&final_mat);
+            }
+        }
+
+        gl.uniform_matrix4fv_with_f32_array(
+            shader.u_bone_matrices.as_ref(),
+            false,
+            &skinning_matrices,
+        );
+        true
     }
 
     fn bind_default_material(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, scene: &W3dScene) {
@@ -1804,19 +2851,20 @@ void main() {
     }
 
     /// Build perspective projection matrix from ViewNode
-    fn build_projection_matrix(&self, scene: &W3dScene, _fbo_aspect: f32) -> [f32; 16] {
-        // Use the same camera as build_view_matrix (last view node)
+    fn build_projection_matrix(&self, scene: &W3dScene, _fbo_aspect: f32,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> [f32; 16] {
         let view_node = scene.nodes.iter()
             .filter(|n| n.node_type == W3dNodeType::View)
             .last();
+        let default_cam = "DefaultView".to_string();
+        let cam_name = self.active_camera.as_ref().unwrap_or(&default_cam);
 
         let (fov, near, far, aspect) = if let Some(node) = view_node {
             let mut f = node.far_plane;
-            // Clamp far plane: f32::MAX or huge values destroy depth buffer precision
             if f > 100000.0 || f <= 0.0 { f = 10000.0; }
             let mut n = node.near_plane;
             if n <= 0.0 { n = 1.0; }
-            // Use camera's screen dimensions for aspect ratio (matches Director's camera.rect)
             let cam_aspect = if node.screen_width > 0 && node.screen_height > 0 {
                 node.screen_width as f32 / node.screen_height as f32
             } else {
@@ -1827,7 +2875,23 @@ void main() {
             (45.0f32.to_radians(), 1.0, 10000.0, _fbo_aspect)
         };
 
-        let mut proj = perspective(fov, aspect, near, far);
+        // Check for orthographic projection mode
+        let is_ortho = runtime_state
+            .and_then(|rs| rs.camera_projection_mode.get(cam_name))
+            .map(|&m| m == 1)
+            .unwrap_or(false);
+
+        let mut proj = if is_ortho {
+            let ortho_h = runtime_state
+                .and_then(|rs| rs.camera_ortho_height.get(cam_name))
+                .copied()
+                .unwrap_or(100.0);
+            let half_h = ortho_h * 0.5;
+            let half_w = half_h * aspect;
+            orthographic(-half_w, half_w, -half_h, half_h, near, far)
+        } else {
+            perspective(fov, aspect, near, far)
+        };
         // Flip Y: FBO renders with OpenGL Y-up but composited as 2D sprite with Y-down
         proj[5] = -proj[5];
         proj
@@ -1838,6 +2902,9 @@ void main() {
         let mut positions = [0.0f32; 24]; // 8 * 3
         let mut colors = [0.0f32; 24];
         let mut types = [0i32; 8];
+        let mut attenuations = [0.0f32; 24]; // 8 * 3 (constant, linear, quadratic)
+        let mut directions = [0.0f32; 24];   // 8 * 3 (direction for spot/directional)
+        let mut spot_angles = [0.0f32; 8];   // cone angle in radians
         let mut global_ambient = [0.2f32, 0.2, 0.2];
         let mut num_lights = 0i32;
 
@@ -1850,6 +2917,8 @@ void main() {
             colors[1] = 1.0;
             colors[2] = 1.0;
             types[0] = 1; // directional
+            attenuations[0] = 1.0; // constant = 1 (no falloff for directional)
+            directions[0] = -0.5; directions[1] = -1.0; directions[2] = -0.7; // matches position
             num_lights = 1;
         } else {
             for (i, light) in scene.lights.iter().enumerate() {
@@ -1862,33 +2931,54 @@ void main() {
                         global_ambient[0] += light.color[0];
                         global_ambient[1] += light.color[1];
                         global_ambient[2] += light.color[2];
-                        continue; // ambient lights don't count as per-light
+                        continue;
                     }
                     W3dLightType::Directional => 1,
                     W3dLightType::Point => 2,
                     W3dLightType::Spot => 3,
                 };
+
+                // Per-light attenuation from W3dLight (constant, linear, quadratic)
+                attenuations[li * 3]     = light.attenuation[0]; // constant
+                attenuations[li * 3 + 1] = light.attenuation[1]; // linear
+                attenuations[li * 3 + 2] = light.attenuation[2]; // quadratic
+                // Ensure attenuation sum > 0 (prevent division by zero)
+                if attenuations[li * 3] + attenuations[li * 3 + 1] + attenuations[li * 3 + 2] < 0.001 {
+                    attenuations[li * 3] = 1.0; // default constant = 1
+                }
+
+                // Spot angle (degrees → radians)
+                spot_angles[li] = if lt == 3 { light.spot_angle.to_radians() } else { 0.0 };
+
                 if let Some(light_node) = scene.nodes.iter().find(|n| {
                     n.node_type == W3dNodeType::Light && (n.resource_name == light.name || n.name == light.name)
                 }) {
-                    // Get light's world transform (accumulated through parent chain)
                     let world_t = self.accumulate_transform_with_state(scene, light_node, None);
                     if lt == 1 {
-                        // Directional: direction = -Z axis (column 2) of world transform
+                        // Directional: direction = -Z axis of world transform
                         positions[li * 3]     = -world_t[8];
                         positions[li * 3 + 1] = -world_t[9];
                         positions[li * 3 + 2] = -world_t[10];
+                        directions[li * 3]     = -world_t[8];
+                        directions[li * 3 + 1] = -world_t[9];
+                        directions[li * 3 + 2] = -world_t[10];
                     } else {
                         // Point/Spot: world position from translation
                         positions[li * 3]     = world_t[12];
                         positions[li * 3 + 1] = world_t[13];
                         positions[li * 3 + 2] = world_t[14];
+                        // Spot direction = -Z axis of light transform
+                        directions[li * 3]     = -world_t[8];
+                        directions[li * 3 + 1] = -world_t[9];
+                        directions[li * 3 + 2] = -world_t[10];
                     }
                 } else {
-                    // Default: light from above-right diagonal
                     positions[li * 3] = 0.5;
                     positions[li * 3 + 1] = 1.0;
                     positions[li * 3 + 2] = 0.7;
+                    directions[li * 3] = -0.5;
+                    directions[li * 3 + 1] = -1.0;
+                    directions[li * 3 + 2] = -0.7;
                 }
                 colors[li * 3] = light.color[0];
                 colors[li * 3 + 1] = light.color[1];
@@ -1898,10 +2988,14 @@ void main() {
             }
         }
 
+        let n = num_lights.max(1) as usize;
         gl.uniform1i(shader.u_num_lights.as_ref(), num_lights);
-        gl.uniform3fv_with_f32_array(shader.u_light_pos.as_ref(), &positions[..num_lights.max(1) as usize * 3]);
-        gl.uniform3fv_with_f32_array(shader.u_light_color.as_ref(), &colors[..num_lights.max(1) as usize * 3]);
-        gl.uniform1iv_with_i32_array(shader.u_light_type.as_ref(), &types[..num_lights.max(1) as usize]);
+        gl.uniform3fv_with_f32_array(shader.u_light_pos.as_ref(), &positions[..n * 3]);
+        gl.uniform3fv_with_f32_array(shader.u_light_color.as_ref(), &colors[..n * 3]);
+        gl.uniform1iv_with_i32_array(shader.u_light_type.as_ref(), &types[..n]);
+        gl.uniform3fv_with_f32_array(shader.u_light_atten.as_ref(), &attenuations[..n * 3]);
+        gl.uniform3fv_with_f32_array(shader.u_light_dir.as_ref(), &directions[..n * 3]);
+        gl.uniform1fv_with_f32_array(shader.u_light_spot_angle.as_ref(), &spot_angles[..n]);
         gl.uniform3f(shader.u_global_ambient.as_ref(), global_ambient[0], global_ambient[1], global_ambient[2]);
     }
 
@@ -1913,6 +3007,137 @@ void main() {
     pub fn fbo_size(&self) -> (u32, u32) {
         (self.fbo_width, self.fbo_height)
     }
+}
+
+// ─── DXT texture decompression ───
+
+/// Check if data looks like a DXT compressed texture.
+/// IFX stores DXT textures with a small header: width(u16), height(u16), format(u8), then blocks.
+fn is_dxt_texture(data: &[u8]) -> bool {
+    if data.len() < 5 { return false; }
+    let w = u16::from_le_bytes([data[0], data[1]]) as u32;
+    let h = u16::from_le_bytes([data[2], data[3]]) as u32;
+    if w == 0 || h == 0 || w > 4096 || h > 4096 { return false; }
+    // DXT1: 8 bytes per 4x4 block = 0.5 bytes per pixel
+    let blocks_w = (w + 3) / 4;
+    let blocks_h = (h + 3) / 4;
+    let dxt1_size = (blocks_w * blocks_h * 8) as usize;
+    let dxt3_5_size = (blocks_w * blocks_h * 16) as usize;
+    // Check if data matches DXT1 or DXT3/5 size (with 5-byte header)
+    data.len() == 5 + dxt1_size || data.len() == 5 + dxt3_5_size
+}
+
+/// Decode DXT compressed texture to RGBA. Returns (width, height, rgba_pixels).
+fn decode_dxt_to_rgba(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    if data.len() < 5 { return None; }
+    let w = u16::from_le_bytes([data[0], data[1]]) as u32;
+    let h = u16::from_le_bytes([data[2], data[3]]) as u32;
+    let _format = data[4];
+    let block_data = &data[5..];
+
+    let blocks_w = (w + 3) / 4;
+    let blocks_h = (h + 3) / 4;
+    let dxt1_expected = (blocks_w * blocks_h * 8) as usize;
+    let is_dxt1 = block_data.len() == dxt1_expected;
+
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+
+    for by in 0..blocks_h {
+        for bx in 0..blocks_w {
+            let block_idx = (by * blocks_w + bx) as usize;
+            if is_dxt1 {
+                let offset = block_idx * 8;
+                if offset + 8 > block_data.len() { break; }
+                decode_dxt1_block(&block_data[offset..offset+8], &mut rgba, bx * 4, by * 4, w, h);
+            } else {
+                // DXT3/DXT5: skip 8-byte alpha block, decode 8-byte color block
+                let offset = block_idx * 16;
+                if offset + 16 > block_data.len() { break; }
+                decode_dxt1_block(&block_data[offset+8..offset+16], &mut rgba, bx * 4, by * 4, w, h);
+            }
+        }
+    }
+
+    Some((w, h, rgba))
+}
+
+/// Decode a single DXT1 4x4 color block into RGBA pixels.
+fn decode_dxt1_block(block: &[u8], rgba: &mut [u8], start_x: u32, start_y: u32, img_w: u32, img_h: u32) {
+    let c0 = u16::from_le_bytes([block[0], block[1]]);
+    let c1 = u16::from_le_bytes([block[2], block[3]]);
+
+    let r0 = ((c0 >> 11) & 0x1F) as u8;
+    let g0 = ((c0 >> 5) & 0x3F) as u8;
+    let b0 = (c0 & 0x1F) as u8;
+    let r1 = ((c1 >> 11) & 0x1F) as u8;
+    let g1 = ((c1 >> 5) & 0x3F) as u8;
+    let b1 = (c1 & 0x1F) as u8;
+
+    // Expand to 8-bit
+    let colors: [[u8; 4]; 4] = if c0 > c1 {
+        [
+            [(r0 << 3) | (r0 >> 2), (g0 << 2) | (g0 >> 4), (b0 << 3) | (b0 >> 2), 255],
+            [(r1 << 3) | (r1 >> 2), (g1 << 2) | (g1 >> 4), (b1 << 3) | (b1 >> 2), 255],
+            [((2*r0 as u16 + r1 as u16)/3) as u8 * 8 / 8, ((2*g0 as u16 + g1 as u16)/3) as u8 * 4 / 4, ((2*b0 as u16 + b1 as u16)/3) as u8 * 8 / 8, 255],
+            [((r0 as u16 + 2*r1 as u16)/3) as u8 * 8 / 8, ((g0 as u16 + 2*g1 as u16)/3) as u8 * 4 / 4, ((b0 as u16 + 2*b1 as u16)/3) as u8 * 8 / 8, 255],
+        ]
+    } else {
+        [
+            [(r0 << 3) | (r0 >> 2), (g0 << 2) | (g0 >> 4), (b0 << 3) | (b0 >> 2), 255],
+            [(r1 << 3) | (r1 >> 2), (g1 << 2) | (g1 >> 4), (b1 << 3) | (b1 >> 2), 255],
+            [((r0 as u16 + r1 as u16)/2) as u8 * 8 / 8, ((g0 as u16 + g1 as u16)/2) as u8 * 4 / 4, ((b0 as u16 + b1 as u16)/2) as u8 * 8 / 8, 255],
+            [0, 0, 0, 0], // Transparent black for DXT1 with alpha
+        ]
+    };
+
+    for py in 0..4u32 {
+        for px in 0..4u32 {
+            let x = start_x + px;
+            let y = start_y + py;
+            if x >= img_w || y >= img_h { continue; }
+            let bit_idx = (py * 4 + px) * 2;
+            let byte_idx = 4 + (bit_idx / 8) as usize;
+            let bit_offset = bit_idx % 8;
+            let color_idx = ((block[byte_idx] >> bit_offset) & 3) as usize;
+            let pixel_offset = ((y * img_w + x) * 4) as usize;
+            rgba[pixel_offset..pixel_offset+4].copy_from_slice(&colors[color_idx]);
+        }
+    }
+}
+
+// ─── Bone data helpers ───
+
+/// Pack variable-length bone indices into fixed vec4 (as f32 for vertex attribute).
+fn pack_bone_vec4_f32(indices: &[Vec<u32>]) -> Vec<[f32; 4]> {
+    indices.iter().map(|v| {
+        let mut out = [0.0f32; 4];
+        for (i, &idx) in v.iter().take(4).enumerate() {
+            out[i] = idx as f32;
+        }
+        out
+    }).collect()
+}
+
+/// Pack variable-length bone weights into fixed vec4, normalized to sum to 1.
+fn pack_bone_weights_vec4(weights: &[Vec<f32>]) -> Vec<[f32; 4]> {
+    weights.iter().map(|v| {
+        let mut out = [0.0f32; 4];
+        let mut sum = 0.0f32;
+        for (i, &w) in v.iter().take(4).enumerate() {
+            out[i] = w;
+            sum += w;
+        }
+        // Normalize so weights sum to 1.0
+        if sum > 0.0 {
+            for w in out.iter_mut() {
+                *w /= sum;
+            }
+        } else {
+            // No weights — assign full weight to bone 0
+            out[0] = 1.0;
+        }
+        out
+    }).collect()
 }
 
 // ─── Matrix math helpers ───
@@ -1951,6 +3176,18 @@ fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
         0.0, f, 0.0, 0.0,
         0.0, 0.0, (far + near) * nf, -1.0,
         0.0, 0.0, 2.0 * far * near * nf, 0.0,
+    ]
+}
+
+fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [f32; 16] {
+    let rl = right - left;
+    let tb = top - bottom;
+    let fn_ = far - near;
+    [
+        2.0 / rl, 0.0, 0.0, 0.0,
+        0.0, 2.0 / tb, 0.0, 0.0,
+        0.0, 0.0, -2.0 / fn_, 0.0,
+        -(right + left) / rl, -(top + bottom) / tb, -(far + near) / fn_, 1.0,
     ]
 }
 
@@ -2009,6 +3246,61 @@ fn invert_transform(m: &[f32; 16]) -> [f32; 16] {
         m[2], m[6], m[10], 0.0,  // R^T column 2
         itx,  ity,  itz,   1.0,  // translation
     ]
+}
+
+/// Generate spherical UV coordinates from vertex positions.
+fn generate_spherical_uvs(positions: &[[f32; 3]]) -> Vec<[f32; 2]> {
+    if positions.is_empty() {
+        return Vec::new();
+    }
+    // Compute center
+    let n = positions.len() as f32;
+    let cx = positions.iter().map(|p| p[0]).sum::<f32>() / n;
+    let cy = positions.iter().map(|p| p[1]).sum::<f32>() / n;
+    let cz = positions.iter().map(|p| p[2]).sum::<f32>() / n;
+
+    positions.iter().map(|p| {
+        let dx = p[0] - cx;
+        let dy = p[1] - cy;
+        let dz = p[2] - cz;
+        let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-8);
+        let nx = dx / len;
+        let ny = dy / len;
+        let nz = dz / len;
+        let u = 0.5 + nz.atan2(nx) / (2.0 * std::f32::consts::PI);
+        let v = 0.5 - ny.asin() / std::f32::consts::PI;
+        [u, v]
+    }).collect()
+}
+
+/// Generate cylindrical UV coordinates from vertex positions.
+fn generate_cylindrical_uvs(positions: &[[f32; 3]]) -> Vec<[f32; 2]> {
+    if positions.is_empty() {
+        return Vec::new();
+    }
+    let n = positions.len() as f32;
+    let cx = positions.iter().map(|p| p[0]).sum::<f32>() / n;
+    let cz = positions.iter().map(|p| p[2]).sum::<f32>() / n;
+    let min_y = positions.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+    let max_y = positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+    let height = (max_y - min_y).max(0.001);
+
+    positions.iter().map(|p| {
+        let dx = p[0] - cx;
+        let dz = p[2] - cz;
+        let u = 0.5 + dz.atan2(dx) / (2.0 * std::f32::consts::PI);
+        let v = (p[1] - min_y) / height;
+        [u, v]
+    }).collect()
+}
+
+/// Generate UVs using the specified mode: 0=planar, 1=spherical, 2=cylindrical, 3=reflection.
+fn generate_uvs_by_mode(positions: &[[f32; 3]], mode: Option<u8>) -> Vec<[f32; 2]> {
+    match mode {
+        Some(1) => generate_spherical_uvs(positions),
+        Some(2) => generate_cylindrical_uvs(positions),
+        _ => generate_planar_uvs(positions), // 0=planar or default
+    }
 }
 
 /// Generate planar UV coordinates from vertex positions (bounding-box normalized).
