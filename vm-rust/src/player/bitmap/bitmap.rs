@@ -800,6 +800,7 @@ pub fn decompress_bitmap(
                 // We need to reorder from [A...A][R...R][G...G][B...B] per line to ARGB per pixel
                 let mut final_data = vec![0u8; info.width as usize * info.height as usize * 4];
 
+                let mut oob_warned = false;
                 for y in 0..info.height as usize {
                     for x in 0..info.width as usize {
                         let line_offset = y * scan_width as usize * 4;
@@ -807,10 +808,13 @@ pub fn decompress_bitmap(
 
                         // Check bounds
                         if line_offset + x + 3 * scan_width as usize >= result.len() {
-                            web_sys::console::warn_1(&format!(
-                                "32-bit decode: Out of bounds access at y={}, x={}. line_offset={}, result.len()={}",
-                                y, x, line_offset, result.len()
-                            ).into());
+                            if !oob_warned {
+                                web_sys::console::warn_1(&format!(
+                                    "32-bit decode: Out of bounds at y={}, x={}. line_offset={}, result.len()={} (further warnings suppressed)",
+                                    y, x, line_offset, result.len()
+                                ).into());
+                                oob_warned = true;
+                            }
                             continue;
                         }
 
