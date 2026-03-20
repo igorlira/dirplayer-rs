@@ -532,10 +532,7 @@ impl CastMemberRefHandlers {
                                         "shader" => {
                                             scene.shaders.push(W3dShader {
                                                 name: obj_name.clone(),
-                                                material_name: String::new(),
-                                                attrs: 0,
-                                                render_pass: 0,
-                                                texture_layers: vec![],
+                                                ..Default::default()
                                             });
                                         }
                                         "modelResource" => {
@@ -552,6 +549,7 @@ impl CastMemberRefHandlers {
                                                 tc_iq: 0.0, diff_iq: 0.0, spec_iq: 0.0,
                                                 has_distal_edge_merge: false,
                                                 has_neighbor_mesh: false,
+                                                uv_gen_mode: None,
                                                 sync_table: None,
                                                 distal_edge_merges: None,
                                             });
