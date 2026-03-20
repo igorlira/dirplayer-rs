@@ -395,10 +395,19 @@ pub struct Shockwave3dRuntimeState {
     pub animation_start_time: f32,
     pub animation_end_time: f32,
     pub animation_blend_time: f32,
+    pub root_lock: bool,
+    /// Previous motion for crossfade blending
+    pub previous_motion: Option<String>,
+    pub blend_weight: f32,       // 0.0 = all previous, 1.0 = all current
+    pub blend_duration: f32,     // total blend time in seconds
+    pub blend_elapsed: f32,      // time spent blending
 
     // ─── Per-node overrides (keyed by node name) ───
     /// Transform overrides for nodes (set via Lingo) — used by renderer
     pub node_transforms: std::collections::HashMap<String, [f32; 16]>,
+    /// Tracks which nodes had their transforms EXPLICITLY set by Lingo (rotate/translate/scale)
+    /// Only these should override motion animations
+    pub node_transforms_dirty: std::collections::HashSet<String>,
     /// Persistent Transform3d DatumRefs per node — returned by .transform getter
     /// so that chained mutations (model.transform.position = v) persist
     pub node_transform_datums: std::collections::HashMap<String, crate::player::DatumRef>,
@@ -417,6 +426,20 @@ pub struct Shockwave3dRuntimeState {
     pub fog_far: f32,
     pub fog_color: (f32, f32, f32),
     pub fog_mode: u8, // 0=linear, 1=exp, 2=exp2
+
+    // ─── Post-processing effects ───
+    pub bloom_enabled: bool,
+    pub bloom_threshold: f32,
+    pub bloom_intensity: f32,
+
+    // ─── Camera ───
+    /// Per-camera projection mode: 0=perspective (default), 1=orthographic
+    pub camera_projection_mode: std::collections::HashMap<String, u8>,
+    /// Per-camera ortho height (world units visible vertically)
+    pub camera_ortho_height: std::collections::HashMap<String, f32>,
+    /// Render-to-texture requests: camera_name → target_texture_name
+    /// When set, the next render from this camera writes to the named texture instead of the main FBO
+    pub render_targets: std::collections::HashMap<String, String>,
 
     // ─── Particle systems ───
     pub particles: std::collections::HashMap<String, ParticleSystemState>,
@@ -567,8 +590,12 @@ pub struct ParticleSystemState {
     pub wind: [f32; 3],
     pub drag: f32,
     pub initial_speed: f32,
+    pub speed_range: f32,  // random speed variation
     pub direction: [f32; 3],
     pub emitter_position: [f32; 3],
+    pub emitter_shape: u8,      // 0=point, 1=line, 2=plane, 3=sphere, 4=cube, 5=cylinder
+    pub emitter_size: [f32; 3], // dimensions of emitter shape
+    pub angle_range: f32,       // emission cone angle (0 = parallel, PI = hemisphere)
     pub particle_size: f32,
 }
 
@@ -619,8 +646,12 @@ impl Default for ParticleSystemState {
             wind: [0.0; 3],
             drag: 0.0,
             initial_speed: 1.0,
+            speed_range: 0.0,
             direction: [0.0, 1.0, 0.0],
             emitter_position: [0.0; 3],
+            emitter_shape: 0,
+            emitter_size: [1.0; 3],
+            angle_range: 0.3,
             particle_size: 1.0,
         }
     }
@@ -651,16 +682,37 @@ impl ParticleSystemState {
                 // Recycle
                 self.ages[i] -= self.lifetime;
                 self.alive[i] = true;
-                self.positions[i] = self.emitter_position;
-                // Random-ish direction from base direction
-                let spread = 0.3;
-                let jx = ((i * 7 + 3) % 100) as f32 / 100.0 * spread - spread * 0.5;
-                let jy = ((i * 13 + 7) % 100) as f32 / 100.0 * spread - spread * 0.5;
-                let jz = ((i * 19 + 11) % 100) as f32 / 100.0 * spread - spread * 0.5;
+                // Emitter shape offset
+                let hash = (i as u32).wrapping_mul(2654435761); // Knuth hash for pseudo-random
+                let r1 = (hash & 0xFF) as f32 / 255.0 - 0.5;
+                let r2 = ((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5;
+                let r3 = ((hash >> 16) & 0xFF) as f32 / 255.0 - 0.5;
+                let offset = match self.emitter_shape {
+                    1 => [r1 * self.emitter_size[0], 0.0, 0.0],              // line
+                    2 => [r1 * self.emitter_size[0], 0.0, r2 * self.emitter_size[2]], // plane
+                    3 => {                                                      // sphere
+                        let len = (r1*r1 + r2*r2 + r3*r3).sqrt().max(0.01);
+                        let s = self.emitter_size[0] * ((hash & 0xFF) as f32 / 255.0);
+                        [r1/len * s, r2/len * s, r3/len * s]
+                    }
+                    4 => [r1 * self.emitter_size[0], r2 * self.emitter_size[1], r3 * self.emitter_size[2]], // cube
+                    _ => [0.0, 0.0, 0.0],                                      // point
+                };
+                self.positions[i] = [
+                    self.emitter_position[0] + offset[0],
+                    self.emitter_position[1] + offset[1],
+                    self.emitter_position[2] + offset[2],
+                ];
+                // Direction with angle spread
+                let spread = self.angle_range;
+                let jx = r1 * spread;
+                let jy = r2 * spread;
+                let jz = r3 * spread;
+                let speed = self.initial_speed + r1 * self.speed_range;
                 self.velocities[i] = [
-                    (self.direction[0] + jx) * self.initial_speed,
-                    (self.direction[1] + jy) * self.initial_speed,
-                    (self.direction[2] + jz) * self.initial_speed,
+                    (self.direction[0] + jx) * speed,
+                    (self.direction[1] + jy) * speed,
+                    (self.direction[2] + jz) * speed,
                 ];
             }
 
