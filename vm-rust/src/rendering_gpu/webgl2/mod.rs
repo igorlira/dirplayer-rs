@@ -1125,12 +1125,109 @@ impl WebGL2Renderer {
             }
         }
 
+        // Resolve 1x1 placeholder textures in W3D scenes from cast member bitmaps.
+        // IFX stores 1x1 white placeholders for textures that should be loaded from cast members.
+        {
+            // Step 1: Collect placeholder names (immutable borrow of scene)
+            let placeholder_names: Vec<String> = {
+                let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                member.and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.parsed_scene.as_ref())
+                    .map(|scene| {
+                        scene.texture_images.iter()
+                            .filter(|(_, data)| data.len() == 12 && data[..8] == [1,0,0,0, 1,0,0,0])
+                            .map(|(name, _)| name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            // Step 2: Resolve each placeholder from cast member bitmaps
+            if !placeholder_names.is_empty() {
+                static PH_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                let ph_log = !PH_LOG.swap(true, std::sync::atomic::Ordering::Relaxed);
+                if ph_log {
+                    web_sys::console::log_1(&format!(
+                        "[W3D-PH] {} placeholders to resolve", placeholder_names.len()
+                    ).into());
+                }
+                let mut resolved: Vec<(String, Vec<u8>)> = Vec::new();
+                let palettes = player.movie.cast_manager.palettes();
+                for tex_name in &placeholder_names {
+                    let tex_name_str = tex_name.to_string();
+                    let found_ref = player.movie.cast_manager.find_member_ref_by_name(&tex_name_str);
+                    if ph_log && tex_name.contains("panel") {
+                        let status = match &found_ref {
+                            Some(r) => {
+                                let m = player.movie.cast_manager.find_member_by_ref(r);
+                                match m {
+                                    Some(m) => {
+                                        let bmp_size = match &m.member_type {
+                                            CastMemberType::Bitmap(bm) => {
+                                                player.bitmap_manager.get_bitmap(bm.image_ref)
+                                                    .map(|b| format!("{}x{}", b.width, b.height))
+                                                    .unwrap_or("no_bmp".into())
+                                            }
+                                            _ => format!("type={}", m.member_type.type_string()),
+                                        };
+                                        format!("found {}:{} '{}' {}", r.cast_lib, r.cast_member, m.name, bmp_size)
+                                    }
+                                    None => "ref_but_no_member".into(),
+                                }
+                            }
+                            None => "NOT_FOUND".into(),
+                        };
+                        web_sys::console::log_1(&format!("[W3D-PH] '{}' -> {}", tex_name, status).into());
+                    }
+                    if let Some(src_ref) = found_ref {
+                        if let Some(src_member) = player.movie.cast_manager.find_member_by_ref(&src_ref) {
+                            if let CastMemberType::Bitmap(bmp_member) = &src_member.member_type {
+                                if let Some(bmp) = player.bitmap_manager.get_bitmap(bmp_member.image_ref) {
+                                    if bmp.width > 1 || bmp.height > 1 {
+                                        let w = bmp.width;
+                                        let h = bmp.height;
+                                        let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                                        for y in 0..h as usize {
+                                            for x in 0..w as usize {
+                                                let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
+                                                let idx = (y * w as usize + x) * 4;
+                                                rgba[idx] = r;
+                                                rgba[idx + 1] = g;
+                                                rgba[idx + 2] = b;
+                                                rgba[idx + 3] = a;
+                                            }
+                                        }
+                                        let mut tex_data = Vec::with_capacity(8 + rgba.len());
+                                        tex_data.extend_from_slice(&(w as u32).to_le_bytes());
+                                        tex_data.extend_from_slice(&(h as u32).to_le_bytes());
+                                        tex_data.extend_from_slice(&rgba);
+                                        resolved.push((tex_name.clone(), tex_data));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Step 3: Insert resolved textures into scene (mutable borrow)
+                if !resolved.is_empty() {
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some(scene) = w3d.scene_mut() {
+                                for (name, data) in resolved {
+                                    scene.texture_images.insert(name, data);
+                                    scene.texture_content_version += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let texture_source = {
             let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
                 Some(m) => m,
                 None => return,
             };
-
 
             match &member.member_type {
                 CastMemberType::Bitmap(bitmap_member) => {
