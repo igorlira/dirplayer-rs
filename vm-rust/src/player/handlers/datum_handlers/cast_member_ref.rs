@@ -313,10 +313,11 @@ impl CastMemberRefHandlers {
                                             (String::new(), identity, String::new(), String::new())
                                         };
                                         // For cloneMotionFromCastmember: source_model_name is the MODEL name
-                                        // (not motion name). Take the first motion from the source scene.
-                                        let motion_tracks = scene.motions.first()
-                                            .map(|m| m.tracks.clone())
-                                            .unwrap_or_default();
+                                        // (not motion name). Merge tracks from ALL motions in the source
+                                        // (IFX files may split bone tracks across multiple MOTION_BLOCKs).
+                                        let motion_tracks: Vec<_> = scene.motions.iter()
+                                            .flat_map(|m| m.tracks.iter().cloned())
+                                            .collect();
                                         (sn, st, sr, smr, motion_tracks)
                                     } else { (String::new(), identity, String::new(), String::new(), vec![]) }
                                 } else { (String::new(), identity, String::new(), String::new(), vec![]) }
@@ -414,13 +415,21 @@ impl CastMemberRefHandlers {
                                                 scene.nodes.push(node.clone());
                                             }
                                         }
-                                        // Copy skeletons — namespace names to match namespaced CLOD meshes
+                                        // Copy skeletons — use namespaced RESOURCE names as skeleton key
+                                        // so the renderer's lookup by model_resource_name finds them.
+                                        // The renderer does: skeletons.find(|s| s.name == resource_name)
+                                        // where resource_name = mapped_model_resource or mapped_resource.
+                                        let skel_key = if !source_model_resource_name.is_empty() {
+                                            format!("{}{}", ns, source_model_resource_name)
+                                        } else if !source_resource_name.is_empty() {
+                                            format!("{}{}", ns, source_resource_name)
+                                        } else { String::new() };
                                         for skeleton in &src_skeletons {
-                                            let new_name = format!("{}{}", ns, skeleton.name);
-                                            if !scene.skeletons.iter().any(|s| s.name == new_name) {
+                                            if !skel_key.is_empty() && !scene.skeletons.iter().any(|s| s.name == skel_key) {
                                                 let mut cloned = skeleton.clone();
-                                                cloned.name = new_name;
+                                                cloned.name = skel_key.clone();
                                                 scene.skeletons.push(cloned);
+                                                break; // only need one skeleton per resource
                                             }
                                         }
                                     }

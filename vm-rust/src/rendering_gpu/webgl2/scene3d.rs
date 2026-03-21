@@ -241,7 +241,7 @@ uniform mat4 u_projection;
 
 // Skeletal skinning
 uniform int u_skinning_enabled;
-uniform mat4 u_bone_matrices[32];
+uniform mat4 u_bone_matrices[48];
 
 // Texture coordinate transform
 uniform mat4 u_tex_transform;
@@ -1314,28 +1314,12 @@ void main() {
                     member_key, model_nodes.len(), model_names, mesh_group_keys,
                     gpu_data.map(|d| d.textures.len()).unwrap_or(0)
                 ).into());
-                // Log motion data
-                for (mi, motion) in scene.motions.iter().enumerate() {
-                    web_sys::console::log_1(&format!(
-                        "[3D-MOTION] motion[{}] '{}': {} tracks, duration={:.2}s",
-                        mi, motion.name, motion.tracks.len(), motion.duration()
-                    ).into());
-                    for track in &motion.tracks {
-                        let node_type = scene.nodes.iter().find(|n| n.name == track.bone_name)
-                            .map(|n| format!("{:?}", n.node_type)).unwrap_or("NOT_FOUND".into());
-                        web_sys::console::log_1(&format!(
-                            "[3D-MOTION]   track '{}' ({}) {} keyframes, first_kf=[pos=({:.1},{:.1},{:.1}) rot=({:.3},{:.3},{:.3},{:.3})]",
-                            track.bone_name, node_type, track.keyframes.len(),
-                            track.keyframes.first().map(|k| k.pos_x).unwrap_or(0.0),
-                            track.keyframes.first().map(|k| k.pos_y).unwrap_or(0.0),
-                            track.keyframes.first().map(|k| k.pos_z).unwrap_or(0.0),
-                            track.keyframes.first().map(|k| k.rot_x).unwrap_or(0.0),
-                            track.keyframes.first().map(|k| k.rot_y).unwrap_or(0.0),
-                            track.keyframes.first().map(|k| k.rot_z).unwrap_or(0.0),
-                            track.keyframes.first().map(|k| k.rot_w).unwrap_or(1.0),
-                        ).into());
-                    }
-                }
+                // Log motion summary (count only, not per-track)
+                web_sys::console::log_1(&format!(
+                    "[3D] {} motions, skeletons={:?}",
+                    scene.motions.len(),
+                    scene.skeletons.iter().map(|s| format!("{}({}b)", s.name, s.bones.len())).collect::<Vec<_>>(),
+                ).into());
             }
 
             // Evaluate motion animations each frame
@@ -2828,8 +2812,9 @@ void main() {
         gpu_data: &MemberGpuData,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> bool {
-        let skeleton = scene.skeletons.iter().find(|s| s.name == resource_name)
-            .or_else(|| scene.skeletons.first());
+        // Only skin models that have a matching skeleton — no fallback to first()
+        // to prevent walls/weapons from being skinned with the character skeleton
+        let skeleton = scene.skeletons.iter().find(|s| s.name == resource_name);
         let skeleton = match skeleton {
             Some(s) if s.bones.len() > 1 => s,
             _ => return false,
@@ -2848,12 +2833,8 @@ void main() {
         } else {
             scene.motions.first()
         };
-        // Skip skinning if motion has too few tracks — avoids collapsing/exploding mesh.
-        // A proper skeletal animation needs at least ~half the bone count in tracks.
-        let min_tracks = (skeleton.bones.len() / 2).max(2);
-        if motion.map(|m| m.tracks.len() < min_tracks).unwrap_or(true) {
-            return false;
-        }
+        // TEMP: Disable skinning entirely until bone matrix math is verified
+        return false;
         let time = self.animation_time;
         let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
         let end_time = runtime_state.map(|rs| rs.animation_end_time).unwrap_or(-1.0);
@@ -2877,7 +2858,7 @@ void main() {
         let prev_motion_name = runtime_state.and_then(|rs| rs.previous_motion.as_deref());
         let blending = blend_weight < 1.0 && prev_motion_name.is_some();
 
-        let bone_count = skeleton.bones.len().min(32);
+        let bone_count = skeleton.bones.len().min(48);
         let mut skinning_matrices = vec![0.0f32; bone_count * 16];
 
         if blending {
@@ -2898,6 +2879,33 @@ void main() {
             for i in 0..bone_count {
                 let final_mat = mat4_multiply_col_major(&world_matrices[i], &inv_bind[i]);
                 skinning_matrices[i * 16..i * 16 + 16].copy_from_slice(&final_mat);
+            }
+        }
+
+        // Diagnostic: log skinning matrix stats once per resource
+        {
+            use std::sync::Mutex; use std::collections::HashSet;
+            static LOGGED_SKIN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+            if let Ok(mut g) = LOGGED_SKIN.lock() {
+                let set = g.get_or_insert_with(HashSet::new);
+                if set.insert(resource_name.to_string()) {
+                    let max_trans = (0..bone_count).map(|i| {
+                        let tx = skinning_matrices[i*16+12].abs();
+                        let ty = skinning_matrices[i*16+13].abs();
+                        let tz = skinning_matrices[i*16+14].abs();
+                        tx.max(ty).max(tz)
+                    }).fold(0.0f32, f32::max);
+                    let matched_tracks = skeleton.bones.iter()
+                        .filter(|b| motion.map(|m| m.find_track_by_bone(&b.name).is_some()).unwrap_or(false))
+                        .count();
+                    web_sys::console::log_1(&format!(
+                        "[W3D-SKIN] resource=\"{}\" bones={} matched_tracks={}/{} max_translation={:.1} inv_bind_max={:.1}",
+                        resource_name, bone_count, matched_tracks,
+                        motion.map(|m| m.tracks.len()).unwrap_or(0),
+                        max_trans,
+                        inv_bind.iter().map(|m| m[12].abs().max(m[13].abs()).max(m[14].abs())).fold(0.0f32, f32::max),
+                    ).into());
+                }
             }
         }
 
