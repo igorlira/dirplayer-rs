@@ -299,28 +299,35 @@ impl CastMemberRefHandlers {
                         };
 
                         // Look up source model's shader/transform/resource from source member's scene
+                        // Also pre-read motion tracks for cloneMotionFromCastmember (before mutable borrow)
                         let identity = [1.0f32,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
-                        let (source_shader_name, source_transform, source_resource_name, source_model_resource_name) = if let Some(ref src_ref) = source_member_ref {
+                        let (source_shader_name, source_transform, source_resource_name, source_model_resource_name, src_motion_tracks) = if let Some(ref src_ref) = source_member_ref {
                             let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
                             if let Some(sm) = src_member {
                                 if let Some(sw3d) = sm.member_type.as_shockwave3d() {
                                     if let Some(ref scene) = sw3d.parsed_scene {
                                         let node = scene.nodes.iter().find(|n| n.name == source_model_name);
-                                        if let Some(n) = node {
+                                        let (sn, st, sr, smr) = if let Some(n) = node {
                                             (n.shader_name.clone(), n.transform, n.resource_name.clone(), n.model_resource_name.clone())
                                         } else {
                                             (String::new(), identity, String::new(), String::new())
-                                        }
-                                    } else { (String::new(), identity, String::new(), String::new()) }
-                                } else { (String::new(), identity, String::new(), String::new()) }
-                            } else { (String::new(), identity, String::new(), String::new()) }
+                                        };
+                                        // For cloneMotionFromCastmember: source_model_name is the MODEL name
+                                        // (not motion name). Take the first motion from the source scene.
+                                        let motion_tracks = scene.motions.first()
+                                            .map(|m| m.tracks.clone())
+                                            .unwrap_or_default();
+                                        (sn, st, sr, smr, motion_tracks)
+                                    } else { (String::new(), identity, String::new(), String::new(), vec![]) }
+                                } else { (String::new(), identity, String::new(), String::new(), vec![]) }
+                            } else { (String::new(), identity, String::new(), String::new(), vec![]) }
                         } else {
-                            (String::new(), identity, String::new(), String::new())
+                            (String::new(), identity, String::new(), String::new(), vec![])
                         };
 
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
-                            let (src_shaders, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes) = {
+                            let (src_shaders, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons) = {
                                 let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
                                 let scene = src_member.and_then(|sm| sm.member_type.as_shockwave3d())
                                     .and_then(|sw3d| sw3d.parsed_scene.as_ref());
@@ -336,36 +343,63 @@ impl CastMemberRefHandlers {
                                 let light_nodes: Vec<_> = scene.map(|s| s.nodes.iter()
                                     .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Light)
                                     .cloned().collect()).unwrap_or_default();
-                                (shaders, resources, meshes, raw, textures, lights, light_nodes)
+                                let skeletons: Vec<_> = scene.map(|s| s.skeletons.clone()).unwrap_or_default();
+                                (shaders, resources, meshes, raw, textures, lights, light_nodes, skeletons)
                             };
+
+                            web_sys::console::log_1(&format!(
+                                "[W3D-CLONE] {}(\"{}\") src_model=\"{}\" src_member={:?}: \
+                                 {} shaders, {} model_resources, {} clod_meshes(keys={:?}), {} raw_meshes(names={:?}), {} textures, \
+                                 src_res=\"{}\", src_mres=\"{}\"",
+                                handler_name, obj_name, source_model_name, source_member_ref,
+                                src_shaders.len(), src_model_resources.len(),
+                                src_clod_meshes.len(), src_clod_meshes.iter().map(|(k,_)| k.clone()).collect::<Vec<String>>(),
+                                src_raw_meshes.len(), src_raw_meshes.iter().map(|m| m.name.clone()).collect::<Vec<String>>(),
+                                src_textures.len(),
+                                source_resource_name, source_model_resource_name,
+                            ).into());
+
+                            // Namespace prefix to avoid name collisions between
+                            // different source members that share resource names like "Group01"
+                            let ns = format!("{}_", obj_name);
 
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
+                                        // Shaders: keep original names (shared safely, game creates per-instance via CloneShader)
                                         for shader in &src_shaders {
                                             if !scene.shaders.iter().any(|s| s.name == shader.name) {
                                                 scene.shaders.push(shader.clone());
                                             }
                                         }
+                                        // Model resources: namespace to prevent collisions
                                         for (res_name, res_info) in &src_model_resources {
-                                            if !scene.model_resources.contains_key(res_name) {
-                                                scene.model_resources.insert(res_name.clone(), res_info.clone());
+                                            let new_name = format!("{}{}", ns, res_name);
+                                            if !scene.model_resources.contains_key(&new_name) {
+                                                scene.model_resources.insert(new_name, res_info.clone());
                                             }
                                         }
+                                        // CLOD meshes: namespace to prevent collisions
                                         for (mesh_name, mesh_data) in &src_clod_meshes {
-                                            if !scene.clod_meshes.contains_key(mesh_name) {
-                                                scene.clod_meshes.insert(mesh_name.clone(), mesh_data.clone());
+                                            let new_name = format!("{}{}", ns, mesh_name);
+                                            if !scene.clod_meshes.contains_key(&new_name) {
+                                                scene.clod_meshes.insert(new_name, mesh_data.clone());
                                             }
                                         }
+                                        // Textures: keep original names (typically unique per cast member)
                                         for (tex_name, tex_data) in &src_textures {
                                             if !scene.texture_images.contains_key(tex_name) {
                                                 scene.texture_images.insert(tex_name.clone(), tex_data.clone());
                                                 scene.texture_content_version += 1;
                                             }
                                         }
+                                        // Raw meshes: namespace to prevent collisions
                                         for raw_mesh in &src_raw_meshes {
-                                            if !scene.raw_meshes.iter().any(|m| m.name == raw_mesh.name) {
-                                                scene.raw_meshes.push(raw_mesh.clone());
+                                            let new_name = format!("{}{}", ns, raw_mesh.name);
+                                            if !scene.raw_meshes.iter().any(|m| m.name == new_name) {
+                                                let mut cloned = raw_mesh.clone();
+                                                cloned.name = new_name;
+                                                scene.raw_meshes.push(cloned);
                                             }
                                         }
                                         // Copy lights from source scene
@@ -380,12 +414,30 @@ impl CastMemberRefHandlers {
                                                 scene.nodes.push(node.clone());
                                             }
                                         }
+                                        // Copy skeletons — namespace names to match namespaced CLOD meshes
+                                        for skeleton in &src_skeletons {
+                                            let new_name = format!("{}{}", ns, skeleton.name);
+                                            if !scene.skeletons.iter().any(|s| s.name == new_name) {
+                                                let mut cloned = skeleton.clone();
+                                                cloned.name = new_name;
+                                                scene.skeletons.push(cloned);
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
 
                         // Add the cloned object to the target scene
+                        // Map resource names with namespace prefix to avoid collisions
+                        let ns = format!("{}_", obj_name);
+                        let mapped_resource = if !source_resource_name.is_empty() {
+                            format!("{}{}", ns, source_resource_name)
+                        } else { source_resource_name.clone() };
+                        let mapped_model_resource = if !source_model_resource_name.is_empty() {
+                            format!("{}{}", ns, source_model_resource_name)
+                        } else { source_model_resource_name.clone() };
+
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d.scene_mut() {
@@ -394,17 +446,18 @@ impl CastMemberRefHandlers {
                                         scene.nodes.push(W3dNode {
                                             name: obj_name.clone(), node_type: W3dNodeType::Model,
                                             parent_name: "World".to_string(),
-                                            resource_name: source_resource_name,
-                                            model_resource_name: source_model_resource_name,
+                                            resource_name: mapped_resource,
+                                            model_resource_name: mapped_model_resource,
                                             shader_name: source_shader_name,
                                             near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
                                         });
                                     } else if obj_type == "motion" {
+                                        // src_motion_tracks was pre-read before mutable borrow
                                         scene.motions.push(W3dMotion {
                                             name: obj_name.clone(),
-                                            tracks: vec![],
+                                            tracks: src_motion_tracks.clone(),
                                         });
                                     }
                                 }

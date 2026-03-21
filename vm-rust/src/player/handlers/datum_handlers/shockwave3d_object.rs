@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use log::debug;
 
 use crate::{
     director::{
@@ -407,7 +408,10 @@ impl Shockwave3dObjectDatumHandlers {
                     let shader_name = value.string_value().unwrap_or_default();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.node_shaders.insert(s3d_ref.name.clone(), shader_name);
+                            let shader_map = w3d.runtime_state.node_shaders
+                                .entry(s3d_ref.name.clone())
+                                .or_insert_with(std::collections::HashMap::new);
+                            shader_map.insert(0, shader_name);
                         }
                     }
                     Ok(())
@@ -431,6 +435,19 @@ impl Shockwave3dObjectDatumHandlers {
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             w3d.runtime_state.play_rate = rate;
+                        }
+                    }
+                    Ok(())
+                }
+                "blendTime" => {
+                    let ms = match value {
+                        Datum::Float(f) => *f as f32,
+                        Datum::Int(i) => *i as f32,
+                        _ => 0.0,
+                    };
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.runtime_state.animation_blend_time = ms;
                         }
                     }
                     Ok(())
@@ -588,9 +605,9 @@ impl Shockwave3dObjectDatumHandlers {
                 }
                 // Shader material property setters
                 "diffuse" | "ambient" | "emissive" | "specular" if s3d_ref.object_type == "shader" => {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[W3D-SET] shader(\"{}\").{}", s3d_ref.name, prop_name
-                    ).into());
+                    );
                     let color = match value {
                         Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) => {
                             [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0]
@@ -983,28 +1000,59 @@ impl Shockwave3dObjectDatumHandlers {
                 }
 
                 // ─── Bones player / animation methods ───
+                // play(motionName {, looped, startTime, endTime, scale, offset})
+                // play() with no args = resume paused motion
                 "play" => {
-                    if !args.is_empty() {
+                    // Pre-read all args before mutable borrow of player
+                    let play_args = if args.is_empty() {
+                        None
+                    } else {
                         let motion_name = player.get_datum(&args[0]).string_value().unwrap_or_default();
                         let is_loop = args.get(1).map(|a| player.get_datum(a).int_value().unwrap_or(0) != 0).unwrap_or(false);
-                        // Optional 3rd arg: blend time in milliseconds
-                        let blend_ms = args.get(2).map(|a| player.get_datum(a).int_value().unwrap_or(0)).unwrap_or(0);
-                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                // Set up crossfade blending if there's an active motion
-                                if blend_ms > 0 && w3d.runtime_state.current_motion.is_some() {
+                        let start_time_ms = args.get(2).map(|a| player.get_datum(a).to_float().unwrap_or(0.0)).unwrap_or(0.0);
+                        let end_time_ms = args.get(3).map(|a| player.get_datum(a).to_float().unwrap_or(-1.0)).unwrap_or(-1.0);
+                        let scale = args.get(4).map(|a| player.get_datum(a).to_float().unwrap_or(1.0)).unwrap_or(1.0);
+                        let offset_ms = args.get(5).map(|a| {
+                            let d = player.get_datum(a);
+                            match d {
+                                Datum::Symbol(s) if s == "synchronized" => -1.0f64,
+                                _ => d.to_float().unwrap_or(0.0),
+                            }
+                        }).unwrap_or(0.0);
+                        Some((motion_name, is_loop, start_time_ms, end_time_ms, scale, offset_ms))
+                    };
+
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some((motion_name, is_loop, start_time_ms, end_time_ms, scale, offset_ms)) = play_args {
+                                // Set up crossfade blending using stored blendTime
+                                let blend_time = w3d.runtime_state.animation_blend_time;
+                                if blend_time > 0.0 && w3d.runtime_state.current_motion.is_some() {
                                     w3d.runtime_state.previous_motion = w3d.runtime_state.current_motion.clone();
-                                    w3d.runtime_state.blend_duration = blend_ms as f32 / 1000.0;
+                                    w3d.runtime_state.blend_duration = blend_time / 1000.0;
                                     w3d.runtime_state.blend_elapsed = 0.0;
                                     w3d.runtime_state.blend_weight = 0.0;
                                 } else {
                                     w3d.runtime_state.previous_motion = None;
                                     w3d.runtime_state.blend_weight = 1.0;
                                 }
+
                                 w3d.runtime_state.current_motion = Some(motion_name);
                                 w3d.runtime_state.animation_playing = true;
-                                w3d.runtime_state.animation_time = 0.0;
                                 w3d.runtime_state.animation_loop = is_loop;
+                                w3d.runtime_state.animation_start_time = start_time_ms as f32 / 1000.0;
+                                w3d.runtime_state.animation_end_time = end_time_ms as f32 / 1000.0;
+                                w3d.runtime_state.animation_scale = scale as f32;
+                                w3d.runtime_state.motion_ended = false;
+
+                                // Determine initial animation time from offset
+                                if offset_ms >= 0.0 {
+                                    w3d.runtime_state.animation_time = offset_ms as f32 / 1000.0;
+                                }
+                                // else: #synchronized — keep current relative position
+                            } else {
+                                // No args: resume paused animation
+                                w3d.runtime_state.animation_playing = true;
                             }
                         }
                     }
@@ -1498,9 +1546,12 @@ impl Shockwave3dObjectDatumHandlers {
                                 let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
                                 if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                     if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                        w3d.runtime_state.node_shaders.insert(
-                                            s3d_ref.name.clone(), shader_ref.name.clone()
-                                        );
+                                        // Store per-mesh shader override (1-based Lingo index → 0-based)
+                                        let mesh_idx = if index > 0 { (index - 1) as usize } else { 0 };
+                                        let shader_map = w3d.runtime_state.node_shaders
+                                            .entry(s3d_ref.name.clone())
+                                            .or_insert_with(std::collections::HashMap::new);
+                                        shader_map.insert(mesh_idx, shader_ref.name.clone());
                                     }
                                 }
                             }

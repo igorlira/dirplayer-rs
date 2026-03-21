@@ -396,6 +396,10 @@ pub struct Shockwave3dRuntimeState {
     pub animation_end_time: f32,
     pub animation_blend_time: f32,
     pub root_lock: bool,
+    /// Per-motion playrate scale (arg 5 of play()), multiplied with play_rate
+    pub animation_scale: f32,
+    /// Whether the current non-looping motion has ended
+    pub motion_ended: bool,
     /// Previous motion for crossfade blending
     pub previous_motion: Option<String>,
     pub blend_weight: f32,       // 0.0 = all previous, 1.0 = all current
@@ -413,8 +417,9 @@ pub struct Shockwave3dRuntimeState {
     pub node_transform_datums: std::collections::HashMap<String, crate::player::DatumRef>,
     /// Visibility overrides for nodes
     pub node_visibility: std::collections::HashMap<String, bool>,
-    /// Shader overrides for nodes (shader name)
-    pub node_shaders: std::collections::HashMap<String, String>,
+    /// Shader overrides for nodes: model_name → (mesh_index → shader_name)
+    /// mesh_index is 0-based; index 0 is also the whole-model fallback
+    pub node_shaders: std::collections::HashMap<String, std::collections::HashMap<usize, String>>,
 
     // ─── World state ───
     pub background_color: Option<(u8, u8, u8)>,
@@ -604,6 +609,8 @@ impl Shockwave3dRuntimeState {
     pub fn from_info(info: &Shockwave3dInfo) -> Self {
         let mut state = Self {
             play_rate: 1.0,
+            animation_scale: 1.0,
+            animation_end_time: -1.0,
             ..Default::default()
         };
         // Seed camera transform from 3DPR camera position/rotation
@@ -2819,8 +2826,8 @@ impl CastMember {
                         parsed_scene: if !w3d_data.is_empty() {
                             match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
                                 Ok(scene) => {
-                                    web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes",
-                                        scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len()).into());
+                                    web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes, {} motions",
+                                        scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len(), scene.motions.len()).into());
                                     Some(std::rc::Rc::new(scene))
                                 }
                                 Err(e) => {
