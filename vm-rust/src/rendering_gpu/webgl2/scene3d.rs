@@ -167,6 +167,12 @@ pub struct Scene3dRenderer {
     pub active_camera: Option<String>,
     /// Set when a non-looping motion reaches its end — caller should advance the queue
     pub motion_ended: bool,
+    /// Track last motion name to detect changes (sync animation_time from runtime state)
+    last_motion_name: Option<String>,
+    /// Local blend state (progressed each frame)
+    blend_elapsed: f32,
+    blend_weight: f32,
+    blend_duration: f32,
     /// Render-to-texture FBO (created on demand)
     rtt_fbo: Option<WebGlFramebuffer>,
     rtt_texture: Option<WebGlTexture>,
@@ -200,6 +206,10 @@ impl Scene3dRenderer {
             motion_transforms: HashMap::new(),
             active_camera: None,
             motion_ended: false,
+            last_motion_name: None,
+            blend_elapsed: 0.0,
+            blend_weight: 1.0,
+            blend_duration: 0.0,
             rtt_fbo: None,
             rtt_texture: None,
             rtt_depth: None,
@@ -825,7 +835,7 @@ void main() {
         key: (i32, i32),
         scene: &W3dScene,
     ) -> Result<(), JsValue> {
-        let current_version = (scene.nodes.len(), scene.clod_meshes.len(), scene.texture_images.len(), scene.shaders.len());
+        let current_version = (scene.nodes.len(), scene.clod_meshes.len() + scene.raw_meshes.len(), scene.texture_images.len(), scene.shaders.len());
         if let Some(existing) = self.member_data.get(&key) {
             if existing.scene_version == current_version {
                 // Structure unchanged — check for texture content updates
@@ -835,6 +845,12 @@ void main() {
                 return Ok(());
             }
             // Scene changed — remove stale data and rebuild
+            web_sys::console::log_1(&format!(
+                "[W3D-GPU] Rebuilding GPU data for {:?}: version {:?} → {:?} (nodes={}, clod={}, raw={}, tex={}, shaders={})",
+                key, existing.scene_version, current_version,
+                scene.nodes.len(), scene.clod_meshes.len(), scene.raw_meshes.len(),
+                scene.texture_images.len(), scene.shaders.len(),
+            ).into());
             self.logged_members.remove(&key);
         }
         self.member_data.remove(&key);
@@ -924,7 +940,7 @@ void main() {
             mesh_groups.insert(name.clone(), group);
         }
 
-        // Upload raw meshes (skip light geometry)
+        // Upload raw meshes to mesh_groups (keyed by name) so draw_model_node can find them
         for mesh in &scene.raw_meshes {
             if light_resources.contains(mesh.name.as_str()) {
                 continue; // Skip light cone/sphere meshes
@@ -937,15 +953,28 @@ void main() {
             } else {
                 None
             };
-            let buffers = Mesh3dBuffers::new(
+            let vc_opt = if !mesh.vertex_colors.is_empty()
+                && mesh.vertex_colors.len() == mesh.positions.len()
+            {
+                Some(mesh.vertex_colors.as_slice())
+            } else {
+                None
+            };
+            let buffers = Mesh3dBuffers::new_full(
                 context,
                 &mesh.positions,
                 &mesh.normals,
                 tc,
                 None, // raw meshes don't have 2nd UV set
                 &mesh.faces,
+                None, // no bone indices
+                None, // no bone weights
+                vc_opt,
             )?;
-            all_meshes.push(buffers);
+            // Add to mesh_groups keyed by name so draw_model_node can look up by resource_name
+            mesh_groups.entry(mesh.name.clone())
+                .or_insert_with(Vec::new)
+                .push(buffers);
         }
 
         // Upload textures (decode JPEG/PNG or raw RGBA)
@@ -1315,13 +1344,37 @@ void main() {
                 // Determine which motion to play: use runtime current_motion, or fallback to first
                 let is_playing = runtime_state.map(|rs| rs.animation_playing).unwrap_or(true);
                 let play_rate = runtime_state.map(|rs| rs.play_rate).unwrap_or(1.0);
+                let anim_scale = runtime_state.map(|rs| rs.animation_scale).unwrap_or(1.0);
                 let is_loop = runtime_state.map(|rs| rs.animation_loop).unwrap_or(true);
-
-                if is_playing {
-                    self.animation_time += (1.0 / 30.0) * play_rate;
-                }
+                let start_time = runtime_state.map(|rs| rs.animation_start_time).unwrap_or(0.0);
+                let end_time = runtime_state.map(|rs| rs.animation_end_time).unwrap_or(-1.0);
 
                 let current_motion_name = runtime_state.and_then(|rs| rs.current_motion.as_deref());
+
+                // Detect motion change — sync animation_time from runtime state
+                let motion_changed = current_motion_name != self.last_motion_name.as_deref();
+                if motion_changed {
+                    self.last_motion_name = current_motion_name.map(|s| s.to_string());
+                    // Sync initial time from runtime state (set by play() offset)
+                    self.animation_time = runtime_state.map(|rs| rs.animation_time).unwrap_or(0.0);
+                    self.motion_ended = false;
+                    // Sync blend state from runtime
+                    self.blend_weight = runtime_state.map(|rs| rs.blend_weight).unwrap_or(1.0);
+                    self.blend_elapsed = runtime_state.map(|rs| rs.blend_elapsed).unwrap_or(0.0);
+                    self.blend_duration = runtime_state.map(|rs| rs.blend_duration).unwrap_or(0.0);
+                }
+
+                let dt = (1.0 / 30.0) * play_rate * anim_scale;
+                if is_playing {
+                    self.animation_time += dt;
+                }
+
+                // Progress blend weight
+                if self.blend_weight < 1.0 && self.blend_duration > 0.0 {
+                    self.blend_elapsed += 1.0 / 30.0;
+                    self.blend_weight = (self.blend_elapsed / self.blend_duration).min(1.0);
+                }
+
                 let motion = if let Some(name) = current_motion_name {
                     scene.motions.iter().find(|m| m.name == name)
                 } else {
@@ -1330,11 +1383,17 @@ void main() {
 
                 if let Some(motion) = motion {
                     let duration = motion.duration();
-                    if duration > 0.0 {
+                    // Effective end time: use end_time if specified, else full duration
+                    let eff_end = if end_time >= 0.0 { (end_time / 1.0).min(duration) } else { duration };
+                    let eff_start = start_time.min(eff_end);
+                    let range = eff_end - eff_start;
+
+                    if range > 0.0 {
                         let t = if is_loop {
-                            self.animation_time % duration
+                            // Loop within [start_time, end_time]
+                            eff_start + ((self.animation_time - eff_start) % range + range) % range
                         } else {
-                            self.animation_time.min(duration)
+                            self.animation_time.clamp(eff_start, eff_end)
                         };
 
                         for track in &motion.tracks {
@@ -1346,8 +1405,8 @@ void main() {
                             self.motion_transforms.insert(track.bone_name.clone(), m);
                         }
 
-                        // Check if non-looping motion has ended — signal for queue processing
-                        if !is_loop && self.animation_time >= duration && !self.motion_ended {
+                        // Check if non-looping motion has ended
+                        if !is_loop && self.animation_time >= eff_end && !self.motion_ended {
                             self.motion_ended = true;
                         }
                     }
@@ -1710,11 +1769,61 @@ void main() {
                     mesh_buf.draw(gl);
                     mesh_buf.unbind(gl);
                 }
+            } else {
+                // Log missing mesh data — deduplicate by model name
+                use std::sync::Mutex;
+                use std::collections::HashSet;
+                static LOGGED_MISS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+                if let Ok(mut guard) = LOGGED_MISS.lock() {
+                    let set = guard.get_or_insert_with(HashSet::new);
+                    if set.insert(model_node.name.clone()) {
+                        web_sys::console::warn_1(&format!(
+                            "[W3D-MISS] model=\"{}\" resource=\"{}\" (res=\"{}\", mres=\"{}\") — NOT in mesh_groups({} keys). parent=\"{}\"",
+                            model_node.name, resource, model_node.resource_name,
+                            model_node.model_resource_name, gpu_data.mesh_groups.len(), model_node.parent_name,
+                        ).into());
+                    }
+                }
+            }
+        }
+        // Log when a player/actor model is actually drawn (once per model name)
+        if model_node.name.contains("PlayerModel") || model_node.name.contains("ActorModel") || model_node.name.contains("PAX_") {
+            use std::sync::Mutex;
+            use std::collections::HashSet;
+            static LOGGED_DRAW: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+            if let Ok(mut guard) = LOGGED_DRAW.lock() {
+                let set = guard.get_or_insert_with(HashSet::new);
+                if set.insert(model_node.name.clone()) {
+                    let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+                    let found = self.member_data.get(member_key)
+                        .and_then(|d| d.mesh_groups.get(resource))
+                        .map(|g| g.len()).unwrap_or(0);
+                    web_sys::console::log_1(&format!(
+                        "[W3D-DRAW] model=\"{}\" resource=\"{}\" meshes={} pos=({:.1},{:.1},{:.1}) parent=\"{}\"",
+                        model_node.name, resource, found,
+                        world_matrix[12], world_matrix[13], world_matrix[14],
+                        model_node.parent_name,
+                    ).into());
+                }
             }
         }
     }
 
     /// Get the opacity of a model node's material (for transparency sorting).
+    /// Look up a per-model shader override.  Returns the first available:
+    /// mesh-specific index → index 0 fallback → None.
+    fn node_shader_override<'a>(
+        rs: &'a crate::player::cast_member::Shockwave3dRuntimeState,
+        node_name: &str,
+        mesh_idx: Option<usize>,
+    ) -> Option<&'a String> {
+        rs.node_shaders.get(node_name).and_then(|m| {
+            mesh_idx.and_then(|idx| m.get(&idx))
+                .or_else(|| m.get(&0))
+                .or_else(|| m.values().next())
+        })
+    }
+
     fn get_model_opacity(
         &self,
         scene: &W3dScene,
@@ -1722,7 +1831,7 @@ void main() {
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> f32 {
         let effective_shader_name = runtime_state
-            .and_then(|rs| rs.node_shaders.get(&model_node.name))
+            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
             .cloned()
             .unwrap_or_else(|| model_node.shader_name.clone());
         if !effective_shader_name.is_empty() {
@@ -2234,7 +2343,7 @@ void main() {
         let has_inker = scene.nodes.iter().any(|n| {
             if n.node_type != W3dNodeType::Model { return false; }
             let shader_name = runtime_state
-                .and_then(|rs| rs.node_shaders.get(&n.name))
+                .and_then(|rs| Self::node_shader_override(rs, &n.name, None))
                 .unwrap_or(&n.shader_name);
             Self::find_shader_ci(&scene.shaders, shader_name)
                 .map(|s| s.shader_type == W3dShaderType::Inker)
@@ -2258,7 +2367,7 @@ void main() {
 
         for model_node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
             let shader_name = runtime_state
-                .and_then(|rs| rs.node_shaders.get(&model_node.name))
+                .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
                 .unwrap_or(&model_node.shader_name);
             let w3d_shader = match Self::find_shader_ci(&scene.shaders, shader_name) {
                 Some(s) if s.shader_type == W3dShaderType::Inker => s,
@@ -2463,7 +2572,7 @@ void main() {
 
         // Check runtime shader override first
         let effective_shader_name = runtime_state
-            .and_then(|rs| rs.node_shaders.get(&model_node.name))
+            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
             .cloned()
             .unwrap_or_else(|| model_node.shader_name.clone());
 
@@ -2551,7 +2660,7 @@ void main() {
     /// Get the first texture layer's blend_func for a model node
     fn get_first_blend_func(&self, scene: &W3dScene, node: &W3dNode, runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>) -> u8 {
         let effective_shader = runtime_state
-            .and_then(|rs| rs.node_shaders.get(&node.name))
+            .and_then(|rs| Self::node_shader_override(rs, &node.name, None))
             .cloned()
             .unwrap_or_else(|| node.shader_name.clone());
         Self::find_shader_ci(&scene.shaders, &effective_shader)
@@ -2566,12 +2675,47 @@ void main() {
         gl: &WebGl2RenderingContext,
         shader: &Shader3d,
         scene: &W3dScene,
-        _model_node: &W3dNode,
+        model_node: &W3dNode,
         res_info: Option<&ModelResourceInfo>,
         mesh_idx: usize,
         member_key: &(i32, i32),
-        _runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> bool {
+        // Check per-mesh shader override first (from Lingo shaderList[I] = shaderRef)
+        if let Some(override_name) = runtime_state
+            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, Some(mesh_idx)))
+        {
+            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, override_name) {
+                let mat = if !w3d_shader.material_name.is_empty() {
+                    Self::find_material_ci(&scene.materials, &w3d_shader.material_name)
+                } else { None }
+                    .or_else(|| Self::find_material_ci(&scene.materials, &w3d_shader.name));
+                if let Some(m) = mat {
+                    self.set_material_uniforms(gl, shader, m);
+                } else {
+                    // No material found — set default opaque white so model is visible
+                    gl.uniform4f(shader.u_diffuse_color.as_ref(), 0.8, 0.8, 0.8, 1.0);
+                    gl.uniform4f(shader.u_ambient_color.as_ref(), 0.2, 0.2, 0.2, 1.0);
+                    gl.uniform4f(shader.u_specular_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
+                    gl.uniform4f(shader.u_emissive_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
+                    gl.uniform1f(shader.u_shininess.as_ref(), 0.0);
+                    gl.uniform1f(shader.u_opacity.as_ref(), 1.0);
+                }
+                let mut tex_bound = false;
+                if let Some(gpu_data) = self.member_data.get(member_key) {
+                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                    tex_bound = Self::bind_texture_layers(gl, shader, &layers);
+                }
+                if !tex_bound {
+                    gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+                }
+                let first_bf = w3d_shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0);
+                let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
+                Self::apply_blend_mode(gl, opacity, first_bf);
+                return true;
+            }
+        }
+
         let res_info = match res_info {
             Some(r) => r,
             None => return false,
@@ -2704,17 +2848,32 @@ void main() {
         } else {
             scene.motions.first()
         };
+        // Skip skinning if motion has too few tracks — avoids collapsing/exploding mesh.
+        // A proper skeletal animation needs at least ~half the bone count in tracks.
+        let min_tracks = (skeleton.bones.len() / 2).max(2);
+        if motion.map(|m| m.tracks.len() < min_tracks).unwrap_or(true) {
+            return false;
+        }
         let time = self.animation_time;
         let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
-        let t = if duration > 0.0 {
-            if is_loop { time % duration } else { time.min(duration) }
+        let end_time = runtime_state.map(|rs| rs.animation_end_time).unwrap_or(-1.0);
+        let start_time = runtime_state.map(|rs| rs.animation_start_time).unwrap_or(0.0);
+        let eff_end = if end_time >= 0.0 { (end_time).min(duration) } else { duration };
+        let eff_start = start_time.min(eff_end);
+        let range = eff_end - eff_start;
+        let t = if range > 0.0 {
+            if is_loop {
+                eff_start + ((time - eff_start) % range + range) % range
+            } else {
+                time.clamp(eff_start, eff_end)
+            }
         } else { 0.0 };
         let world_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
             skeleton, motion, t, root_lock,
         );
 
-        // Check for motion blending (crossfade)
-        let blend_weight = runtime_state.map(|rs| rs.blend_weight).unwrap_or(1.0);
+        // Check for motion blending (crossfade) — use renderer's local blend state
+        let blend_weight = self.blend_weight;
         let prev_motion_name = runtime_state.and_then(|rs| rs.previous_motion.as_deref());
         let blending = blend_weight < 1.0 && prev_motion_name.is_some();
 
