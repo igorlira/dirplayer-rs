@@ -305,6 +305,10 @@ impl FieldMemberHandlers {
                 }
             }
             "media" => Ok(Datum::Media(Media::Field(field.clone()))),
+            "regPoint" => Ok(Datum::Point([
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(0)),
+            ])),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for field",
                 prop
