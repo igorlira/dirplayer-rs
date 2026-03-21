@@ -704,20 +704,26 @@ impl TypeHandlers {
         let result = match obj_type {
             DatumType::Symbol => reserve_player_mut(|player| {
                 let s = player.get_datum(&args[0]).string_value()?;
-                let cast_num = if args.len() > 1 {
+                let (cast_num, slot) = if args.len() > 1 {
                     match player.get_datum(&args[1]) {
-                        Datum::CastLib(cast_num) => *cast_num,
+                        Datum::CastLib(cast_num) => (*cast_num, None),
+                        Datum::CastMember(member_ref) => {
+                            let cn = if member_ref.cast_lib > 0 { member_ref.cast_lib as u32 } else { 1 };
+                            let slot = if member_ref.cast_member > 0 { Some(member_ref.cast_member as u32) } else { None };
+                            (cn, slot)
+                        }
                         other => Err(ScriptError::new(format!(
                             "Unsupported call location type: {}",
                             other.type_str()
                         )))?,
                     }
                 } else {
-                    1
+                    (1, None)
                 };
                 let cast = player.movie.cast_manager.get_cast_mut(cast_num);
+                let member_slot = slot.unwrap_or_else(|| cast.first_free_member_id());
                 let member_ref = cast.create_member_at(
-                    cast.first_free_member_id(),
+                    member_slot,
                     &s,
                     &mut player.bitmap_manager,
                 )?;
