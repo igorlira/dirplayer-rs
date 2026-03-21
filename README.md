@@ -2,7 +2,7 @@
 
 # DirPlayer
 
-DirPlayer is a Director/Shockwave Player emulator written in Rust that aims to make playing applications and games made using Director possible on modern browsers.
+DirPlayer is a Shockwave Player emulator written in Rust that aims to make playing applications and games made using Director possible on modern browsers.
 
 This cannot run Flash games. For those, you can use Ruffle.
 
