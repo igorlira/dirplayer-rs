@@ -34,7 +34,10 @@ impl VectorDatumHandlers {
         match handler_name {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
-            "duplicate" => Ok(datum.clone()),
+            "duplicate" => reserve_player_mut(|player| {
+                let vec = Self::datum_to_vec(player, player.get_datum(datum))?;
+                Ok(player.alloc_datum(Datum::Vector(vec)))
+            }),
             "distanceTo" => reserve_player_mut(|player| {
                 let a = Self::datum_to_vec(player, player.get_datum(datum))?;
                 let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
