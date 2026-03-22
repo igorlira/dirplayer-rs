@@ -1739,79 +1739,6 @@ void main() {
         result
     }
 
-    /// Accumulate world transform for a node's PARENT only (skipping the node's own transform).
-    /// Used for skinned models where the node's rotation is already in the skeleton rest pose.
-    fn accumulate_parent_transform_with_state(
-        &self,
-        scene: &W3dScene,
-        node: &W3dNode,
-        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> [f32; 16] {
-        let mut chain: Vec<[f32; 16]> = Vec::new();
-        let mut current_parent = &node.parent_name;
-
-        while !current_parent.is_empty() && current_parent != "<world>" {
-            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
-                let parent_t = runtime_state
-                    .and_then(|rs| rs.node_transforms.get(&parent_node.name))
-                    .copied()
-                    .unwrap_or(parent_node.transform);
-                chain.push(parent_t);
-                current_parent = &parent_node.parent_name;
-            } else {
-                break;
-            }
-        }
-
-        let mut result = IDENTITY_4X4;
-        for t in chain.into_iter().rev() {
-            result = mat4_multiply_col_major(&result, &t);
-        }
-        result
-    }
-
-    /// Build world placement for skinned models while stripping static bind-space rotations
-    /// from the node chain. Runtime overrides are preserved as deltas relative to the parsed scene.
-    fn accumulate_skinned_placement_transform(
-        &self,
-        scene: &W3dScene,
-        node: &W3dNode,
-        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> [f32; 16] {
-        let mut chain: Vec<&W3dNode> = vec![node];
-        let mut current_parent = &node.parent_name;
-
-        while !current_parent.is_empty() && current_parent != "<world>" {
-            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
-                chain.push(parent_node);
-                current_parent = &parent_node.parent_name;
-            } else {
-                break;
-            }
-        }
-
-        let mut result = IDENTITY_4X4;
-        for current in chain.into_iter().rev() {
-            let runtime_transform = runtime_state
-                .and_then(|rs| rs.node_transforms.get(&current.name))
-                .copied()
-                .unwrap_or(current.transform);
-
-            let mut local_delta = mat4_multiply_col_major(
-                &runtime_transform,
-                &invert_transform(&current.transform),
-            );
-            // Keep placement translation in local node space while stripping the authored rest rotation.
-            local_delta[12] = runtime_transform[12];
-            local_delta[13] = runtime_transform[13];
-            local_delta[14] = runtime_transform[14];
-
-            result = mat4_multiply_col_major(&result, &local_delta);
-        }
-
-        result
-    }
-
     /// Draw a single model node (extracted for opaque/transparent pass reuse).
     fn draw_model_node(
         &self,
@@ -1834,11 +1761,8 @@ void main() {
                 gl, shader, scene, resource, gpu_data, runtime_state,
             );
 
-            // For skinned meshes, the skeleton already carries the authored bind-space rotations.
-            // Preserve runtime placement/rotation deltas, but strip static rest rotations from
-            // the full node chain so player prefabs do not inherit a constant tilt.
             let world_matrix = if has_skeleton_data {
-                self.accumulate_skinned_placement_transform(scene, model_node, runtime_state)
+                self.build_skinned_model_matrix(scene, model_node, runtime_state)
             } else {
                 self.accumulate_transform_with_state(scene, model_node, runtime_state)
             };
@@ -1921,6 +1845,52 @@ void main() {
                 }
             }
         }
+    }
+
+    fn build_skinned_model_matrix(
+        &self,
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> [f32; 16] {
+        let current_world = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+
+        let mut chain = vec![model_node];
+        let mut current_parent = &model_node.parent_name;
+        while !current_parent.is_empty() && current_parent != "<world>" {
+            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
+                chain.push(parent_node);
+                current_parent = &parent_node.parent_name;
+            } else {
+                break;
+            }
+        }
+
+        let mut result = IDENTITY_4X4;
+        for node in chain.into_iter().rev() {
+            let current_local = runtime_state
+                .and_then(|rs| rs.node_transforms.get(&node.name))
+                .copied()
+                .unwrap_or(node.transform);
+            let authored_rot = rotation_only_matrix(&node.transform);
+            let current_rot = rotation_only_matrix(&current_local);
+            let has_runtime_override = runtime_state
+                .map(|rs| rs.node_transforms_dirty.contains(&node.name))
+                .unwrap_or(false);
+            let delta = if has_runtime_override {
+                current_rot
+            } else {
+                let authored_inv = inverse_rotation_matrix(&authored_rot);
+                mat4_multiply_col_major(&current_rot, &authored_inv)
+            };
+            result = mat4_multiply_col_major(&result, &delta);
+        }
+
+        result[12] = current_world[12];
+        result[13] = current_world[13];
+        result[14] = current_world[14];
+        result[15] = 1.0;
+        result
     }
 
     /// Get the opacity of a model node's material (for transparency sorting).
@@ -3761,4 +3731,34 @@ fn mat4_multiply_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
         }
     }
     r
+}
+
+fn extract_axis_scale(m: &[f32; 16], col: usize) -> f32 {
+    let x = m[col * 4];
+    let y = m[col * 4 + 1];
+    let z = m[col * 4 + 2];
+    let len = (x * x + y * y + z * z).sqrt();
+    if len > 1e-6 { len } else { 1.0 }
+}
+
+fn rotation_only_matrix(m: &[f32; 16]) -> [f32; 16] {
+    let sx = extract_axis_scale(m, 0);
+    let sy = extract_axis_scale(m, 1);
+    let sz = extract_axis_scale(m, 2);
+
+    [
+        m[0] / sx, m[1] / sx, m[2] / sx, 0.0,
+        m[4] / sy, m[5] / sy, m[6] / sy, 0.0,
+        m[8] / sz, m[9] / sz, m[10] / sz, 0.0,
+        0.0,       0.0,       0.0,       1.0,
+    ]
+}
+
+fn inverse_rotation_matrix(m: &[f32; 16]) -> [f32; 16] {
+    [
+        m[0], m[4], m[8],  0.0,
+        m[1], m[5], m[9],  0.0,
+        m[2], m[6], m[10], 0.0,
+        0.0,  0.0,  0.0,   1.0,
+    ]
 }

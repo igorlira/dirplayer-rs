@@ -371,6 +371,7 @@ pub struct FlashMember {
 pub struct Shockwave3dMember {
     pub info: Shockwave3dInfo,
     pub w3d_data: Vec<u8>,
+    pub source_scene: Option<std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>>,
     pub parsed_scene: Option<std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>>,
     pub runtime_state: Shockwave3dRuntimeState,
 }
@@ -415,6 +416,8 @@ pub struct Shockwave3dRuntimeState {
     /// Persistent Transform3d DatumRefs per node — returned by .transform getter
     /// so that chained mutations (model.transform.position = v) persist
     pub node_transform_datums: std::collections::HashMap<String, crate::player::DatumRef>,
+    /// Director-friendly Euler readback hints for nodes oriented via pointAt().
+    pub node_rotation_hints: std::collections::HashMap<String, [f64; 3]>,
     /// Visibility overrides for nodes
     pub node_visibility: std::collections::HashMap<String, bool>,
     /// Shader overrides for nodes: model_name → (mesh_index → shader_name)
@@ -1622,7 +1625,7 @@ impl CastMember {
     }
 
     /// Create an empty W3D scene with a DefaultView camera, matching Director's behavior.
-    fn create_empty_w3d_scene() -> crate::director::chunks::w3d::types::W3dScene {
+    pub(crate) fn create_empty_w3d_scene() -> crate::director::chunks::w3d::types::W3dScene {
         use crate::director::chunks::w3d::types::*;
         let mut scene = W3dScene::default();
         // Director always creates a DefaultView camera in empty 3D members
@@ -2074,11 +2077,12 @@ impl CastMember {
                     camera_position: None, camera_rotation: None,
                     bg_color: None, ambient_color: None,
                 };
+                let source_scene = parsed_scene.clone();
                 return Some(CastMember {
                     number,
                     name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                     comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
-                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info); CastMemberType::Shockwave3d(Shockwave3dMember { info, w3d_data, parsed_scene, runtime_state: rs }) },
+                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info); CastMemberType::Shockwave3d(Shockwave3dMember { info, w3d_data, source_scene, parsed_scene, runtime_state: rs }) },
                     color: ColorRef::PaletteIndex(255),
                     bg_color: ColorRef::PaletteIndex(0),
                 });
@@ -2823,6 +2827,7 @@ impl CastMember {
                         name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                         comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
                         member_type: CastMemberType::Shockwave3d(Shockwave3dMember {
+                        source_scene: None,
                         parsed_scene: if !w3d_data.is_empty() {
                             match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
                                 Ok(scene) => {
