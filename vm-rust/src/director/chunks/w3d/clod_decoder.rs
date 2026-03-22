@@ -436,7 +436,7 @@ impl ClodMeshDecoder {
                     indices.push(bs.read_compressed_u32(19));
                     if n > 0 {
                         let weight_mag = bs.read_compressed_u32(20);
-                        let w = weight_mag as f32 * self.diffuse_color_iq;
+                        let w = (weight_mag as f32 * self.diffuse_color_iq).clamp(0.0, 1.0);
                         weights.push(w);
                         weights[0] -= w;
                     }
@@ -708,6 +708,37 @@ impl ClodMeshDecoder {
                     specular_colors: Vec::new(),
                     bone_indices: mesh.bone_indices[..vert_count.min(mesh.bone_indices.len())].to_vec(),
                     bone_weights: mesh.bone_weights[..vert_count.min(mesh.bone_weights.len())].to_vec(),
+                }
+            })
+            .collect()
+    }
+
+    /// Get decoded meshes at full resolution (all patches applied)
+    pub fn get_decoded_meshes_full_resolution(&self) -> Vec<ClodDecodedMesh> {
+        self.meshes
+            .iter()
+            .enumerate()
+            .map(|(i, mesh)| {
+                // Start with all faces, then apply ALL patch records
+                let mut faces = mesh.faces.clone();
+                for patch in &mesh.patch_records {
+                    let fi = patch.face_index as usize;
+                    let ci = patch.corner_index as usize;
+                    if fi < faces.len() && ci < 3 {
+                        faces[fi][ci] = patch.new_vertex_index;
+                    }
+                }
+
+                ClodDecodedMesh {
+                    name: format!("mesh_{}", i),
+                    positions: mesh.positions.clone(),
+                    normals: mesh.normals.clone(),
+                    tex_coords: mesh.tex_coords.clone(),
+                    faces,
+                    diffuse_colors: Vec::new(),
+                    specular_colors: Vec::new(),
+                    bone_indices: mesh.bone_indices.clone(),
+                    bone_weights: mesh.bone_weights.clone(),
                 }
             })
             .collect()
