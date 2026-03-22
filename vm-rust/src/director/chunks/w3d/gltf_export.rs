@@ -4,6 +4,7 @@
 //! This format supports bones, weights, and keyframe animations unlike OBJ.
 
 use super::types::*;
+use super::skeleton::export_basis_transform;
 
 /// Export a W3dScene as a GLB (binary glTF) byte buffer.
 pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
@@ -202,6 +203,7 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
     let root_idx = gltf.nodes.len();
     gltf.nodes.push(GltfNode {
         name: "Root".into(),
+        matrix: Some(export_basis_transform()),
         children: root_children,
         ..Default::default()
     });
