@@ -660,12 +660,33 @@ impl Shockwave3dObjectDatumHandlers {
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
-                                let mat_name = scene.shaders.iter()
-                                    .find(|s| s.name == s3d_ref.name)
-                                    .map(|s| s.material_name.clone());
-                                if let Some(ref mn) = mat_name {
-                                    if let Some(mat) = scene.materials.iter_mut().find(|m| m.name == *mn) {
-                                        mat.opacity = blend_val / 100.0;
+                                // Find the shader and get/create its material
+                                let mat_name_to_update = {
+                                    let shader = scene.shaders.iter_mut()
+                                        .find(|s| s.name == s3d_ref.name);
+                                    if let Some(shader) = shader {
+                                        if shader.material_name.is_empty() {
+                                            // Shader has no material — create one and link it
+                                            let new_mat_name = format!("{}_mat", s3d_ref.name);
+                                            shader.material_name = new_mat_name.clone();
+                                            Some((new_mat_name, true))
+                                        } else {
+                                            Some((shader.material_name.clone(), false))
+                                        }
+                                    } else { None }
+                                };
+                                if let Some((mat_name, needs_create)) = mat_name_to_update {
+                                    if needs_create {
+                                        use crate::director::chunks::w3d::types::W3dMaterial;
+                                        scene.materials.push(W3dMaterial {
+                                            name: mat_name,
+                                            opacity: blend_val / 100.0,
+                                            ..Default::default()
+                                        });
+                                    } else {
+                                        if let Some(mat) = scene.materials.iter_mut().find(|m| m.name == mat_name) {
+                                            mat.opacity = blend_val / 100.0;
+                                        }
                                     }
                                 }
                             }
@@ -954,8 +975,14 @@ impl Shockwave3dObjectDatumHandlers {
                     if !args.is_empty() {
                         if let Datum::Vector(target) = player.get_datum(&args[0]) {
                             let target = *target;
+                            let (ux, uy, uz) = if args.len() > 1 {
+                                if let Datum::Vector(up) = player.get_datum(&args[1]) {
+                                    (up[0] as f32, up[1] as f32, up[2] as f32)
+                                } else { (0.0f32, 1.0, 0.0) }
+                            } else { (0.0f32, 1.0, 0.0) };
                             apply_point_at(player, &member_ref, &s3d_ref.name,
-                                target[0] as f32, target[1] as f32, target[2] as f32);
+                                target[0] as f32, target[1] as f32, target[2] as f32,
+                                ux, uy, uz);
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))
@@ -1494,8 +1521,25 @@ impl Shockwave3dObjectDatumHandlers {
                         let prop = player.get_datum(&args[0]).string_value().unwrap_or_default();
                         let index = player.get_datum(&args[1]).int_value()?;
                         let value_ref = args[2].clone();
+                        let value_datum = player.get_datum(&value_ref).clone();
 
-                        // Get the collection (textureList, shaderList, etc.) and setAt
+                        // For shaderList assignment, update node_shaders for the renderer
+                        if (prop == "shaderList" || prop == "shader") && s3d_ref.object_type == "model" {
+                            if let Datum::Shockwave3dObjectRef(shader_ref) = &value_datum {
+                                let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                        let mesh_idx = if index > 0 { (index - 1) as usize } else { 0 };
+                                        let shader_map = w3d.runtime_state.node_shaders
+                                            .entry(s3d_ref.name.clone())
+                                            .or_insert_with(std::collections::HashMap::new);
+                                        shader_map.insert(mesh_idx, shader_ref.name.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        // Also update the transient list
                         let list_ref = Self::get_prop(datum, &prop)?;
                         let list_datum = player.get_datum(&list_ref);
                         if let Datum::List(_, items, _) = list_datum {
@@ -3556,7 +3600,13 @@ fn apply_rotation(
 ) {
     let m = get_or_init_node_transform(player, member_ref, node_name);
     let rot = euler_to_matrix_f32(rx_deg, ry_deg, rz_deg);
-    let result = mat4_mul_f32(&m, &rot);
+    // Apply rotation in world axes but keep the node positioned in place.
+    // Post-multiplying by `rot` rotates around the node's existing local basis,
+    // which inherits bind/rest orientation and can turn a yaw into an apparent roll.
+    let mut result = mat4_mul_f32(&rot, &m);
+    result[12] = m[12];
+    result[13] = m[13];
+    result[14] = m[14];
     set_node_transform(player, member_ref, node_name, result);
 }
 
@@ -3579,11 +3629,12 @@ fn apply_point_at(
     member_ref: &crate::player::cast_lib::CastMemberRef,
     node_name: &str,
     tx: f32, ty: f32, tz: f32,
+    up_x: f32, up_y: f32, up_z: f32,
 ) {
     let m = get_or_init_node_transform(player, member_ref, node_name);
     let pos = [m[12], m[13], m[14]];
 
-    // Build look-at matrix
+    // Forward = toward target
     let mut fwd = [tx - pos[0], ty - pos[1], tz - pos[2]];
     let len = (fwd[0]*fwd[0] + fwd[1]*fwd[1] + fwd[2]*fwd[2]).sqrt();
     if len > 1e-6 {
@@ -3592,28 +3643,40 @@ fn apply_point_at(
         return;
     }
 
-    let up = [0.0f32, 1.0, 0.0];
+    // Z axis = -forward (away from target, Director/standard look-at convention)
+    let neg_fwd = [-fwd[0], -fwd[1], -fwd[2]];
+
+    // Use provided up hint; fall back to world X if forward is parallel to up
+    let mut up = [up_x, up_y, up_z];
+    let dot_up_fwd = up[0]*fwd[0] + up[1]*fwd[1] + up[2]*fwd[2];
+    if dot_up_fwd.abs() > 0.999 {
+        up = [1.0, 0.0, 0.0];
+    }
+
+    // right = cross(up, negFwd)
     let mut right = [
-        up[1]*fwd[2] - up[2]*fwd[1],
-        up[2]*fwd[0] - up[0]*fwd[2],
-        up[0]*fwd[1] - up[1]*fwd[0],
+        up[1]*neg_fwd[2] - up[2]*neg_fwd[1],
+        up[2]*neg_fwd[0] - up[0]*neg_fwd[2],
+        up[0]*neg_fwd[1] - up[1]*neg_fwd[0],
     ];
     let rlen = (right[0]*right[0] + right[1]*right[1] + right[2]*right[2]).sqrt();
     if rlen > 1e-6 {
         right[0] /= rlen; right[1] /= rlen; right[2] /= rlen;
     }
 
+    // Recomputed up = cross(negFwd, right)
     let up2 = [
-        fwd[1]*right[2] - fwd[2]*right[1],
-        fwd[2]*right[0] - fwd[0]*right[2],
-        fwd[0]*right[1] - fwd[1]*right[0],
+        neg_fwd[1]*right[2] - neg_fwd[2]*right[1],
+        neg_fwd[2]*right[0] - neg_fwd[0]*right[2],
+        neg_fwd[0]*right[1] - neg_fwd[1]*right[0],
     ];
 
+    // Column-major: X=right, Y=up, Z=-forward (away from target), W=position
     let result = [
-        right[0], right[1], right[2], 0.0,
-        up2[0],   up2[1],   up2[2],   0.0,
-        fwd[0],   fwd[1],   fwd[2],   0.0,
-        pos[0],   pos[1],   pos[2],   1.0,
+        right[0],   right[1],   right[2],   0.0,
+        up2[0],     up2[1],     up2[2],     0.0,
+        neg_fwd[0], neg_fwd[1], neg_fwd[2], 0.0,
+        pos[0],     pos[1],     pos[2],     1.0,
     ];
     set_node_transform(player, member_ref, node_name, result);
 }
@@ -3636,7 +3699,7 @@ fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 /// Euler angles (degrees) to column-major rotation matrix
 fn euler_to_matrix_f32(rx_deg: f32, ry_deg: f32, rz_deg: f32) -> [f32; 16] {
     let rx = rx_deg.to_radians();
-    let ry = ry_deg.to_radians();
+    let ry = (-ry_deg).to_radians(); // Director uses left-handed Y rotation
     let rz = rz_deg.to_radians();
     let (sx, cx) = (rx.sin(), rx.cos());
     let (sy, cy) = (ry.sin(), ry.cos());
