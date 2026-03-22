@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use super::skeleton::{build_node_world_matrices, export_basis_transform};
 
 #[derive(Clone, Debug)]
 pub struct W3dMaterial {
@@ -431,6 +432,7 @@ impl W3dScene {
     /// Ported from CLODMeshDecoder.WriteAssembledPart + ExportMesh.
     pub fn export_obj_with_mtl(&self, mtl_filename: &str) -> String {
         let mut obj = String::new();
+        let basis_transform = export_basis_transform();
         let num_parts = self.clod_meshes.len() + self.raw_meshes.len();
         obj.push_str(&format!("# Assembled W3D model: {} parts\n", num_parts));
         obj.push_str(&format!("mtllib {}\n", mtl_filename));
@@ -497,6 +499,7 @@ impl W3dScene {
                 } else {
                     (pos[0], pos[1], pos[2])
                 };
+                let (px, py, pz) = transform_point(&basis_transform, px, py, pz);
                 if has_vcolors {
                     let c = &vertex_colors[i];
                     // Extended OBJ: v x y z r g b (supported by MeshLab, Blender, etc.)
@@ -511,6 +514,7 @@ impl W3dScene {
                 } else {
                     (n[0], n[1], n[2])
                 };
+                let (nx, ny, nz) = transform_normal(&basis_transform, nx, ny, nz);
                 obj.push_str(&format!("vn {:.6} {:.6} {:.6}\n", nx, ny, nz));
             }
             for tc in &texcoords {
@@ -567,15 +571,17 @@ impl W3dScene {
             // Vertex data first (with optional vertex colors)
             let has_raw_vcolors = mesh.vertex_colors.len() == mesh.positions.len();
             for (i, pos) in mesh.positions.iter().enumerate() {
+                let (px, py, pz) = transform_point(&basis_transform, pos[0], pos[1], pos[2]);
                 if has_raw_vcolors {
                     let c = &mesh.vertex_colors[i];
-                    obj.push_str(&format!("v {:.6} {:.6} {:.6} {:.4} {:.4} {:.4}\n", pos[0], pos[1], pos[2], c[0], c[1], c[2]));
+                    obj.push_str(&format!("v {:.6} {:.6} {:.6} {:.4} {:.4} {:.4}\n", px, py, pz, c[0], c[1], c[2]));
                 } else {
-                    obj.push_str(&format!("v {:.6} {:.6} {:.6}\n", pos[0], pos[1], pos[2]));
+                    obj.push_str(&format!("v {:.6} {:.6} {:.6}\n", px, py, pz));
                 }
             }
             for norm in &mesh.normals {
-                obj.push_str(&format!("vn {:.6} {:.6} {:.6}\n", norm[0], norm[1], norm[2]));
+                let (nx, ny, nz) = transform_normal(&basis_transform, norm[0], norm[1], norm[2]);
+                obj.push_str(&format!("vn {:.6} {:.6} {:.6}\n", nx, ny, nz));
             }
             let has_tc = !mesh.tex_coords.is_empty();
             if has_tc {
@@ -807,12 +813,15 @@ impl W3dScene {
 
     /// Find world transform for a model resource from the scene graph.
     fn find_transform_for_resource(&self, resource_name: &str) -> Option<[f32; 16]> {
+        let world_transforms = build_node_world_matrices(&self.nodes);
         for node in &self.nodes {
             if node.node_type != W3dNodeType::Model { continue; }
             let res = if !node.model_resource_name.is_empty() { &node.model_resource_name } else { &node.resource_name };
             if res != resource_name { continue; }
-            if !is_identity(&node.transform) {
-                return Some(node.transform);
+            if let Some(world_transform) = world_transforms.get(&node.name) {
+                if !is_identity(world_transform) {
+                    return Some(*world_transform);
+                }
             }
         }
         None

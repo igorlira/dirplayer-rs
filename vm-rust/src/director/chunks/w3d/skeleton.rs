@@ -2,6 +2,7 @@
 //! Ported from SkeletonEvaluator.cs.
 
 use super::types::*;
+use std::collections::HashMap;
 
 const TRANSLATION_EPSILON: f32 = 1e-5;
 
@@ -124,6 +125,50 @@ pub fn build_inverse_bind_matrices(skeleton: &W3dSkeleton) -> Vec<[f32; 16]> {
     let rest_matrices = build_bone_matrices(skeleton, None, 0.0);
     let inverted: Vec<_> = rest_matrices.iter().map(|m| invert_matrix(m)).collect();
     inverted
+}
+
+/// Build world matrices for scene graph nodes using parent-name chaining.
+pub fn build_node_world_matrices(nodes: &[W3dNode]) -> HashMap<String, [f32; 16]> {
+    fn build_node_world_matrix(
+        node: &W3dNode,
+        node_map: &HashMap<String, &W3dNode>,
+        cache: &mut HashMap<String, [f32; 16]>,
+    ) -> [f32; 16] {
+        if let Some(world) = cache.get(&node.name) {
+            return *world;
+        }
+
+        let world = if !node.parent_name.is_empty() {
+            if let Some(parent) = node_map.get(&node.parent_name) {
+                let parent_world = build_node_world_matrix(parent, node_map, cache);
+                multiply_matrix(&parent_world, &node.transform)
+            } else {
+                node.transform
+            }
+        } else {
+            node.transform
+        };
+
+        cache.insert(node.name.clone(), world);
+        world
+    }
+
+    let node_map: HashMap<String, &W3dNode> = nodes.iter().map(|n| (n.name.clone(), n)).collect();
+    let mut cache = HashMap::new();
+    for node in nodes {
+        build_node_world_matrix(node, &node_map, &mut cache);
+    }
+    cache
+}
+
+/// Convert W3D's authored Z-up basis into the Y-up basis expected by common OBJ/glTF viewers.
+pub fn export_basis_transform() -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, -1.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ]
 }
 
 /// Compose a 4x4 column-major matrix from position, quaternion rotation, and scale.
