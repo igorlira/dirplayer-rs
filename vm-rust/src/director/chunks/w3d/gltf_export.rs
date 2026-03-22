@@ -10,35 +10,155 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
     let mut bin = BinaryBuffer::new();
     let mut gltf = GltfRoot::new();
 
-    // Add a single scene
-    gltf.scenes.push(GltfScene { nodes: vec![] });
+    let skeleton = scene.skeletons.first().filter(|s| !s.bones.is_empty());
+    let mesh_bind_transform = skeleton
+        .and_then(|s| scene.find_transform_for_resource_pub(&s.name))
+        .unwrap_or_else(identity_matrix);
 
-    // Export meshes and materials
+    let mut root_children = vec![];
+    let mut skinned_root_children = vec![];
+    let mut skinned_root_node_idx = None;
+    let mut bone_node_start = None;
+    let mut skin_idx = None;
+
+    if let Some(skeleton) = skeleton {
+        if !is_identity(&mesh_bind_transform) {
+            let node_idx = gltf.nodes.len();
+            gltf.nodes.push(GltfNode {
+                name: format!("{}_BindRoot", skeleton.name),
+                matrix: Some(mesh_bind_transform),
+                ..Default::default()
+            });
+            root_children.push(node_idx);
+            skinned_root_node_idx = Some(node_idx);
+        }
+
+        let start = gltf.nodes.len();
+        bone_node_start = Some(start);
+
+        for (i, bone) in skeleton.bones.iter().enumerate() {
+            let bind_pose = super::skeleton::get_bind_pose(skeleton, i);
+            let (rx, ry, rz, rw) =
+                normalize_quaternion(bind_pose.rot_x, bind_pose.rot_y, bind_pose.rot_z, bind_pose.rot_w);
+            gltf.nodes.push(GltfNode {
+                name: bone.name.clone(),
+                translation: Some([bind_pose.pos_x, bind_pose.pos_y, bind_pose.pos_z]),
+                rotation: Some([rx, ry, rz, rw]),
+                ..Default::default()
+            });
+        }
+
+        for (i, bone) in skeleton.bones.iter().enumerate() {
+            if bone.parent_index >= 0 {
+                let parent_idx = start + bone.parent_index as usize;
+                gltf.nodes[parent_idx].children.push(start + i);
+            } else if skinned_root_node_idx.is_some() {
+                skinned_root_children.push(start + i);
+            } else {
+                root_children.push(start + i);
+            }
+        }
+
+        let inv_bind = super::skeleton::build_inverse_bind_matrices(skeleton);
+        let ibm_data: Vec<u8> = inv_bind
+            .iter()
+            .flat_map(|m| m.iter().flat_map(|f| f.to_le_bytes()))
+            .collect();
+        let ibm_view = add_buffer_view(&mut gltf, &mut bin, &ibm_data);
+        let ibm_acc = gltf.accessors.len();
+        gltf.accessors.push(GltfAccessor {
+            buffer_view: ibm_view,
+            component_type: 5126,
+            count: skeleton.bones.len(),
+            acc_type: "MAT4".into(),
+            min: None,
+            max: None,
+        });
+
+        let joints: Vec<usize> = (0..skeleton.bones.len()).map(|i| start + i).collect();
+        let skeleton_root = skeleton
+            .bones
+            .iter()
+            .position(|b| b.parent_index < 0)
+            .map(|i| start + i)
+            .or_else(|| joints.first().copied());
+
+        skin_idx = Some(gltf.skins.len());
+        gltf.skins.push(GltfSkin {
+            inverse_bind_matrices: ibm_acc,
+            joints,
+            skeleton_root,
+        });
+    }
+
+    export_textures(&mut gltf, &mut bin, scene);
+    build_materials(&mut gltf, scene);
+
+    // Export meshes
     let mut mesh_node_indices = vec![];
     for (resource_name, meshes) in &scene.clod_meshes {
-        let world_transform = scene.find_transform_for_resource_pub(resource_name);
-        for (mi, mesh) in meshes.iter().enumerate() {
-            if mesh.positions.is_empty() || mesh.faces.is_empty() { continue; }
+        if meshes.is_empty() { continue; }
 
-            let mesh_name = if meshes.len() > 1 {
-                format!("{}_{}", resource_name, mi)
-            } else {
-                resource_name.clone()
-            };
-
-            let mesh_idx = export_mesh(&mut gltf, &mut bin, mesh, &mesh_name, scene);
-            let node_idx = gltf.nodes.len();
-            let mut node = GltfNode {
-                name: mesh_name,
-                mesh: Some(mesh_idx),
-                ..Default::default()
-            };
-            if let Some(m) = world_transform {
-                node.matrix = Some(m);
+        // Combine ALL submeshes into one (matching C# BuildMesh behavior)
+        let mut combined = ClodDecodedMesh {
+            name: resource_name.clone(),
+            positions: vec![], normals: vec![], tex_coords: vec![],
+            faces: vec![], diffuse_colors: vec![], specular_colors: vec![],
+            bone_indices: vec![], bone_weights: vec![],
+        };
+        let mut vert_offset = 0u32;
+        for submesh in meshes {
+            let vert_limit = submesh.positions.len();
+            combined.positions.extend_from_slice(&submesh.positions[..vert_limit]);
+            combined.normals.extend_from_slice(&submesh.normals[..vert_limit.min(submesh.normals.len())]);
+            // Texcoords: merge per-layer
+            for (li, layer) in submesh.tex_coords.iter().enumerate() {
+                while combined.tex_coords.len() <= li {
+                    combined.tex_coords.push(vec![]);
+                }
+                combined.tex_coords[li].extend_from_slice(&layer[..vert_limit.min(layer.len())]);
             }
-            gltf.nodes.push(node);
-            gltf.scenes[0].nodes.push(node_idx);
-            mesh_node_indices.push(node_idx);
+            combined.bone_indices.extend_from_slice(&submesh.bone_indices[..vert_limit.min(submesh.bone_indices.len())]);
+            combined.bone_weights.extend_from_slice(&submesh.bone_weights[..vert_limit.min(submesh.bone_weights.len())]);
+            // Offset face indices by accumulated vertex count
+            for face in &submesh.faces {
+                let v0 = face[0] + vert_offset;
+                let v1 = face[1] + vert_offset;
+                let v2 = face[2] + vert_offset;
+                if (v0 as usize) < combined.positions.len() &&
+                   (v1 as usize) < combined.positions.len() &&
+                   (v2 as usize) < combined.positions.len() {
+                    combined.faces.push([v0, v1, v2]);
+                }
+            }
+            vert_offset += vert_limit as u32;
+        }
+
+        if combined.positions.is_empty() || combined.faces.is_empty() { continue; }
+
+        let mesh_idx = export_mesh(&mut gltf, &mut bin, &combined, resource_name, scene);
+        let node_idx = gltf.nodes.len();
+        let mut node = GltfNode {
+            name: resource_name.clone(),
+            mesh: Some(mesh_idx),
+            ..Default::default()
+        };
+        if let Some(current_skin_idx) = skin_idx {
+            if mesh_node_indices.is_empty() {
+                node.skin = Some(current_skin_idx);
+            } else if let Some(transform) = scene.find_transform_for_resource_pub(resource_name) {
+                node.matrix = Some(transform);
+            }
+        } else if let Some(transform) = scene.find_transform_for_resource_pub(resource_name) {
+            node.matrix = Some(transform);
+        }
+        gltf.nodes.push(node);
+        mesh_node_indices.push(node_idx);
+
+        if skin_idx.is_some() && mesh_node_indices.len() == 1 && skinned_root_node_idx.is_some() {
+            skinned_root_children.push(node_idx);
+        } else {
+            root_children.push(node_idx);
         }
     }
 
@@ -63,41 +183,29 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
             mesh: Some(mesh_idx),
             ..Default::default()
         });
-        gltf.scenes[0].nodes.push(node_idx);
+        root_children.push(node_idx);
     }
 
-    // Export skeleton + skin if available
-    if let Some(skeleton) = scene.skeletons.first() {
-        if skeleton.bones.len() > 1 {
-            export_skeleton(&mut gltf, &mut bin, skeleton, scene, &mesh_node_indices);
-        }
+    if let Some(root_idx) = skinned_root_node_idx {
+        gltf.nodes[root_idx].children = skinned_root_children;
     }
 
-    // Export textures
-    for (name, data) in &scene.texture_images {
-        if data.is_empty() { continue; }
-        let is_png = data.len() >= 2 && data[0] == 0x89 && data[1] == 0x50;
-        let mime = if is_png { "image/png" } else { "image/jpeg" };
-
-        let buf_view_idx = add_buffer_view(&mut gltf, &mut bin, data);
-        let image_idx = gltf.images.len();
-        gltf.images.push(GltfImage {
-            buffer_view: buf_view_idx,
-            mime_type: mime.to_string(),
-            name: name.clone(),
-        });
-        let tex_idx = gltf.textures.len();
-        gltf.textures.push(GltfTexture { source: image_idx, name: name.clone() });
-
-        // Link to materials by matching texture name in shader layers
-        for (mat_idx, mat) in gltf.materials.iter_mut().enumerate() {
-            if let Some(shader) = scene.shaders.get(mat_idx) {
-                if shader.texture_layers.iter().any(|l| l.name == *name && (l.tex_mode == 0 || l.tex_mode == 5)) {
-                    mat.base_color_texture = Some(tex_idx);
-                }
+    if let (Some(skeleton), Some(bone_node_start)) = (skeleton, bone_node_start) {
+        for motion in &scene.motions {
+            if motion.tracks.len() <= 1 {
+                continue;
             }
+            export_animation(&mut gltf, &mut bin, motion, skeleton, bone_node_start);
         }
     }
+
+    let root_idx = gltf.nodes.len();
+    gltf.nodes.push(GltfNode {
+        name: "Root".into(),
+        children: root_children,
+        ..Default::default()
+    });
+    gltf.scenes.push(GltfScene { nodes: vec![root_idx] });
 
     // Serialize to GLB
     let json_str = serialize_gltf(&gltf, bin.data.len());
@@ -111,6 +219,8 @@ fn export_mesh(
     name: &str,
     scene: &W3dScene,
 ) -> usize {
+    let recalculated_normals = recalculate_smooth_normals(&mesh.positions, &mesh.faces);
+
     // Positions
     let (pos_min, pos_max) = compute_bounds(&mesh.positions);
     let pos_view = add_buffer_view(gltf, bin, &flatten_vec3(&mesh.positions));
@@ -125,22 +235,19 @@ fn export_mesh(
     });
 
     // Normals
-    let norm_view = add_buffer_view(gltf, bin, &flatten_vec3(&mesh.normals));
+    let norm_view = add_buffer_view(gltf, bin, &flatten_vec3(&recalculated_normals));
     let norm_acc = gltf.accessors.len();
     gltf.accessors.push(GltfAccessor {
         buffer_view: norm_view,
         component_type: 5126,
-        count: mesh.normals.len(),
+        count: recalculated_normals.len(),
         acc_type: "VEC3".into(),
         min: None, max: None,
     });
 
     // Texcoords
     let tc_acc = if !mesh.tex_coords.is_empty() && !mesh.tex_coords[0].is_empty() {
-        let tc_data: Vec<[f32; 2]> = mesh.tex_coords[0].iter().map(|tc| {
-            // Remap W3D [-0.5, 0.5] → [0, 1], V-flip
-            [tc[0] + 0.5, 0.5 - tc[1]]
-        }).collect();
+        let tc_data: Vec<[f32; 2]> = mesh.tex_coords[0].clone();
         let tc_view = add_buffer_view(gltf, bin, &flatten_vec2(&tc_data));
         let idx = gltf.accessors.len();
         gltf.accessors.push(GltfAccessor {
@@ -153,8 +260,8 @@ fn export_mesh(
         Some(idx)
     } else { None };
 
-    // Indices (reverse winding for glTF CCW)
-    let idx_data: Vec<u32> = mesh.faces.iter().flat_map(|f| [f[0], f[2], f[1]]).collect();
+    // Indices
+    let idx_data: Vec<u32> = mesh.faces.iter().flat_map(|f| [f[0], f[1], f[2]]).collect();
     let idx_view = add_buffer_view(gltf, bin, &to_bytes_u32(&idx_data));
     let idx_acc = gltf.accessors.len();
     gltf.accessors.push(GltfAccessor {
@@ -188,8 +295,17 @@ fn export_mesh(
         let weights: Vec<[f32; 4]> = mesh.bone_weights.iter().map(|v| {
             let mut out = [0.0f32; 4];
             let mut sum = 0.0f32;
-            for (i, &w) in v.iter().take(4).enumerate() { out[i] = w; sum += w; }
-            if sum > 0.0 { for w in out.iter_mut() { *w /= sum; } } else { out[0] = 1.0; }
+            for (i, &w) in v.iter().take(4).enumerate() {
+                out[i] = w.max(0.0);
+                sum += out[i];
+            }
+            if sum > 1e-6 {
+                for w in out.iter_mut() {
+                    *w /= sum;
+                }
+            } else {
+                out[0] = 1.0;
+            }
             out
         }).collect();
         let wv = add_buffer_view(gltf, bin, &flatten_vec4(&weights));
@@ -233,81 +349,6 @@ fn export_mesh(
     mesh_idx
 }
 
-fn export_skeleton(
-    gltf: &mut GltfRoot,
-    bin: &mut BinaryBuffer,
-    skeleton: &W3dSkeleton,
-    scene: &W3dScene,
-    mesh_node_indices: &[usize],
-) {
-    let bone_node_start = gltf.nodes.len();
-
-    // Create bone nodes
-    for (i, bone) in skeleton.bones.iter().enumerate() {
-        let node = GltfNode {
-            name: bone.name.clone(),
-            translation: Some([bone.dir_x, bone.dir_y, bone.dir_z]),
-            rotation: Some([bone.rot_x, bone.rot_y, bone.rot_z, bone.rot_w]),
-            ..Default::default()
-        };
-        gltf.nodes.push(node);
-    }
-
-    // Set up parent-child relationships
-    for (i, bone) in skeleton.bones.iter().enumerate() {
-        if bone.parent_index >= 0 {
-            let parent_idx = bone_node_start + bone.parent_index as usize;
-            if parent_idx < gltf.nodes.len() {
-                gltf.nodes[parent_idx].children.push(bone_node_start + i);
-            }
-        }
-    }
-
-    // Add root bones to scene
-    for (i, bone) in skeleton.bones.iter().enumerate() {
-        if bone.parent_index < 0 {
-            gltf.scenes[0].nodes.push(bone_node_start + i);
-        }
-    }
-
-    // Compute inverse bind matrices
-    let inv_bind = super::skeleton::build_inverse_bind_matrices(skeleton);
-    let ibm_data: Vec<u8> = inv_bind.iter().flat_map(|m| {
-        m.iter().flat_map(|f| f.to_le_bytes())
-    }).collect();
-    let ibm_view = add_buffer_view(gltf, bin, &ibm_data);
-    let ibm_acc = gltf.accessors.len();
-    gltf.accessors.push(GltfAccessor {
-        buffer_view: ibm_view,
-        component_type: 5126,
-        count: skeleton.bones.len(),
-        acc_type: "MAT4".into(),
-        min: None, max: None,
-    });
-
-    // Create skin
-    let joint_indices: Vec<usize> = (0..skeleton.bones.len()).map(|i| bone_node_start + i).collect();
-    let skin_idx = gltf.skins.len();
-    gltf.skins.push(GltfSkin {
-        name: skeleton.name.clone(),
-        inverse_bind_matrices: ibm_acc,
-        joints: joint_indices,
-        skeleton_root: Some(bone_node_start),
-    });
-
-    // Assign skin to mesh nodes
-    for &ni in mesh_node_indices {
-        if ni < gltf.nodes.len() {
-            gltf.nodes[ni].skin = Some(skin_idx);
-        }
-    }
-
-    // Export animations
-    for motion in &scene.motions {
-        export_animation(gltf, bin, motion, skeleton, bone_node_start);
-    }
-}
-
 fn export_animation(
     gltf: &mut GltfRoot,
     bin: &mut BinaryBuffer,
@@ -341,47 +382,96 @@ fn export_animation(
             max: Some(vec![t_max]),
         });
 
-        // Translation
-        let translations: Vec<f32> = track.keyframes.iter()
-            .flat_map(|k| [k.pos_x, k.pos_y, k.pos_z])
-            .collect();
-        let trans_view = add_buffer_view(gltf, bin, &to_bytes_f32(&translations));
-        let trans_acc = gltf.accessors.len();
-        gltf.accessors.push(GltfAccessor {
-            buffer_view: trans_view,
-            component_type: 5126,
-            count: track.keyframes.len(),
-            acc_type: "VEC3".into(),
-            min: None, max: None,
-        });
-        let trans_sampler = samplers.len();
-        samplers.push(GltfAnimSampler { input: time_acc, output: trans_acc, interpolation: "LINEAR".into() });
-        channels.push(GltfAnimChannel { sampler: trans_sampler, target_node, target_path: "translation".into() });
+        if should_write_translation_track(skeleton, bone_idx, track) {
+            let translations: Vec<f32> = track
+                .keyframes
+                .iter()
+                .flat_map(|k| {
+                    let (px, py, pz) = super::skeleton::resolve_local_translation(
+                        skeleton, bone_idx, k.pos_x, k.pos_y, k.pos_z,
+                    );
+                    [px, py, pz]
+                })
+                .collect();
+            let trans_view = add_buffer_view(gltf, bin, &to_bytes_f32(&translations));
+            let trans_acc = gltf.accessors.len();
+            gltf.accessors.push(GltfAccessor {
+                buffer_view: trans_view,
+                component_type: 5126,
+                count: track.keyframes.len(),
+                acc_type: "VEC3".into(),
+                min: None,
+                max: None,
+            });
+            let trans_sampler = samplers.len();
+            samplers.push(GltfAnimSampler {
+                input: time_acc,
+                output: trans_acc,
+                interpolation: "LINEAR".into(),
+            });
+            channels.push(GltfAnimChannel {
+                sampler: trans_sampler,
+                target_node,
+                target_path: "translation".into(),
+            });
+        }
 
-        // Rotation (quaternion)
-        let rotations: Vec<f32> = track.keyframes.iter()
-            .flat_map(|k| [k.rot_x, k.rot_y, k.rot_z, k.rot_w])
-            .collect();
-        let rot_view = add_buffer_view(gltf, bin, &to_bytes_f32(&rotations));
-        let rot_acc = gltf.accessors.len();
-        gltf.accessors.push(GltfAccessor {
-            buffer_view: rot_view,
-            component_type: 5126,
-            count: track.keyframes.len(),
-            acc_type: "VEC4".into(),
-            min: None, max: None,
-        });
-        let rot_sampler = samplers.len();
-        samplers.push(GltfAnimSampler { input: time_acc, output: rot_acc, interpolation: "LINEAR".into() });
-        channels.push(GltfAnimChannel { sampler: rot_sampler, target_node, target_path: "rotation".into() });
+        if should_write_rotation_track(skeleton, bone_idx, track) {
+            let mut rotations = Vec::with_capacity(track.keyframes.len() * 4);
+            let (mut prev_x, mut prev_y, mut prev_z, mut prev_w) = (0.0f32, 0.0, 0.0, 0.0);
+            let mut has_prev = false;
+            for k in &track.keyframes {
+                let (mut rx, mut ry, mut rz, mut rw) =
+                    normalize_quaternion(k.rot_x, k.rot_y, k.rot_z, k.rot_w);
+                if has_prev && (rx * prev_x + ry * prev_y + rz * prev_z + rw * prev_w) < 0.0 {
+                    rx = -rx;
+                    ry = -ry;
+                    rz = -rz;
+                    rw = -rw;
+                }
+                prev_x = rx;
+                prev_y = ry;
+                prev_z = rz;
+                prev_w = rw;
+                has_prev = true;
+                rotations.extend_from_slice(&[rx, ry, rz, rw]);
+            }
+            let rot_view = add_buffer_view(gltf, bin, &to_bytes_f32(&rotations));
+            let rot_acc = gltf.accessors.len();
+            gltf.accessors.push(GltfAccessor {
+                buffer_view: rot_view,
+                component_type: 5126,
+                count: track.keyframes.len(),
+                acc_type: "VEC4".into(),
+                min: None,
+                max: None,
+            });
+            let rot_sampler = samplers.len();
+            samplers.push(GltfAnimSampler {
+                input: time_acc,
+                output: rot_acc,
+                interpolation: "LINEAR".into(),
+            });
+            channels.push(GltfAnimChannel {
+                sampler: rot_sampler,
+                target_node,
+                target_path: "rotation".into(),
+            });
+        }
 
         // Scale
         let has_scale = track.keyframes.iter().any(|k| {
-            (k.scale_x - 1.0).abs() > 0.001 || (k.scale_y - 1.0).abs() > 0.001 || (k.scale_z - 1.0).abs() > 0.001
+            (sanitize_scale(k.scale_x) - 1.0).abs() > 1e-5
+                || (sanitize_scale(k.scale_y) - 1.0).abs() > 1e-5
+                || (sanitize_scale(k.scale_z) - 1.0).abs() > 1e-5
         });
         if has_scale {
             let scales: Vec<f32> = track.keyframes.iter()
-                .flat_map(|k| [k.scale_x.max(0.001), k.scale_y.max(0.001), k.scale_z.max(0.001)])
+                .flat_map(|k| [
+                    sanitize_scale(k.scale_x),
+                    sanitize_scale(k.scale_y),
+                    sanitize_scale(k.scale_z),
+                ])
                 .collect();
             let scale_view = add_buffer_view(gltf, bin, &to_bytes_f32(&scales));
             let scale_acc = gltf.accessors.len();
@@ -407,25 +497,183 @@ fn export_animation(
     }
 }
 
-fn resolve_material_index(gltf: &mut GltfRoot, scene: &W3dScene, resource_name: &str) -> Option<usize> {
-    let mat_name = scene.resolve_material_for_resource(resource_name)?;
-    let mat = scene.materials.iter().find(|m| m.name == mat_name)?;
+fn export_textures(gltf: &mut GltfRoot, bin: &mut BinaryBuffer, scene: &W3dScene) {
+    for (name, data) in &scene.texture_images {
+        if data.is_empty() {
+            continue;
+        }
 
-    // Check if already added
-    if let Some(idx) = gltf.materials.iter().position(|m| m.name == mat_name) {
-        return Some(idx);
+        let is_png = data.len() >= 2 && data[0] == 0x89 && data[1] == 0x50;
+        let mime = if is_png { "image/png" } else { "image/jpeg" };
+        let buf_view_idx = add_buffer_view(gltf, bin, data);
+        let image_idx = gltf.images.len();
+        gltf.images.push(GltfImage {
+            buffer_view: buf_view_idx,
+            mime_type: mime.to_string(),
+            name: name.clone(),
+        });
+        gltf.textures.push(GltfTexture {
+            source: image_idx,
+            name: name.clone(),
+        });
+    }
+}
+
+fn build_materials(gltf: &mut GltfRoot, scene: &W3dScene) {
+    for mat in &scene.materials {
+        let mut base_color_texture = None;
+
+        if let Some(shader) = scene.shaders.iter().find(|s| s.material_name == mat.name) {
+            for layer in &shader.texture_layers {
+                if layer.name.is_empty() {
+                    continue;
+                }
+                if let Some(tex_idx) = gltf.textures.iter().position(|t| t.name == layer.name) {
+                    if layer.tex_mode == 0 || layer.tex_mode == 5 {
+                        base_color_texture = Some(tex_idx);
+                    }
+                    break;
+                }
+            }
+        }
+
+        gltf.materials.push(GltfMaterial {
+            name: mat.name.clone(),
+            base_color: [mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.opacity],
+            metallic: mat.reflectivity,
+            roughness: 1.0 - mat.reflectivity,
+            emissive: [mat.emissive[0], mat.emissive[1], mat.emissive[2]],
+            base_color_texture,
+            alpha_mode: if mat.opacity < 1.0 { Some("BLEND".into()) } else { None },
+        });
+    }
+}
+
+fn find_material_name_for_resource<'a>(scene: &'a W3dScene, resource_name: &str) -> Option<&'a str> {
+    for node in &scene.nodes {
+        if node.node_type != W3dNodeType::Model {
+            continue;
+        }
+        let candidate = if !node.model_resource_name.is_empty() {
+            &node.model_resource_name
+        } else {
+            &node.resource_name
+        };
+        if candidate != resource_name || node.shader_name.is_empty() {
+            continue;
+        }
+        if let Some(shader) = scene.shaders.iter().find(|s| s.name == node.shader_name) {
+            if !shader.material_name.is_empty() {
+                return Some(shader.material_name.as_str());
+            }
+        }
+    }
+    None
+}
+
+fn resolve_material_index(gltf: &mut GltfRoot, scene: &W3dScene, resource_name: &str) -> Option<usize> {
+    let mat_name = find_material_name_for_resource(scene, resource_name)?;
+    gltf.materials.iter().position(|m| m.name == mat_name)
+}
+
+fn identity_matrix() -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
+fn is_identity(m: &[f32; 16]) -> bool {
+    let id = identity_matrix();
+    m.iter()
+        .zip(id.iter())
+        .all(|(a, b)| (*a - *b).abs() <= 1e-6)
+}
+
+fn normalize_quaternion(qx: f32, qy: f32, qz: f32, qw: f32) -> (f32, f32, f32, f32) {
+    let len = (qx * qx + qy * qy + qz * qz + qw * qw).sqrt();
+    if len > 1e-8 {
+        (qx / len, qy / len, qz / len, qw / len)
+    } else {
+        (0.0, 0.0, 0.0, 1.0)
+    }
+}
+
+fn sanitize_scale(scale: f32) -> f32 {
+    if scale.abs() < 0.01 {
+        1.0
+    } else {
+        scale
+    }
+}
+
+fn should_write_translation_track(skeleton: &W3dSkeleton, bone_idx: usize, track: &W3dMotionTrack) -> bool {
+    let bind_pose = super::skeleton::get_bind_pose(skeleton, bone_idx);
+    track.keyframes.iter().any(|kf| {
+        let (px, py, pz) =
+            super::skeleton::resolve_local_translation(skeleton, bone_idx, kf.pos_x, kf.pos_y, kf.pos_z);
+        (px - bind_pose.pos_x).abs() > 1e-4
+            || (py - bind_pose.pos_y).abs() > 1e-4
+            || (pz - bind_pose.pos_z).abs() > 1e-4
+    })
+}
+
+fn should_write_rotation_track(skeleton: &W3dSkeleton, bone_idx: usize, track: &W3dMotionTrack) -> bool {
+    let bind_pose = super::skeleton::get_bind_pose(skeleton, bone_idx);
+    let (bx, by, bz, bw) =
+        normalize_quaternion(bind_pose.rot_x, bind_pose.rot_y, bind_pose.rot_z, bind_pose.rot_w);
+    track.keyframes.iter().any(|kf| {
+        let (tx, ty, tz, tw) = normalize_quaternion(kf.rot_x, kf.rot_y, kf.rot_z, kf.rot_w);
+        let dot = (tx * bx + ty * by + tz * bz + tw * bw).abs();
+        1.0 - dot > 1e-4
+    })
+}
+
+fn recalculate_smooth_normals(positions: &[[f32; 3]], faces: &[[u32; 3]]) -> Vec<[f32; 3]> {
+    let mut accum = vec![[0.0f32; 3]; positions.len()];
+
+    for face in faces {
+        let i0 = face[0] as usize;
+        let i1 = face[1] as usize;
+        let i2 = face[2] as usize;
+        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+            continue;
+        }
+        if i0 == i1 || i1 == i2 || i0 == i2 {
+            continue;
+        }
+
+        let p0 = positions[i0];
+        let p1 = positions[i1];
+        let p2 = positions[i2];
+        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+
+        for &idx in &[i0, i1, i2] {
+            accum[idx][0] += n[0];
+            accum[idx][1] += n[1];
+            accum[idx][2] += n[2];
+        }
     }
 
-    let idx = gltf.materials.len();
-    gltf.materials.push(GltfMaterial {
-        name: mat_name,
-        base_color: [mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.opacity],
-        metallic: mat.reflectivity,
-        roughness: 1.0 - (mat.shininess / 128.0).min(1.0),
-        emissive: [mat.emissive[0], mat.emissive[1], mat.emissive[2]],
-        base_color_texture: None,
-    });
-    Some(idx)
+    accum
+        .into_iter()
+        .map(|n| {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if len > 1e-8 {
+                [n[0] / len, n[1] / len, n[2] / len]
+            } else {
+                [0.0, 0.0, 1.0]
+            }
+        })
+        .collect()
 }
 
 // ─── Binary buffer helpers ───
@@ -550,13 +798,13 @@ struct GltfMaterial {
     roughness: f32,
     emissive: [f32; 3],
     base_color_texture: Option<usize>,
+    alpha_mode: Option<String>,
 }
 
 struct GltfTexture { source: usize, name: String }
 struct GltfImage { buffer_view: usize, mime_type: String, name: String }
 
 struct GltfSkin {
-    name: String,
     inverse_bind_matrices: usize,
     joints: Vec<usize>,
     skeleton_root: Option<usize>,
@@ -678,6 +926,9 @@ fn serialize_gltf(root: &GltfRoot, bin_size: usize) -> String {
             if m.emissive[0] > 0.0 || m.emissive[1] > 0.0 || m.emissive[2] > 0.0 {
                 j.push_str(&format!(", \"emissiveFactor\": {:?}", m.emissive.to_vec()));
             }
+            if let Some(ref alpha_mode) = m.alpha_mode {
+                j.push_str(&format!(", \"alphaMode\": {:?}", alpha_mode));
+            }
             j.push_str(" }");
         }
         j.push_str("],\n");
@@ -709,8 +960,8 @@ fn serialize_gltf(root: &GltfRoot, bin_size: usize) -> String {
         j.push_str("  \"skins\": [");
         for (i, s) in root.skins.iter().enumerate() {
             if i > 0 { j.push(','); }
-            j.push_str(&format!("{{ \"name\": {:?}, \"inverseBindMatrices\": {}, \"joints\": {:?}",
-                s.name, s.inverse_bind_matrices, s.joints));
+            j.push_str(&format!("{{ \"inverseBindMatrices\": {}, \"joints\": {:?}",
+                s.inverse_bind_matrices, s.joints));
             if let Some(root) = s.skeleton_root {
                 j.push_str(&format!(", \"skeleton\": {}", root));
             }
