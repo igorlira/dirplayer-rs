@@ -912,6 +912,27 @@ void main() {
                 {
                     bone_idx_packed = pack_bone_vec4_f32(&mesh.bone_indices);
                     bone_wgt_packed = pack_bone_weights_vec4(&mesh.bone_weights);
+                    // Diagnostic: log bone data stats for first mesh with bones
+                    {
+                        use std::sync::Mutex; use std::collections::HashSet;
+                        static LOGGED_BD: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+                        if let Ok(mut g) = LOGGED_BD.lock() { let set = g.get_or_insert_with(HashSet::new);
+                        if set.insert(name.clone()) {
+                            let max_idx = bone_idx_packed.iter().flat_map(|v| v.iter()).cloned().fold(0.0f32, f32::max);
+                            let wgt_sums: Vec<f32> = bone_wgt_packed.iter().map(|w| w.iter().sum::<f32>()).collect();
+                            let min_sum = wgt_sums.iter().cloned().fold(f32::MAX, f32::min);
+                            let max_sum = wgt_sums.iter().cloned().fold(0.0f32, f32::max);
+                            let zero_wgt = wgt_sums.iter().filter(|s| **s < 0.001).count();
+                            let raw_lens: Vec<usize> = mesh.bone_indices.iter().take(3).map(|v| v.len()).collect();
+                            web_sys::console::log_1(&format!(
+                                "[W3D-BONEDATA] mesh=\"{}\" verts={} bone_idx_count={} bone_wgt_count={} max_bone_idx={:.0} wgt_range=[{:.3},{:.3}] zero_wgt_verts={} raw_per_vert_lens={:?} first3_idx={:?} first3_wgt={:?}",
+                                name, mesh.positions.len(), mesh.bone_indices.len(), mesh.bone_weights.len(),
+                                max_idx, min_sum, max_sum, zero_wgt, raw_lens,
+                                &bone_idx_packed[..3.min(bone_idx_packed.len())],
+                                &bone_wgt_packed[..3.min(bone_wgt_packed.len())],
+                            ).into());
+                        }}
+                    }
                     (Some(bone_idx_packed.as_slice()), Some(bone_wgt_packed.as_slice()))
                 } else {
                     (None, None)
@@ -1670,10 +1691,22 @@ void main() {
         node: &W3dNode,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> [f32; 16] {
+        // Bone motion tracks share names with skeleton/model roots (for example "Bip01").
+        // Applying those tracks to Model nodes would animate the root twice:
+        // once through skinning and again through u_model.
+        let allow_motion_override = node.node_type != W3dNodeType::Model;
+
         // Get this node's transform: motion (combined with base), runtime override, or parsed
-        let node_transform = if let Some(motion_t) = self.motion_transforms.get(&node.name) {
-            // Motion applied to base: motion * base (motion rotates the base orientation)
-            mat4_multiply_col_major(motion_t, &node.transform)
+        let node_transform = if allow_motion_override {
+            if let Some(motion_t) = self.motion_transforms.get(&node.name) {
+                // Motion applied to base: motion * base (motion rotates the base orientation)
+                mat4_multiply_col_major(motion_t, &node.transform)
+            } else {
+                runtime_state
+                    .and_then(|rs| rs.node_transforms.get(&node.name))
+                    .copied()
+                    .unwrap_or(node.transform)
+            }
         } else {
             runtime_state
                 .and_then(|rs| rs.node_transforms.get(&node.name))
@@ -1706,6 +1739,79 @@ void main() {
         result
     }
 
+    /// Accumulate world transform for a node's PARENT only (skipping the node's own transform).
+    /// Used for skinned models where the node's rotation is already in the skeleton rest pose.
+    fn accumulate_parent_transform_with_state(
+        &self,
+        scene: &W3dScene,
+        node: &W3dNode,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> [f32; 16] {
+        let mut chain: Vec<[f32; 16]> = Vec::new();
+        let mut current_parent = &node.parent_name;
+
+        while !current_parent.is_empty() && current_parent != "<world>" {
+            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
+                let parent_t = runtime_state
+                    .and_then(|rs| rs.node_transforms.get(&parent_node.name))
+                    .copied()
+                    .unwrap_or(parent_node.transform);
+                chain.push(parent_t);
+                current_parent = &parent_node.parent_name;
+            } else {
+                break;
+            }
+        }
+
+        let mut result = IDENTITY_4X4;
+        for t in chain.into_iter().rev() {
+            result = mat4_multiply_col_major(&result, &t);
+        }
+        result
+    }
+
+    /// Build world placement for skinned models while stripping static bind-space rotations
+    /// from the node chain. Runtime overrides are preserved as deltas relative to the parsed scene.
+    fn accumulate_skinned_placement_transform(
+        &self,
+        scene: &W3dScene,
+        node: &W3dNode,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> [f32; 16] {
+        let mut chain: Vec<&W3dNode> = vec![node];
+        let mut current_parent = &node.parent_name;
+
+        while !current_parent.is_empty() && current_parent != "<world>" {
+            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
+                chain.push(parent_node);
+                current_parent = &parent_node.parent_name;
+            } else {
+                break;
+            }
+        }
+
+        let mut result = IDENTITY_4X4;
+        for current in chain.into_iter().rev() {
+            let runtime_transform = runtime_state
+                .and_then(|rs| rs.node_transforms.get(&current.name))
+                .copied()
+                .unwrap_or(current.transform);
+
+            let mut local_delta = mat4_multiply_col_major(
+                &runtime_transform,
+                &invert_transform(&current.transform),
+            );
+            // Keep placement translation in local node space while stripping the authored rest rotation.
+            local_delta[12] = runtime_transform[12];
+            local_delta[13] = runtime_transform[13];
+            local_delta[14] = runtime_transform[14];
+
+            result = mat4_multiply_col_major(&result, &local_delta);
+        }
+
+        result
+    }
+
     /// Draw a single model node (extracted for opaque/transparent pass reuse).
     fn draw_model_node(
         &self,
@@ -1716,9 +1822,6 @@ void main() {
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) {
-        let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
-        gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
-
         let resource = if !model_node.model_resource_name.is_empty() {
             &model_node.model_resource_name
         } else {
@@ -1730,6 +1833,16 @@ void main() {
             let has_skeleton_data = self.setup_skinning_for_resource(
                 gl, shader, scene, resource, gpu_data, runtime_state,
             );
+
+            // For skinned meshes, the skeleton already carries the authored bind-space rotations.
+            // Preserve runtime placement/rotation deltas, but strip static rest rotations from
+            // the full node chain so player prefabs do not inherit a constant tilt.
+            let world_matrix = if has_skeleton_data {
+                self.accumulate_skinned_placement_transform(scene, model_node, runtime_state)
+            } else {
+                self.accumulate_transform_with_state(scene, model_node, runtime_state)
+            };
+            gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
 
             if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
                 for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
@@ -1770,8 +1883,11 @@ void main() {
                 }
             }
         }
-        // Log when a player/actor model is actually drawn (once per model name)
-        if model_node.name.contains("PlayerModel") || model_node.name.contains("ActorModel") || model_node.name.contains("PAX_") {
+        // Log when a player/actor/bot model is actually drawn (once per model name)
+        if model_node.name.contains("PlayerModel") || model_node.name.contains("BotModel")
+            || model_node.name.contains("ActorModel") || model_node.name.contains("PAX_")
+            || model_node.name.contains("PPX_") || model_node.name.contains("BPX_")
+        {
             use std::sync::Mutex;
             use std::collections::HashSet;
             static LOGGED_DRAW: Mutex<Option<HashSet<String>>> = Mutex::new(None);
@@ -1782,11 +1898,25 @@ void main() {
                     let found = self.member_data.get(member_key)
                         .and_then(|d| d.mesh_groups.get(resource))
                         .map(|g| g.len()).unwrap_or(0);
+                    // Get shader override info
+                    let shader_override = runtime_state
+                        .and_then(|rs| rs.node_shaders.get(&model_node.name))
+                        .map(|m| format!("{:?}", m))
+                        .unwrap_or_else(|| "none".to_string());
+                    // Get effective opacity
+                    let effective_shader_name = runtime_state
+                        .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
+                        .cloned()
+                        .unwrap_or_else(|| model_node.shader_name.clone());
+                    let opacity = Self::find_shader_ci(&scene.shaders, &effective_shader_name)
+                        .and_then(|s| Self::find_material_ci(&scene.materials, &s.material_name))
+                        .map(|m| m.opacity)
+                        .unwrap_or(1.0);
                     web_sys::console::log_1(&format!(
-                        "[W3D-DRAW] model=\"{}\" resource=\"{}\" meshes={} pos=({:.1},{:.1},{:.1}) parent=\"{}\"",
+                        "[W3D-DRAW] model=\"{}\" resource=\"{}\" meshes={} pos=({:.1},{:.1},{:.1}) parent=\"{}\" shader_overrides={} eff_shader=\"{}\" opacity={:.2}",
                         model_node.name, resource, found,
                         world_matrix[12], world_matrix[13], world_matrix[14],
-                        model_node.parent_name,
+                        model_node.parent_name, shader_override, effective_shader_name, opacity,
                     ).into());
                 }
             }
@@ -1804,7 +1934,6 @@ void main() {
         rs.node_shaders.get(node_name).and_then(|m| {
             mesh_idx.and_then(|idx| m.get(&idx))
                 .or_else(|| m.get(&0))
-                .or_else(|| m.values().next())
         })
     }
 
@@ -2398,6 +2527,26 @@ void main() {
         materials.iter().find(|m| m.name.eq_ignore_ascii_case(name))
     }
 
+    /// Find the first shader that references a material by name.
+    fn find_shader_for_material_ci<'a>(scene: &'a W3dScene, material_name: &str) -> Option<&'a W3dShader> {
+        scene.shaders.iter().find(|s| s.material_name.eq_ignore_ascii_case(material_name))
+    }
+
+    /// Resolve a candidate name to a shader, allowing either shader names or material names.
+    fn resolve_shader_candidate_ci<'a>(scene: &'a W3dScene, candidate: &str) -> Option<&'a W3dShader> {
+        Self::find_shader_ci(&scene.shaders, candidate)
+            .or_else(|| Self::find_shader_for_material_ci(scene, candidate))
+    }
+
+    /// Resolve a candidate name to a material, allowing either material names or shader names.
+    fn resolve_material_candidate_ci<'a>(scene: &'a W3dScene, candidate: &str) -> Option<&'a W3dMaterial> {
+        Self::find_material_ci(&scene.materials, candidate)
+            .or_else(|| {
+                Self::find_shader_ci(&scene.shaders, candidate)
+                    .and_then(|s| Self::find_material_ci(&scene.materials, &s.material_name))
+            })
+    }
+
     /// Resolve all texture layers for a shader: diffuse, extra blend layers, and specular map.
     /// Categorizes layers by tex_mode: 0/5 = diffuse, 6 = specular, others = diffuse.
     /// Extra layers (beyond the first diffuse) are returned with proper blend modes.
@@ -2705,64 +2854,73 @@ void main() {
             None => return false,
         };
 
-        // Walk shader bindings - prefer bindings that have textures
-        // Each binding has: name (shader name) + mesh_bindings (per-mesh shader/material overrides)
-        let mut best_material: Option<&W3dMaterial> = None;
+        let mut candidate_names: Vec<&str> = Vec::new();
+        for binding in &res_info.shader_bindings {
+            if mesh_idx < binding.mesh_bindings.len() && !binding.mesh_bindings[mesh_idx].is_empty() {
+                candidate_names.push(&binding.mesh_bindings[mesh_idx]);
+            }
+        }
+
+        let effective_shader_name = runtime_state
+            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
+            .map(|s| s.as_str())
+            .unwrap_or(model_node.shader_name.as_str());
+        if !effective_shader_name.is_empty() {
+            candidate_names.push(effective_shader_name);
+        }
 
         for binding in &res_info.shader_bindings {
-            // Resolve shader: try mesh-specific binding first, then fall back to top-level.
-            // Many W3D files use mesh_bindings as material/texture names rather than shader
-            // names, so falling back to binding.name is essential for texture resolution.
-            let mesh_binding_name = if mesh_idx < binding.mesh_bindings.len()
-                && !binding.mesh_bindings[mesh_idx].is_empty()
-            {
-                &binding.mesh_bindings[mesh_idx]
-            } else {
-                &binding.name
-            };
-            let w3d_shader = if !mesh_binding_name.is_empty() {
-                Self::find_shader_ci(&scene.shaders, mesh_binding_name)
-            } else {
-                None
-            }.or_else(|| Self::find_shader_ci(&scene.shaders, &binding.name));
+            if !binding.name.is_empty() {
+                candidate_names.push(&binding.name);
+            }
+        }
 
-            if w3d_shader.is_none() { continue; }
-            let w3d_shader = w3d_shader.unwrap();
+        let mut best_material: Option<&W3dMaterial> = None;
+        let mut best_blend_func = 0u8;
 
-            // Get material: try multiple lookup strategies
-            let mesh_bind_name = if mesh_idx < binding.mesh_bindings.len() && !binding.mesh_bindings[mesh_idx].is_empty() {
-                Some(&binding.mesh_bindings[mesh_idx])
-            } else {
-                None
-            };
-            let mat = mesh_bind_name.and_then(|n| Self::find_material_ci(&scene.materials, n))
-                .or_else(|| if !w3d_shader.material_name.is_empty() {
-                    Self::find_material_ci(&scene.materials, &w3d_shader.material_name)
-                } else { None })
-                .or_else(|| Self::find_material_ci(&scene.materials, &w3d_shader.name));
+        for candidate in candidate_names {
+            if candidate.is_empty() {
+                continue;
+            }
 
-            // Try binding texture layers from this shader
+            let w3d_shader = Self::resolve_shader_candidate_ci(scene, candidate);
+            let mat = Self::resolve_material_candidate_ci(scene, candidate)
+                .or_else(|| {
+                    w3d_shader.and_then(|s| {
+                        if !s.material_name.is_empty() {
+                            Self::find_material_ci(&scene.materials, &s.material_name)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .or_else(|| w3d_shader.and_then(|s| Self::find_material_ci(&scene.materials, &s.name)));
+
+            if best_material.is_none() {
+                best_material = mat;
+                best_blend_func = w3d_shader
+                    .and_then(|s| s.texture_layers.first())
+                    .map(|l| l.blend_func)
+                    .unwrap_or(0);
+            }
+
             let mut tex_bound = false;
-            if let Some(gpu_data) = self.member_data.get(member_key) {
+            if let (Some(gpu_data), Some(w3d_shader)) = (self.member_data.get(member_key), w3d_shader) {
                 let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
                 tex_bound = Self::bind_texture_layers(gl, shader, &layers);
             }
 
-            // If this binding has a texture, use it immediately (best match)
             if tex_bound {
                 if let Some(m) = mat {
                     self.set_material_uniforms(gl, shader, m);
                 }
-                // Apply blend mode for this shader
-                let first_bf = w3d_shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0);
+                let first_bf = w3d_shader
+                    .and_then(|s| s.texture_layers.first())
+                    .map(|l| l.blend_func)
+                    .unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
                 Self::apply_blend_mode(gl, opacity, first_bf);
                 return true;
-            }
-
-            // Otherwise remember the material for fallback
-            if best_material.is_none() {
-                best_material = mat;
             }
         }
 
@@ -2770,7 +2928,7 @@ void main() {
         if let Some(mat) = best_material {
             self.set_material_uniforms(gl, shader, mat);
             gl.uniform1i(shader.u_has_texture.as_ref(), 0);
-            Self::apply_blend_mode(gl, mat.opacity, 0);
+            Self::apply_blend_mode(gl, mat.opacity, best_blend_func);
             return true;
         }
 
@@ -2820,10 +2978,22 @@ void main() {
             _ => return false,
         };
 
-        let inv_bind = match gpu_data.inverse_bind_cache.get(&skeleton.name) {
-            Some(m) => m,
-            None => return false,
+        // Compute inverse bind matrices fresh (bypass cache to ensure correct transpose)
+        let inv_bind_fresh = {
+            let rest = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, None, 0.0);
+            rest.iter().map(|m| {
+                // Proper column-major affine inverse: R^-1 = R^T, t^-1 = -R^T * t
+                let (r00,r01,r02) = (m[0], m[4], m[8]);
+                let (r10,r11,r12) = (m[1], m[5], m[9]);
+                let (r20,r21,r22) = (m[2], m[6], m[10]);
+                let (tx,ty,tz) = (m[12], m[13], m[14]);
+                let itx = -(r00*tx + r10*ty + r20*tz);
+                let ity = -(r01*tx + r11*ty + r21*tz);
+                let itz = -(r02*tx + r12*ty + r22*tz);
+                [r00,r01,r02,0.0, r10,r11,r12,0.0, r20,r21,r22,0.0, itx,ity,itz,1.0]
+            }).collect::<Vec<_>>()
         };
+        let inv_bind = &inv_bind_fresh;
 
         let current_motion_name = runtime_state.and_then(|rs| rs.current_motion.as_deref());
         let is_loop = runtime_state.map(|rs| rs.animation_loop).unwrap_or(true);
@@ -2833,8 +3003,11 @@ void main() {
         } else {
             scene.motions.first()
         };
-        // TEMP: Disable skinning entirely until bone matrix math is verified
-        return false;
+        // Skip skinning if motion has too few tracks for the skeleton
+        let min_tracks = (skeleton.bones.len() / 2).max(2);
+        if motion.map(|m| m.tracks.len() < min_tracks).unwrap_or(true) {
+            return false;
+        }
         let time = self.animation_time;
         let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
         let end_time = runtime_state.map(|rs| rs.animation_end_time).unwrap_or(-1.0);
@@ -2859,10 +3032,18 @@ void main() {
         let blending = blend_weight < 1.0 && prev_motion_name.is_some();
 
         let bone_count = skeleton.bones.len().min(48);
-        let mut skinning_matrices = vec![0.0f32; bone_count * 16];
+        // Initialize ALL 48 uniform slots to identity — bone indices can reference
+        // any slot 0-47, even beyond the skeleton's actual bone count.
+        let uniform_slots = 48;
+        let mut skinning_matrices = vec![0.0f32; uniform_slots * 16];
+        for i in 0..uniform_slots {
+            skinning_matrices[i * 16]      = 1.0; // m[0][0]
+            skinning_matrices[i * 16 + 5]  = 1.0; // m[1][1]
+            skinning_matrices[i * 16 + 10] = 1.0; // m[2][2]
+            skinning_matrices[i * 16 + 15] = 1.0; // m[3][3]
+        }
 
         if blending {
-            // Evaluate previous motion and lerp matrices
             let prev_motion = prev_motion_name.and_then(|n| scene.motions.iter().find(|m| m.name == n));
             let prev_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
                 skeleton, prev_motion, t, root_lock,
@@ -2870,7 +3051,6 @@ void main() {
             for i in 0..bone_count {
                 let cur = mat4_multiply_col_major(&world_matrices[i], &inv_bind[i]);
                 let prev = mat4_multiply_col_major(&prev_matrices[i], &inv_bind[i]);
-                // Linear interpolation between previous and current
                 for j in 0..16 {
                     skinning_matrices[i * 16 + j] = prev[j] + (cur[j] - prev[j]) * blend_weight;
                 }
@@ -2882,32 +3062,6 @@ void main() {
             }
         }
 
-        // Diagnostic: log skinning matrix stats once per resource
-        {
-            use std::sync::Mutex; use std::collections::HashSet;
-            static LOGGED_SKIN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-            if let Ok(mut g) = LOGGED_SKIN.lock() {
-                let set = g.get_or_insert_with(HashSet::new);
-                if set.insert(resource_name.to_string()) {
-                    let max_trans = (0..bone_count).map(|i| {
-                        let tx = skinning_matrices[i*16+12].abs();
-                        let ty = skinning_matrices[i*16+13].abs();
-                        let tz = skinning_matrices[i*16+14].abs();
-                        tx.max(ty).max(tz)
-                    }).fold(0.0f32, f32::max);
-                    let matched_tracks = skeleton.bones.iter()
-                        .filter(|b| motion.map(|m| m.find_track_by_bone(&b.name).is_some()).unwrap_or(false))
-                        .count();
-                    web_sys::console::log_1(&format!(
-                        "[W3D-SKIN] resource=\"{}\" bones={} matched_tracks={}/{} max_translation={:.1} inv_bind_max={:.1}",
-                        resource_name, bone_count, matched_tracks,
-                        motion.map(|m| m.tracks.len()).unwrap_or(0),
-                        max_trans,
-                        inv_bind.iter().map(|m| m[12].abs().max(m[13].abs()).max(m[14].abs())).fold(0.0f32, f32::max),
-                    ).into());
-                }
-            }
-        }
 
         gl.uniform_matrix4fv_with_f32_array(
             shader.u_bone_matrices.as_ref(),
@@ -3379,7 +3533,8 @@ fn pack_bone_vec4_f32(indices: &[Vec<u32>]) -> Vec<[f32; 4]> {
     indices.iter().map(|v| {
         let mut out = [0.0f32; 4];
         for (i, &idx) in v.iter().take(4).enumerate() {
-            out[i] = idx as f32;
+            // Clamp to max bone uniform array size to prevent out-of-bounds GPU access
+            out[i] = (idx as f32).min(47.0);
         }
         out
     }).collect()
@@ -3389,13 +3544,12 @@ fn pack_bone_vec4_f32(indices: &[Vec<u32>]) -> Vec<[f32; 4]> {
 fn pack_bone_weights_vec4(weights: &[Vec<f32>]) -> Vec<[f32; 4]> {
     weights.iter().map(|v| {
         let mut out = [0.0f32; 4];
-        let mut sum = 0.0f32;
         for (i, &w) in v.iter().take(4).enumerate() {
-            out[i] = w;
-            sum += w;
+            out[i] = w.max(0.0); // clamp negatives to 0 (bad IQ can produce negative weights)
         }
         // Normalize so weights sum to 1.0
-        if sum > 0.0 {
+        let sum: f32 = out.iter().sum();
+        if sum > 0.001 {
             for w in out.iter_mut() {
                 *w /= sum;
             }

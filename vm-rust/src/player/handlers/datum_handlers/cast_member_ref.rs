@@ -312,12 +312,13 @@ impl CastMemberRefHandlers {
                                         } else {
                                             (String::new(), identity, String::new(), String::new())
                                         };
-                                        // For cloneMotionFromCastmember: source_model_name is the MODEL name
-                                        // (not motion name). Merge tracks from ALL motions in the source
-                                        // (IFX files may split bone tracks across multiple MOTION_BLOCKs).
-                                        let motion_tracks: Vec<_> = scene.motions.iter()
-                                            .flat_map(|m| m.tracks.iter().cloned())
-                                            .collect();
+                                        // For cloneMotionFromCastmember: source_model_name is the MODEL name.
+                                        // Source members typically have 2 motions — use the one with the
+                                        // most tracks (the actual animation, not a reference/placeholder).
+                                        let motion_tracks = scene.motions.iter()
+                                            .max_by_key(|m| m.tracks.len())
+                                            .map(|m| m.tracks.clone())
+                                            .unwrap_or_default();
                                         (sn, st, sr, smr, motion_tracks)
                                     } else { (String::new(), identity, String::new(), String::new(), vec![]) }
                                 } else { (String::new(), identity, String::new(), String::new(), vec![]) }
@@ -871,11 +872,48 @@ impl CastMemberRefHandlers {
                             .and_then(|w3d| w3d.parsed_scene.clone())
                     };
 
-                    // Get runtime node transforms for world-space raycasting
-                    let node_transforms = {
+                    // Get runtime node transforms and build exclusion set for invisible/detached models
+                    let (node_transforms, excluded_nodes) = {
                         let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
-                        member.and_then(|m| m.member_type.as_shockwave3d())
-                            .map(|w3d| w3d.runtime_state.node_transforms.clone())
+                        if let Some(w3d) = member.and_then(|m| m.member_type.as_shockwave3d()) {
+                            let transforms = w3d.runtime_state.node_transforms.clone();
+                            let mut excluded = std::collections::HashSet::new();
+                            // Exclude models with visibility = none (false)
+                            for (name, &visible) in &w3d.runtime_state.node_visibility {
+                                if !visible { excluded.insert(name.clone()); }
+                            }
+                            // Exclude directly detached nodes (parent = VOID)
+                            for name in &w3d.runtime_state.detached_nodes {
+                                excluded.insert(name.clone());
+                            }
+                            // Exclude models whose parent is detached (e.g. under a hidden group)
+                            if let Some(ref scene) = w3d.parsed_scene {
+                                for node in &scene.nodes {
+                                    if excluded.contains(&node.name) { continue; }
+                                    // Walk parent chain to check for detached ancestors
+                                    let mut parent = &node.parent_name;
+                                    for _ in 0..10 {
+                                        if parent.is_empty() {
+                                            // Parent is VOID — this node is detached
+                                            excluded.insert(node.name.clone());
+                                            break;
+                                        }
+                                        if *parent == "World" { break; }
+                                        if w3d.runtime_state.detached_nodes.contains(parent.as_str()) {
+                                            excluded.insert(node.name.clone());
+                                            break;
+                                        }
+                                        // Find parent node and continue walking
+                                        if let Some(pn) = scene.nodes.iter().find(|n| n.name == *parent) {
+                                            parent = &pn.parent_name;
+                                        } else { break; }
+                                    }
+                                }
+                            }
+                            (Some(transforms), excluded)
+                        } else {
+                            (None, std::collections::HashSet::new())
+                        }
                     };
 
                     let mut results = Vec::new();
@@ -885,9 +923,11 @@ impl CastMemberRefHandlers {
                             origin: [origin[0] as f32, origin[1] as f32, origin[2] as f32],
                             direction: [direction[0] as f32, direction[1] as f32, direction[2] as f32],
                         };
+                        let excluded_ref = if excluded_nodes.is_empty() { None } else { Some(&excluded_nodes) };
                         let hits = raycast_scene_multi(
                             &ray, &scene, 100000.0, max_models as usize,
                             node_transforms.as_ref(),
+                            excluded_ref,
                         );
                         for hit in &hits {
                             if detailed {

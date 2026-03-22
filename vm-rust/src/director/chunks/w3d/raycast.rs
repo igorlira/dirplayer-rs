@@ -59,22 +59,28 @@ pub fn raycast_scene(
     scene: &W3dScene,
     max_dist: f32,
 ) -> Option<RayHit> {
-    raycast_scene_multi(ray, scene, max_dist, 1, None).into_iter().next()
+    raycast_scene_multi(ray, scene, max_dist, 1, None, None).into_iter().next()
 }
 
 /// Test ray against all meshes in a scene, returning up to max_hits sorted by distance.
 /// If node_transforms is provided, meshes are tested in world space using model transforms.
+/// If excluded_nodes is provided, nodes in the set are skipped (e.g. invisible models).
 pub fn raycast_scene_multi(
     ray: &Ray,
     scene: &W3dScene,
     max_dist: f32,
     max_hits: usize,
     node_transforms: Option<&std::collections::HashMap<String, [f32; 16]>>,
+    excluded_nodes: Option<&std::collections::HashSet<String>>,
 ) -> Vec<RayHit> {
     let mut all_hits: Vec<RayHit> = Vec::new();
 
     // For each model node, find its mesh data and test
     for node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
+        // Skip excluded nodes (invisible or detached models)
+        if let Some(excluded) = excluded_nodes {
+            if excluded.contains(&node.name) { continue; }
+        }
         let resource = if !node.model_resource_name.is_empty() {
             &node.model_resource_name
         } else {
