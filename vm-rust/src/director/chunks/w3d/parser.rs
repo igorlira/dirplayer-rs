@@ -93,9 +93,15 @@ impl W3dFileParser {
             block_index += 1;
         }
 
-        // Finalize: extract decoded CLOD meshes
+        // Finalize: extract decoded CLOD meshes at full resolution (all patches applied)
         for (name, decoder) in &self.clod_decoders {
-            let meshes = decoder.get_decoded_meshes();
+            let meshes = decoder.get_decoded_meshes_full_resolution();
+            for m in &meshes {
+                web_sys::console::log_1(&format!(
+                    "[W3D] CLOD mesh '{}': {} verts, {} faces, {} bone_idx, {} bone_wgt (full res with patches)",
+                    name, m.positions.len(), m.faces.len(), m.bone_indices.len(), m.bone_weights.len()
+                ).into());
+            }
             self.scene.clod_meshes.insert(name.clone(), meshes);
         }
 
@@ -660,10 +666,11 @@ impl W3dFileParser {
             let dx = r.read_f32()?;
             let dy = r.read_f32()?;
             let dz = r.read_f32()?;
+            // Skeleton bone quaternion: [W,X,Y,Z] (verified from IFX + GLTF rest pose test)
+            let qw = r.read_f32()?;
             let qx = r.read_f32()?;
             let qy = r.read_f32()?;
             let qz = r.read_f32()?;
-            let qw = r.read_f32()?;
             let bone_attrs = r.read_u32()?;
 
             skeleton.bones.push(W3dBone {
@@ -748,7 +755,8 @@ impl W3dFileParser {
                     acc_pos_z += if (pos_sign & 4) != 0 { -mag_z } else { mag_z };
                 }
 
-                // Rotation (quaternion)
+                // Rotation (quaternion) — first keyframe: [W,X,Y,Z]
+                // (verified from IFX decompiled code + C# GLTF testing)
                 let (qw, qx, qy, qz);
                 if k == 0 {
                     qw = bs.read_f32();
@@ -770,7 +778,7 @@ impl W3dFileParser {
                     if (rot_sign & 4) != 0 { dy = -dy; }
                     if (rot_sign & 8) != 0 { dz = -dz; }
 
-                    // Hamilton product: q_new = q_prev * q_delta
+                    // Hamilton product: q_new = q_prev * q_delta (standard order)
                     let (pw, px, py, pz) = (acc_rot_w, acc_rot_x, acc_rot_y, acc_rot_z);
                     qw = pw * dw - px * dx - py * dy - pz * dz;
                     qx = pw * dx + px * dw + py * dz - pz * dy;
