@@ -52,17 +52,24 @@ impl Transform3dDatumHandlers {
         match prop {
             "position" => {
                 if let Datum::Vector(v) = val {
-                    m[12] = v[0]; m[13] = v[1]; m[14] = v[2];
+                    // Guard: only set finite values
+                    if v[0].is_finite() { m[12] = v[0]; }
+                    if v[1].is_finite() { m[13] = v[1]; }
+                    if v[2].is_finite() { m[14] = v[2]; }
                 }
                 Ok(())
             }
             "rotation" => {
                 if let Datum::Vector(v) = val {
-                    // Preserve position and scale, rebuild rotation in column-major
+                    // Preserve position and scale, rebuild rotation
                     let pos = [m[12], m[13], m[14]];
+                    // Guard: if current matrix has NaN, use scale 1.0
                     let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
                     let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
                     let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
+                    let sx = if sx.is_finite() && sx > 1e-10 { sx } else { 1.0 };
+                    let sy = if sy.is_finite() && sy > 1e-10 { sy } else { 1.0 };
+                    let sz = if sz.is_finite() && sz > 1e-10 { sz } else { 1.0 };
                     let rot = euler_to_matrix(v[0], v[1], v[2]);
                     // Apply scale to rotation columns
                     m[0] = rot[0]*sx;  m[1] = rot[1]*sx;  m[2] = rot[2]*sx;
@@ -333,41 +340,53 @@ fn mat4_invert_affine(m: &[f64; 16]) -> [f64; 16] {
 
 /// Euler angles to column-major rotation matrix
 pub fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
-    let rx = rx_deg.to_radians();
-    let ry = (-ry_deg).to_radians(); // Director uses left-handed Y rotation
-    let rz = rz_deg.to_radians();
+    // Guard against NaN/infinity — use 0 for any invalid input
+    let rx = if rx_deg.is_finite() { rx_deg } else { 0.0 }.to_radians();
+    let ry = if ry_deg.is_finite() { (-ry_deg) } else { 0.0 }.to_radians();
+    let rz = if rz_deg.is_finite() { rz_deg } else { 0.0 }.to_radians();
 
     let (sx, cx) = (rx.sin(), rx.cos());
     let (sy, cy) = (ry.sin(), ry.cos());
     let (sz, cz) = (rz.sin(), rz.cos());
 
-    // Column-major layout: each group of 4 is a column
+    // True column-major: m[col*4+row], R = Rz * Ry * Rx
     [
-        cy * cz,                   sx * sy * cz - cx * sz,    cx * sy * cz + sx * sz,  0.0,  // col 0
-        cy * sz,                   sx * sy * sz + cx * cz,    cx * sy * sz - sx * cz,  0.0,  // col 1
-        -sy,                       sx * cy,                   cx * cy,                 0.0,  // col 2
+        cy * cz,                   cy * sz,                   -sy,                     0.0,  // col 0
+        sx * sy * cz - cx * sz,    sx * sy * sz + cx * cz,    sx * cy,                 0.0,  // col 1
+        cx * sy * cz + sx * sz,    cx * sy * sz - sx * cz,    cx * cy,                 0.0,  // col 2
         0.0,                       0.0,                       0.0,                     1.0,  // col 3
     ]
 }
 
-/// Extract euler angles from column-major rotation matrix
+/// Extract euler angles from rotation matrix (matching euler_to_matrix convention)
 fn matrix_to_euler(m: &[f64; 16]) -> (f64, f64, f64) {
-    // Column-major: m[col*4+row], so m[8] = R[0][2] = -sin(ry)
-    let sy = -m[8];
+    // Normalize rotation columns to remove scale before extracting angles
+    let s0 = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt().max(1e-10);
+    let s1 = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt().max(1e-10);
+    let s2 = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt().max(1e-10);
+    let n = [m[0]/s0, m[1]/s0, m[2]/s0, 0.0,
+             m[4]/s1, m[5]/s1, m[6]/s1, 0.0,
+             m[8]/s2, m[9]/s2, m[10]/s2, 0.0,
+             0.0, 0.0, 0.0, 1.0];
+
+    // Guard: if matrix contains NaN, return zero rotation
+    if !n[0].is_finite() || !n[2].is_finite() || !n[10].is_finite() {
+        return (0.0, 0.0, 0.0);
+    }
+
+    // True column-major: n[2] = R[2][0] = -sin(ry)
+    let sy = (-n[2]).clamp(-1.0, 1.0);
     let ry = sy.asin();
     let cy = ry.cos();
 
     let (rx, rz);
     if cy.abs() > 1e-6 {
-        // m[9] = R[1][2] = sx*cy, m[10] = R[2][2] = cx*cy
-        rx = (m[9] / cy).atan2(m[10] / cy);
-        // m[4] = R[0][1] = cy*sz, m[0] = R[0][0] = cy*cz
-        rz = (m[4] / cy).atan2(m[0] / cy);
+        rx = (n[6] / cy).atan2(n[10] / cy);
+        rz = (n[1] / cy).atan2(n[0] / cy);
     } else {
         rx = 0.0;
-        // Gimbal lock: use m[1] and m[5]
-        rz = m[1].atan2(m[5]);
+        rz = n[4].atan2(n[5]);
     }
 
-    (rx.to_degrees(), -ry.to_degrees(), rz.to_degrees()) // Negate Y to match Director's left-handed convention
+    (rx.to_degrees(), -ry.to_degrees(), rz.to_degrees())
 }

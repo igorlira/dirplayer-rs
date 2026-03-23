@@ -1383,7 +1383,7 @@ void main() {
                 let motion = if let Some(name) = current_motion_name {
                     scene.motions.iter().find(|m| m.name == name)
                 } else {
-                    scene.motions.first() // fallback: play first motion
+                    None // Don't apply a motion until the game explicitly calls play()
                 };
 
                 if let Some(motion) = motion {
@@ -1761,11 +1761,7 @@ void main() {
                 gl, shader, scene, resource, gpu_data, runtime_state,
             );
 
-            let world_matrix = if has_skeleton_data {
-                self.build_skinned_model_matrix(scene, model_node, runtime_state)
-            } else {
-                self.accumulate_transform_with_state(scene, model_node, runtime_state)
-            };
+            let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
             gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
 
             if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
@@ -1845,45 +1841,6 @@ void main() {
                 }
             }
         }
-    }
-
-    fn build_skinned_model_matrix(
-        &self,
-        scene: &W3dScene,
-        model_node: &W3dNode,
-        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> [f32; 16] {
-        let current_world = self.accumulate_transform_with_state(scene, model_node, runtime_state);
-
-        let mut chain = vec![model_node];
-        let mut current_parent = &model_node.parent_name;
-        while !current_parent.is_empty() && current_parent != "<world>" {
-            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
-                chain.push(parent_node);
-                current_parent = &parent_node.parent_name;
-            } else {
-                break;
-            }
-        }
-
-        let mut result = IDENTITY_4X4;
-        for node in chain.into_iter().rev() {
-            let current_local = runtime_state
-                .and_then(|rs| rs.node_transforms.get(&node.name))
-                .copied()
-                .unwrap_or(node.transform);
-            let authored_rot = rotation_only_matrix(&node.transform);
-            let current_rot = rotation_only_matrix(&current_local);
-            let authored_inv = inverse_rotation_matrix(&authored_rot);
-            let delta = mat4_multiply_col_major(&current_rot, &authored_inv);
-            result = mat4_multiply_col_major(&result, &delta);
-        }
-
-        result[12] = current_world[12];
-        result[13] = current_world[13];
-        result[14] = current_world[14];
-        result[15] = 1.0;
-        result
     }
 
     /// Get the opacity of a model node's material (for transparency sorting).
@@ -2964,7 +2921,7 @@ void main() {
         let motion = if let Some(name) = current_motion_name {
             scene.motions.iter().find(|m| m.name == name)
         } else {
-            scene.motions.first()
+            None // Don't apply a motion until the game explicitly calls play()
         };
         // Skip skinning if motion has too few tracks for the skeleton
         let min_tracks = (skeleton.bones.len() / 2).max(2);
@@ -3024,7 +2981,6 @@ void main() {
                 skinning_matrices[i * 16..i * 16 + 16].copy_from_slice(&final_mat);
             }
         }
-
 
         gl.uniform_matrix4fv_with_f32_array(
             shader.u_bone_matrices.as_ref(),
@@ -3727,32 +3683,3 @@ fn mat4_multiply_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     r
 }
 
-fn extract_axis_scale(m: &[f32; 16], col: usize) -> f32 {
-    let x = m[col * 4];
-    let y = m[col * 4 + 1];
-    let z = m[col * 4 + 2];
-    let len = (x * x + y * y + z * z).sqrt();
-    if len > 1e-6 { len } else { 1.0 }
-}
-
-fn rotation_only_matrix(m: &[f32; 16]) -> [f32; 16] {
-    let sx = extract_axis_scale(m, 0);
-    let sy = extract_axis_scale(m, 1);
-    let sz = extract_axis_scale(m, 2);
-
-    [
-        m[0] / sx, m[1] / sx, m[2] / sx, 0.0,
-        m[4] / sy, m[5] / sy, m[6] / sy, 0.0,
-        m[8] / sz, m[9] / sz, m[10] / sz, 0.0,
-        0.0,       0.0,       0.0,       1.0,
-    ]
-}
-
-fn inverse_rotation_matrix(m: &[f32; 16]) -> [f32; 16] {
-    [
-        m[0], m[4], m[8],  0.0,
-        m[1], m[5], m[9],  0.0,
-        m[2], m[6], m[10], 0.0,
-        0.0,  0.0,  0.0,   1.0,
-    ]
-}

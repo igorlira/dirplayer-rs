@@ -3630,7 +3630,15 @@ fn apply_point_at(
     up_x: f32, up_y: f32, up_z: f32,
 ) {
     let m = get_or_init_node_transform(player, member_ref, node_name);
-    let pos = [m[12], m[13], m[14]];
+    // Guard: if position is NaN (corrupted matrix), use origin
+    let pos = [
+        if m[12].is_finite() { m[12] } else { 0.0 },
+        if m[13].is_finite() { m[13] } else { 0.0 },
+        if m[14].is_finite() { m[14] } else { 0.0 },
+    ];
+
+    // Guard: if target is NaN, skip
+    if !tx.is_finite() || !ty.is_finite() || !tz.is_finite() { return; }
 
     // Forward = toward target
     let mut fwd = [tx - pos[0], ty - pos[1], tz - pos[2]];
@@ -3697,17 +3705,17 @@ fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 /// Euler angles (degrees) to column-major rotation matrix
 fn euler_to_matrix_f32(rx_deg: f32, ry_deg: f32, rz_deg: f32) -> [f32; 16] {
     let rx = rx_deg.to_radians();
-    let ry = (-ry_deg).to_radians(); // Director uses left-handed Y rotation
+    let ry = (-ry_deg).to_radians();
     let rz = rz_deg.to_radians();
     let (sx, cx) = (rx.sin(), rx.cos());
     let (sy, cy) = (ry.sin(), ry.cos());
     let (sz, cz) = (rz.sin(), rz.cos());
 
-    // Column-major layout: each group of 4 is a column
+    // True column-major: m[col*4+row], R = Rz * Ry * Rx
     [
-        cy*cz,              sx*sy*cz - cx*sz,   cx*sy*cz + sx*sz,  0.0,  // col 0
-        cy*sz,              sx*sy*sz + cx*cz,   cx*sy*sz - sx*cz,  0.0,  // col 1
-        -sy,                sx*cy,              cx*cy,             0.0,  // col 2
+        cy*cz,              cy*sz,              -sy,               0.0,  // col 0
+        sx*sy*cz - cx*sz,   sx*sy*sz + cx*cz,   sx*cy,            0.0,  // col 1
+        cx*sy*cz + sx*sz,   cx*sy*sz - sx*cz,   cx*cy,            0.0,  // col 2
         0.0,                0.0,                0.0,               1.0,  // col 3
     ]
 }
