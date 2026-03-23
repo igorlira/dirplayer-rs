@@ -14,7 +14,7 @@ impl StringDatumUtils {
     pub fn get_prop_ref(
         player: &DirPlayer,
         datum_ref: &DatumRef,
-        prop_name: &String,
+        prop_name: &str,
         start: i32,
         end: i32,
     ) -> Result<Datum, ScriptError> {
@@ -47,11 +47,11 @@ impl StringDatumUtils {
         }
     }
 
-    pub fn get_built_in_prop(value: &String, prop_name: &String) -> Result<Datum, ScriptError> {
-        match prop_name.as_str() {
+    pub fn get_built_in_prop(value: &str, prop_name: &str) -> Result<Datum, ScriptError> {
+        match prop_name {
             "length" => Ok(Datum::Int(value.chars().count() as i32)),
             "ilk" => Ok(Datum::Symbol("string".to_owned())),
-            "string" => Ok(Datum::String(value.clone())),
+            "string" => Ok(Datum::String(value.to_owned())),
             "value" => {
                 // Strip Lingo comments and fix unbalanced brackets before parsing
                 let cleaned = strip_lingo_comments(value);
@@ -61,7 +61,7 @@ impl StringDatumUtils {
                     Ok(datum_ref) => {
                         reserve_player_ref(|player| Ok(player.get_datum(&datum_ref).clone()))
                     }
-                    Err(_) => Ok(Datum::String(value.clone())),
+                    Err(_) => Ok(Datum::String(value.to_owned())),
                 }
             }
             "charToNum" => {
@@ -177,10 +177,10 @@ impl StringDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "count" => Self::count(datum, args),
             "getAt" => Self::get_at(datum, args),
             "duplicate" => Self::duplicate(datum, args),
@@ -195,11 +195,11 @@ impl StringDatumHandlers {
 }
 
 pub fn string_get_count(
-    value: &String,
-    operand: &String,
+    value: &str,
+    operand: &str,
     delimiter: char,
 ) -> Result<u32, ScriptError> {
-    match operand.as_str() {
+    match operand {
         "char" | "chars" => Ok(value.chars().count() as u32),
         "item" | "items" => Ok(string_get_items(value, delimiter).len() as u32),
         "word" | "words" => Ok(if value.len() > 0 {
@@ -214,7 +214,7 @@ pub fn string_get_count(
     }
 }
 
-pub fn string_get_items(value: &String, delimiter: char) -> Vec<String> {
+pub fn string_get_items(value: &str, delimiter: char) -> Vec<String> {
     if delimiter == '\r' || delimiter == '\n' {
         string_get_lines(value)
     } else {
@@ -239,7 +239,7 @@ pub fn string_get_words(value: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn string_get_lines(value: &String) -> Vec<String> {
+pub fn string_get_lines(value: &str) -> Vec<String> {
     // In Director, the number of lines in "" returns 0
     if value.is_empty() {
         return Vec::new();

@@ -28,7 +28,7 @@ pub struct DateDatumHandlers;
 impl DateDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -42,7 +42,7 @@ impl DateDatumHandlers {
                 date_obj.timestamp_ms as f64,
             ));
 
-            match handler_name.as_str() {
+            match handler_name {
                 "getTime" => {
                     let time = js_date.get_time() as i32;
                     Ok(player.alloc_datum(Datum::Int(time)))
@@ -191,9 +191,9 @@ impl DateDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+        match prop {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("date".to_owned()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get date property {}",
@@ -205,7 +205,7 @@ impl DateDatumHandlers {
     pub fn set_prop(
         _player: &mut DirPlayer,
         _datum: &DatumRef,
-        prop: &String,
+        prop: &str,
         _value: &DatumRef,
     ) -> Result<(), ScriptError> {
         Err(ScriptError::new(format!(

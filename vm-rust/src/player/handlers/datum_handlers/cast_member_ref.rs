@@ -57,10 +57,10 @@ impl CastMemberRefHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "duplicate" => Self::duplicate(datum, args),
             "erase" => Self::erase(datum, args),
             "charPosToLoc" => {
@@ -133,8 +133,6 @@ impl CastMemberRefHandlers {
                         return Err(ScriptError::new("count requires 1 argument".to_string()));
                     }
                     
-                    let count_of = player.get_datum(&args[0]).string_value()?;
-                    
                     // Try to get the member's text
                     // First try "text" property, then fallback to "previewText" for Font members
                     let text = match Self::get_prop(player, &cast_member_ref, &"text".to_string()) {
@@ -151,11 +149,13 @@ impl CastMemberRefHandlers {
                             }
                         }
                     };
+
+                    let count_of = player.get_datum(&args[0]).string_value_cow()?;
                     
                     let delimiter = player.movie.item_delimiter;
                     let count = crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils::resolve_chunk_count(
                         &text,
-                        crate::director::lingo::datum::StringChunkType::from(&count_of),
+                        crate::director::lingo::datum::StringChunkType::from(&*count_of),
                         delimiter,
                     )?;
                     Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -167,7 +167,7 @@ impl CastMemberRefHandlers {
 
     fn call_member_type(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -265,9 +265,9 @@ impl CastMemberRefHandlers {
     fn get_invalid_member_prop(
         player: &mut DirPlayer,
         member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
-        match prop.as_str() {
+        match prop {
             "name" => Ok(Datum::String("".to_string())),
             "number" => Ok(Datum::Int(-1)),
             "type" => Ok(Datum::String("empty".to_string())),
@@ -290,7 +290,7 @@ impl CastMemberRefHandlers {
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
         member_type: &CastMemberTypeId,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         debug!("Getting prop '{}' for member type {:?}", prop, member_type);
         match &member_type {
@@ -313,7 +313,7 @@ impl CastMemberRefHandlers {
                     CastMemberType::Script(s) => s,
                     _ => return Err(ScriptError::new("Cast member is not a script".to_string())),
                 };
-                match prop.as_str() {
+                match prop {
                     "text" => Ok(Datum::String("".to_string())),
                     "script" => Ok(Datum::ScriptRef(cast_member_ref.clone())),
                     "scriptText" => Ok(Datum::String("".to_string())),
@@ -337,7 +337,7 @@ impl CastMemberRefHandlers {
 
                 if let CastMemberType::Shape(shape_member) = &cast_member.member_type {
                     let info = &shape_member.shape_info;
-                    match prop.as_str() {
+                    match prop {
                         "rect" => {
                             let width = info.width() as i32;
                             let height = info.height() as i32;
@@ -379,7 +379,7 @@ impl CastMemberRefHandlers {
 
                 if let CastMemberType::VectorShape(vs) = &cast_member.member_type {
                     // Extract data we need before dropping the borrow on player
-                    let result: Result<Datum, ScriptError> = match prop.as_str() {
+                    let result: Result<Datum, ScriptError> = match prop {
                         "width" => Ok(Datum::Int(vs.width().ceil() as i32)),
                         "height" => Ok(Datum::Int(vs.height().ceil() as i32)),
                         "strokeColor" => {
@@ -473,7 +473,7 @@ impl CastMemberRefHandlers {
 
     fn set_member_type_prop(
         member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
         let member_type = reserve_player_ref(|player| {
@@ -499,7 +499,7 @@ impl CastMemberRefHandlers {
         // Handle Script-specific props before the main match so unrecognized
         // props fall through to the wildcard arm (e.g. implicit bitmap conversion).
         if member_type == CastMemberTypeId::Script {
-            match prop.as_str() {
+            match prop {
                 "scriptText" => return Ok(()), // No-op: no lingo compiler
                 "scriptType" => {
                     let type_str = value.string_value()?;
@@ -578,7 +578,7 @@ impl CastMemberRefHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let is_invalid = cast_member_ref.cast_lib < 0 || cast_member_ref.cast_member < 0;
         if is_invalid {
@@ -610,7 +610,7 @@ impl CastMemberRefHandlers {
             }
         };
 
-        match prop.as_str() {
+        match prop {
             "name" => Ok(Datum::String(name)),
             "memberNum" => Ok(Datum::Int(member_num as i32)),
             "number" => {
@@ -633,7 +633,7 @@ impl CastMemberRefHandlers {
 
     pub fn set_prop(
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
         let is_invalid = cast_member_ref.cast_lib < 0 || cast_member_ref.cast_member < 0;
@@ -651,7 +651,7 @@ impl CastMemberRefHandlers {
                 .is_some()
         });
         let result = if exists {
-            match prop.as_str() {
+            match prop {
                 "name" => borrow_member_mut(
                     cast_member_ref,
                     |_player| value.string_value(),

@@ -9,7 +9,7 @@ impl SoundMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -18,7 +18,7 @@ impl SoundMemberHandlers {
             .unwrap();
         let sound = member.member_type.as_sound().unwrap();
 
-        match prop.as_str() {
+        match prop {
             "duration" => Ok(Datum::Int(sound.info.duration as i32)),
             "sampleRate" => Ok(Datum::Int(sound.info.sample_rate as i32)),
             "sampleSize" => Ok(Datum::Int(sound.info.sample_size as i32)),

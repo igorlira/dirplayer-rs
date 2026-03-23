@@ -985,7 +985,7 @@ impl StackExpressionTracker {
         }
     }
 
-    pub fn get_stack_top(&self) -> Option<&String> {
-        self.stack.last()
+    pub fn get_stack_top(&self) -> Option<&str> {
+        self.stack.last().map(|s| s.as_str())
     }
 }

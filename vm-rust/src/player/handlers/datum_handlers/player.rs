@@ -9,8 +9,8 @@ use crate::{
 pub struct PlayerDatumHandlers {}
 
 impl PlayerDatumHandlers {
-    pub fn call(handler_name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+    pub fn call(handler_name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        match handler_name {
             "count" => Self::count(args),
             _ => reserve_player_ref(|player| {
                 Err(ScriptError::new_code(

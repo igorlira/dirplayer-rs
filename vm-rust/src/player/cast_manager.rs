@@ -296,7 +296,7 @@ impl CastManager {
         self.palette_cache.borrow().as_ref().unwrap().clone()
     }
 
-    pub fn find_member_ref_by_name(&self, name: &String) -> Option<CastMemberRef> {
+    pub fn find_member_ref_by_name(&self, name: &str) -> Option<CastMemberRef> {
         for cast in &self.casts {
             if let Some(member) = cast.find_member_by_name(name) {
                 return Some(CastMemberRef {

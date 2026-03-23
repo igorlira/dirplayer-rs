@@ -14,8 +14,8 @@ use crate::{
 pub struct ScriptDatumHandlers {}
 
 impl ScriptDatumHandlers {
-    pub fn has_async_handler(obj_ref: &DatumRef, name: &String) -> bool {
-        match name.as_str() {
+    pub fn has_async_handler(obj_ref: &DatumRef, name: &str) -> bool {
+        match name {
             "new" => true,
             "rawNew" => false,
             "handler" => false,
@@ -41,10 +41,10 @@ impl ScriptDatumHandlers {
 
     pub async fn call_async(
         obj_ref: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "new" => Self::new(obj_ref, args).await,
             _ => {
                 // Try to call a handler defined in the script itself
@@ -53,7 +53,7 @@ impl ScriptDatumHandlers {
                         Datum::ScriptRef(script_ref) => script_ref.clone(),
                         _ => return Err(ScriptError::new("Expected script reference".to_string())),
                     };
-                    Ok::<_, ScriptError>((script_ref, handler_name.clone()))
+                    Ok::<_, ScriptError>((script_ref, handler_name.to_owned()))
                 })?;
 
                 // Check if the script actually has this handler
@@ -98,10 +98,10 @@ impl ScriptDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "rawNew" => Self::raw_new(datum),
             "handler" => Self::handler(datum, args),
             "handlers" => Self::handlers(datum, args),
