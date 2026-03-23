@@ -23,6 +23,7 @@ use crate::player::cast_member::CastMemberType;
 use crate::player::ColorRef;
 use std::borrow::Borrow;
 use std::convert::TryInto;
+use log::debug;
 use wasm_bindgen::JsCast;
 
 // Simple HTML parser without external dependencies
@@ -835,12 +836,12 @@ impl FontMemberHandlers {
         let scaled_char_height = requested_font_size;
         let scaled_char_width = (font.char_width as i32 * requested_font_size) / native_char_height;
 
-        web_sys::console::log_1(&format!(
+        debug!(
             "ðŸ“ Font scaling: requested={}pt, native_char={}x{} -> scaled={}x{}",
             requested_font_size,
             font.char_width, font.char_height,
             scaled_char_width, scaled_char_height
-        ).into());
+        );
 
         // Use scaled dimensions for layout
         let char_width = scaled_char_width.max(1);

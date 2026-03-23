@@ -129,7 +129,38 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
   renderPlayer(config, newElement, width, height, src, externalParams);
 }
 
+function extractNoscriptElements() {
+  const noscripts = document.getElementsByTagName('noscript');
+  for (const noscript of Array.from(noscripts)) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(noscript.innerHTML, 'text/html');
+
+    const objects = doc.getElementsByTagName('object');
+    for (const object of Array.from(objects)) {
+      const { isDirObject } = checkDirObject(object);
+      if (isDirObject) {
+        // Move the parsed object into the live DOM, replacing the <noscript>
+        const liveObject = document.adoptNode(object);
+        noscript.replaceWith(liveObject);
+        return; // noscript is gone, stop iterating its contents
+      }
+    }
+
+    const embeds = doc.getElementsByTagName('embed');
+    for (const embed of Array.from(embeds)) {
+      if (checkDirEmbed(embed)) {
+        const liveEmbed = document.adoptNode(embed);
+        noscript.replaceWith(liveEmbed);
+        return;
+      }
+    }
+  }
+}
+
 function replaceDirPlayerElements(config: PolyfillConfig) {
+  // Extract Director elements hidden inside <noscript> tags first
+  extractNoscriptElements();
+
   const objects = document.getElementsByTagName('object');
   for (const object of Array.from(objects)) {
     const { isDirObject, params } = checkDirObject(object);

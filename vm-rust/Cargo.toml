@@ -126,3 +126,16 @@ opt-level = "s"
 [package.metadata.wasm-pack.profile.release]
 # default is ["-O"]; -g means to preserve debug symbols.
 wasm-opt = ["-O", "-g"]
+
+[profile.dev]
+# Turn on a small amount of optimisation in Development mode.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[package.metadata.wasm-pack.profile.dev.wasm-bindgen]
+dwarf-debug-info = true
+
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+dwarf-debug-info = true

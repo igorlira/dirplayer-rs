@@ -8,7 +8,7 @@ cd %~dp0
 cd .\..\vm-rust\
 
 :: Run the build command.
-powershell wasm-pack build --release --target web
+powershell wasm-pack build --target web --dev
 
 pause
 exit
