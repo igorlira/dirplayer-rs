@@ -1668,6 +1668,13 @@ impl Shockwave3dObjectDatumHandlers {
                         } else if prop_name == "textureList" {
                             // Update the persistent textureList at the given index
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            // Extract the texture name from the value for scene data sync
+                            let tex_name = match &value {
+                                Datum::Shockwave3dObjectRef(r) => r.name.clone(),
+                                Datum::String(s) => s.clone(),
+                                Datum::Void => String::new(),
+                                _ => String::new(),
+                            };
                             let list_ref = {
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 member.and_then(|m| m.member_type.as_shockwave3d())
@@ -1728,6 +1735,19 @@ impl Shockwave3dObjectDatumHandlers {
                                 list_vec.extend(void_refs);
                                 if idx < list_vec.len() {
                                     list_vec[idx] = value_ref;
+                                }
+                            }
+                            // Sync texture name to scene data so the GPU renderer sees it
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                            while shader.texture_layers.len() <= idx {
+                                                shader.texture_layers.push(crate::director::chunks::w3d::types::W3dTextureLayer::default());
+                                            }
+                                            shader.texture_layers[idx].name = tex_name;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2846,6 +2866,35 @@ impl Shockwave3dObjectDatumHandlers {
                 }
                 if items.is_empty() {
                     items.push_back(player.alloc_datum(Datum::Symbol("multiply".to_string())));
+                }
+                Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List, items, false,
+                )))
+            }
+            "blendSourceList" => {
+                let mut items = VecDeque::new();
+                if let Some(s) = shader {
+                    for layer in &s.texture_layers {
+                        let sym = if layer.blend_src == 1 { "alpha" } else { "constant" };
+                        items.push_back(player.alloc_datum(Datum::Symbol(sym.to_string())));
+                    }
+                }
+                if items.is_empty() {
+                    items.push_back(player.alloc_datum(Datum::Symbol("constant".to_string())));
+                }
+                Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List, items, false,
+                )))
+            }
+            "blendConstantList" => {
+                let mut items = VecDeque::new();
+                if let Some(s) = shader {
+                    for layer in &s.texture_layers {
+                        items.push_back(player.alloc_datum(Datum::Float((layer.blend_const as f64) * 100.0)));
+                    }
+                }
+                if items.is_empty() {
+                    items.push_back(player.alloc_datum(Datum::Float(50.0)));
                 }
                 Ok(player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List, items, false,
