@@ -215,7 +215,7 @@ impl CastManager {
     ) {
         for cast in self.casts.iter_mut() {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
-                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode)));
+                debug!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode);
                 match cast.preload_mode {
                     0 | 1 => {
                         // Preload: When Needed / After frame one
@@ -839,11 +839,11 @@ impl CastManager {
 
             // Log all cached font keys to browser console
             let keys: Vec<&String> = font_manager.font_cache.keys().collect();
-            console::log_1(&format!("Font cache keys: {:?}", keys).into());
+            debug!("Font cache keys: {:?}", keys);
 
             // Log font_by_id mappings
             let id_mappings: Vec<(&u16, &crate::player::font::FontRef)> = font_manager.font_by_id.iter().collect();
-            console::log_1(&format!("Font by_id mappings: {:?}", id_mappings).into());
+            debug!("Font by_id mappings: {:?}", id_mappings);
         }
     }
 }

@@ -105,9 +105,8 @@ impl Movie {
     }
 
     pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
-        let prop_lower = prop.to_lowercase();
-        match prop_lower.as_str() {
-            "alerthook" => match self.alert_hook.to_owned() {
+        match_ci!(prop, {
+            "alertHook" => match self.alert_hook.to_owned() {
                 Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
                 Some(ScriptReceiver::ScriptInstance(script_instance_id)) => {
                     Ok(Datum::ScriptInstanceRef(script_instance_id))
@@ -123,20 +122,20 @@ impl Movie {
                 let time = Local::now();
                 let formatted = time.format("%m/%d/%Y").to_string();
                 Ok(Datum::String(formatted))
-            }
+            },
             "long time" => {
                 let time = Local::now();
                 let formatted = time.format("%H:%M:%S %p").to_string();
                 Ok(Datum::String(formatted))
-            }
-            "lastchannel" => Ok(Datum::Int(self.score.get_channel_count() as i32)),
-            "moviepath" => {
+            },
+            "lastChannel" => Ok(Datum::Int(self.score.get_channel_count() as i32)),
+            "moviePath" => {
                 let mut result = self.base_path.clone();
                 if !result.is_empty() && !result.ends_with(PATH_SEPARATOR) {
                     result.push_str(PATH_SEPARATOR);
                 }
                 Ok(Datum::String(result))
-            }
+            },
             "platform" => Ok(Datum::String("Windows,32".to_string())),
             "frame" => Ok(Datum::Int(self.current_frame as i32)),
             "productversion" => Ok(Datum::String("10.1".to_string())),
@@ -147,14 +146,17 @@ impl Movie {
             "moviename" => Ok(Datum::String(self.file_name.to_owned())),
             "updatelock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
             "path" => Ok(Datum::String(self.base_path.to_owned())),
-            "mousedownscript" | "mouseupscript" | "keydownscript" | "keyupscript" | "timeoutscript" => {
-                let script = match prop_lower.as_str() {
-                    "mousedownscript" => &self.mouse_down_script,
-                    "mouseupscript" => &self.mouse_up_script,
-                    "keydownscript" => &self.key_down_script,
-                    "keyupscript" => &self.key_up_script,
-                    "timeoutscript" => &self.timeout_script,
-                    _ => unreachable!(),
+            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
+                let script = if prop.eq_ignore_ascii_case("mouseDownScript") {
+                    &self.mouse_down_script
+                } else if prop.eq_ignore_ascii_case("mouseUpScript") {
+                    &self.mouse_up_script
+                } else if prop.eq_ignore_ascii_case("keyDownScript") {
+                    &self.key_down_script
+                } else if prop.eq_ignore_ascii_case("keyUpScript") {
+                    &self.key_up_script
+                } else {
+                    &self.timeout_script
                 };
                 match script.to_owned() {
                     Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
@@ -162,8 +164,8 @@ impl Movie {
                     Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
                     None => Ok(Datum::Int(0)),
                 }
-            }
-            "allowcustomcaching" => Ok(datum_bool(self.allow_custom_caching)),
+            },
+            "allowCustomCaching" => Ok(datum_bool(self.allow_custom_caching)),
             "timer" => {
                 reserve_player_ref(|player| {
                     let elapsed = chrono::Local::now()
@@ -173,24 +175,24 @@ impl Movie {
                     let ticks = (elapsed * 60) / 1000;
                     Ok(Datum::Int(ticks as i32))
                 })
-            }
-            "mousedown" => {
+            },
+            "mouseDown" => {
                 Ok(datum_bool(self.mouse_down))
-            }
-            "tracescript" => Ok(datum_bool(self.trace_script)),
-            "activewindow" => Ok(Datum::Stage),
-            "rollover" => {
+            },
+            "traceScript" => Ok(datum_bool(self.trace_script)),
+            "activeWindow" => Ok(Datum::Stage),
+            "rollOver" => {
                 reserve_player_ref(|player| {
                     let sprite = super::score::get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
                     Ok(Datum::Int(sprite.unwrap_or(0) as i32))
                 })
-            }
-            "randomseed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
-            "maxinteger" => Ok(Datum::Int(i32::MAX)),
-            "memorysize" => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
-            "active3drenderer" => Ok(Datum::String("#openGL".to_string())),
-            "scriptexecutionstyle" => Ok(Datum::Int(9)),
-            "xtralist" => {
+            },
+            "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
+            "maxInteger" => Ok(Datum::Int(i32::MAX)),
+            "memorySize" => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
+            "active3dRenderer" => Ok(Datum::String("#openGL".to_string())),
+            "scriptExecutionStyle" => Ok(Datum::Int(9)),
+            "xtraList" => {
                 // Return a list of prop lists, each with #name and #fileName
                 use crate::player::xtra::manager::get_registered_xtra_names;
                 reserve_player_mut(|player| {
@@ -212,9 +214,9 @@ impl Movie {
                         false,
                     ))
                 })
-            }
-            "sounddevice" => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
-            "sounddevicelist" => {
+            },
+            "soundDevice" => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
+            "soundDeviceList" => {
                 reserve_player_mut(|player| {
                     let device = player.alloc_datum(Datum::String("WebAudio".to_string()));
                     Ok(Datum::List(
@@ -223,8 +225,8 @@ impl Movie {
                         false,
                     ))
                 })
-            }
-            "desktoprectlist" => {
+            },
+            "desktopRectList" => {
                 reserve_player_mut(|player| {
                     let w = player.movie.rect.right as i32;
                     let h = player.movie.rect.bottom as i32;
@@ -239,8 +241,8 @@ impl Movie {
                         false,
                     ))
                 })
-            }
-            "labellist" => {
+            },
+            "labelList" => {
                 let s = self
                     .score
                     .frame_labels
@@ -249,10 +251,10 @@ impl Movie {
                     .collect::<Vec<_>>()
                     .join("\r");
                 Ok(Datum::String(s))
-            }
+            },
             "debugplaybackenabled" => Ok(Datum::Int(0)),
-            _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}"))),
-        }
+            _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
+        })
     }
 
     pub fn set_prop(
@@ -261,19 +263,21 @@ impl Movie {
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
-        let prop_lower = prop.to_lowercase();
-        match prop_lower.as_str() {
-            "exitlock" => {
+        match_ci!(prop, {
+            "exitLock" => {
                 self.exit_lock = value.int_value()? == 1;
-            }
-            "itemdelimiter" => {
+                Ok(())
+            },
+            "itemDelimiter" => {
                 self.item_delimiter = (value.string_value()?).chars().next().unwrap();
-            }
-            "debugplaybackenabled" => {
+                Ok(())
+            },
+            "debugPlaybackEnabled" => {
                 // TODO
-            }
-            "alerthook" => {
-                return match value {
+                Ok(())
+            },
+            "alertHook" => {
+                match value {
                     Datum::Int(0) => {
                         self.alert_hook = None;
                         Ok(())
@@ -290,39 +294,40 @@ impl Movie {
                         "Object or 0 expected for alertHook value".to_string(),
                     )),
                 }
-            }
-            "tracescript" => {
+            },
+            "traceScript" => {
                 self.trace_script = value.int_value()? != 0;
-            }
-            "tracelogfile" => {
+                Ok(())
+            },
+            "traceLogFile" => {
                 self.trace_log_file = value.string_value()?;
-            }
-            "updatelock" => {
+                Ok(())
+            },
+            "updateLock" => {
                 self.update_lock = value.int_value()? != 0;
-            }
-            "mousedownscript" | "mouseupscript" | "keydownscript" | "keyupscript" | "timeoutscript" => {
-                let target = match prop_lower.as_str() {
-                    "mousedownscript" => &mut self.mouse_down_script,
-                    "mouseupscript" => &mut self.mouse_up_script,
-                    "keydownscript" => &mut self.key_down_script,
-                    "keyupscript" => &mut self.key_up_script,
-                    "timeoutscript" => &mut self.timeout_script,
-                    _ => unreachable!(),
+                Ok(())
+            },
+            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
+                let target = if prop.eq_ignore_ascii_case("mouseDownScript") {
+                    &mut self.mouse_down_script
+                } else if prop.eq_ignore_ascii_case("mouseUpScript") {
+                    &mut self.mouse_up_script
+                } else if prop.eq_ignore_ascii_case("keyDownScript") {
+                    &mut self.key_down_script
+                } else if prop.eq_ignore_ascii_case("keyUpScript") {
+                    &mut self.key_up_script
+                } else {
+                    &mut self.timeout_script
                 };
-                return match value {
+                match value {
                     Datum::Int(0) | Datum::Void => {
                         *target = None;
                         Ok(())
                     }
                     Datum::String(script_text) => {
                         if script_text.is_empty() {
-                            // EMPTY clears the script
                             *target = None;
                         } else {
-                            // Store everything, including comments like "--nothing".
-                            // In Director, setting mouseDownScript to a comment means
-                            // "intercept the event but do nothing" - the presence of
-                            // the script blocks normal event propagation to sprites.
                             *target = Some(ScriptReceiver::ScriptText(script_text));
                         }
                         Ok(())
@@ -339,48 +344,56 @@ impl Movie {
                         format!("String, object or 0 expected for {} value", prop),
                     )),
                 }
-            }
-            "allowcustomcaching" => {
+            },
+            "allowCustomCaching" => {
                 self.allow_custom_caching = value.int_value()? != 0;
-            }
-            "puppettempo" => {
+                Ok(())
+            },
+            "puppetTempo" => {
                 self.puppet_tempo = value.int_value()? as u32;
-            }
-            "colordepth" | "usefastquads" | "romanlingo" | "allowsavelocal" => {
+                Ok(())
+            },
+            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" => {
                 // Read-only / no-op in practice; ignore sets like Director does
-            }
-            "sounddevice" => {
-                // Accept the sound device setting (DirectSound, MacroMix, QT3Mix, etc.)
-                // In WASM we use WebAudio, so this is stored but not acted upon
-                self.sound_device = value.string_value().unwrap_or_default();
-            }
-            "timeoutlength" | "timeoutkeydown" | "timeoutmouse" | "timeoutplay"
-            | "timeoutlapsed" | "soundenabled" | "soundlevel"
-            | "beepon" | "centerstage" | "fixstagesize" => {
-                // Anim props that are set via property_type 0x07 - accept silently
-            }
-            "randomseed" => {
-                self.random_seed = Some(value.int_value()?);
-            }
-            "preferred3drenderer" | "milesfast" => {
-                // 3D renderer preference / sound settings — accept silently in WASM
-            }
-            "stagecolor" => {
+                Ok(())
+            },
+            "stageColor" => {
                 match value {
                     Datum::Int(color_index) => {
                         self.stage_color_ref = ColorRef::PaletteIndex(color_index as u8);
+                        Ok(())
                     }
                     Datum::ColorRef(color_ref) => {
                         self.stage_color_ref = color_ref;
+                        Ok(())
                     }
                     _ => {
-                        return Err(ScriptError::new("Integer color index expected for stageColor".to_string()));
+                        Err(ScriptError::new("Integer color index expected for stageColor".to_string()))
                     }
                 }
-            }
-            _ => return Err(ScriptError::new(format!("Cannot set movie prop {prop}"))),
-        }
-        Ok(())
+            },
+            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
+            | "timeoutLapsed" | "soundEnabled" | "soundLevel"
+            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize" => {
+                // Anim props that are set via property_type 0x07 - accept silently
+                Ok(())
+            },
+            "randomSeed" => {
+                self.random_seed = Some(value.int_value()?);
+                Ok(())
+            },
+            "soundDevice" => {
+                // Accept the sound device setting (DirectSound, MacroMix, QT3Mix, etc.)
+                // In WASM we use WebAudio, so this is stored but not acted upon
+                self.sound_device = value.string_value().unwrap_or_default();
+                Ok(())
+            },
+            "preferred3drenderer" | "milesfast" => {
+                // 3D renderer preference / sound settings — accept silently in WASM
+                Ok(())
+            },
+            _ => Err(ScriptError::new(format!("Cannot set movie prop {prop}")))
+        })
     }
 
     /// Get the current effective tempo (puppetTempo overrides frameTempo)

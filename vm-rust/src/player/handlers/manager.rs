@@ -1415,9 +1415,7 @@ impl BuiltInHandlerManager {
             let xml_node = player.get_datum(&args[0]);
             let node_name = player.get_datum(&args[1]).string_value()?;
 
-            web_sys::console::log_1(
-                &format!("🔧 getNodes called for node type: {}", node_name).into(),
-            );
+            debug!("🔧 getNodes called for node type: {}", node_name);
 
             // Get the XML node ID
             let xml_id = match xml_node {
@@ -1518,7 +1516,7 @@ impl BuiltInHandlerManager {
         reserve_player_ref(|player| {
             let event_string = player.get_datum(&args[0]).string_value()?;
             
-            web_sys::console::log_1(&format!("🔔 externalEvent: {}", event_string).into());
+            debug!("🔔 externalEvent: {}", event_string);
             
             crate::js_api::JsApi::dispatch_external_event(&event_string);
             

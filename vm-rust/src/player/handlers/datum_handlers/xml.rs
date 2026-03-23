@@ -6,6 +6,7 @@ use crate::{
 };
 use std::collections::HashMap;
 use std::io::Cursor;
+use log::{debug, error, warn};
 use xml::attribute::OwnedAttribute;
 use xml::reader::{EventReader, XmlEvent};
 
@@ -143,20 +144,20 @@ impl XmlParser {
                 }
 
                 Ok(XmlEvent::StartDocument { .. }) => {
-                    web_sys::console::log_1(&"🔧 XML document parsing started".into());
+                    debug!("🔧 XML document parsing started");
                 }
 
                 Ok(XmlEvent::EndDocument) => {
-                    web_sys::console::log_1(&"🔧 XML document parsing completed".into());
+                    debug!("🔧 XML document parsing completed");
                 }
 
                 Ok(XmlEvent::Doctype { .. }) => {
                     // Ignore DOCTYPE declarations
-                    web_sys::console::log_1(&"🔧 Skipping DOCTYPE declaration".into());
+                    debug!("🔧 Skipping DOCTYPE declaration");
                 }
 
                 Err(e) => {
-                    web_sys::console::log_1(&format!("🔧 ❌ XML parsing error: {}", e).into());
+                    error!("🔧 ❌ XML parsing error: {}", e);
                     return Err(ScriptError::new(format!("XML parsing error: {}", e)));
                 }
             }
@@ -196,9 +197,7 @@ impl XmlParser {
         }
 
         nodes.insert(text_id, text_node);
-        web_sys::console::log_1(
-            &format!("🔧 Created text node: '{}' (ID: {})", text, text_id).into(),
-        );
+        debug!("🔧 Created text node: '{}' (ID: {})", text, text_id);
     }
 
     fn add_cdata_node(&mut self, nodes: &mut HashMap<u32, XmlNode>, parent_id: u32, cdata: &str) {
@@ -445,7 +444,7 @@ impl XmlDatumHandlers {
         let xml_id = match player.get_datum(datum) {
             Datum::XmlRef(id) => *id,
             _ => {
-                web_sys::console::log_1(&"🔧 ❌ XML get_prop called on non-XML datum".into());
+                debug!("🔧 ❌ XML get_prop called on non-XML datum");
                 return Err(ScriptError::new("Invalid XML reference".to_string()));
             }
         };
@@ -487,14 +486,12 @@ impl XmlDatumHandlers {
                 }
             };
 
-            web_sys::console::log_1(
-                &format!("🔧 parseXML called on parser object ID {}", parser_id).into(),
-            );
+            debug!("🔧 parseXML called on parser object ID {}", parser_id);
 
             // Check what type the argument is
             let arg_datum = player.get_datum(&args[0]);
             let datum_type = Self::get_datum_type_name(arg_datum);
-            web_sys::console::log_1(&format!("🔧 parseXML arg type: {}", datum_type).into());
+            debug!("🔧 parseXML arg type: {}", datum_type);
 
             let xml_string = match arg_datum {
                 Datum::String(s) => s.clone(),
@@ -570,7 +567,7 @@ impl XmlDatumHandlers {
                 );
             }
 
-            web_sys::console::log_1(&"🔧 XML parsing completed successfully".into());
+            debug!("🔧 XML parsing completed successfully");
 
             // parseXML returns Void in Lingo
             Ok(DatumRef::Void)
@@ -670,9 +667,7 @@ impl XmlDatumHandlers {
                 }
             };
 
-            web_sys::console::log_1(
-                &format!("🔧 appendChild: parent={}, child={}", parent_id, child_id).into(),
-            );
+            debug!("🔧 appendChild: parent={}, child={}", parent_id, child_id);
 
             // Check if parent is a document
             if let Some(doc) = player.xml_documents.get_mut(&parent_id) {
@@ -698,9 +693,7 @@ impl XmlDatumHandlers {
                     child_node.parent = Some(parent_id);
                 }
 
-                web_sys::console::log_1(
-                    &format!("🔧 Added child {} to node {}", child_id, parent_id).into(),
-                );
+                debug!("🔧 Added child {} to node {}", child_id, parent_id);
             } else {
                 return Err(ScriptError::new(format!(
                     "Parent node {} not found",
@@ -718,8 +711,8 @@ impl XmlDatumHandlers {
         let doc_id = player.next_xml_id;
         player.next_xml_id += 1;
 
-        web_sys::console::log_1(&format!("🔧 Creating XML document with ID {}", doc_id).into());
-        web_sys::console::log_1(&format!("🔧 Content length: {} bytes", content.len()).into());
+        debug!("🔧 Creating XML document with ID {}", doc_id);
+        debug!("🔧 Content length: {} bytes", content.len());
 
         let mut parser = XmlParser::new(player.next_xml_id);
         let (root_id, nodes) = parser.parse_xml_content(&content)?;
@@ -738,7 +731,7 @@ impl XmlDatumHandlers {
 
         // Add all parsed nodes to the player's xml_nodes
         for (node_id, node) in nodes {
-            web_sys::console::log_1(&format!("🔧 Storing node {} ({})", node_id, node.name).into());
+            debug!("🔧 Storing node {} ({})", node_id, node.name);
             player.xml_nodes.insert(node_id, node);
         }
 
@@ -760,11 +753,9 @@ impl XmlDatumHandlers {
 
         // Verify storage
         if player.xml_documents.contains_key(&doc_id) {
-            web_sys::console::log_1(
-                &format!("🔧 ✓ Document {} stored successfully", doc_id).into(),
-            );
+            debug!("🔧 ✓ Document {} stored successfully", doc_id);
         } else {
-            web_sys::console::log_1(&format!("🔧 ❌ FAILED to store document {}!", doc_id).into());
+            error!("🔧 ❌ FAILED to store document {}!", doc_id);
         }
 
         Ok(doc_id)
@@ -781,7 +772,7 @@ impl XmlDatumHandlers {
                 }
             };
 
-            web_sys::console::log_1(&format!("🔧 toString called on XML {}", xml_id).into());
+            debug!("🔧 toString called on XML {}", xml_id);
 
             // Check if it's a document
             let root_id = if let Some(doc) = player.xml_documents.get(&xml_id) {
@@ -876,9 +867,7 @@ impl XmlDatumHandlers {
                     if let Some(root_id) = doc.root_element {
                         return Ok(player.alloc_datum(Datum::XmlRef(root_id)));
                     } else {
-                        web_sys::console::log_1(
-                            &format!("🔧 ⚠️ Document {} has no root_element (None)", xml_id).into(),
-                        );
+                        warn!("🔧 ⚠️ Document {} has no root_element (None)", xml_id);
                     }
 
                     return Ok(player.alloc_datum(Datum::Void));
@@ -890,9 +879,7 @@ impl XmlDatumHandlers {
                     if let Some(first_child) = children.first() {
                         return Ok(first_child.clone());
                     } else {
-                        web_sys::console::log_1(
-                            &format!("🔧 Node has no accessible children").into(),
-                        );
+                        warn!("🔧 Node has no accessible children");
                     }
                 } else {
                     web_sys::console::log_1(
@@ -930,7 +917,7 @@ impl XmlDatumHandlers {
             //     // If this is a document, return a list containing just the root element
             //     if let Some(doc) = player.xml_documents.get(&xml_id) {
             //         if let Some(root_id) = doc.root_element {
-            //             web_sys::console::log_1(&format!("🔧 Document {}.childNodes returning root element {}", xml_id, root_id).into());
+            //             debug!("🔧 Document {}.childNodes returning root element {}", xml_id, root_id);
             //             let root_ref = player.alloc_datum(Datum::XmlRef(root_id));
             //             return Ok(player.alloc_datum(Datum::List(
             //                 crate::director::lingo::datum::DatumType::XmlChildNodes,
@@ -1031,7 +1018,7 @@ impl XmlDatumHandlers {
                         .unwrap_or_default();
                     Ok(player.alloc_datum(Datum::String(value)))
                 } else {
-                    web_sys::console::log_1(&format!("🔧 ⚠️ Node {} not found", node_id).into());
+                    warn!("🔧 ⚠️ Node {} not found", node_id);
                     Ok(player.alloc_datum(Datum::String("".to_string())))
                 }
             }

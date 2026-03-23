@@ -1,5 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
-use log::warn;
+use log::{debug, error, warn};
 use num_derive::FromPrimitive;
 
 use std::convert::TryInto;
@@ -1508,7 +1508,7 @@ pub struct TexSection {
 impl TextMemberData {
     pub fn from_raw_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 8 {
-            console::log_1(&format!("❌ TextMemberData: too short ({} bytes)", bytes.len()).into());
+            error!("❌ TextMemberData: too short ({} bytes)", bytes.len());
             return None;
         }
 
@@ -1525,7 +1525,7 @@ impl TextMemberData {
         }
 
         let data_length = reader.read_u32().ok()?;
-        console::log_1(&format!("📦 Text member data length: {}", data_length).into());
+        debug!("📦 Text member data length: {}", data_length);
 
         // Skip zeros to find actual data (36 bytes of padding)
         reader.pos += 36;
@@ -1533,19 +1533,19 @@ impl TextMemberData {
         // Read dimensions and counts
         let width = reader.read_u32().unwrap_or(0);
         let height = reader.read_u32().unwrap_or(0);
-        console::log_1(&format!("📐 Dimensions: {}x{}", width, height).into());
+        debug!("📐 Dimensions: {}x{}", width, height);
 
         let count1 = reader.read_u32().unwrap_or(0);
         let size1 = reader.read_u32().unwrap_or(0);
-        console::log_1(&format!("🔢 Format count: {}, Size: {}", count1, size1).into());
+        debug!("🔢 Format count: {}, Size: {}", count1, size1);
 
         let count2 = reader.read_u32().unwrap_or(0);
         let size2 = reader.read_u32().unwrap_or(0);
-        console::log_1(&format!("🔢 Run count: {}, Size: {}", count2, size2).into());
+        debug!("🔢 Run count: {}, Size: {}", count2, size2);
 
         let char_count = reader.read_u32().unwrap_or(0);
         let size3 = reader.read_u32().unwrap_or(0);
-        console::log_1(&format!("🔢 Character count: {}, Size: {}", char_count, size3).into());
+        debug!("🔢 Character count: {}, Size: {}", char_count, size3);
 
         // Read the remaining values before 3TEX
         let val1 = reader.read_u32().ok()?;
@@ -1564,11 +1564,11 @@ impl TextMemberData {
         );
 
         if val3_str != "3TEX" {
-            console::log_1(&format!("❌ Expected '3TEX', got '{}'", val3_str).into());
+            error!("❌ Expected '3TEX', got '{}'", val3_str);
             return None;
         }
 
-        console::log_1(&"✅ Found 3TEX section".into());
+        debug!("✅ Found 3TEX section");
 
         // Parse the 3TEX section
         let tex_section = Self::parse_tex_section(&mut reader, char_count)?;
@@ -1585,7 +1585,7 @@ impl TextMemberData {
         expected_char_count: u32,
     ) -> Option<TexSection> {
         let tex_length = reader.read_u32().ok()?;
-        console::log_1(&format!("📦 3TEX section length: {}", tex_length).into());
+        debug!("📦 3TEX section length: {}", tex_length);
 
         // Parse header
         let color_id = reader.read_i32().ok()?;
@@ -1631,7 +1631,7 @@ impl TextMemberData {
         // Texture flag (usually 'NoTexture\0')
         let no_texture_bytes = reader.read_bytes(9).ok()?;
         let no_texture = String::from_utf8_lossy(&no_texture_bytes);
-        console::log_1(&format!("📝 Texture flag: '{}'", no_texture.trim_end_matches('\0')).into());
+        debug!("📝 Texture flag: '{}'", no_texture.trim_end_matches('\0'));
 
         // -----------------------------
         // Read actual text string
@@ -1650,7 +1650,7 @@ impl TextMemberData {
             if chunk_type == "TEXT" {
                 let text_bytes = reader.read_bytes(chunk_len).ok()?;
                 text = String::from_utf8_lossy(text_bytes).to_string();
-                console::log_1(&format!("📝 Found TEXT chunk: '{}'", text).into());
+                debug!("📝 Found TEXT chunk: '{}'", text);
                 break;
             } else {
                 // Skip unknown chunk
@@ -1687,14 +1687,14 @@ impl TextMemberData {
     }
 
     pub fn log_summary(&self) {
-        console::log_1(&"═══════════════════════════════════".into());
-        console::log_1(&"📄 TEXT MEMBER DATA SUMMARY".into());
-        console::log_1(&"═══════════════════════════════════".into());
-        console::log_1(&format!("Dimensions:    {}x{}", self.width, self.height).into());
+        debug!("═══════════════════════════════════");
+        debug!("📄 TEXT MEMBER DATA SUMMARY");
+        debug!("═══════════════════════════════════");
+        debug!("Dimensions:    {}x{}", self.width, self.height);
 
         if let Some(ref tex) = self.tex_section {
-            console::log_1(&"───────────────────────────────────".into());
-            console::log_1(&"3TEX Section:".into());
+            debug!("───────────────────────────────────");
+            debug!("3TEX Section:");
             console::log_1(
                 &format!(
                     "  Color ID:      {} {}",
@@ -1707,10 +1707,10 @@ impl TextMemberData {
                 )
                 .into(),
             );
-            console::log_1(&format!("  BG Color ID:   {}", tex.bg_color_id).into());
-            console::log_1(&format!("  Char Count:    {}", tex.char_count).into());
-            console::log_1(&format!("  Line Count:    {}", tex.line_count).into());
-            console::log_1(&format!("  Text Offset:   {}", tex.text_offset).into());
+            debug!("  BG Color ID:   {}", tex.bg_color_id);
+            debug!("  Char Count:    {}", tex.char_count);
+            debug!("  Line Count:    {}", tex.line_count);
+            debug!("  Text Offset:   {}", tex.text_offset);
             console::log_1(
                 &format!(
                     "  Color 1:       RGB({}, {}, {})",
@@ -1732,16 +1732,16 @@ impl TextMemberData {
                 )
                 .into(),
             );
-            console::log_1(&format!("  Float 1:       {}", tex.float1).into());
-            console::log_1(&format!("  Float 2:       {}", tex.float2).into());
+            debug!("  Float 1:       {}", tex.float1);
+            debug!("  Float 2:       {}", tex.float2);
 
             if !tex.text.is_empty() {
-                console::log_1(&format!("  Text:          '{}'", tex.text).into());
+                debug!("  Text:          '{}'", tex.text);
             } else {
-                console::log_1(&"  Text:          (in child Text chunk)".into());
+                debug!("  Text:          (in child Text chunk)");
             }
         }
 
-        console::log_1(&"═══════════════════════════════════".into());
+        debug!("═══════════════════════════════════");
     }
 }

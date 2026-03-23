@@ -101,17 +101,14 @@ impl MediaChunk {
         let is_ima_adpcm = compression_ratio > 2.0 && !is_mp3;
         let is_compressed = is_mp3 || is_ima_adpcm;
 
-        console::log_1(
-            &format!(
-                "MediaChunk: {} bytes (expected {}), ratio={:.2}, mp3={}, ima_adpcm={}, rate={}",
-                audio_data.len(),
-                data_size_field,
-                compression_ratio,
-                is_mp3,
-                is_ima_adpcm,
-                sample_rate
-            )
-            .into(),
+        debug!(
+            "MediaChunk: {} bytes (expected {}), ratio={:.2}, mp3={}, ima_adpcm={}, rate={}",
+            audio_data.len(),
+            data_size_field,
+            compression_ratio,
+            is_mp3,
+            is_ima_adpcm,
+            sample_rate
         );
 
         reader.endian = original_endian;

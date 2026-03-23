@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-
+use log::error;
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType},
     player::{
@@ -17,7 +17,8 @@ pub struct ScriptDatumHandlers {}
 impl ScriptDatumHandlers {
     pub fn has_async_handler(obj_ref: &DatumRef, name: &String) -> bool {
         match name.as_str() {
-            "new" | "rawNew" => true,
+            "new" => true,
+            "rawNew" => false,
             "handler" => false,
             _ => {
                 reserve_player_ref(|player| {
@@ -46,7 +47,7 @@ impl ScriptDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
             "new" => Self::new(obj_ref, args).await,
-            "rawNew" => Self::raw_new(obj_ref).await,
+            "rawNew" => Self::raw_new(obj_ref),
             _ => {
                 // Try to call a handler defined in the script itself
                 let handler_ref = reserve_player_ref(|player| {
@@ -103,6 +104,7 @@ impl ScriptDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
+            "rawNew" => Self::raw_new(datum),
             "handler" => Self::handler(datum, args),
             "handlers" => Self::handlers(datum, args),
             _ => Err(ScriptError::new(format!(
@@ -184,33 +186,44 @@ impl ScriptDatumHandlers {
         })
     }
 
-    pub async fn raw_new(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
-        let script_ref = reserve_player_ref(|player| {
-            match player.get_datum(datum) {
-                Datum::ScriptRef(script_ref) => Ok(script_ref.clone()),
-                _ => Err(ScriptError::new("Cannot create new instance of non-script".to_string())),
-            }
+    fn create_uninit_instance(datum: &DatumRef) -> Result<(CastMemberRef, ScriptInstanceRef, DatumRef), ScriptError> {
+        let script_ref = reserve_player_mut(|player| {
+            let script_ref = match player.get_datum(datum) {
+                Datum::ScriptRef(script_ref) => script_ref,
+                _ => {
+                    return Err(ScriptError::new(
+                        "Cannot create new instance of non-script".to_string(),
+                    ))
+                }
+            };
+
+            Ok(script_ref.clone())
         })?;
 
-        let (_script_instance_ref, datum_ref) = Self::create_script_instance(&script_ref)?;
-        Ok(datum_ref)
+        let (script_instance_ref, datum_ref) = match Self::create_script_instance(&script_ref) {
+            Ok((instance_ref, datum_ref)) => (instance_ref, datum_ref),
+            Err(e) => {
+                error!("Failed to create script instance: {}", e.message);
+                return Err(e); // Return the error
+            }
+        };
+
+        Ok((script_ref, script_instance_ref, datum_ref))
+    }
+
+    pub fn raw_new(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
+        Ok(Self::create_uninit_instance(datum)?.2)
     }
 
     pub async fn new(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let (script_ref, new_handler_ref, expected_param_count, script_name) =
+        let (script_ref, script_instance_ref, datum_ref) = Self::create_uninit_instance(datum)?;
+
+        let (new_handler_ref, expected_param_count, script_name) =
             reserve_player_mut(|player| {
-                let script_ref = match player.get_datum(datum) {
-                    Datum::ScriptRef(script_ref) => script_ref,
-                    _ => {
-                        return Err(ScriptError::new(
-                            "Cannot create new instance of non-script".to_string(),
-                        ))
-                    }
-                };
                 let script = player
                     .movie
                     .cast_manager
-                    .get_script_by_ref(script_ref)
+                    .get_script_by_ref(&script_ref)
                     .unwrap();
                 let new_handler_ref = script.get_own_handler_ref(&"new".to_string());
 
@@ -222,22 +235,12 @@ impl ScriptDatumHandlers {
                 };
 
                 Ok((
-                    script_ref.clone(),
                     new_handler_ref,
                     param_count,
                     script.name.clone(),
                 ))
             })?;
 
-        let (script_instance_ref, datum_ref) = match Self::create_script_instance(&script_ref) {
-            Ok((instance_ref, datum_ref)) => (instance_ref, datum_ref),
-            Err(e) => {
-                web_sys::console::error_1(&format!("Failed to create script instance: {}", e.message).into());
-                return Err(e); // Return the error
-            }
-        };
-
-        // Check if a virtual handler wants to handle the "new" call
         let virtual_new_result = reserve_player_mut(|player| {
             crate::player::virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_ref, Some(&script_instance_ref), "new", args)
         });
@@ -259,9 +262,7 @@ impl ScriptDatumHandlers {
                 {
                     Ok(scope) => scope,
                     Err(err) => {
-                        web_sys::console::log_1(
-                            &format!("❌ Error in {}.new(): {}", script_name, err.message).into(),
-                        );
+                        error!("❌ Error in {}.new(): {}", script_name, err.message);
                         return Err(err);
                     }
                 };

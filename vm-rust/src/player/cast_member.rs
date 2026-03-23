@@ -2005,11 +2005,11 @@ impl CastMember {
             let Some(Chunk::XMedia(xm)) = opt_child else { continue };
 
             let member_name = chunk.member_info.as_ref().map(|i| i.name.as_str()).unwrap_or("");
-            web_sys::console::log_1(&format!("Checking XMedia child (member #{}, name='{}', {} bytes)", number, member_name, xm.raw_data.len()).into());
+            debug!("Checking XMedia child (member #{}, name='{}', {} bytes)", number, member_name, xm.raw_data.len());
 
             // 1) If SWF: return SWF
             if let Some(cm) = Self::try_parse_swf(xm.raw_data.to_vec(), number, chunk) {
-                web_sys::console::log_1(&"Detected as SWF".into());
+                debug!("Detected as SWF");
                 return Some(cm);
             }
 
@@ -2029,7 +2029,7 @@ impl CastMember {
             let is_text_ole = ole_type.is_empty() || ole_type == "text";
             if is_text_ole {
                 if let Some(styled_text) = xm.parse_styled_text() {
-                    web_sys::console::log_1(&"Detected as XMED styled text".into());
+                    debug!("Detected as XMED styled text");
                     return Some(Self::create_text_member_from_xmed(
                         number,
                         chunk,
@@ -2048,8 +2048,8 @@ impl CastMember {
                 let parsed_scene = if !w3d_data.is_empty() {
                     match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
                         Ok(mut scene) => {
-                            web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes",
-                                scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len()).into());
+                            debug!("W3D parsed: {} materials, {} nodes, {} meshes",
+                                scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len());
                             // Ensure DefaultShader exists
                             if !scene.shaders.iter().any(|s| s.name == "DefaultShader") {
                                 scene.shaders.push(crate::director::chunks::w3d::types::W3dShader {
@@ -2060,7 +2060,7 @@ impl CastMember {
                             Some(std::rc::Rc::new(scene))
                         }
                         Err(e) => {
-                            web_sys::console::log_1(&format!("W3D parse error: {}", e).into());
+                            warn!("W3D parse error: {}", e);
                             Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                         }
                     }
@@ -2088,7 +2088,7 @@ impl CastMember {
             // 4) Check if this is a real PFR font or just text content
             let has_pfr = Self::extract_pfr(member_def).is_some();
             if has_pfr {
-                web_sys::console::log_1(&"Detected as PFR font".into());
+                debug!("Detected as PFR font");
                 return Some(Self::parse_xmedia_font(member_def, number, chunk, xm, bitmap_manager));
             }
 
@@ -3015,7 +3015,7 @@ impl CastMember {
                     None
                 };
 
-                web_sys::console::log_1(&format!("Shape member {} script_id={}", number, script_id).into());
+                debug!("Shape member {} script_id={}", number, script_id);
 
                 CastMemberType::Shape(ShapeMember {
                     shape_info: chunk.specific_data.shape_info().unwrap().clone(),

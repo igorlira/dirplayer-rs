@@ -239,9 +239,9 @@ fn is_director_whitespace(byte: char) -> bool {
 }
 
 #[allow(dead_code)]
-pub fn string_get_words(value: &String) -> Vec<String> {
-    let inner = value.split(is_director_whitespace);
-    inner
+pub fn string_get_words(value: &str) -> Vec<String> {
+    value
+        .split(is_director_whitespace)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()
