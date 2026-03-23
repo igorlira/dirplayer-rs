@@ -1437,10 +1437,41 @@ impl Bitmap {
             .unwrap_or(100);
         let ink = param_list.get("ink");
         let mut ink = if let Some(ink) = ink {
-            ink.int_value().unwrap() as u32
+            match ink {
+                Datum::Symbol(s) => match s.as_str() {
+                    "copy" => 0,
+                    "transparent" => 1,
+                    "reverse" => 2,
+                    "ghost" => 3,
+                    "notCopy" | "notcopy" => 4,
+                    "notTransparent" | "nottransparent" => 5,
+                    "notReverse" | "notreverse" => 6,
+                    "notGhost" | "notghost" => 7,
+                    "matte" => 8,
+                    "mask" => 9,
+                    "blend" => 32,
+                    "addPin" | "addpin" => 33,
+                    "add" => 34,
+                    "subtractPin" | "subtractpin" => 35,
+                    "backgroundTransparent" | "backgroundtransparent" | "bgTransparent" | "bgtransparent" => 36,
+                    "lightest" => 37,
+                    "subtract" => 38,
+                    "darkest" => 39,
+                    _ => ink.int_value().unwrap_or(0) as u32,
+                },
+                _ => ink.int_value().unwrap_or(0) as u32,
+            }
         } else {
             0
         };
+        // blendLevel (0-255) overrides blend (0-100) when present — used by
+        // copyPixels with [#ink: #blend, #blendLevel: N]
+        if let Some(blend_level) = param_list.get("blendLevel") {
+            if let Ok(level) = blend_level.int_value() {
+                blend = (level * 100 / 255).max(0).min(100);
+                if ink == 0 { ink = 32; } // auto-set blend ink when blendLevel is specified
+            }
+        }
         let bg_color = param_list.get("bgColor");
         let bg_color = if let Some(bg_color) = bg_color {
             bg_color.to_color_ref().unwrap().to_owned()

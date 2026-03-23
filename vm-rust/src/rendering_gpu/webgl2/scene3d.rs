@@ -10,6 +10,8 @@ use web_sys::{
     WebGlUniformLocation,
 };
 
+use log::debug;
+
 use super::context::WebGL2Context;
 use super::mesh3d::Mesh3dBuffers;
 use crate::director::chunks::w3d::types::*;
@@ -431,6 +433,19 @@ void main() {
             } else if (u_has_lightmap == 2) {
                 // Additive blend (lightmap): brighten with light data
                 final_color += lm_sample.rgb * intensity;
+            }
+        }
+
+        // Apply third texture layer if present
+        if (u_layer2_blend > 0) {
+            vec4 l2_sample = texture(u_layer2_tex, v_texcoord);
+            float l2_intensity = u_layer2_intensity;
+            if (u_layer2_blend == 1) {
+                // Multiply blend (shadow map)
+                final_color *= mix(vec3(1.0), l2_sample.rgb, l2_intensity);
+            } else if (u_layer2_blend == 2) {
+                // Additive blend (lightmap)
+                final_color += l2_sample.rgb * l2_intensity;
             }
         }
 
@@ -924,13 +939,13 @@ void main() {
                             let max_sum = wgt_sums.iter().cloned().fold(0.0f32, f32::max);
                             let zero_wgt = wgt_sums.iter().filter(|s| **s < 0.001).count();
                             let raw_lens: Vec<usize> = mesh.bone_indices.iter().take(3).map(|v| v.len()).collect();
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "[W3D-BONEDATA] mesh=\"{}\" verts={} bone_idx_count={} bone_wgt_count={} max_bone_idx={:.0} wgt_range=[{:.3},{:.3}] zero_wgt_verts={} raw_per_vert_lens={:?} first3_idx={:?} first3_wgt={:?}",
                                 name, mesh.positions.len(), mesh.bone_indices.len(), mesh.bone_weights.len(),
                                 max_idx, min_sum, max_sum, zero_wgt, raw_lens,
                                 &bone_idx_packed[..3.min(bone_idx_packed.len())],
                                 &bone_wgt_packed[..3.min(bone_wgt_packed.len())],
-                            ).into());
+                            );
                         }}
                     }
                     (Some(bone_idx_packed.as_slice()), Some(bone_wgt_packed.as_slice()))
@@ -2498,9 +2513,12 @@ void main() {
             specular: None,
         };
 
+        let mut diffuse_name = String::new();
+
         for layer in layers {
             if layer.name.is_empty() { continue; }
-            let tex = gpu_data.textures.get(&layer.name.to_lowercase());
+            let lower = layer.name.to_lowercase();
+            let tex = gpu_data.textures.get(&lower);
             let tex = match tex {
                 Some(t) => t,
                 None => continue,
@@ -2517,6 +2535,7 @@ void main() {
             // First non-specular texture is the diffuse base
             if result.diffuse.is_none() {
                 result.diffuse = Some(tex);
+                diffuse_name = lower;
                 // Store texture coordinate transform (non-identity = scrolling/rotation/etc.)
                 if layer.tex_transform != identity {
                     result.diffuse_tex_transform = layer.tex_transform;
@@ -2527,33 +2546,52 @@ void main() {
 
             // Subsequent non-specular textures are extra blend layers (up to 2)
             if result.extra_layers.len() < 2 {
-                // IFX texture combine modes:
-                //   blend_func 0 = GL_REPLACE (7681)
-                //   blend_func 1 = GL_ADD (260)
-                //   blend_func 2 = GL_MODULATE (8448)
-                //   blend_func 3+ = GL_DECAL (8449)
-                // Map to our blend values: 1=multiply, 2=add, 3=replace, 4=decal
-                // IFX blend_func for secondary layers:
-                //   0 = GL_REPLACE — but in practice, most W3D content uses this as modulate
-                //   1 = GL_ADD
-                //   2 = GL_MODULATE (multiply)
-                //   3 = GL_DECAL
-                let mut blend = match layer.blend_func {
-                    1 => 2,  // IFX ADD → our add mode
-                    2 => 1,  // IFX MODULATE → our multiply mode
-                    _ => 1,  // default to multiply (matches original behavior)
-                };
-                // Name-based heuristic: lightmaps use additive blending
-                let lower = layer.name.to_lowercase();
-                if lower.contains("lightmap") && !lower.contains("shadow") {
-                    blend = 2; // add for lightmaps
+                // Skip duplicate layers (same texture as diffuse) — W3D files often
+                // have the same texture in multiple layers as placeholders
+                if lower == diffuse_name {
+                    continue;
                 }
+
+                // Blend mode mapping:
+                //   blend_func 0 = #multiply / GL_REPLACE (ambiguous)
+                //   blend_func 1 = #add / GL_ADD
+                //   blend_func 2 = #replace / GL_MODULATE
+                //   blend_func 3 = #blend / GL_DECAL
+                let blend = if lower.contains("lightmap") && !lower.contains("shadow") {
+                    2 // add for lightmaps (name heuristic)
+                } else {
+                    match layer.blend_func {
+                        1 => 2,  // #add / GL_ADD → our add mode
+                        2 => 1,  // #replace / GL_MODULATE → our multiply mode
+                        _ => 1,  // #multiply → multiply
+                    }
+                };
 
                 result.extra_layers.push(TextureLayerBinding {
                     tex,
                     blend,
                     intensity: layer.intensity,
                 });
+            }
+        }
+
+        // Debug: log shaders with 3+ renderable layers (one-time per combination)
+        if result.extra_layers.len() >= 2 {
+            use std::sync::Mutex;
+            use std::collections::HashSet;
+            static LOGGED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+            let names: Vec<&str> = layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.name.as_str()).collect();
+            let key = format!("{:?}", names);
+            if let Ok(mut guard) = LOGGED.lock() {
+                let set = guard.get_or_insert_with(HashSet::new);
+                if set.insert(key.clone()) {
+                    let blends: Vec<u8> = layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.blend_func).collect();
+                    let intensities: Vec<f32> = layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.intensity).collect();
+                    web_sys::console::warn_1(&format!(
+                        "[W3D-TEX3] 3+ layers: names={:?} blend_funcs={:?} intensities={:?}",
+                        names, blends, intensities
+                    ).into());
+                }
             }
         }
 
