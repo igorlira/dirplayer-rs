@@ -410,9 +410,6 @@ pub struct Shockwave3dRuntimeState {
     // ─── Per-node overrides (keyed by node name) ───
     /// Transform overrides for nodes (set via Lingo) — used by renderer
     pub node_transforms: std::collections::HashMap<String, [f32; 16]>,
-    /// Tracks which nodes had their transforms EXPLICITLY set by Lingo (rotate/translate/scale)
-    /// Only these should override motion animations
-    pub node_transforms_dirty: std::collections::HashSet<String>,
     /// Persistent Transform3d DatumRefs per node — returned by .transform getter
     /// so that chained mutations (model.transform.position = v) persist
     pub node_transform_datums: std::collections::HashMap<String, crate::player::DatumRef>,

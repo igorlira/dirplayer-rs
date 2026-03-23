@@ -3453,8 +3453,6 @@ fn set_node_transform(
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
             w3d.runtime_state.node_transforms.insert(node_name.to_string(), m);
-            // Mark this node as explicitly modified — overrides motion animation
-            w3d.runtime_state.node_transforms_dirty.insert(node_name.to_string());
             // Also update persistent datum if it exists
             if let Some(datum_ref) = w3d.runtime_state.node_transform_datums.get(node_name) {
                 let m64: [f64; 16] = m.map(|v| v as f64);

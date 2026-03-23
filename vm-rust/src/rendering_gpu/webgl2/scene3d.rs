@@ -1874,15 +1874,8 @@ void main() {
                 .unwrap_or(node.transform);
             let authored_rot = rotation_only_matrix(&node.transform);
             let current_rot = rotation_only_matrix(&current_local);
-            let has_runtime_override = runtime_state
-                .map(|rs| rs.node_transforms_dirty.contains(&node.name))
-                .unwrap_or(false);
-            let delta = if has_runtime_override {
-                current_rot
-            } else {
-                let authored_inv = inverse_rotation_matrix(&authored_rot);
-                mat4_multiply_col_major(&current_rot, &authored_inv)
-            };
+            let authored_inv = inverse_rotation_matrix(&authored_rot);
+            let delta = mat4_multiply_col_major(&current_rot, &authored_inv);
             result = mat4_multiply_col_major(&result, &delta);
         }
 
