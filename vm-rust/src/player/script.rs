@@ -28,6 +28,7 @@ use super::{
             date::DateDatumHandlers, math::MathDatumHandlers,
             vector::VectorDatumHandlers, xml::XmlDatumHandlers,
             float::FloatDatumHandlers,
+            cast_member::shockwave3d::Shockwave3dMemberHandlers,
         },
         types::TypeUtils,
     },
@@ -160,8 +161,8 @@ pub fn script_get_prop_opt(
         }
     }
 
-    // Fall back to built-in "class" property if not found in instance or ancestors
-    if prop_name == "class" {
+    // Fall back to built-in properties if not found in instance or ancestors
+    if prop_name == "class" || prop_name == "script" {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
     }
