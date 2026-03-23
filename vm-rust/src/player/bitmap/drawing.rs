@@ -1468,7 +1468,7 @@ impl Bitmap {
         // copyPixels with [#ink: #blend, #blendLevel: N]
         if let Some(blend_level) = param_list.get("blendLevel") {
             if let Ok(level) = blend_level.int_value() {
-                blend = (level * 100 / 255).max(0).min(100);
+                blend = ((level as f64 * 100.0 / 255.0).round() as i32).max(0).min(100);
                 if ink == 0 { ink = 32; } // auto-set blend ink when blendLevel is specified
             }
         }

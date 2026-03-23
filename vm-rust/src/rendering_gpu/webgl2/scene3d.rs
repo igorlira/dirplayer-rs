@@ -438,7 +438,8 @@ void main() {
 
         // Apply third texture layer if present
         if (u_layer2_blend > 0) {
-            vec4 l2_sample = texture(u_layer2_tex, v_texcoord);
+            vec2 l2_uv = (u_has_texcoord2 > 0) ? v_texcoord2 : v_texcoord;
+            vec4 l2_sample = texture(u_layer2_tex, l2_uv);
             float l2_intensity = u_layer2_intensity;
             if (u_layer2_blend == 1) {
                 // Multiply blend (shadow map)
@@ -1211,6 +1212,23 @@ void main() {
         self.ensure_fbo(context, width, height)?;
         self.ensure_member_data(context, member_key, scene)?;
 
+        // Sync lightmap UVs: check scene CLOD mesh tex_coords[1] and upload to GPU if new
+        if let Some(gpu_data) = self.member_data.get_mut(&member_key) {
+            for (resource_name, mesh_group) in gpu_data.mesh_groups.iter_mut() {
+                if let Some(clod_meshes) = scene.clod_meshes.get(resource_name) {
+                    for (mesh_idx, mesh_buf) in mesh_group.iter_mut().enumerate() {
+                        if mesh_buf.meshdeform_uv_synced { continue; }
+                        if let Some(mesh) = clod_meshes.get(mesh_idx) {
+                            if mesh.tex_coords.len() >= 2 && !mesh.tex_coords[1].is_empty() {
+                                mesh_buf.update_texcoord2(context.gl(), &mesh.tex_coords[1]);
+                                mesh_buf.meshdeform_uv_synced = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let gl = context.gl();
         let shader = self.shader.as_ref().unwrap();
         let fbo = self.fbo.as_ref().unwrap();
@@ -1811,6 +1829,8 @@ void main() {
                     }
                     gl.uniform1i(shader.u_has_vertex_color.as_ref(),
                         if mesh_buf.has_vertex_colors { 1 } else { 0 });
+                    gl.uniform1i(shader.u_has_texcoord2.as_ref(),
+                        if mesh_buf.has_texcoord2 { 1 } else { 0 });
 
                     mesh_buf.bind(gl);
                     mesh_buf.draw(gl);

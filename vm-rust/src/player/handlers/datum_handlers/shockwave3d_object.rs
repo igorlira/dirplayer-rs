@@ -898,6 +898,7 @@ impl Shockwave3dObjectDatumHandlers {
                         let layer_idx: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
 
                         // Parse UV coordinates from the value (list of [u, v] pairs)
+                        // (UV data stored directly on scene CLOD mesh tex_coords[1])
                         let coords: Vec<[f32; 2]> = if let Datum::List(_, items, _) = value {
                             items.iter().map(|item_ref| {
                                 let item = player.get_datum(item_ref);
@@ -915,19 +916,34 @@ impl Shockwave3dObjectDatumHandlers {
 
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                use crate::player::cast_member::{MeshDeformState, MeshDeformMesh, MeshDeformTextureLayer};
-                                let md = w3d.runtime_state.mesh_deform
-                                    .entry(model_name)
-                                    .or_insert_with(|| MeshDeformState::default());
-                                // Auto-extend meshes
-                                while md.meshes.len() <= mesh_idx {
-                                    md.meshes.push(MeshDeformMesh::default());
+                                // Find the CLOD mesh key by suffix match — model_name is a face group
+                                // name like "w_terrain_wall-FACES01" but CLOD keys are compound like
+                                // "MAP_01_w_terrain_wall-FACES01_w_terrain_wall-FACES01"
+                                let suffix = format!("_{}", model_name);
+                                let clod_key = w3d.parsed_scene.as_ref().and_then(|scene| {
+                                    // Try exact match first, then suffix match
+                                    if scene.clod_meshes.contains_key(&model_name) {
+                                        Some(model_name.clone())
+                                    } else {
+                                        scene.clod_meshes.keys()
+                                            .find(|k| k.ends_with(&suffix))
+                                            .cloned()
+                                    }
+                                });
+                                // Write UVs directly into the scene's CLOD mesh tex_coords[1]
+                                // so the Rc-shared scene data is visible to the renderer
+                                if let Some(ref key) = clod_key {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(clod_meshes) = scene.clod_meshes.get_mut(key) {
+                                            if let Some(mesh) = clod_meshes.get_mut(mesh_idx) {
+                                                while mesh.tex_coords.len() < 2 {
+                                                    mesh.tex_coords.push(Vec::new());
+                                                }
+                                                mesh.tex_coords[1] = coords;
+                                            }
+                                        }
+                                    }
                                 }
-                                // Auto-extend texture layers
-                                while md.meshes[mesh_idx].texture_layers.len() <= layer_idx {
-                                    md.meshes[mesh_idx].texture_layers.push(MeshDeformTextureLayer::default());
-                                }
-                                md.meshes[mesh_idx].texture_layers[layer_idx].texture_coordinate_list = coords;
                             }
                         }
                         return Ok(());
@@ -2084,33 +2100,18 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                 }
                             }
-                            // meshDeformMesh.textureLayer[n] — return the PropList item from persistent list
+                            // meshDeformMesh.textureLayer[n] — return a meshDeformTexLayer ref
                             "textureLayer" if s3d_ref.object_type == "meshDeformMesh" => {
                                 let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
                                 let model_name = parts.get(0).unwrap_or(&"").to_string();
                                 let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                                // Get the persistent textureLayer list DatumRef
-                                let list_ref = {
-                                    let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
-                                    member.and_then(|m| m.member_type.as_shockwave3d())
-                                        .and_then(|w3d| w3d.runtime_state.mesh_deform.get(&model_name))
-                                        .and_then(|md| md.meshes.get(mesh_idx))
-                                        .and_then(|mesh| mesh.texture_layer_datum_ref.clone())
-                                };
-                                if let Some(list_ref) = list_ref {
-                                    let list_datum = player.get_datum(&list_ref).clone();
-                                    if let Datum::List(_, items, _) = list_datum {
-                                        if idx < items.len() {
-                                            Some(items[idx].clone())
-                                        } else {
-                                            Some(player.alloc_datum(Datum::Void))
-                                        }
-                                    } else {
-                                        Some(player.alloc_datum(Datum::Void))
-                                    }
-                                } else {
-                                    Some(player.alloc_datum(Datum::Void))
-                                }
+                                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                                Some(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                    cast_lib: member_ref.cast_lib,
+                                    cast_member: member_ref.cast_member,
+                                    object_type: "meshDeformTexLayer".to_string(),
+                                    name: format!("{}:{}:{}", model_name, mesh_idx, idx),
+                                })))
                             }
                             // meshDeformMesh.vertexList[j] — return the j-th vertex vector
                             "vertexList" if s3d_ref.object_type == "meshDeformMesh" => {

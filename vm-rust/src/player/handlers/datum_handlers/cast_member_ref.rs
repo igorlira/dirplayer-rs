@@ -327,6 +327,9 @@ impl CastMemberRefHandlers {
                             (String::new(), identity, String::new(), String::new(), vec![])
                         };
 
+                        // Track shader name remapping for -clone suffix creation
+                        let mut shader_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
                             let (src_shaders, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons) = {
@@ -349,7 +352,7 @@ impl CastMemberRefHandlers {
                                 (shaders, resources, meshes, raw, textures, lights, light_nodes, skeletons)
                             };
 
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "[W3D-CLONE] {}(\"{}\") src_model=\"{}\" src_member={:?}: \
                                  {} shaders, {} model_resources, {} clod_meshes(keys={:?}), {} raw_meshes(names={:?}), {} textures, \
                                  src_res=\"{}\", src_mres=\"{}\"",
@@ -359,7 +362,7 @@ impl CastMemberRefHandlers {
                                 src_raw_meshes.len(), src_raw_meshes.iter().map(|m| m.name.clone()).collect::<Vec<String>>(),
                                 src_textures.len(),
                                 source_resource_name, source_model_resource_name,
-                            ).into());
+                            );
 
                             // Namespace prefix to avoid name collisions between
                             // different source members that share resource names like "Group01"
@@ -368,17 +371,28 @@ impl CastMemberRefHandlers {
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
-                                        // Shaders: keep original names (shared safely, game creates per-instance via CloneShader)
+                                        // Shaders: reuse existing by name (Director behavior).
+                                        // Director reuses shaders with identical names rather than cloning.
                                         for shader in &src_shaders {
                                             if !scene.shaders.iter().any(|s| s.name == shader.name) {
                                                 scene.shaders.push(shader.clone());
                                             }
                                         }
                                         // Model resources: namespace to prevent collisions
+                                        // Also remap shader bindings to use -clone names
                                         for (res_name, res_info) in &src_model_resources {
                                             let new_name = format!("{}{}", ns, res_name);
                                             if !scene.model_resources.contains_key(&new_name) {
-                                                scene.model_resources.insert(new_name, res_info.clone());
+                                                let mut cloned_res = res_info.clone();
+                                                // Remap shader bindings to cloned names
+                                                for binding in &mut cloned_res.shader_bindings {
+                                                    for mesh_shader in &mut binding.mesh_bindings {
+                                                        if let Some(new_name) = shader_name_map.get(mesh_shader.as_str()) {
+                                                            *mesh_shader = new_name.clone();
+                                                        }
+                                                    }
+                                                }
+                                                scene.model_resources.insert(new_name, cloned_res);
                                             }
                                         }
                                         // CLOD meshes: namespace to prevent collisions
@@ -448,6 +462,11 @@ impl CastMemberRefHandlers {
                             format!("{}{}", ns, source_model_resource_name)
                         } else { source_model_resource_name.clone() };
 
+                        // Remap shader_name if it was cloned
+                        let effective_shader_name = shader_name_map.get(&source_shader_name)
+                            .cloned()
+                            .unwrap_or(source_shader_name);
+
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d.scene_mut() {
@@ -458,7 +477,7 @@ impl CastMemberRefHandlers {
                                             parent_name: "World".to_string(),
                                             resource_name: mapped_resource,
                                             model_resource_name: mapped_model_resource,
-                                            shader_name: source_shader_name,
+                                            shader_name: effective_shader_name,
                                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
