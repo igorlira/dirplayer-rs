@@ -3702,7 +3702,7 @@ fn mat4_mul_f32(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     r
 }
 
-/// Euler angles (degrees) to column-major rotation matrix
+/// Euler angles (degrees) to column-major rotation matrix (IFX convention: R = Rx * Ry * Rz)
 fn euler_to_matrix_f32(rx_deg: f32, ry_deg: f32, rz_deg: f32) -> [f32; 16] {
     let rx = rx_deg.to_radians();
     let ry = (-ry_deg).to_radians();
@@ -3711,7 +3711,7 @@ fn euler_to_matrix_f32(rx_deg: f32, ry_deg: f32, rz_deg: f32) -> [f32; 16] {
     let (sy, cy) = (ry.sin(), ry.cos());
     let (sz, cz) = (rz.sin(), rz.cos());
 
-    // True column-major: m[col*4+row], R = Rz * Ry * Rx
+    // R = Rz * Ry * Rx, true column-major: m[col*4+row]
     [
         cy*cz,              cy*sz,              -sy,               0.0,  // col 0
         sx*sy*cz - cx*sz,   sx*sy*sz + cx*cz,   sx*cy,            0.0,  // col 1
