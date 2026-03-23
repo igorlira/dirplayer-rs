@@ -30,6 +30,8 @@ pub struct Mesh3dBuffers {
     pub index_count: i32,
     pub has_bones: bool,
     pub has_vertex_colors: bool,
+    pub has_texcoord2: bool,
+    pub meshdeform_uv_synced: bool,
 }
 
 impl Mesh3dBuffers {
@@ -246,10 +248,39 @@ impl Mesh3dBuffers {
             vbo_bone_weights,
             vbo_vertex_colors,
             ibo,
+            has_texcoord2: texcoords2.is_some(),
+            meshdeform_uv_synced: false,
             index_count,
             has_bones,
             has_vertex_colors: vertex_colors.is_some(),
         })
+    }
+
+    /// Upload or replace the secondary UV set (location 3) for lightmap/shadow coordinates.
+    /// Called at render time when meshDeform provides runtime lightmap UVs.
+    pub fn update_texcoord2(&mut self, gl: &WebGl2RenderingContext, tc2: &[[f32; 2]]) {
+        gl.bind_vertex_array(Some(&self.vao));
+        let vbo = if let Some(ref vbo) = self.vbo_texcoords2 {
+            vbo.clone()
+        } else {
+            let vbo = gl.create_buffer().unwrap();
+            self.vbo_texcoords2 = Some(vbo.clone());
+            vbo
+        };
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&vbo));
+        let tc_flat: Vec<f32> = tc2.iter().flat_map(|t| t.iter().copied()).collect();
+        unsafe {
+            let array = js_sys::Float32Array::view(&tc_flat);
+            gl.buffer_data_with_array_buffer_view(
+                WebGl2RenderingContext::ARRAY_BUFFER,
+                &array,
+                WebGl2RenderingContext::DYNAMIC_DRAW,
+            );
+        }
+        gl.enable_vertex_attrib_array(3);
+        gl.vertex_attrib_pointer_with_i32(3, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
+        gl.bind_vertex_array(None);
+        self.has_texcoord2 = true;
     }
 
     /// Bind this mesh for drawing
