@@ -3134,11 +3134,12 @@ void main() {
     fn build_projection_matrix(&self, scene: &W3dScene, _fbo_aspect: f32,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> [f32; 16] {
-        let view_node = scene.nodes.iter()
-            .filter(|n| n.node_type == W3dNodeType::View)
-            .last();
         let default_cam = "DefaultView".to_string();
         let cam_name = self.active_camera.as_ref().unwrap_or(&default_cam);
+        // Match by active camera name first, fall back to any view node
+        let view_node = scene.nodes.iter()
+            .find(|n| n.node_type == W3dNodeType::View && n.name == *cam_name)
+            .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View));
 
         let (fov, near, far, aspect) = if let Some(node) = view_node {
             let mut f = node.far_plane;
