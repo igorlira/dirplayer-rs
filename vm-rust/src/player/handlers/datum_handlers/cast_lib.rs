@@ -11,10 +11,10 @@ pub struct CastLibDatumHandlers {}
 impl CastLibDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "getPropRef" => Self::get_prop_ref(datum, args),
             _ => Err(ScriptError::new_code(
                 ScriptErrorCode::HandlerNotFound,

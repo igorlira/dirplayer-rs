@@ -14,10 +14,10 @@ impl ButtonMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
         datum: &crate::player::DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<crate::player::DatumRef>,
     ) -> Result<crate::player::DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "count" => {
                 let member_ref = player.get_datum(datum).to_member_ref()?;
                 let member = player
@@ -32,7 +32,7 @@ impl ButtonMemberHandlers {
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
                     &button.field.text,
-                    StringChunkType::from(&count_of),
+                    count_of.as_str().into(),
                     delimiter,
                 )?;
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -46,7 +46,7 @@ impl ButtonMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -55,7 +55,7 @@ impl ButtonMemberHandlers {
             .unwrap();
         let button = member.member_type.as_button().unwrap();
 
-        match prop.as_str() {
+        match prop {
             "text" => Ok(Datum::String(button.field.text.to_owned())),
             "font" => Ok(Datum::String(button.field.font.to_owned())),
             "fontSize" => Ok(Datum::Int(button.field.font_size as i32)),
@@ -84,10 +84,10 @@ impl ButtonMemberHandlers {
 
     pub fn set_prop(
         member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop {
             "text" => borrow_member_mut(
                 member_ref,
                 |_player| value.string_value(),

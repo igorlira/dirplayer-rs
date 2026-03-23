@@ -97,8 +97,8 @@ impl BreakpointManager {
 
     pub fn has_breakpoint(
         &self,
-        script_name: &String,
-        handler_name: &String,
+        script_name: &str,
+        handler_name: &str,
         bytecode_index: usize,
     ) -> bool {
         self.breakpoints.iter().any(|bp| {
@@ -110,8 +110,8 @@ impl BreakpointManager {
 
     pub fn find_breakpoint_for_bytecode(
         &self,
-        script_name: &String,
-        handler_name: &String,
+        script_name: &str,
+        handler_name: &str,
         bytecode_index: usize,
     ) -> Option<&Breakpoint> {
         self.breakpoints.iter().find(|bp| {

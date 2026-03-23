@@ -52,7 +52,7 @@ use crate::{
 
 pub async fn player_call_datum_handler(
     obj_ref: &DatumRef,
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     // Track handler depth
@@ -141,7 +141,7 @@ pub async fn player_call_datum_handler(
             let (xtra_name, instance_id) = reserve_player_ref(|player| {
                 let (xtra_name, instance_id) =
                     player.get_datum(obj_ref).to_xtra_instance().unwrap();
-                (xtra_name.clone(), instance_id.clone())
+                (xtra_name.to_owned(), instance_id.clone())
             });
             if has_xtra_instance_async_handler(&xtra_name, handler_name, instance_id) {
                 call_xtra_instance_async_handler(&xtra_name, instance_id, handler_name, args).await
@@ -160,7 +160,7 @@ pub async fn player_call_datum_handler(
         }),
         DatumType::CastLibRef => CastLibDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::MovieRef => {
-            match handler_name.as_str() {
+            match handler_name {
                 "newMember" => {
                     Box::pin(crate::player::handlers::types::TypeHandlers::new(&args.clone())).await
                 }

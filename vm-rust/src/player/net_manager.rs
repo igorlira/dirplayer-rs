@@ -243,7 +243,7 @@ impl NetManager {
     }
 }
 
-fn normalize_task_url(url: &String, base_path: Option<&Url>) -> Url {
+fn normalize_task_url(url: &str, base_path: Option<&Url>) -> Url {
     let slash_norm = url.replace("\\", "/");
     let parsed_path = Path::new(slash_norm.as_str());
     let parsed_url = Url::parse(&slash_norm);
@@ -257,7 +257,7 @@ fn normalize_task_url(url: &String, base_path: Option<&Url>) -> Url {
     if parsed_path.is_absolute() {
         return Url::parse(format!("file:///{slash_norm}").as_str()).unwrap();
     } else if let Some(base_path) = base_path {
-        return base_path.join(url.as_str()).unwrap();
+        return base_path.join(url).unwrap();
     } else {
         return Url::parse(&slash_norm).unwrap();
     }
@@ -265,12 +265,11 @@ fn normalize_task_url(url: &String, base_path: Option<&Url>) -> Url {
 
 pub fn find_task_with_url<'a>(
     tasks: &'a HashMap<u32, NetTask>,
-    url: &String,
+    url: &str,
 ) -> Option<&'a NetTask> {
     let decoded_url = percent_decode_str(url)
         .decode_utf8()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|_| url.clone());
+        .unwrap_or_else(|_| url.into());
     tasks
         .iter()
         .find(|(_, x)| x.url == decoded_url)

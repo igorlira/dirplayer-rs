@@ -67,7 +67,7 @@ impl ScriptInstanceUtils {
     }
 
     pub fn get_handler(
-        name: &String,
+        name: &str,
         datum: &DatumRef,
         player: &DirPlayer,
     ) -> Result<Option<ScriptHandlerRef>, ScriptError> {
@@ -86,7 +86,7 @@ impl ScriptInstanceUtils {
     }
 
     pub fn get_script_instance_handler(
-        name: &String,
+        name: &str,
         instance_ref: &ScriptInstanceRef,
         player: &DirPlayer,
     ) -> Result<Option<ScriptHandlerRef>, ScriptError> {
@@ -115,7 +115,7 @@ impl ScriptInstanceUtils {
 
     pub fn get_handler_from_first_arg(
         args: &Vec<DatumRef>,
-        handler_name: &String,
+        handler_name: &str,
     ) -> Option<(Option<ScriptInstanceRef>, (CastMemberRef, String))> {
         reserve_player_mut(|player| {
             let receiver_handler = args
@@ -166,7 +166,7 @@ impl ScriptInstanceUtils {
 
     pub fn set_at(
         datum: &DatumRef,
-        key: &String,
+        key: &str,
         value: &DatumRef,
         player: &mut DirPlayer,
     ) -> Result<(), ScriptError> {
@@ -178,7 +178,7 @@ impl ScriptInstanceUtils {
                 ))
             }
         };
-        match key.as_str() {
+        match key {
             "ancestor" => {
                 let value_datum = player.get_datum(value).to_owned();
                 match value_datum {
@@ -256,7 +256,7 @@ impl ScriptInstanceDatumHandlers {
         None
     }
 
-    pub fn has_async_handler(datum: &DatumRef, name: &String) -> Result<bool, ScriptError> {
+    pub fn has_async_handler(datum: &DatumRef, name: &str) -> Result<bool, ScriptError> {
         return reserve_player_ref(|player| {
             if let Datum::ScriptInstanceRef(ref instance_ref) = player.get_datum(datum) {
                 if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, instance_ref, name) {
@@ -284,7 +284,7 @@ impl ScriptInstanceDatumHandlers {
 
     pub async fn call_async(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         let (instance_id, handler_ref) = reserve_player_ref(|player| {
@@ -321,7 +321,7 @@ impl ScriptInstanceDatumHandlers {
             }
 
             // Director system events should be silently ignored if not implemented
-            match handler_name.as_str() {
+            match handler_name {
                 "exitFrame" | "enterFrame" | "prepareFrame" | "idle" | "stepFrame" |
                 "mouseDown" | "mouseUp" | "mouseEnter" | "mouseLeave" | "mouseWithin" |
                 "keyDown" | "keyUp" | "beginSprite" | "endSprite" | "prepareMovie" |
@@ -535,10 +535,10 @@ impl ScriptInstanceDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "setAt" => Self::set_at(datum, args),
             "handler" => Self::handler(datum, args),
             "setaProp" => Self::set_a_prop(datum, args),

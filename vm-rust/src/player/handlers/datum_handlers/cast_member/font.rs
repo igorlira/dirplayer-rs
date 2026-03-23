@@ -320,7 +320,7 @@ impl FontMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         let member_ref = player.get_datum(datum).to_member_ref()?;
@@ -330,7 +330,7 @@ impl FontMemberHandlers {
             .find_member_by_ref(&member_ref)
             .unwrap();
         let text = member.member_type.as_text().unwrap();
-        match handler_name.as_str() {
+        match handler_name {
             "count" => {
                 let count_of = player.get_datum(&args[0]).string_value()?;
                 if args.len() != 1 {
@@ -1206,7 +1206,7 @@ impl FontMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -1216,7 +1216,7 @@ impl FontMemberHandlers {
 
         match &member.member_type {
             CastMemberType::Text(text_data) => {
-                match prop.as_str() {
+                match prop {
                     "text" => Ok(Datum::String(text_data.text.clone())),
                     "alignment" => Ok(Datum::String(text_data.alignment.clone())),
                     "wordWrap" => Ok(datum_bool(text_data.word_wrap)),
@@ -1282,7 +1282,7 @@ impl FontMemberHandlers {
                         let (width, height) =
                             measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
 
-                        match prop.as_str() {
+                        match prop {
                             "rect" => Ok(Datum::Rect([
                                 player.alloc_datum(Datum::Int(0)),
                                 player.alloc_datum(Datum::Int(0)),
@@ -1384,7 +1384,7 @@ impl FontMemberHandlers {
                 }
             }
 
-            CastMemberType::Font(font_data) => match prop.as_str() {
+            CastMemberType::Font(font_data) => match prop {
                 "text" => Ok(Datum::String(font_data.preview_text.clone())),
                 "previewText" => Ok(Datum::String(font_data.preview_text.clone())),
                 "previewHtml" => {

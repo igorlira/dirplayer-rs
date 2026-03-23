@@ -20,10 +20,10 @@ pub struct BitmapDatumHandlers {}
 impl BitmapDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "fill" => Self::fill(datum, args),
             "draw" => Self::draw(datum, args),
             "setPixel" => Self::set_pixel(datum, args),
@@ -645,7 +645,7 @@ impl BitmapDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let bitmap = player.get_datum(datum);
         let bitmap = match bitmap {
@@ -657,7 +657,7 @@ impl BitmapDatumHandlers {
         let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
         let width = bitmap.width as i32;
         let height = bitmap.height as i32;
-        let result = match prop.as_str() {
+        let result = match prop {
             "width" => Ok(Datum::Int(width)),
             "height" => Ok(Datum::Int(height)),
             "rect" => {
@@ -688,11 +688,11 @@ impl BitmapDatumHandlers {
     pub fn set_bitmap_ref_prop(
         player: &mut DirPlayer,
         bitmap_ref: BitmapRef,
-        prop: &String,
+        prop: &str,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
         let value = player.get_datum(value);
-        match prop.as_str() {
+        match prop {
             "paletteRef" => match value {
                 Datum::Symbol(symbol) => {
                     let palette = BuiltInPalette::from_symbol_string(&symbol).ok_or_else(|| {

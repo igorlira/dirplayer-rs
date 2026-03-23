@@ -150,7 +150,7 @@ impl CastLib {
         self.members.get_mut(&number)
     }
 
-    pub fn find_member_by_name(&self, name: &String) -> Option<&CastMember> {
+    pub fn find_member_by_name(&self, name: &str) -> Option<&CastMember> {
         for member in self.members.values() {
             if member.name.eq_ignore_ascii_case(name) {
                 return Some(member);
@@ -180,12 +180,12 @@ impl CastLib {
 
     pub fn set_prop(
         &mut self,
-        prop: &String,
+        prop: &str,
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
         // TODO
-        match prop.as_str() {
+        match prop {
             "preloadMode" => {
                 self.preload_mode = value.int_value()? as u16;
             }
@@ -205,8 +205,8 @@ impl CastLib {
         Ok(())
     }
 
-    pub fn get_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
-        match prop.as_str() {
+    pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
+        match prop {
             "preloadMode" => Ok(Datum::Int(self.preload_mode as i32)),
             "fileName" => Ok(Datum::String(self.file_name.clone())),
             "number" => Ok(Datum::Int(self.number as i32)),
@@ -479,7 +479,7 @@ impl CastMemberRef {
 
 pub async fn player_cast_lib_set_prop(
     cast_lib: u32,
-    prop_name: &String,
+    prop_name: &str,
     value: Datum,
 ) -> Result<(), ScriptError> {
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };

@@ -9,10 +9,10 @@ impl FloatDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let float_value = player.get_datum(datum_ref).float_value()?;
-        match prop.as_str() {
+        match prop {
             "abs" => Ok(player.alloc_datum(Datum::Float(float_value.abs()))),
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("float".to_string()))),
             "integer" => Ok(player.alloc_datum(Datum::Int(float_value.round() as i32))),

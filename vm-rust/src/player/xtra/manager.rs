@@ -6,7 +6,7 @@ use crate::{
 use super::multiuser::{borrow_multiuser_manager_mut, MultiuserXtraManager};
 use super::xmlparser::{borrow_xmlparser_manager_mut, XmlParserXtraManager};
 
-pub fn is_xtra_registered(name: &String) -> bool {
+pub fn is_xtra_registered(name: &str) -> bool {
     let name_lower = name.to_lowercase();
     return name == "Multiuser" || name_lower == "xmlparser";
 }
@@ -16,9 +16,9 @@ pub fn get_registered_xtra_names() -> Vec<&'static str> {
 }
 
 pub fn call_xtra_instance_handler(
-    xtra_name: &String,
+    xtra_name: &str,
     instance_id: XtraInstanceId,
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     let xtra_name_lower = xtra_name.to_lowercase();
@@ -37,9 +37,9 @@ pub fn call_xtra_instance_handler(
 }
 
 pub async fn call_xtra_instance_async_handler(
-    xtra_name: &String,
+    xtra_name: &str,
     instance_id: XtraInstanceId,
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     let xtra_name_lower = xtra_name.to_lowercase();
@@ -68,8 +68,8 @@ pub async fn call_xtra_instance_async_handler(
 }
 
 pub fn has_xtra_instance_async_handler(
-    xtra_name: &String,
-    handler_name: &String,
+    xtra_name: &str,
+    handler_name: &str,
     _instance_id: XtraInstanceId,
 ) -> bool {
     let xtra_name_lower = xtra_name.to_lowercase();
@@ -81,7 +81,7 @@ pub fn has_xtra_instance_async_handler(
 }
 
 pub fn create_xtra_instance(
-    xtra_name: &String,
+    xtra_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<XtraInstanceId, ScriptError> {
     let xtra_name_lower = xtra_name.to_lowercase();

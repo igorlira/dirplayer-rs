@@ -24,7 +24,7 @@ use super::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, s
 #[grammar = "lingo.pest"]
 struct LingoParser;
 
-fn tokenize_lingo(_expr: &String) -> Vec<String> {
+fn tokenize_lingo(_expr: &str) -> Vec<String> {
     [].to_vec()
 }
 
@@ -1486,7 +1486,7 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                             }
                             Datum::PropList(..) => {
                                 let formatted_key = format_datum(&index_ref, &player);
-                                PropListUtils::set_at(player, &list_ref, &index_ref, &right_datum, formatted_key)?;
+                                PropListUtils::set_at(player, &list_ref, &index_ref, &right_datum, &formatted_key)?;
                                 Ok(right_datum)
                             }
                             Datum::Point(_) => {

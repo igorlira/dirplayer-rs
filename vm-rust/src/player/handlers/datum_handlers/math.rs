@@ -20,7 +20,7 @@ pub struct MathDatumHandlers;
 impl MathDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -80,7 +80,7 @@ impl MathDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let name = prop.to_lowercase();
         match name.as_str() {
@@ -96,7 +96,7 @@ impl MathDatumHandlers {
     pub fn set_prop(
         _player: &mut DirPlayer,
         _datum: &DatumRef,
-        prop: &String,
+        prop: &str,
         _value: &DatumRef,
     ) -> Result<(), ScriptError> {
         Err(ScriptError::new(format!(

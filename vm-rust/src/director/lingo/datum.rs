@@ -62,15 +62,21 @@ pub enum StringChunkType {
     Line,
 }
 
-impl From<&String> for StringChunkType {
-    fn from(s: &String) -> Self {
-        match s.as_str() {
+impl From<&str> for StringChunkType {
+    fn from(s: &str) -> Self {
+        match s {
             "item" => StringChunkType::Item,
             "word" => StringChunkType::Word,
             "char" => StringChunkType::Char,
             "line" => StringChunkType::Line,
             _ => panic!("Invalid string chunk type"),
         }
+    }
+}
+
+impl From<&String> for StringChunkType {
+    fn from(s: &String) -> Self {
+        StringChunkType::from(s.as_str())
     }
 }
 
@@ -574,7 +580,7 @@ impl Datum {
         }
     }
 
-    pub fn to_xtra_instance(&self) -> Result<(&String, &XtraInstanceId), ScriptError> {
+    pub fn to_xtra_instance(&self) -> Result<(&str, &XtraInstanceId), ScriptError> {
         match self {
             Datum::XtraInstance(xtra_name, xtra_instance) => Ok((xtra_name, xtra_instance)),
             _ => Err(ScriptError::new(
@@ -583,7 +589,7 @@ impl Datum {
         }
     }
 
-    pub fn to_xtra_name(&self) -> Result<&String, ScriptError> {
+    pub fn to_xtra_name(&self) -> Result<&str, ScriptError> {
         match self {
             Datum::Xtra(name) => Ok(name),
             _ => Err(ScriptError::new(
@@ -594,7 +600,7 @@ impl Datum {
 
     pub fn to_string_chunk(
         &self,
-    ) -> Result<(&StringChunkSource, &StringChunkExpr, &String), ScriptError> {
+    ) -> Result<(&StringChunkSource, &StringChunkExpr, &str), ScriptError> {
         match self {
             Datum::StringChunk(datum_ref, expr, value) => Ok((datum_ref, expr, value)),
             _ => Err(ScriptError::new(

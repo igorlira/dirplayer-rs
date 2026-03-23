@@ -109,12 +109,12 @@ impl StringChunkUtils {
     }
 
     pub fn string_by_deleting_chunk(
-        string: &String,
+        string: &str,
         chunk_expr: &StringChunkExpr,
     ) -> Result<String, ScriptError> {
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
-                let mut new_string = string.clone();
+                let mut new_string = string.to_owned();
                 let (start, end) =
                     Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.replace_range(start..end, "");
@@ -127,7 +127,7 @@ impl StringChunkUtils {
                     Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
 
                 if chunk_list.len() == 0 {
-                    return Ok(string.clone());
+                    return Ok(string.to_owned());
                 }
 
                 let mut new_chunks = chunk_list;
@@ -142,7 +142,7 @@ impl StringChunkUtils {
                     Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
 
                 if chunk_list.len() == 0 {
-                    return Ok(string.clone());
+                    return Ok(string.to_owned());
                 }
 
                 let mut new_chunks = chunk_list;
@@ -156,7 +156,7 @@ impl StringChunkUtils {
                     Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
 
                 if chunk_list.len() == 0 {
-                    return Ok(string.clone());
+                    return Ok(string.to_owned());
                 }
 
                 let mut new_chunks = chunk_list;
@@ -167,13 +167,13 @@ impl StringChunkUtils {
     }
 
     pub fn string_by_setting_chunk(
-        string: &String,
+        string: &str,
         chunk_expr: &StringChunkExpr,
-        replace_with: &String,
+        replace_with: &str,
     ) -> Result<String, ScriptError> {
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
-                let mut new_string = string.clone();
+                let mut new_string = string.to_owned();
                 let (start, end) =
                     Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.replace_range(start..end, &replace_with);
@@ -217,7 +217,7 @@ impl StringChunkUtils {
     }
 
     pub fn resolve_chunk_list(
-        string: &String,
+        string: &str,
         chunk_type: StringChunkType,
         item_delimiter: char,
     ) -> Result<Vec<String>, ScriptError> {
@@ -239,7 +239,7 @@ impl StringChunkUtils {
     }
 
     pub fn resolve_last_chunk(
-        string: &String,
+        string: &str,
         chunk_type: StringChunkType,
         item_delimiter: char,
     ) -> Result<String, ScriptError> {
@@ -265,7 +265,7 @@ impl StringChunkUtils {
     }
 
     pub fn resolve_chunk_count(
-        string: &String,
+        string: &str,
         chunk_type: StringChunkType,
         item_delimiter: char,
     ) -> Result<usize, ScriptError> {
@@ -280,7 +280,7 @@ impl StringChunkUtils {
     }
 
     pub fn resolve_chunk_expr_string(
-        string: &String,
+        string: &str,
         chunk_expr: &StringChunkExpr,
     ) -> Result<String, ScriptError> {
         // let type_str: String = chunk_expr.chunk_type.to_owned().into();
@@ -356,14 +356,14 @@ impl StringChunkUtils {
     }
 
     pub fn string_by_putting_into_chunk(
-        string: &String,
+        string: &str,
         chunk_expr: &StringChunkExpr,
-        replace_with: &String,
+        replace_with: &str,
     ) -> Result<String, ScriptError> {
         // Similar to string_by_setting_chunk but supports all chunk types
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
-                let mut new_string = string.clone();
+                let mut new_string = string.to_owned();
                 let (start, end) =
                     StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.replace_range(start..end, replace_with);
@@ -381,11 +381,11 @@ impl StringChunkUtils {
                 );
 
                 if chunk_list.is_empty() {
-                    return Ok(string.clone());
+                    return Ok(string.to_owned());
                 }
 
                 let mut new_chunks = chunk_list;
-                new_chunks.splice(start..end, [replace_with.clone()]);
+                new_chunks.splice(start..end, [replace_with.to_owned()]);
 
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
@@ -399,13 +399,13 @@ impl StringChunkUtils {
     }
 
     pub fn string_by_putting_before_chunk(
-        string: &String,
+        string: &str,
         chunk_expr: &StringChunkExpr,
-        insert_value: &String,
+        insert_value: &str,
     ) -> Result<String, ScriptError> {
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
-                let mut new_string = string.clone();
+                let mut new_string = string.to_owned();
                 let (start, _) =
                     StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.insert_str(start, insert_value);
@@ -423,7 +423,7 @@ impl StringChunkUtils {
                 );
 
                 if chunk_list.is_empty() {
-                    return Ok(insert_value.clone());
+                    return Ok(insert_value.to_owned());
                 }
 
                 let mut new_chunks = chunk_list;
@@ -450,13 +450,13 @@ impl StringChunkUtils {
     }
 
     pub fn string_by_putting_after_chunk(
-        string: &String,
+        string: &str,
         chunk_expr: &StringChunkExpr,
-        insert_value: &String,
+        insert_value: &str,
     ) -> Result<String, ScriptError> {
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
-                let mut new_string = string.clone();
+                let mut new_string = string.to_owned();
                 let (_, end) =
                     StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.insert_str(end, insert_value);
@@ -474,7 +474,7 @@ impl StringChunkUtils {
                 );
 
                 if chunk_list.is_empty() {
-                    return Ok(insert_value.clone());
+                    return Ok(insert_value.to_owned());
                 }
 
                 let mut new_chunks = chunk_list;
@@ -543,10 +543,10 @@ impl StringChunkHandlers {
     pub fn set_prop(
         _: &mut DirPlayer,
         _: &DatumRef,
-        prop: &String,
+        prop: &str,
         _value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop {
             "font" | "fontStyle" | "color" => {
                 // TODO
             }
@@ -583,10 +583,10 @@ impl StringChunkHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "count" => Self::count(datum, args),
             "getProp" => Self::get_prop(datum, args),
             "delete" => Self::delete(datum, args),
