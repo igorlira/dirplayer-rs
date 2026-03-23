@@ -25,7 +25,6 @@ impl Transform3dDatumHandlers {
         match prop {
             "position" => Ok(Datum::Vector([m[12], m[13], m[14]])),
             "rotation" => {
-                // Extract Euler angles from rotation matrix (XYZ order)
                 let (rx, ry, rz) = matrix_to_euler(&m);
                 Ok(Datum::Vector([rx, ry, rz]))
             }

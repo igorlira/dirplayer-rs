@@ -1762,7 +1762,22 @@ void main() {
             );
 
             let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
-            gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
+            // For skinned models, pre-multiply Ry(90°) to align the Biped mesh
+            // convention (+X forward) with the euler/movement convention (-Z forward).
+            // Ry(90°) * (x,y,z) = (z, y, -x) — only affects orientation, not position.
+            if has_skeleton_data {
+                let mut m = world_matrix;
+                for col in 0..3 {
+                    let o = col * 4;
+                    let r0 = m[o];     // row 0
+                    let r2 = m[o + 2]; // row 2
+                    m[o]     = r2;     // new row 0 = old row 2
+                    m[o + 2] = -r0;    // new row 2 = -old row 0
+                }
+                gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &m);
+            } else {
+                gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
+            }
 
             if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
                 for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
