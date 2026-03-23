@@ -62,7 +62,11 @@ impl Transform3dDatumHandlers {
             "rotation" => {
                 if let Datum::Vector(v) = val {
                     // Preserve position and scale, rebuild rotation
-                    let pos = [m[12], m[13], m[14]];
+                    let pos = [
+                        if m[12].is_finite() { m[12] } else { 0.0 },
+                        if m[13].is_finite() { m[13] } else { 0.0 },
+                        if m[14].is_finite() { m[14] } else { 0.0 },
+                    ];
                     // Guard: if current matrix has NaN, use scale 1.0
                     let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
                     let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
@@ -338,7 +342,7 @@ fn mat4_invert_affine(m: &[f64; 16]) -> [f64; 16] {
     ]
 }
 
-/// Euler angles to column-major rotation matrix
+/// Euler angles to column-major rotation matrix (IFX convention: R = Rx * Ry * Rz)
 pub fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
     // Guard against NaN/infinity — use 0 for any invalid input
     let rx = if rx_deg.is_finite() { rx_deg } else { 0.0 }.to_radians();
@@ -349,11 +353,11 @@ pub fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
     let (sy, cy) = (ry.sin(), ry.cos());
     let (sz, cz) = (rz.sin(), rz.cos());
 
-    // True column-major: m[col*4+row], R = Rz * Ry * Rx
+    // R = Rz * Ry * Rx, true column-major: m[col*4+row]
     [
-        cy * cz,                   cy * sz,                   -sy,                     0.0,  // col 0
-        sx * sy * cz - cx * sz,    sx * sy * sz + cx * cz,    sx * cy,                 0.0,  // col 1
-        cx * sy * cz + sx * sz,    cx * sy * sz - sx * cz,    cx * cy,                 0.0,  // col 2
+        cy*cz,                     cy*sz,                     -sy,                     0.0,  // col 0
+        sx*sy*cz - cx*sz,          sx*sy*sz + cx*cz,          sx*cy,                   0.0,  // col 1
+        cx*sy*cz + sx*sz,          cx*sy*sz - sx*cz,          cx*cy,                   0.0,  // col 2
         0.0,                       0.0,                       0.0,                     1.0,  // col 3
     ]
 }
@@ -374,14 +378,16 @@ fn matrix_to_euler(m: &[f64; 16]) -> (f64, f64, f64) {
         return (0.0, 0.0, 0.0);
     }
 
-    // True column-major: n[2] = R[2][0] = -sin(ry)
+    // IFX convention: Y = -asin(m[2]) where m[2] = R[2][0]
     let sy = (-n[2]).clamp(-1.0, 1.0);
     let ry = sy.asin();
     let cy = ry.cos();
 
     let (rx, rz);
     if cy.abs() > 1e-6 {
+        // X = atan2(R[2][1], R[2][2]) = atan2(m[6], m[10])
         rx = (n[6] / cy).atan2(n[10] / cy);
+        // Z = atan2(R[1][0], R[0][0]) = atan2(m[1], m[0])
         rz = (n[1] / cy).atan2(n[0] / cy);
     } else {
         rx = 0.0;
