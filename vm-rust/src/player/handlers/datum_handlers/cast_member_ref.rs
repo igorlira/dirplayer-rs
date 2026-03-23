@@ -19,9 +19,21 @@ use crate::{
 
 use super::cast_member::{
     bitmap::BitmapMemberHandlers, button::ButtonMemberHandlers, field::FieldMemberHandlers,
-    film_loop::FilmLoopMemberHandlers, font::FontMemberHandlers, shockwave3d::Shockwave3dMemberHandlers,
+    film_loop::FilmLoopMemberHandlers, font::FontMemberHandlers,
+    shockwave3d::Shockwave3dMemberHandlers,
     sound::SoundMemberHandlers, text::TextMemberHandlers, palette::PaletteMemberHandlers,
 };
+
+fn is_3d_member(datum: &DatumRef) -> Result<bool, ScriptError> {
+    reserve_player_mut(|player| {
+        let r = match player.get_datum(datum) {
+            Datum::CastMember(r) => r.to_owned(),
+            _ => return Ok(false),
+        };
+        Ok(player.movie.cast_manager.find_member_by_ref(&r)
+            .map_or(false, |m| m.member_type.as_shockwave3d().is_some()))
+    })
+}
 
 pub struct CastMemberRefHandlers {}
 
@@ -36,7 +48,7 @@ where
             .movie
             .cast_manager
             .find_mut_member_by_ref(&member_ref)
-            .unwrap();
+            .expect("cast member ref should be valid in borrow_member_mut");
         f(member, arg)
     })
 }
@@ -80,6 +92,7 @@ impl CastMemberRefHandlers {
                         .cast_manager
                         .find_member_by_ref(&cast_member_ref)
                         .ok_or_else(|| ScriptError::new("charPosToLoc: member not found".to_string()))?;
+                    let text_data = cast_member.member_type.as_text().expect("charPosToLoc only works on text members");
                     let char_pos = player.get_datum(&args[0]).int_value()? as u16;
                     let char_width: i32 = 7;
 
@@ -132,915 +145,67 @@ impl CastMemberRefHandlers {
                 }
             }
             "getPropRef" => {
-                // For Shockwave3D members: member.model[1] → getPropRef(#model, 1)
-                // Check if this is a 3D member first, otherwise fall through to member type handlers
-                let is_3d = reserve_player_mut(|player| {
-                    let cast_member_ref = match player.get_datum(datum) {
-                        Datum::CastMember(r) => r.to_owned(),
-                        _ => return Ok(false),
-                    };
-                    let member = player.movie.cast_manager.find_member_by_ref(&cast_member_ref);
-                    Ok(member.map_or(false, |m| m.member_type.as_shockwave3d().is_some()))
-                })?;
-                if is_3d {
-                    reserve_player_mut(|player| {
-                        let cast_member_ref = match player.get_datum(datum) {
-                            Datum::CastMember(r) => r.to_owned(),
-                            _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
-                        };
-                        let collection = player.get_datum(&args[0]).string_value()?;
-                        let index = if args.len() > 1 {
-                            player.get_datum(&args[1]).int_value()? as usize
-                        } else {
-                            1
-                        };
-                        let member = player.movie.cast_manager.find_member_by_ref(&cast_member_ref);
-                        if let Some(m) = member {
-                            if let Some(w3d) = m.member_type.as_shockwave3d() {
-                                if let Some(ref scene) = w3d.parsed_scene {
-                                    let obj_name = Self::get_3d_object_name_by_index(scene, &collection, index)
-                                        .unwrap_or_default();
-                                    if !obj_name.is_empty() {
-                                        use crate::director::lingo::datum::Shockwave3dObjectRef;
-                                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                                            cast_lib: cast_member_ref.cast_lib,
-                                            cast_member: cast_member_ref.cast_member,
-                                            object_type: collection,
-                                            name: obj_name,
-                                        })));
-                                    }
-                                }
-                            }
-                        }
-                        Ok(player.alloc_datum(Datum::Void))
-                    })
+                if is_3d_member(datum)? {
+                    Shockwave3dMemberHandlers::call(datum, handler_name, args)
                 } else {
-                    // Non-3D members: fall through to member type handlers (text, field, etc.)
-                    // If the handler isn't supported, return VOID gracefully
                     Self::call_member_type(datum, handler_name, args)
                         .or_else(|_| reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Void))))
                 }
             }
             "count" => {
-                reserve_player_mut(|player| {
-                    let cast_member_ref = match player.get_datum(datum) {
-                        Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
-                        _ => {
-                            return Err(ScriptError::new(
-                                "Cannot call count on non-cast-member".to_string(),
-                            ))
+                if is_3d_member(datum)? {
+                    Shockwave3dMemberHandlers::call(datum, handler_name, args)
+                } else {
+                    reserve_player_mut(|player| {
+                        let cast_member_ref = match player.get_datum(datum) {
+                            Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
+                            _ => {
+                                return Err(ScriptError::new(
+                                    "Cannot call count on non-cast-member".to_string(),
+                                ))
+                            }
+                        };
+                        if args.is_empty() {
+                            return Err(ScriptError::new("count requires 1 argument".to_string()));
                         }
-                    };
-                    
-                    if args.is_empty() {
-                        return Err(ScriptError::new("count requires 1 argument".to_string()));
-                    }
-                    
-                    let count_of = player.get_datum(&args[0]).string_value()?;
-
-                    // For Shockwave3D members, count of 3D collections (model, texture, shader, etc.)
-                    let member = player.movie.cast_manager.find_member_by_ref(&cast_member_ref);
-                    if let Some(m) = member {
-                        if let Some(w3d) = m.member_type.as_shockwave3d() {
-                            if let Some(ref scene) = w3d.parsed_scene {
-                                let count = Self::get_3d_collection_count(scene, &count_of);
-                                if count >= 0 {
-                                    return Ok(player.alloc_datum(Datum::Int(count)));
+                        let count_of = player.get_datum(&args[0]).string_value()?;
+                        // Try to get the member's text
+                        let text = match Self::get_prop(player, &cast_member_ref, &"text".to_string()) {
+                            Ok(datum) => datum.string_value()?,
+                            Err(_) => {
+                                match Self::get_prop(player, &cast_member_ref, &"previewText".to_string()) {
+                                    Ok(datum) => datum.string_value()?,
+                                    Err(_) => {
+                                        return Err(ScriptError::new(
+                                            "Member type does not support count operation".to_string(),
+                                        ));
+                                    }
                                 }
                             }
-                        }
-                    }
-
-                    // Try to get the member's text
-                    // First try "text" property, then fallback to "previewText" for Font members
-                    let text = match Self::get_prop(player, &cast_member_ref, &"text".to_string()) {
-                        Ok(datum) => datum.string_value()?,
-                        Err(_) => {
-                            // Try previewText for Font members
-                            match Self::get_prop(player, &cast_member_ref, &"previewText".to_string()) {
-                                Ok(datum) => datum.string_value()?,
-                                Err(_) => {
-                                    return Err(ScriptError::new(format!(
-                                        "Member type does not support count operation"
-                                    )));
-                                }
-                            }
-                        }
-                    };
-                    
-                    let delimiter = player.movie.item_delimiter;
-                    let count = crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils::resolve_chunk_count(
-                        &text,
-                        crate::director::lingo::datum::StringChunkType::try_from_str(&count_of)
-                            .ok_or_else(|| ScriptError::new(format!("Invalid string chunk type: {}", count_of)))?,
-                        delimiter,
-                    )?;
-                    Ok(player.alloc_datum(Datum::Int(count as i32)))
-                })
+                        };
+                        let delimiter = player.movie.item_delimiter;
+                        let count = crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils::resolve_chunk_count(
+                            &text,
+                            crate::director::lingo::datum::StringChunkType::try_from_str(&count_of)
+                                .ok_or_else(|| ScriptError::new(format!("Invalid string chunk type: {}", count_of)))?,
+                            delimiter,
+                        )?;
+                        Ok(player.alloc_datum(Datum::Int(count as i32)))
+                    })
+                }
             }
-            // Shockwave 3D collection accessors: member("x").model("name"), member("x").shader(1), etc.
+            // Shockwave 3D member handlers — delegated to Shockwave3dMemberHandlers::call()
             "model" | "modelResource" | "shader" | "texture" | "light" | "camera" | "group" | "motion"
             | "resetWorld" | "revertToWorldDefaults"
             | "newTexture" | "newShader" | "newModel" | "newModelResource" | "newLight" | "newCamera" | "newGroup" | "newMotion" | "newMesh"
             | "deleteTexture" | "deleteShader" | "deleteModel" | "deleteModelResource" | "deleteLight" | "deleteCamera" | "deleteGroup" | "deleteMotion"
             | "cloneModelFromCastmember" | "cloneMotionFromCastmember" | "cloneDeep"
             | "loadFile" | "extrude3d" | "getPref" | "setPref"
-            | "image" => {
-                reserve_player_mut(|player| {
-                    let member_ref = match player.get_datum(datum) {
-                        Datum::CastMember(r) => r.to_owned(),
-                        _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
-                    };
-                    let cast_member = player.movie.cast_manager.find_member_by_ref(&member_ref)
-                        .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-                    let w3d = cast_member.member_type.as_shockwave3d()
-                        .ok_or_else(|| {
-                            ScriptError::new(format!(
-                                "Cannot call .{}() on non-Shockwave3D member (type: {:?})",
-                                handler_name, cast_member.member_type.member_type_id()
-                            ))
-                        })?;
-
-                    if handler_name == "resetWorld" || handler_name == "revertToWorldDefaults" {
-                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
-                            .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
-                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            // Reset to initial state from 3DPR data (preserves camera, bg color)
-                            w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info);
-                        }
-                        return Ok(player.alloc_datum(Datum::Void));
-                    }
-
-                    // cloneModelFromCastmember / cloneMotionFromCastmember / cloneDeep
-                    // Returns a model/motion ref in this 3D world
-                    if handler_name == "cloneModelFromCastmember" || handler_name == "cloneMotionFromCastmember" || handler_name == "cloneDeep" {
-                        let obj_name = if !args.is_empty() {
-                            player.get_datum(&args[0]).string_value().unwrap_or_default()
-                        } else {
-                            String::new()
-                        };
-                        let source_model_name = if args.len() > 1 {
-                            player.get_datum(&args[1]).string_value().unwrap_or_default()
-                        } else {
-                            String::new()
-                        };
-                        let source_member_ref = if args.len() > 2 {
-                            match player.get_datum(&args[2]) {
-                                Datum::CastMember(r) => Some(r.clone()),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
-                        let obj_type = if handler_name == "cloneMotionFromCastmember" {
-                            "motion"
-                        } else {
-                            "model"
-                        };
-
-                        // Look up source model's shader/transform/resource from source member's scene
-                        // Also pre-read motion tracks for cloneMotionFromCastmember (before mutable borrow)
-                        let identity = [1.0f32,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
-                        let (source_shader_name, source_transform, source_resource_name, source_model_resource_name, src_motion_tracks) = if let Some(ref src_ref) = source_member_ref {
-                            let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
-                            if let Some(sm) = src_member {
-                                if let Some(sw3d) = sm.member_type.as_shockwave3d() {
-                                    if let Some(ref scene) = sw3d.parsed_scene {
-                                        let node = scene.nodes.iter().find(|n| n.name == source_model_name);
-                                        let (sn, st, sr, smr) = if let Some(n) = node {
-                                            (n.shader_name.clone(), n.transform, n.resource_name.clone(), n.model_resource_name.clone())
-                                        } else {
-                                            (String::new(), identity, String::new(), String::new())
-                                        };
-                                        // For cloneMotionFromCastmember: source_model_name is the MODEL name.
-                                        // Source members typically have 2 motions — use the one with the
-                                        // most tracks (the actual animation, not a reference/placeholder).
-                                        let motion_tracks = scene.motions.iter()
-                                            .max_by_key(|m| m.tracks.len())
-                                            .map(|m| m.tracks.clone())
-                                            .unwrap_or_default();
-                                        (sn, st, sr, smr, motion_tracks)
-                                    } else { (String::new(), identity, String::new(), String::new(), vec![]) }
-                                } else { (String::new(), identity, String::new(), String::new(), vec![]) }
-                            } else { (String::new(), identity, String::new(), String::new(), vec![]) }
-                        } else {
-                            (String::new(), identity, String::new(), String::new(), vec![])
-                        };
-
-                        // Track shader name remapping for -clone suffix creation
-                        let mut shader_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
-                        // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
-                        if let Some(ref src_ref) = source_member_ref {
-                            let (src_shaders, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons) = {
-                                let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
-                                let scene = src_member.and_then(|sm| sm.member_type.as_shockwave3d())
-                                    .and_then(|sw3d| sw3d.parsed_scene.as_ref());
-                                let shaders: Vec<_> = scene.map(|s| s.shaders.clone()).unwrap_or_default();
-                                let resources: Vec<_> = scene.map(|s| s.model_resources.iter()
-                                    .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-                                let meshes: Vec<_> = scene.map(|s| s.clod_meshes.iter()
-                                    .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-                                let raw: Vec<_> = scene.map(|s| s.raw_meshes.clone()).unwrap_or_default();
-                                let textures: Vec<_> = scene.map(|s| s.texture_images.iter()
-                                    .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-                                let lights: Vec<_> = scene.map(|s| s.lights.clone()).unwrap_or_default();
-                                let light_nodes: Vec<_> = scene.map(|s| s.nodes.iter()
-                                    .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Light)
-                                    .cloned().collect()).unwrap_or_default();
-                                let skeletons: Vec<_> = scene.map(|s| s.skeletons.clone()).unwrap_or_default();
-                                (shaders, resources, meshes, raw, textures, lights, light_nodes, skeletons)
-                            };
-
-                            debug!(
-                                "[W3D-CLONE] {}(\"{}\") src_model=\"{}\" src_member={:?}: \
-                                 {} shaders, {} model_resources, {} clod_meshes(keys={:?}), {} raw_meshes(names={:?}), {} textures, \
-                                 src_res=\"{}\", src_mres=\"{}\"",
-                                handler_name, obj_name, source_model_name, source_member_ref,
-                                src_shaders.len(), src_model_resources.len(),
-                                src_clod_meshes.len(), src_clod_meshes.iter().map(|(k,_)| k.clone()).collect::<Vec<String>>(),
-                                src_raw_meshes.len(), src_raw_meshes.iter().map(|m| m.name.clone()).collect::<Vec<String>>(),
-                                src_textures.len(),
-                                source_resource_name, source_model_resource_name,
-                            );
-
-                            // Namespace prefix to avoid name collisions between
-                            // different source members that share resource names like "Group01"
-                            let ns = format!("{}_", obj_name);
-
-                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                    if let Some(scene) = w3d.scene_mut() {
-                                        // Shaders: reuse existing by name (Director behavior).
-                                        // Director reuses shaders with identical names rather than cloning.
-                                        for shader in &src_shaders {
-                                            if !scene.shaders.iter().any(|s| s.name == shader.name) {
-                                                scene.shaders.push(shader.clone());
-                                            }
-                                        }
-                                        // Model resources: namespace to prevent collisions
-                                        // Also remap shader bindings to use -clone names
-                                        for (res_name, res_info) in &src_model_resources {
-                                            let new_name = format!("{}{}", ns, res_name);
-                                            if !scene.model_resources.contains_key(&new_name) {
-                                                let mut cloned_res = res_info.clone();
-                                                // Remap shader bindings to cloned names
-                                                for binding in &mut cloned_res.shader_bindings {
-                                                    for mesh_shader in &mut binding.mesh_bindings {
-                                                        if let Some(new_name) = shader_name_map.get(mesh_shader.as_str()) {
-                                                            *mesh_shader = new_name.clone();
-                                                        }
-                                                    }
-                                                }
-                                                scene.model_resources.insert(new_name, cloned_res);
-                                            }
-                                        }
-                                        // CLOD meshes: namespace to prevent collisions
-                                        for (mesh_name, mesh_data) in &src_clod_meshes {
-                                            let new_name = format!("{}{}", ns, mesh_name);
-                                            if !scene.clod_meshes.contains_key(&new_name) {
-                                                scene.clod_meshes.insert(new_name, mesh_data.clone());
-                                            }
-                                        }
-                                        // Textures: keep original names (typically unique per cast member)
-                                        for (tex_name, tex_data) in &src_textures {
-                                            if !scene.texture_images.contains_key(tex_name) {
-                                                scene.texture_images.insert(tex_name.clone(), tex_data.clone());
-                                                scene.texture_content_version += 1;
-                                            }
-                                        }
-                                        // Raw meshes: namespace to prevent collisions
-                                        for raw_mesh in &src_raw_meshes {
-                                            let new_name = format!("{}{}", ns, raw_mesh.name);
-                                            if !scene.raw_meshes.iter().any(|m| m.name == new_name) {
-                                                let mut cloned = raw_mesh.clone();
-                                                cloned.name = new_name;
-                                                scene.raw_meshes.push(cloned);
-                                            }
-                                        }
-                                        // Copy lights from source scene
-                                        for light in &src_lights {
-                                            if !scene.lights.iter().any(|l| l.name == light.name) {
-                                                scene.lights.push(light.clone());
-                                            }
-                                        }
-                                        // Copy light nodes from source scene
-                                        for node in &src_light_nodes {
-                                            if !scene.nodes.iter().any(|n| n.name == node.name) {
-                                                scene.nodes.push(node.clone());
-                                            }
-                                        }
-                                        // Copy skeletons — use namespaced RESOURCE names as skeleton key
-                                        // so the renderer's lookup by model_resource_name finds them.
-                                        // The renderer does: skeletons.find(|s| s.name == resource_name)
-                                        // where resource_name = mapped_model_resource or mapped_resource.
-                                        let skel_key = if !source_model_resource_name.is_empty() {
-                                            format!("{}{}", ns, source_model_resource_name)
-                                        } else if !source_resource_name.is_empty() {
-                                            format!("{}{}", ns, source_resource_name)
-                                        } else { String::new() };
-                                        for skeleton in &src_skeletons {
-                                            if !skel_key.is_empty() && !scene.skeletons.iter().any(|s| s.name == skel_key) {
-                                                let mut cloned = skeleton.clone();
-                                                cloned.name = skel_key.clone();
-                                                scene.skeletons.push(cloned);
-                                                break; // only need one skeleton per resource
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Add the cloned object to the target scene
-                        // Map resource names with namespace prefix to avoid collisions
-                        let ns = format!("{}_", obj_name);
-                        let mapped_resource = if !source_resource_name.is_empty() {
-                            format!("{}{}", ns, source_resource_name)
-                        } else { source_resource_name.clone() };
-                        let mapped_model_resource = if !source_model_resource_name.is_empty() {
-                            format!("{}{}", ns, source_model_resource_name)
-                        } else { source_model_resource_name.clone() };
-
-                        // Remap shader_name if it was cloned
-                        let effective_shader_name = shader_name_map.get(&source_shader_name)
-                            .cloned()
-                            .unwrap_or(source_shader_name);
-
-                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                if let Some(scene) = w3d.scene_mut() {
-                                    use crate::director::chunks::w3d::types::*;
-                                    if obj_type == "model" {
-                                        scene.nodes.push(W3dNode {
-                                            name: obj_name.clone(), node_type: W3dNodeType::Model,
-                                            parent_name: "World".to_string(),
-                                            resource_name: mapped_resource,
-                                            model_resource_name: mapped_model_resource,
-                                            shader_name: effective_shader_name,
-                                            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                            screen_width: 640, screen_height: 480,
-                                            transform: source_transform,
-                                        });
-                                    } else if obj_type == "motion" {
-                                        // src_motion_tracks was pre-read before mutable borrow
-                                        scene.motions.push(W3dMotion {
-                                            name: obj_name.clone(),
-                                            tracks: src_motion_tracks.clone(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        use crate::director::lingo::datum::Shockwave3dObjectRef;
-                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                            cast_lib: member_ref.cast_lib,
-                            cast_member: member_ref.cast_member,
-                            object_type: obj_type.to_string(),
-                            name: obj_name,
-                        })));
-                    }
-
-                    // newTexture/newShader/newModel/etc. — create and return a ref
-                    if handler_name.starts_with("new") || handler_name.starts_with("delete") {
-                        let obj_type = match handler_name.as_str() {
-                            "newTexture" | "deleteTexture" => "texture",
-                            "newShader" | "deleteShader" => "shader",
-                            "newModel" | "deleteModel" => "model",
-                            "newModelResource" | "deleteModelResource" | "newMesh" => "modelResource",
-                            "newLight" | "deleteLight" => "light",
-                            "newCamera" | "deleteCamera" => "camera",
-                            "newGroup" | "deleteGroup" => "group",
-                            "newMotion" | "deleteMotion" => "motion",
-                            _ => "unknown",
-                        };
-                        // Get name from first arg
-                        let obj_name = if !args.is_empty() {
-                            player.get_datum(&args[0]).string_value().unwrap_or_default()
-                        } else {
-                            String::new()
-                        };
-
-                        if handler_name.starts_with("delete") {
-                            // Remove from parsed scene
-                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                    if let Some(scene) = w3d.scene_mut() {
-                                        match obj_type {
-                                            "model" | "group" | "camera" | "light" => {
-                                                scene.nodes.retain(|n| n.name != obj_name);
-                                            }
-                                            "shader" => {
-                                                scene.shaders.retain(|s| s.name != obj_name);
-                                            }
-                                            "motion" => {
-                                                scene.motions.retain(|m| m.name != obj_name);
-                                            }
-                                            "texture" => {
-                                                scene.texture_images.remove(&obj_name);
-                                                scene.texture_content_version += 1;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                            return Ok(player.alloc_datum(Datum::Void));
-                        }
-
-                        // Pre-read args for newMesh before mutable borrow
-                        let mesh_num_faces = if handler_name == "newMesh" && args.len() >= 2 {
-                            player.get_datum(&args[1]).int_value().unwrap_or(0) as u32
-                        } else { 0 };
-
-                        // Add to parsed scene
-                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                if let Some(scene) = w3d.scene_mut() {
-                                    use crate::director::chunks::w3d::types::*;
-                                    let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
-                                    match obj_type {
-                                        "model" => {
-                                            scene.nodes.push(W3dNode {
-                                                name: obj_name.clone(), node_type: W3dNodeType::Model,
-                                                parent_name: "World".to_string(),
-                                                resource_name: String::new(), model_resource_name: String::new(),
-                                                shader_name: String::new(),
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                                screen_width: 640, screen_height: 480,
-                                                transform: identity,
-                                            });
-                                        }
-                                        "group" => {
-                                            scene.nodes.push(W3dNode {
-                                                name: obj_name.clone(), node_type: W3dNodeType::Group,
-                                                parent_name: "World".to_string(),
-                                                resource_name: String::new(), model_resource_name: String::new(),
-                                                shader_name: String::new(),
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                                screen_width: 640, screen_height: 480,
-                                                transform: identity,
-                                            });
-                                        }
-                                        "camera" => {
-                                            scene.nodes.push(W3dNode {
-                                                name: obj_name.clone(), node_type: W3dNodeType::View,
-                                                parent_name: "World".to_string(),
-                                                resource_name: String::new(), model_resource_name: String::new(),
-                                                shader_name: String::new(),
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                                screen_width: 640, screen_height: 480,
-                                                transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0],
-                                            });
-                                        }
-                                        "light" => {
-                                            scene.lights.push(W3dLight {
-                                                name: obj_name.clone(),
-                                                light_type: W3dLightType::Point,
-                                                color: [1.0, 1.0, 1.0],
-                                                attenuation: [1.0, 0.0, 0.0],
-                                                spot_angle: 30.0,
-                                                enabled: true,
-                                            });
-                                            // Also add as a node so it can be transformed
-                                            scene.nodes.push(W3dNode {
-                                                name: obj_name.clone(), node_type: W3dNodeType::Light,
-                                                parent_name: "World".to_string(),
-                                                resource_name: String::new(), model_resource_name: String::new(),
-                                                shader_name: String::new(),
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                                screen_width: 640, screen_height: 480,
-                                                transform: identity,
-                                            });
-                                        }
-                                        "shader" => {
-                                            scene.shaders.push(W3dShader {
-                                                name: obj_name.clone(),
-                                                ..Default::default()
-                                            });
-                                        }
-                                        "modelResource" => {
-                                            let num_faces = mesh_num_faces;
-                                            let mut mesh_info = ClodMeshInfo::default();
-                                            mesh_info.num_faces = num_faces;
-                                            scene.model_resources.insert(obj_name.clone(), ModelResourceInfo {
-                                                name: obj_name.clone(),
-                                                mesh_infos: vec![mesh_info],
-                                                max_resolution: 0,
-                                                shading_count: 0,
-                                                shader_bindings: vec![],
-                                                pos_iq: 0.0, norm_iq: 0.0, normal_crease: 0.0,
-                                                tc_iq: 0.0, diff_iq: 0.0, spec_iq: 0.0,
-                                                has_distal_edge_merge: false,
-                                                has_neighbor_mesh: false,
-                                                uv_gen_mode: None,
-                                                sync_table: None,
-                                                distal_edge_merges: None,
-                                            });
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-
-                        // For newTexture(name, #fromImageObject/#fromCastMember, source) — store bitmap data
-                        // in the W3D scene's texture_images so the renderer can use it
-                        if handler_name == "newTexture" && args.len() >= 3 {
-                            let tex_type = player.get_datum(&args[1]).string_value().unwrap_or_default();
-                            if tex_type == "fromCastMember" {
-                                // newTexture("name", #fromCastMember, member(...))
-                                // Get the bitmap from the cast member
-                                let source_member_ref = match player.get_datum(&args[2]) {
-                                    Datum::CastMember(r) => Some(r.clone()),
-                                    _ => None,
-                                };
-                                if let Some(src_ref) = source_member_ref {
-                                    let rgba_data = {
-                                        let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
-                                        src_member.and_then(|m| {
-                                            match &m.member_type {
-                                                CastMemberType::Bitmap(bmp_member) => {
-                                                    let bmp = player.bitmap_manager.get_bitmap(bmp_member.image_ref)?;
-                                                    let w = bmp.width;
-                                                    let h = bmp.height;
-                                                    let palettes = player.movie.cast_manager.palettes();
-                                                    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
-                                                    for y in 0..h as usize {
-                                                        for x in 0..w as usize {
-                                                            let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
-                                                            let idx = (y * w as usize + x) * 4;
-                                                            rgba[idx] = r;
-                                                            rgba[idx + 1] = g;
-                                                            rgba[idx + 2] = b;
-                                                            rgba[idx + 3] = a;
-                                                        }
-                                                    }
-                                                    web_sys::console::log_1(&format!(
-                                                        "[W3D] newTexture(\"{}\", #fromCastMember): {}x{} from member {}:{} '{}'",
-                                                        obj_name, w, h, src_ref.cast_lib, src_ref.cast_member, m.name
-                                                    ).into());
-                                                    Some((w, h, rgba))
-                                                }
-                                                _ => {
-                                                    web_sys::console::log_1(&format!(
-                                                        "[W3D] newTexture(\"{}\", #fromCastMember): member {}:{} '{}' is {} not Bitmap",
-                                                        obj_name, src_ref.cast_lib, src_ref.cast_member,
-                                                        m.name, m.member_type.type_string()
-                                                    ).into());
-                                                    None
-                                                }
-                                            }
-                                        })
-                                    };
-                                    if let Some((w, h, rgba)) = rgba_data {
-                                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref);
-                                        if let Some(member) = member {
-                                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                                if let Some(scene) = w3d.scene_mut() {
-                                                    let mut tex_data = Vec::with_capacity(8 + rgba.len());
-                                                    tex_data.extend_from_slice(&(w as u32).to_le_bytes());
-                                                    tex_data.extend_from_slice(&(h as u32).to_le_bytes());
-                                                    tex_data.extend_from_slice(&rgba);
-                                                    scene.texture_images.insert(obj_name.clone(), tex_data);
-                                                    scene.texture_content_version += 1;
-                                                    web_sys::console::log_1(&format!(
-                                                        "[W3D] newTexture(\"{}\", #fromCastMember): stored {}x{} RGBA",
-                                                        obj_name, w, h
-                                                    ).into());
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            } else if tex_type == "fromImageObject" {
-                                // Get the bitmap data from arg[2]
-                                if let Ok(bitmap_ref) = player.get_datum(&args[2]).to_bitmap_ref() {
-                                    let rgba_data = if let Some(bmp) = player.bitmap_manager.get_bitmap(*bitmap_ref) {
-                                        let w = bmp.width;
-                                        let h = bmp.height;
-                                        let palettes = player.movie.cast_manager.palettes();
-                                        let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
-                                        for y in 0..h as usize {
-                                            for x in 0..w as usize {
-                                                let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
-                                                let idx = (y * w as usize + x) * 4;
-                                                rgba[idx] = r;
-                                                rgba[idx + 1] = g;
-                                                rgba[idx + 2] = b;
-                                                rgba[idx + 3] = a;
-                                            }
-                                        }
-                                        Some((w, h, rgba))
-                                    } else {
-                                        None
-                                    };
-
-                                    if let Some((w, h, rgba)) = rgba_data {
-                                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref);
-                                        if let Some(member) = member {
-                                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                                if let Some(scene) = w3d.scene_mut() {
-                                                    // Store raw RGBA with width/height prefix
-                                                    let mut tex_data = Vec::with_capacity(8 + rgba.len());
-                                                    tex_data.extend_from_slice(&(w as u32).to_le_bytes());
-                                                    tex_data.extend_from_slice(&(h as u32).to_le_bytes());
-                                                    tex_data.extend_from_slice(&rgba);
-                                                    scene.texture_images.insert(obj_name.clone(), tex_data);
-                                                    scene.texture_content_version += 1;
-                                                    web_sys::console::log_1(&format!(
-                                                        "[W3D] newTexture(\"{}\", #fromImageObject): stored {}x{} RGBA",
-                                                        obj_name, w, h
-                                                    ).into());
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        use crate::director::lingo::datum::Shockwave3dObjectRef;
-                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                            cast_lib: member_ref.cast_lib,
-                            cast_member: member_ref.cast_member,
-                            object_type: obj_type.to_string(),
-                            name: obj_name,
-                        })));
-                    }
-
-                    // image — return the rendered 3D world as a bitmap ref
-                    if handler_name == "image" {
-                        // Return void for now — would need to render to bitmap
-                        return Ok(player.alloc_datum(Datum::Void));
-                    }
-
-                    // loadFile, extrude3d, getPref, setPref
-                    if handler_name == "loadFile" || handler_name == "extrude3d"
-                        || handler_name == "getPref" || handler_name == "setPref" {
-                        return Ok(player.alloc_datum(Datum::Void));
-                    }
-
-                    // If no parsed scene exists, create a minimal empty scene
-                    // (e.g., after resetWorld or for empty 3D members used as runtime containers)
-                    if w3d.parsed_scene.is_none() {
-                        use crate::director::chunks::w3d::types::*;
-                        use std::collections::HashMap;
-                        let mut empty_scene = W3dScene {
-                            materials: Vec::new(), shaders: Vec::new(), nodes: Vec::new(),
-                            lights: Vec::new(), texture_images: HashMap::new(), texture_infos: Vec::new(),
-                            skeletons: Vec::new(), motions: Vec::new(), model_resources: HashMap::new(),
-                            clod_meshes: HashMap::new(), raw_meshes: Vec::new(),
-                            texture_content_version: 0,
-                        };
-                        empty_scene.nodes.push(W3dNode {
-                            name: "World".to_string(),
-                            node_type: W3dNodeType::Group,
-                            parent_name: String::new(),
-                            resource_name: String::new(),
-                            model_resource_name: String::new(),
-                            shader_name: String::new(),
-                            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                            screen_width: player.movie.rect.right as i32,
-                            screen_height: player.movie.rect.bottom as i32,
-                            transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
-                        });
-                        empty_scene.nodes.push(W3dNode {
-                            name: "DefaultView".to_string(),
-                            node_type: W3dNodeType::View,
-                            parent_name: "World".to_string(),
-                            resource_name: String::new(),
-                            model_resource_name: String::new(),
-                            shader_name: String::new(),
-                            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                            screen_width: player.movie.rect.right as i32,
-                            screen_height: player.movie.rect.bottom as i32,
-                            transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0],
-                        });
-                        // Add DefaultShader
-                        empty_scene.shaders.push(W3dShader {
-                            name: "DefaultShader".to_string(),
-                            ..Default::default()
-                        });
-                        let member_mut = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
-                            .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
-                        if let Some(w3d_mut) = member_mut.member_type.as_shockwave3d_mut() {
-                            w3d_mut.parsed_scene = Some(std::rc::Rc::new(empty_scene));
-                        }
-                    }
-                    // Re-fetch after potential mutation
-                    let cast_member = player.movie.cast_manager.find_member_by_ref(&member_ref)
-                        .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
-                    let w3d = cast_member.member_type.as_shockwave3d()
-                        .ok_or_else(|| ScriptError::new("Not a 3D member".to_string()))?;
-                    let scene = w3d.parsed_scene.as_ref().unwrap();
-
-                    // Resolve name from argument (string or int index)
-                    let obj_name = if args.is_empty() {
-                        // No args: return the count
-                        let count = Self::get_3d_collection_count(scene, handler_name);
-                        return Ok(player.alloc_datum(Datum::Int(count)));
-                    } else {
-                        let arg = player.get_datum(&args[0]).clone();
-                        match arg {
-                            Datum::String(s) => s,
-                            Datum::Int(idx) => {
-                                // 1-based index
-                                Self::get_3d_object_name_by_index(scene, handler_name, idx as usize)
-                                    .unwrap_or_default()
-                            }
-                            _ => arg.string_value().unwrap_or_default(),
-                        }
-                    };
-
-                    if obj_name.is_empty() {
-                        return Ok(player.alloc_datum(Datum::Void));
-                    }
-
-                    use crate::director::lingo::datum::Shockwave3dObjectRef;
-                    Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                        cast_lib: member_ref.cast_lib,
-                        cast_member: member_ref.cast_member,
-                        object_type: handler_name.to_string(),
-                        name: obj_name,
-                    })))
-                })
-            }
-            "modelsUnderRay" => {
-                // modelsUnderRay(locationVector, directionVector, maxModels, levelOfDetail)
-                reserve_player_mut(|player| {
-                    let member_ref = match player.get_datum(datum) {
-                        Datum::CastMember(r) => r.to_owned(),
-                        _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
-                    };
-                    if args.len() < 2 {
-                        return Ok(player.alloc_datum(Datum::List(
-                            crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
-                        )));
-                    }
-                    let origin = player.get_datum(&args[0]).to_vector()?;
-                    let direction = player.get_datum(&args[1]).to_vector()?;
-                    let max_models = if args.len() > 2 { player.get_datum(&args[2]).int_value().unwrap_or(100) } else { 100 };
-                    let detailed = if args.len() > 3 {
-                        player.get_datum(&args[3]).string_value().unwrap_or_default() == "detailed"
-                    } else { false };
-
-                    let scene = {
-                        let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
-                        member.and_then(|m| m.member_type.as_shockwave3d())
-                            .and_then(|w3d| w3d.parsed_scene.clone())
-                    };
-
-                    // Get runtime node transforms and build exclusion set for invisible/detached models
-                    let (node_transforms, excluded_nodes) = {
-                        let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
-                        if let Some(w3d) = member.and_then(|m| m.member_type.as_shockwave3d()) {
-                            let transforms = w3d.runtime_state.node_transforms.clone();
-                            let mut excluded = std::collections::HashSet::new();
-                            // Exclude models with visibility = none (false)
-                            for (name, &visible) in &w3d.runtime_state.node_visibility {
-                                if !visible { excluded.insert(name.clone()); }
-                            }
-                            // Exclude directly detached nodes (parent = VOID)
-                            for name in &w3d.runtime_state.detached_nodes {
-                                excluded.insert(name.clone());
-                            }
-                            // Exclude models whose parent is detached (e.g. under a hidden group)
-                            if let Some(ref scene) = w3d.parsed_scene {
-                                for node in &scene.nodes {
-                                    if excluded.contains(&node.name) { continue; }
-                                    // Walk parent chain to check for detached ancestors
-                                    let mut parent = &node.parent_name;
-                                    for _ in 0..10 {
-                                        if parent.is_empty() {
-                                            // Parent is VOID — this node is detached
-                                            excluded.insert(node.name.clone());
-                                            break;
-                                        }
-                                        if *parent == "World" { break; }
-                                        if w3d.runtime_state.detached_nodes.contains(parent.as_str()) {
-                                            excluded.insert(node.name.clone());
-                                            break;
-                                        }
-                                        // Find parent node and continue walking
-                                        if let Some(pn) = scene.nodes.iter().find(|n| n.name == *parent) {
-                                            parent = &pn.parent_name;
-                                        } else { break; }
-                                    }
-                                }
-                            }
-                            (Some(transforms), excluded)
-                        } else {
-                            (None, std::collections::HashSet::new())
-                        }
-                    };
-
-                    let mut results = Vec::new();
-                    if let Some(scene) = scene {
-                        use crate::director::chunks::w3d::raycast::{Ray, raycast_scene_multi};
-                        let ray = Ray {
-                            origin: [origin[0] as f32, origin[1] as f32, origin[2] as f32],
-                            direction: [direction[0] as f32, direction[1] as f32, direction[2] as f32],
-                        };
-                        let excluded_ref = if excluded_nodes.is_empty() { None } else { Some(&excluded_nodes) };
-                        let hits = raycast_scene_multi(
-                            &ray, &scene, 100000.0, max_models as usize,
-                            node_transforms.as_ref(),
-                            excluded_ref,
-                        );
-                        for hit in &hits {
-                            if detailed {
-                                let model_key = player.alloc_datum(Datum::Symbol("model".to_string()));
-                                let model_val = player.alloc_datum(Datum::Shockwave3dObjectRef(
-                                    crate::director::lingo::datum::Shockwave3dObjectRef {
-                                        cast_lib: member_ref.cast_lib, cast_member: member_ref.cast_member,
-                                        object_type: "model".to_string(),
-                                        name: hit.model_name.clone(),
-                                    }
-                                ));
-                                let dist_key = player.alloc_datum(Datum::Symbol("distance".to_string()));
-                                let dist_val = player.alloc_datum(Datum::Float(hit.distance as f64));
-                                let pos_key = player.alloc_datum(Datum::Symbol("isectPosition".to_string()));
-                                let pos_val = player.alloc_datum(Datum::Vector([
-                                    hit.position[0] as f64, hit.position[1] as f64, hit.position[2] as f64,
-                                ]));
-                                let norm_key = player.alloc_datum(Datum::Symbol("isectNormal".to_string()));
-                                let norm_val = player.alloc_datum(Datum::Vector([
-                                    hit.normal[0] as f64, hit.normal[1] as f64, hit.normal[2] as f64,
-                                ]));
-                                let mesh_key = player.alloc_datum(Datum::Symbol("meshID".to_string()));
-                                let mesh_val = player.alloc_datum(Datum::Int(1));
-                                let face_key = player.alloc_datum(Datum::Symbol("faceID".to_string()));
-                                let face_val = player.alloc_datum(Datum::Int(hit.face_index as i32));
-
-                                let hit_proplist = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
-                                    (model_key, model_val), (dist_key, dist_val),
-                                    (pos_key, pos_val), (norm_key, norm_val),
-                                    (mesh_key, mesh_val), (face_key, face_val),
-                                ]), false));
-                                results.push(hit_proplist);
-                            } else {
-                                results.push(player.alloc_datum(Datum::Shockwave3dObjectRef(
-                                    crate::director::lingo::datum::Shockwave3dObjectRef {
-                                        cast_lib: member_ref.cast_lib, cast_member: member_ref.cast_member,
-                                        object_type: "model".to_string(),
-                                        name: hit.model_name.clone(),
-                                    }
-                                )));
-                            }
-                        }
-                    }
-                    Ok(player.alloc_datum(Datum::List(
-                        crate::director::lingo::datum::DatumType::List, VecDeque::from(results), false,
-                    )))
-                })
-            }
-            "modelsUnderLoc" | "modelUnderLoc" => {
-                // Camera method — modelsUnderLoc(point, maxModels, levelOfDetail)
-                // When called on member directly, return empty list / VOID
-                reserve_player_mut(|player| {
-                    if handler_name == "modelUnderLoc" {
-                        Ok(player.alloc_datum(Datum::Void))
-                    } else {
-                        Ok(player.alloc_datum(Datum::List(
-                            crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
-                        )))
-                    }
-                })
+            | "image"
+            | "modelsUnderRay" | "modelsUnderLoc" | "modelUnderLoc" => {
+                Shockwave3dMemberHandlers::call(datum, handler_name, args)
             }
             _ => Self::call_member_type(datum, handler_name, args),
-        }
-    }
-
-    fn get_3d_collection_count(scene: &crate::director::chunks::w3d::types::W3dScene, collection: &str) -> i32 {
-        use crate::director::chunks::w3d::types::W3dNodeType;
-        match collection {
-            "model" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).count() as i32,
-            "modelResource" => scene.model_resources.len() as i32,
-            "shader" => scene.shaders.len() as i32,
-            "texture" => scene.texture_images.len() as i32,
-            "light" => scene.lights.len() as i32,
-            "camera" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::View).count() as i32,
-            "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).count() as i32,
-            "motion" => scene.motions.len() as i32,
-            _ => 0,
-        }
-    }
-
-    fn get_3d_object_name_by_index(scene: &crate::director::chunks::w3d::types::W3dScene, collection: &str, index: usize) -> Option<String> {
-        use crate::director::chunks::w3d::types::W3dNodeType;
-        if index == 0 { return None; }
-        let idx = index - 1; // 1-based to 0-based
-        match collection {
-            "model" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).nth(idx).map(|n| n.name.clone()),
-            "modelResource" => scene.model_resources.keys().nth(idx).cloned(),
-            "shader" => scene.shaders.get(idx).map(|s| s.name.clone()),
-            "texture" => scene.texture_images.keys().nth(idx).cloned(),
-            "light" => scene.lights.get(idx).map(|l| l.name.clone()),
-            "camera" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::View).nth(idx).map(|n| n.name.clone()),
-            "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).nth(idx).map(|n| n.name.clone()),
-            "motion" => scene.motions.get(idx).map(|m| m.name.clone()),
-            _ => None,
         }
     }
 
@@ -1121,14 +286,14 @@ impl CastMemberRefHandlers {
                     ))
                 }
             };
-            let dest_slot_number = args.get(0).map(|x| player.get_datum(x).int_value());
-
-            if dest_slot_number.is_none() {
+            let Some(dest_slot_number) = args.get(0).map(|x| player.get_datum(x).int_value()) else {
                 return Err(ScriptError::new(
                     "Cannot duplicate cast member without destination slot number".to_string(),
                 ));
-            }
-            let dest_slot_number = dest_slot_number.unwrap()?;
+            };
+
+            let dest_slot_number = dest_slot_number?;
+
             let dest_ref = Self::member_ref_from_slot_number(dest_slot_number as u32);
 
             let mut new_member = {
@@ -1136,12 +301,15 @@ impl CastMemberRefHandlers {
                     .movie
                     .cast_manager
                     .find_member_by_ref(&cast_member_ref);
-                if src_member.is_none() {
-                    return Err(ScriptError::new(
-                        "Cannot duplicate non-existent cast member reference".to_string(),
-                    ));
+                match src_member {
+                    Some(m) => m.clone(),
+                    None => {
+                        return Err(ScriptError::new(format!(
+                            "Cannot duplicate cast member: source member not found (castLib {}, member {})",
+                            cast_member_ref.cast_lib, cast_member_ref.cast_member
+                        )));
+                    }
                 }
-                src_member.unwrap().clone()
             };
             new_member.number = dest_ref.cast_member as u32;
 
@@ -1574,7 +742,7 @@ impl CastMemberRefHandlers {
                             .movie
                             .cast_manager
                             .find_mut_member_by_ref(member_ref)
-                            .unwrap();
+                            .expect("cast member ref should be valid in set_member_type_prop");
 
                         // If not already a bitmap, convert it
                         if cast_member.member_type.as_bitmap().is_none() {
