@@ -467,7 +467,7 @@ impl Shockwave3dObjectDatumHandlers {
                 }
                 // Camera properties
                 "fieldOfView" | "projectionAngle" => {
-                    let fov = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 45.0 };
+                    let fov = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 30.0 };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
@@ -881,7 +881,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     "direction" => if let Datum::Vector(v) = value { em.direction = *v; },
                                     "region" => if let Datum::Vector(v) = value { em.region = *v; },
                                     "distribution" => em.distribution = value.symbol_value().unwrap_or_else(|_| value.string_value().unwrap_or_default()),
-                                    "angle" => em.angle = value.float_value().unwrap_or(45.0),
+                                    "angle" => em.angle = value.float_value().unwrap_or(30.0),
                                     "minSpeed" => em.min_speed = value.float_value().unwrap_or(1.0),
                                     "maxSpeed" => em.max_speed = value.float_value().unwrap_or(1.0),
                                     "pathStrength" => em.path_strength = value.float_value().unwrap_or(0.0),
@@ -1152,7 +1152,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         parent_name: "World".to_string(),
                                         resource_name: String::new(), model_resource_name: String::new(),
                                         shader_name: String::new(),
-                                        near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
+                                        near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                         screen_width: 640, screen_height: 480,
                                         transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
                                     });
@@ -1281,7 +1281,7 @@ impl Shockwave3dObjectDatumHandlers {
                             let (fov, near, far) = if let Some(n) = view_node {
                                 (n.fov.to_radians(), n.near_plane, n.far_plane)
                             } else {
-                                (45.0f32.to_radians(), 1.0, 10000.0)
+                                (30.0f32.to_radians(), 1.0, 10000.0)
                             };
 
                             let width = 320.0f32; // default viewport
@@ -2354,7 +2354,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let fov = scene.nodes.iter()
                         .find(|n| n.name == s3d_ref.name)
                         .map(|n| n.fov)
-                        .unwrap_or(45.0);
+                        .unwrap_or(30.0);
                     let aspect = vw / vh;
                     let proj = build_perspective_f32(fov, aspect, 1.0, 10000.0);
                     // Transform world pos to clip space
@@ -2406,7 +2406,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let fov = scene.nodes.iter()
                         .find(|n| n.name == s3d_ref.name)
                         .map(|n| n.fov)
-                        .unwrap_or(45.0);
+                        .unwrap_or(30.0);
                     // Distance at which 1 pixel = 1 world unit
                     let half_h = (fov.to_radians() * 0.5).tan();
                     let proj_dist = (vh * 0.5) / half_h;
@@ -2936,7 +2936,7 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(get_persistent_node_transform(player, member_ref, camera_name))
             }
             "fieldOfView" | "projectionAngle" => {
-                let fov = node.map(|n| n.fov).unwrap_or(45.0);
+                let fov = node.map(|n| n.fov).unwrap_or(30.0);
                 Ok(player.alloc_datum(Datum::Float(fov as f64)))
             }
             "nearClipPlane" | "hither" => {

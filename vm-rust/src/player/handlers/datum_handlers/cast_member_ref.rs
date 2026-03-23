@@ -459,7 +459,7 @@ impl CastMemberRefHandlers {
                                             resource_name: mapped_resource,
                                             model_resource_name: mapped_model_resource,
                                             shader_name: source_shader_name,
-                                            near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
+                                            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
                                         });
@@ -547,7 +547,7 @@ impl CastMemberRefHandlers {
                                                 parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
+                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
                                             });
@@ -558,7 +558,7 @@ impl CastMemberRefHandlers {
                                                 parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
+                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
                                             });
@@ -569,7 +569,7 @@ impl CastMemberRefHandlers {
                                                 parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
+                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0],
                                             });
@@ -580,7 +580,7 @@ impl CastMemberRefHandlers {
                                                 light_type: W3dLightType::Point,
                                                 color: [1.0, 1.0, 1.0],
                                                 attenuation: [1.0, 0.0, 0.0],
-                                                spot_angle: 45.0,
+                                                spot_angle: 30.0,
                                                 enabled: true,
                                             });
                                             // Also add as a node so it can be transformed
@@ -589,7 +589,7 @@ impl CastMemberRefHandlers {
                                                 parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
+                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
                                             });
@@ -781,7 +781,7 @@ impl CastMemberRefHandlers {
                             resource_name: String::new(),
                             model_resource_name: String::new(),
                             shader_name: String::new(),
-                            near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
+                            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
                             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
@@ -793,7 +793,7 @@ impl CastMemberRefHandlers {
                             resource_name: String::new(),
                             model_resource_name: String::new(),
                             shader_name: String::new(),
-                            near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
+                            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
                             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0],

@@ -577,7 +577,7 @@ impl Default for EmitterState {
             direction: [0.0, 1.0, 0.0],
             region: [0.0, 0.0, 0.0],
             distribution: "linear".to_string(),
-            angle: 45.0,
+            angle: 180.0,
             min_speed: 1.0,
             max_speed: 1.0,
             path_strength: 0.0,
@@ -1638,7 +1638,7 @@ impl CastMember {
             shader_name: String::new(),
             near_plane: 1.0,
             far_plane: 10000.0,
-            fov: 45.0,
+            fov: 30.0,
             screen_width: 640,
             screen_height: 480,
             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,100.0,1.0],
@@ -1669,7 +1669,7 @@ impl CastMember {
             resource_name: "DefaultDirectional".to_string(),
             model_resource_name: String::new(),
             shader_name: String::new(),
-            near_plane: 1.0, far_plane: 10000.0, fov: 45.0,
+            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
             screen_width: 640, screen_height: 480,
             // Rotation: Z-axis points toward (0.5, 1.0, 0.7) normalized
             // -Z axis = (-0.37, -0.74, -0.52) is the light direction

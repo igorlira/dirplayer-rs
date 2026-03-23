@@ -287,7 +287,7 @@ impl Default for W3dNode {
             shader_name: String::new(),
             near_plane: 1.0,
             far_plane: 1000.0,
-            fov: 45.0,
+            fov: 30.0,
             screen_width: 640,
             screen_height: 480,
         }
