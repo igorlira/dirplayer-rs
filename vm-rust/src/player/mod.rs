@@ -209,6 +209,7 @@ pub struct DirPlayer {
     pub text_selection_end: u16,
     pub mouse_loc: (i32, i32),
     pub wants_pointer_lock: bool,
+    pub cursor_is_hidden: bool,
     /// Track parent DatumRef for chained property access (transform.position.z = value)
     /// (vector DatumRef, parent transform DatumRef, sub-property name)
     pub transform_sub_refs: Vec<(DatumRef, DatumRef, String)>,
@@ -370,6 +371,7 @@ impl DirPlayer {
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
             wants_pointer_lock: false,
+            cursor_is_hidden: false,
             transform_sub_refs: Vec::new(),
             last_mouse_down_time: 0,
             is_double_click: false,
@@ -1572,7 +1574,11 @@ impl DirPlayer {
                         let x = self.get_datum(&refs[0]).int_value()?;
                         let y = self.get_datum(&refs[1]).int_value()?;
                         self.mouse_loc = (x, y);
-                        // mouseLoc is being set by the game — pointer lock is handled by cursor=200
+                        // Game is programmatically warping the mouse — this is the FPS mouselook pattern.
+                        // Only request pointer lock if cursor is hidden AND 3D content is active.
+                        if self.cursor_is_hidden && !self.w3d_frame_buffers.is_empty() {
+                            self.wants_pointer_lock = true;
+                        }
                         Ok(())
                     }
                     _ => Err(ScriptError::new("mouseLoc requires a point value".to_string())),

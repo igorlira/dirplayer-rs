@@ -3555,16 +3555,26 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             },
             |sprite, cursor_ref| {
                 let cr = cursor_ref?;
-                // Track pointer lock: cursor 200 = lock (hidden), cursor 0 = release
+                // Track hidden cursor state for pointer lock detection.
+                // Pointer lock is only activated when the game also sets _mouse.mouseLoc.
                 match &cr {
                     crate::player::sprite::CursorRef::System(id) => {
                         if *id == 200 || *id == -1 {
-                            reserve_player_mut(|p| { p.wants_pointer_lock = true; });
+                            reserve_player_mut(|p| { p.cursor_is_hidden = true; });
                         } else {
-                            reserve_player_mut(|p| { p.wants_pointer_lock = false; });
+                            reserve_player_mut(|p| {
+                                p.cursor_is_hidden = false;
+                                p.wants_pointer_lock = false;
+                            });
                         }
                     }
-                    _ => {}
+                    _ => {
+                        // Member cursor (custom bitmap) = visible, not mouselook
+                        reserve_player_mut(|p| {
+                            p.cursor_is_hidden = false;
+                            p.wants_pointer_lock = false;
+                        });
+                    }
                 }
                 sprite.cursor_ref = Some(cr);
                 Ok(())

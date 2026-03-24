@@ -690,7 +690,14 @@ impl TypeHandlers {
             if args.len() == 1 {
                 let arg = player.get_datum(&args[0]);
                 if arg.is_int() {
-                    player.cursor = CursorRef::System(arg.int_value()?);
+                    let cursor_val = arg.int_value()?;
+                    player.cursor = CursorRef::System(cursor_val);
+                    if cursor_val == 200 || cursor_val == -1 {
+                        player.cursor_is_hidden = true;
+                    } else {
+                        player.cursor_is_hidden = false;
+                        player.wants_pointer_lock = false;
+                    }
                     Ok(DatumRef::Void)
                 } else if arg.is_list() {
                     let list = arg.to_list()?;
@@ -709,6 +716,8 @@ impl TypeHandlers {
                         members.push(slot);
                     }
                     player.cursor = CursorRef::Member(members);
+                    player.cursor_is_hidden = false;
+                    player.wants_pointer_lock = false;
                     Ok(DatumRef::Void)
                 } else {
                     Err(ScriptError::new("Invalid argument for cursor".to_string()))
