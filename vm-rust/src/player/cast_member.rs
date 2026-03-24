@@ -474,6 +474,9 @@ pub struct Shockwave3dRuntimeState {
     /// Per-resource emitter state: resource_name -> emitter properties
     pub emitters: std::collections::HashMap<String, EmitterState>,
 
+    // ─── Level of Detail (LOD) state ───
+    pub lod_state: std::collections::HashMap<String, LodState>,
+
     // ─── Subdivision Surface (SDS) state ───
     pub sds_state: std::collections::HashMap<String, SdsState>,
 
@@ -523,6 +526,19 @@ impl Default for CameraOverlay {
             reg_point: [0.0, 0.0],
             shader_name: String::new(),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LodState {
+    pub level: i32,
+    pub auto_mode: bool,
+    pub bias: f32,
+}
+
+impl Default for LodState {
+    fn default() -> Self {
+        Self { level: 100, auto_mode: true, bias: 100.0 }
     }
 }
 
