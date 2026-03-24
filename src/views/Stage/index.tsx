@@ -70,6 +70,10 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   useEffect(() => {
     const handleLockedMouseMove = (e: MouseEvent) => {
       if (document.pointerLockElement) {
+        if (!wants_pointer_lock()) {
+          document.exitPointerLock();
+          return;
+        }
         mouse_move_delta(e.movementX, e.movementY);
       }
     };
