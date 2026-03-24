@@ -383,6 +383,16 @@ impl Shockwave3dMember {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct QueuedMotion {
+    pub name: String,
+    pub looped: bool,
+    pub start_time: f32,   // seconds
+    pub end_time: f32,     // seconds, -1.0 = full duration
+    pub scale: f32,
+    pub offset: f32,       // seconds, -1.0 = #synchronized
+}
+
 /// Mutable runtime state for a Shockwave 3D member (animation, transforms, etc.)
 #[derive(Clone, Debug, Default)]
 pub struct Shockwave3dRuntimeState {
@@ -392,7 +402,7 @@ pub struct Shockwave3dRuntimeState {
     pub current_motion: Option<String>,
     pub play_rate: f32,
     pub animation_loop: bool,
-    pub motion_queue: Vec<String>,
+    pub motion_queue: Vec<QueuedMotion>,
     pub animation_start_time: f32,
     pub animation_end_time: f32,
     pub animation_blend_time: f32,
@@ -606,7 +616,8 @@ pub struct ParticleSystemState {
 
 impl Shockwave3dRuntimeState {
     /// Create runtime state initialized with camera data from the 3DPR info
-    pub fn from_info(info: &Shockwave3dInfo) -> Self {
+    /// and optionally auto-start animation if animationEnabled is set.
+    pub fn from_info(info: &Shockwave3dInfo, scene: Option<&crate::director::chunks::w3d::types::W3dScene>) -> Self {
         let mut state = Self {
             play_rate: 1.0,
             animation_scale: 1.0,
@@ -615,20 +626,22 @@ impl Shockwave3dRuntimeState {
         };
         // Seed camera transform from 3DPR camera position/rotation
         if let Some((px, py, pz)) = info.camera_position {
-            let (rx, ry, _rz) = info.camera_rotation.unwrap_or((0.0, 0.0, 0.0));
+            let (rx, ry, rz) = info.camera_rotation.unwrap_or((0.0, 0.0, 0.0));
             // Build camera transform from position + Euler rotation (degrees)
-            // Director uses negative rotation convention for camera look-at
+            // Director uses negative rotation convention, order: Z * Y * X
             let rx_rad = (-rx).to_radians();
             let ry_rad = (-ry).to_radians();
+            let rz_rad = (-rz).to_radians();
             let (sx, cx) = (rx_rad.sin(), rx_rad.cos());
             let (sy, cy) = (ry_rad.sin(), ry_rad.cos());
+            let (sz, cz) = (rz_rad.sin(), rz_rad.cos());
 
-            // Rotation order: Y * X
+            // Rotation = Rz * Ry * Rx (column-major)
             let m = [
-                cy,       0.0,  -sy,     0.0,
-                sx*sy,    cx,   sx*cy,   0.0,
-                cx*sy,   -sx,   cx*cy,   0.0,
-                px,       py,   pz,      1.0,
+                cy*cz,              cy*sz,              -sy,     0.0,
+                sx*sy*cz - cx*sz,   sx*sy*sz + cx*cz,   sx*cy,  0.0,
+                cx*sy*cz + sx*sz,   cx*sy*sz - sx*cz,   cx*cy,  0.0,
+                px,                 py,                 pz,      1.0,
             ];
             state.node_transforms.insert("DefaultView".to_string(), m);
             state.node_transforms.insert("defaultview".to_string(), m);
@@ -636,6 +649,8 @@ impl Shockwave3dRuntimeState {
         if let Some(bg) = info.bg_color {
             state.background_color = Some(bg);
         }
+        // Note: animationEnabled auto-start is handled in the rendering path
+        // when the sprite first appears on stage, not here at parse time.
         state
     }
 }
@@ -2079,7 +2094,7 @@ impl CastMember {
                     number,
                     name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                     comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
-                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info); CastMemberType::Shockwave3d(Shockwave3dMember { info, w3d_data, source_scene, parsed_scene, runtime_state: rs }) },
+                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info, parsed_scene.as_deref()); CastMemberType::Shockwave3d(Shockwave3dMember { info, w3d_data, source_scene, parsed_scene, runtime_state: rs }) },
                     color: ColorRef::PaletteIndex(255),
                     bg_color: ColorRef::PaletteIndex(0),
                 });
@@ -2819,29 +2834,31 @@ impl CastMember {
                             ifx_start, first256.join(" ")
                         );
                     }
+                    let parsed_scene = if !w3d_data.is_empty() {
+                        match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
+                            Ok(scene) => {
+                                web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes, {} motions",
+                                    scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len(), scene.motions.len()).into());
+                                Some(std::rc::Rc::new(scene))
+                            }
+                            Err(e) => {
+                                web_sys::console::error_1(&format!("W3D parse error: {}", e).into());
+                                Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
+                            }
+                        }
+                    } else {
+                        // Empty W3D data — create empty scene for Lingo-created content
+                        Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
+                    };
+                    let runtime_state = Shockwave3dRuntimeState::from_info(&info, parsed_scene.as_deref());
                     return CastMember {
                         number,
                         name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                         comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
                         member_type: CastMemberType::Shockwave3d(Shockwave3dMember {
                         source_scene: None,
-                        parsed_scene: if !w3d_data.is_empty() {
-                            match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
-                                Ok(scene) => {
-                                    web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes, {} motions",
-                                        scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len(), scene.motions.len()).into());
-                                    Some(std::rc::Rc::new(scene))
-                                }
-                                Err(e) => {
-                                    web_sys::console::error_1(&format!("W3D parse error: {}", e).into());
-                                    Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
-                                }
-                            }
-                        } else {
-                            // Empty W3D data — create empty scene for Lingo-created content
-                            Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
-                        },
-                        runtime_state: Shockwave3dRuntimeState::from_info(&info),
+                        parsed_scene,
+                        runtime_state,
                         info,
                         w3d_data,
                     }),

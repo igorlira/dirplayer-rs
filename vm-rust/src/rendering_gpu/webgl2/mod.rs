@@ -1223,6 +1223,53 @@ impl WebGL2Renderer {
             }
         }
 
+        // Auto-advance: when a non-looping motion ends, play next queued motion
+        if self.scene3d.motion_ended {
+            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                    if !w3d.runtime_state.motion_queue.is_empty() {
+                        let next = w3d.runtime_state.motion_queue.remove(0);
+                        w3d.runtime_state.current_motion = Some(next.name);
+                        w3d.runtime_state.animation_loop = next.looped;
+                        w3d.runtime_state.animation_start_time = next.start_time;
+                        w3d.runtime_state.animation_end_time = next.end_time;
+                        w3d.runtime_state.animation_scale = next.scale;
+                        w3d.runtime_state.animation_time = if next.offset >= 0.0 { next.offset } else { 0.0 };
+                        w3d.runtime_state.animation_playing = true;
+                        w3d.runtime_state.motion_ended = false;
+                        self.scene3d.motion_ended = false;
+                    }
+                }
+            }
+        }
+
+        // Auto-start animation for Shockwave3D members with animationEnabled
+        // This triggers when the sprite first appears on stage during playback.
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                if w3d.info.animation_enabled
+                    && !w3d.runtime_state.animation_playing
+                    && w3d.runtime_state.current_motion.is_none()
+                {
+                    if let Some(scene) = w3d.parsed_scene.as_ref() {
+                        if let Some(first_motion) = scene.motions.first() {
+                            // Detect animation type: bones (skeleton) vs keyframe (node transforms)
+                            let has_skeleton = !scene.skeletons.is_empty()
+                                && scene.skeletons.iter().any(|s| s.bones.len() > 1);
+                            let anim_type = if has_skeleton { "bones" } else { "keyframe" };
+                            web_sys::console::log_1(&format!(
+                                "[3D] animationEnabled: auto-starting {} motion '{}' (loop={})",
+                                anim_type, first_motion.name, w3d.info.loops
+                            ).into());
+                            w3d.runtime_state.current_motion = Some(first_motion.name.clone());
+                            w3d.runtime_state.animation_playing = true;
+                            w3d.runtime_state.animation_loop = w3d.info.loops;
+                        }
+                    }
+                }
+            }
+        }
+
         let texture_source = {
             let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
                 Some(m) => m,
@@ -1788,6 +1835,19 @@ impl WebGL2Renderer {
                     if let Some(ref parsed_scene) = w3d.parsed_scene {
                         // FBO dimensions from sprite rect
                         let (w, h) = (sprite_rect.width().max(1) as u32, sprite_rect.height().max(1) as u32);
+                        // Auto-populate extra cameras from non-DefaultView View nodes
+                        let extra_cams = if w3d_extra_cams.is_empty() {
+                            let active = w3d_camera.as_deref().unwrap_or("DefaultView");
+                            let cams: Vec<String> = parsed_scene.nodes.iter()
+                                .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::View
+                                    && !n.name.eq_ignore_ascii_case("DefaultView")
+                                    && !n.name.eq_ignore_ascii_case(active))
+                                .map(|n| n.name.clone())
+                                .collect();
+                            cams
+                        } else {
+                            w3d_extra_cams.clone()
+                        };
                         TextureSource::Shockwave3dScene {
                             width: w,
                             height: h,
@@ -1795,7 +1855,7 @@ impl WebGL2Renderer {
                             scene: parsed_scene.clone(),
                             runtime_state: w3d.runtime_state.clone(),
                             active_camera: w3d_camera.clone(),
-                            extra_cameras: w3d_extra_cams.clone(),
+                            extra_cameras: extra_cams,
                         }
                     } else {
                         return;
