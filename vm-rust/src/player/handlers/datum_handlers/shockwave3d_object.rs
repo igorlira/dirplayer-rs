@@ -168,6 +168,21 @@ impl Shockwave3dObjectDatumHandlers {
                     },
                 })
             },
+            "lod" => {
+                let lod = {
+                    let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                    member.and_then(|m| m.member_type.as_shockwave3d())
+                        .and_then(|w3d| w3d.runtime_state.lod_state.get(&s3d_ref.name))
+                        .cloned()
+                        .unwrap_or_default()
+                };
+                match_ci!(prop_name, {
+                    "level" => Ok(player.alloc_datum(Datum::Int(lod.level))),
+                    "auto" => Ok(player.alloc_datum(Datum::Int(if lod.auto_mode { 1 } else { 0 }))),
+                    "bias" => Ok(player.alloc_datum(Datum::Float(lod.bias as f64))),
+                    _ => Ok(player.alloc_datum(Datum::Void)),
+                })
+            },
             "bone" => {
                 // name format is "modelName:boneIndex"
                 let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
@@ -804,6 +819,22 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                     }
                     Ok(())
+                  } else if s3d_ref.object_type == "lod" {
+                    // LOD modifier set properties
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            let lod = w3d.runtime_state.lod_state
+                                .entry(s3d_ref.name.clone())
+                                .or_insert_with(crate::player::cast_member::LodState::default);
+                            match_ci!(prop_name.as_str(), {
+                                "level" => lod.level = value.int_value().unwrap_or(100),
+                                "auto" => lod.auto_mode = value.int_value().unwrap_or(1) != 0,
+                                "bias" => lod.bias = value.to_float().unwrap_or(100.0) as f32,
+                                _ => {},
+                            })
+                        }
+                    }
+                    Ok(())
                   } else if s3d_ref.object_type == "sds" {
                     // Subdivision Surface modifier set properties
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
@@ -1292,7 +1323,15 @@ impl Shockwave3dObjectDatumHandlers {
                     // Initialize meshDeform state when #meshDeform modifier is added
                     if !args.is_empty() {
                         let mod_name = player.get_datum(&args[0]).string_value().unwrap_or_default();
-                        if mod_name == "meshDeform" {
+                        if mod_name == "lod" {
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.lod_state.entry(s3d_ref.name.clone())
+                                        .or_insert_with(crate::player::cast_member::LodState::default);
+                                }
+                            }
+                        } else if mod_name == "meshDeform" {
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
                             let mesh_count = {
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -2564,6 +2603,16 @@ impl Shockwave3dObjectDatumHandlers {
                     name: model_name.to_string(),
                 })))
             },
+            "lod" => {
+                // LOD modifier — return LOD object ref
+                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                    cast_lib: member_ref.cast_lib,
+                    cast_member: member_ref.cast_member,
+                    object_type: "lod".to_string(),
+                    name: model_name.to_string(),
+                })))
+            },
             "parent" => {
                 if let Some(n) = node {
                     Ok(player.alloc_datum(Datum::String(n.parent_name.clone())))
@@ -3333,16 +3382,13 @@ impl Shockwave3dObjectDatumHandlers {
                 }
             },
             "lod" => {
-                // Return a PropList with lod properties (auto, level, bias)
-                let auto_key = player.alloc_datum(Datum::Symbol("auto".to_string()));
-                let auto_val = player.alloc_datum(Datum::Int(1));
-                let level_key = player.alloc_datum(Datum::Symbol("level".to_string()));
-                let level_val = player.alloc_datum(Datum::Int(100));
-                let bias_key = player.alloc_datum(Datum::Symbol("bias".to_string()));
-                let bias_val = player.alloc_datum(Datum::Float(100.0));
-                Ok(player.alloc_datum(Datum::PropList(VecDeque::from(vec![
-                    (auto_key, auto_val), (level_key, level_val), (bias_key, bias_val),
-                ]), false)))
+                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                    cast_lib: member_ref.cast_lib,
+                    cast_member: member_ref.cast_member,
+                    object_type: "lod".to_string(),
+                    name: resource_name.to_string(),
+                })))
             },
             "sds" => {
                 // Subdivision Surface modifier — return object with depth/tension properties
