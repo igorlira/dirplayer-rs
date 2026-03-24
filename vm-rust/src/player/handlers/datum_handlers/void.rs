@@ -27,6 +27,10 @@ impl VoidDatumHandlers {
                     Ok(player.alloc_datum(Datum::Int(0)))
                 })
             }
+            "getProp" | "getaProp" | "getPropRef" => {
+                // getProp(#char, 1, 6) etc. on VOID should return VOID
+                Ok(DatumRef::Void)
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for void"
             ))),
@@ -74,6 +78,10 @@ impl VoidDatumHandlers {
             | "position" | "rotation" | "scale"
             | "x" | "y" | "z" | "locH" | "locV" => {
                 Ok(player.alloc_datum(Datum::Void))
+            }
+            // String slice operations on VOID should return empty string
+            "char" | "word" | "line" | "item" => {
+                Ok(player.alloc_datum(Datum::String("".to_owned())))
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot get property '{}' on VOID - a variable or property that should contain an object is uninitialized",

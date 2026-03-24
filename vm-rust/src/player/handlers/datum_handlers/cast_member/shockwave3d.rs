@@ -269,7 +269,7 @@ impl Shockwave3dMemberHandlers {
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             // Reset to initial state from 3DPR data (preserves camera, bg color)
-                            w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info);
+                            w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info, w3d.parsed_scene.as_deref());
                         }
                         return Ok(player.alloc_datum(Datum::Void));
                     }

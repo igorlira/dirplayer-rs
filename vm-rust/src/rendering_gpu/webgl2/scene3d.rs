@@ -1725,9 +1725,15 @@ void main() {
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> [f32; 16] {
         // Bone motion tracks share names with skeleton/model roots (for example "Bip01").
-        // Applying those tracks to Model nodes would animate the root twice:
+        // Applying those tracks to Model nodes with skeletons would animate the root twice:
         // once through skinning and again through u_model.
-        let allow_motion_override = node.node_type != W3dNodeType::Model;
+        // But Model nodes WITHOUT skeletons need motion overrides for keyframe animation.
+        let allow_motion_override = if node.node_type == W3dNodeType::Model {
+            // Allow keyframe animation on models that have no skeleton
+            !scene.skeletons.iter().any(|s| s.name == node.resource_name && s.bones.len() > 1)
+        } else {
+            true
+        };
 
         // Get this node's transform: motion (combined with base), runtime override, or parsed
         let node_transform = if allow_motion_override {
@@ -3125,8 +3131,10 @@ void main() {
             let cam_pos = [world_t[12], world_t[13], world_t[14]];
             return (invert_transform(&world_t), cam_pos);
         }
-        // Fallback: try any view node
-        let view_node = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View);
+        // Fallback: prefer a DefaultView-like camera (case-insensitive), then any view node
+        let view_node = scene.nodes.iter()
+            .find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case("DefaultView"))
+            .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View));
         let cam_name = view_node.map(|n| n.name.as_str()).unwrap_or("DefaultView");
 
         // 3. Check runtime transform for this camera
@@ -3165,9 +3173,9 @@ void main() {
     ) -> [f32; 16] {
         let default_cam = "DefaultView".to_string();
         let cam_name = self.active_camera.as_ref().unwrap_or(&default_cam);
-        // Match by active camera name first, fall back to any view node
+        // Match by active camera name first (case-insensitive), fall back to any view node
         let view_node = scene.nodes.iter()
-            .find(|n| n.node_type == W3dNodeType::View && n.name == *cam_name)
+            .find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case(cam_name))
             .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View));
 
         let (fov, near, far, aspect) = if let Some(node) = view_node {
@@ -3180,7 +3188,24 @@ void main() {
             } else {
                 _fbo_aspect
             };
-            (node.fov.to_radians(), n, f, cam_aspect)
+            // For non-DefaultView cameras, inherit FOV/near/far from the DefaultView camera
+            // since extra cameras (e.g. "spining") often share the same projection settings
+            let (fov, n, f) = if !node.name.eq_ignore_ascii_case("DefaultView") {
+                if let Some(dv) = scene.nodes.iter().find(|n2|
+                    n2.node_type == W3dNodeType::View && n2.name.eq_ignore_ascii_case("DefaultView"))
+                {
+                    let mut df = dv.far_plane;
+                    if df > 100000.0 || df <= 0.0 { df = 10000.0; }
+                    let mut dn = dv.near_plane;
+                    if dn <= 0.0 { dn = 1.0; }
+                    (dv.fov, dn, df)
+                } else {
+                    (node.fov, n, f)
+                }
+            } else {
+                (node.fov, n, f)
+            };
+            (fov.to_radians(), n, f, cam_aspect)
         } else {
             (30.0f32.to_radians(), 1.0, 10000.0, _fbo_aspect)
         };
