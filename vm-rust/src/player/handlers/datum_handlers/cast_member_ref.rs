@@ -34,7 +34,7 @@ where
             .movie
             .cast_manager
             .find_mut_member_by_ref(&member_ref)
-            .expect("cast member ref should be valid in borrow_member_mut");
+            .unwrap();
         f(member, arg)
     })
 }
@@ -77,8 +77,8 @@ impl CastMemberRefHandlers {
                         .movie
                         .cast_manager
                         .find_member_by_ref(&cast_member_ref)
-                        .expect("cast member ref should be valid in charPosToLoc");
-                    let text_data = cast_member.member_type.as_text().expect("charPosToLoc only works on text members");
+                        .unwrap();
+                    let text_data = cast_member.member_type.as_text().unwrap();
                     let char_pos = player.get_datum(&args[0]).int_value()? as u16;
                     let char_width: i32 = 7;
                     let line_height: i32 = get_text_member_line_height(&text_data) as i32;
@@ -133,6 +133,8 @@ impl CastMemberRefHandlers {
                         return Err(ScriptError::new("count requires 1 argument".to_string()));
                     }
                     
+                    let count_of = player.get_datum(&args[0]).string_value()?;
+                    
                     // Try to get the member's text
                     // First try "text" property, then fallback to "previewText" for Font members
                     let text = match Self::get_prop(player, &cast_member_ref, &"text".to_string()) {
@@ -149,13 +151,11 @@ impl CastMemberRefHandlers {
                             }
                         }
                     };
-
-                    let count_of = player.get_datum(&args[0]).string_value_cow()?;
                     
                     let delimiter = player.movie.item_delimiter;
                     let count = crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils::resolve_chunk_count(
                         &text,
-                        crate::director::lingo::datum::StringChunkType::from(&*count_of),
+                        crate::director::lingo::datum::StringChunkType::from(&count_of),
                         delimiter,
                     )?;
                     Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -183,7 +183,7 @@ impl CastMemberRefHandlers {
                 .movie
                 .cast_manager
                 .find_member_by_ref(&member_ref)
-                .expect("cast member ref should be valid in call_member_type");
+                .unwrap();
             match &cast_member.member_type {
                 CastMemberType::Field(_) => {
                     FieldMemberHandlers::call(player, datum, handler_name, args)
@@ -225,14 +225,14 @@ impl CastMemberRefHandlers {
                     ))
                 }
             };
-            let Some(dest_slot_number) = args.get(0).map(|x| player.get_datum(x).int_value()) else {
+            let dest_slot_number = args.get(0).map(|x| player.get_datum(x).int_value());
+
+            if dest_slot_number.is_none() {
                 return Err(ScriptError::new(
                     "Cannot duplicate cast member without destination slot number".to_string(),
                 ));
-            };
-
-            let dest_slot_number = dest_slot_number?;
-            
+            }
+            let dest_slot_number = dest_slot_number.unwrap()?;
             let dest_ref = Self::member_ref_from_slot_number(dest_slot_number as u32);
 
             let mut new_member = {
@@ -240,15 +240,12 @@ impl CastMemberRefHandlers {
                     .movie
                     .cast_manager
                     .find_member_by_ref(&cast_member_ref);
-                match src_member {
-                    Some(m) => m.clone(),
-                    None => {
-                        return Err(ScriptError::new(format!(
-                            "Cannot duplicate cast member: source member not found (castLib {}, member {})",
-                            cast_member_ref.cast_lib, cast_member_ref.cast_member
-                        )));
-                    }
+                if src_member.is_none() {
+                    return Err(ScriptError::new(
+                        "Cannot duplicate non-existent cast member reference".to_string(),
+                    ));
                 }
+                src_member.unwrap().clone()
             };
             new_member.number = dest_ref.cast_member as u32;
 
@@ -293,6 +290,15 @@ impl CastMemberRefHandlers {
         prop: &str,
     ) -> Result<Datum, ScriptError> {
         debug!("Getting prop '{}' for member type {:?}", prop, member_type);
+        if prop.eq_ignore_ascii_case("regPoint") {
+            let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+            let rp = member.reg_point;
+            return Ok(Datum::Point([
+                player.alloc_datum(Datum::Int(rp.0)),
+                player.alloc_datum(Datum::Int(rp.1)),
+            ]));
+        }
         match &member_type {
             CastMemberTypeId::Bitmap => {
                 BitmapMemberHandlers::get_prop(player, cast_member_ref, prop)
@@ -496,6 +502,21 @@ impl CastMemberRefHandlers {
             None => return Ok(()), // Member was erased, silently ignore
         };
 
+        if prop.eq_ignore_ascii_case("regPoint") {
+            return reserve_player_mut(|player| {
+                let point = value.to_point()?;
+                let x = player.get_datum(&point[0]).int_value()?;
+                let y = player.get_datum(&point[1]).int_value()?;
+                let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
+                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+                member.reg_point = (x, y);
+                if let CastMemberType::Bitmap(ref mut bm) = member.member_type {
+                    bm.reg_point = (x as i16, y as i16);
+                }
+                Ok(())
+            });
+        }
+
         // Handle Script-specific props before the main match so unrecognized
         // props fall through to the wildcard arm (e.g. implicit bitmap conversion).
         if member_type == CastMemberTypeId::Script {
@@ -550,7 +571,7 @@ impl CastMemberRefHandlers {
                             .movie
                             .cast_manager
                             .find_mut_member_by_ref(member_ref)
-                            .expect("cast member ref should be valid in set_member_type_prop");
+                            .unwrap();
 
                         // If not already a bitmap, convert it
                         if cast_member.member_type.as_bitmap().is_none() {
