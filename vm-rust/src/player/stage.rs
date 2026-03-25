@@ -53,6 +53,23 @@ pub fn set_stage_prop(
             player.title = value.string_value()?;
             Ok(())
         }
+        "bgColor" => {
+            let value = player.get_datum(value).clone();
+            match value {
+                Datum::ColorRef(color_ref) => {
+                    player.bg_color = color_ref;
+                }
+                Datum::Int(i) => {
+                    player.bg_color = super::sprite::ColorRef::PaletteIndex(i as u8);
+                }
+                _ => {
+                    return Err(ScriptError::new(
+                        "Color ref or integer expected for stage bgColor".to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        }
         _ => {
             return Err(ScriptError::new(format!(
                 "Cannot set stage property {}",
