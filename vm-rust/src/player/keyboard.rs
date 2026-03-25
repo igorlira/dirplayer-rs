@@ -70,7 +70,14 @@ impl KeyboardManager {
     }
 
     pub fn key(&self) -> String {
-        if self.down_keys.len() == 0 {
+        if self.down_keys.is_empty() {
+            return "".to_string();
+        }
+        self.down_keys.last().unwrap().key.clone()
+    }
+
+    pub fn key_pressed(&self) -> String {
+        if self.down_keys.is_empty() {
             return "".to_string();
         }
         self.down_keys.last().unwrap().key.clone()
