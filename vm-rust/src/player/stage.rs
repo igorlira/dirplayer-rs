@@ -45,11 +45,12 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
 pub fn set_stage_prop(
     player: &mut DirPlayer,
     prop: &str,
-    _value: &DatumRef,
+    value: &DatumRef,
 ) -> Result<(), ScriptError> {
     match prop {
         "title" => {
-            player.title = "title".to_string();
+            let value = player.get_datum(value).clone();
+            player.title = value.string_value()?;
             Ok(())
         }
         _ => {
