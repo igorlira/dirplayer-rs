@@ -244,7 +244,9 @@ impl Shockwave3dObjectDatumHandlers {
                 let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                 match_ci!(prop_name, {
                     "textureLayer" => {
-                        // Get or create a persistent texture layer list DatumRef in runtime state
+                        // Get or create a persistent texture layer list DatumRef in runtime state.
+                        // The list contains meshDeformTexLayer refs so that indexed access like
+                        // textureLayer[N].textureCoordinateList = data goes through our set_prop handler.
                         let member_ref_owned = member_ref.clone();
 
                         // Check if we already have a stored DatumRef for this mesh's textureLayer
@@ -377,7 +379,15 @@ impl Shockwave3dObjectDatumHandlers {
     pub fn set_prop(obj_ref: &DatumRef, prop_name: &String, value: &Datum) -> Result<(), ScriptError> {
         reserve_player_mut(|player| {
             let s3d_ref = match player.get_datum(obj_ref) {
-                Datum::Shockwave3dObjectRef(r) => r.clone(),
+                Datum::Shockwave3dObjectRef(r) => {
+                    if r.object_type == "meshDeformTexLayer" {
+                        web_sys::console::log_1(&format!(
+                            "[W3D-TEXLAYER-SET] meshDeformTexLayer.{} name=\"{}\"",
+                            prop_name, r.name
+                        ).into());
+                    }
+                    r.clone()
+                },
                 _ => return Err(ScriptError::new("Expected Shockwave3dObjectRef".to_string())),
             };
 
@@ -533,6 +543,24 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
+                "resource" => {
+                    // model.resource = modelResource — link model node to a model resource
+                    let res_name = match value {
+                        Datum::Shockwave3dObjectRef(r) if r.object_type == "modelResource" => r.name.clone(),
+                        Datum::String(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some(scene) = w3d.scene_mut() {
+                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
+                                    node.model_resource_name = res_name;
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
                 "parent" => {
                     let is_detach = matches!(value, Datum::Void);
                     let parent_name = match value {
@@ -552,6 +580,45 @@ impl Shockwave3dObjectDatumHandlers {
                             if let Some(scene) = w3d.scene_mut() {
                                 if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
                                     node.parent_name = parent_name;
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                // Light properties
+                "color" => {
+                    if s3d_ref.object_type == "light" {
+                        let (r, g, b) = match value {
+                            Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) => (*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0),
+                            _ => (1.0, 1.0, 1.0),
+                        };
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                if let Some(scene) = w3d.scene_mut() {
+                                    if let Some(light) = scene.lights.iter_mut().find(|l| l.name.eq_ignore_ascii_case(&s3d_ref.name)) {
+                                        light.color = [r, g, b];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                "specular" => {
+                    // For lights: specular = 1/0 (enable/disable specular contribution)
+                    // For shaders: handled elsewhere
+                    Ok(())
+                },
+                "spotAngle" => {
+                    if s3d_ref.object_type == "light" {
+                        let angle = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 30.0 };
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                if let Some(scene) = w3d.scene_mut() {
+                                    if let Some(light) = scene.lights.iter_mut().find(|l| l.name.eq_ignore_ascii_case(&s3d_ref.name)) {
+                                        light.spot_angle = angle;
+                                    }
                                 }
                             }
                         }
@@ -910,6 +977,89 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                     }
                     Ok(())
+                  } else if s3d_ref.object_type == "modelResource" {
+                    // modelResource property set: vertexList, textureCoordinateList, colorList, normalList
+                    use crate::player::cast_member::MeshBuildData;
+                    match_ci!(prop_name.as_str(), {
+                        "vertexList" => {
+                            let verts: Vec<[f32; 3]> = if let Datum::List(_, items, _) = value {
+                                items.iter().map(|r| {
+                                    match player.get_datum(r) {
+                                        Datum::Vector(v) => [v[0] as f32, v[1] as f32, v[2] as f32],
+                                        _ => [0.0, 0.0, 0.0],
+                                    }
+                                }).collect()
+                            } else { vec![] };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.mesh_build_data
+                                        .entry(s3d_ref.name.clone())
+                                        .or_insert_with(MeshBuildData::default)
+                                        .vertex_list = verts;
+                                }
+                            }
+                        },
+                        "textureCoordinateList" => {
+                            let coords: Vec<[f32; 2]> = if let Datum::List(_, items, _) = value {
+                                items.iter().map(|r| {
+                                    match player.get_datum(r) {
+                                        Datum::List(_, uv, _) if uv.len() >= 2 => {
+                                            let u = player.get_datum(&uv[0]).to_float().unwrap_or(0.0) as f32;
+                                            let v_val = player.get_datum(&uv[1]).to_float().unwrap_or(0.0) as f32;
+                                            [u, v_val]
+                                        }
+                                        _ => [0.0, 0.0],
+                                    }
+                                }).collect()
+                            } else { vec![] };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.mesh_build_data
+                                        .entry(s3d_ref.name.clone())
+                                        .or_insert_with(MeshBuildData::default)
+                                        .texture_coordinate_list = coords;
+                                }
+                            }
+                        },
+                        "colorList" => {
+                            let colors: Vec<(u8, u8, u8)> = if let Datum::List(_, items, _) = value {
+                                items.iter().map(|r| {
+                                    match player.get_datum(r) {
+                                        Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) => (*r, *g, *b),
+                                        _ => (255, 255, 255),
+                                    }
+                                }).collect()
+                            } else { vec![] };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.mesh_build_data
+                                        .entry(s3d_ref.name.clone())
+                                        .or_insert_with(MeshBuildData::default)
+                                        .color_list = colors;
+                                }
+                            }
+                        },
+                        "normalList" => {
+                            let normals: Vec<[f32; 3]> = if let Datum::List(_, items, _) = value {
+                                items.iter().map(|r| {
+                                    match player.get_datum(r) {
+                                        Datum::Vector(v) => [v[0] as f32, v[1] as f32, v[2] as f32],
+                                        _ => [0.0, 1.0, 0.0],
+                                    }
+                                }).collect()
+                            } else { vec![] };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.mesh_build_data
+                                        .entry(s3d_ref.name.clone())
+                                        .or_insert_with(MeshBuildData::default)
+                                        .normal_list = normals;
+                                }
+                            }
+                        },
+                        _ => {},
+                    });
+                    Ok(())
                   } else {
                     // Handle meshDeformTexLayer.textureCoordinateList = data
                     if s3d_ref.object_type == "emitter" {
@@ -940,10 +1090,9 @@ impl Shockwave3dObjectDatumHandlers {
                         let parts: Vec<&str> = s3d_ref.name.splitn(3, ':').collect();
                         let model_name = parts.get(0).unwrap_or(&"").to_string();
                         let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let layer_idx: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let _layer_idx: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
 
                         // Parse UV coordinates from the value (list of [u, v] pairs)
-                        // (UV data stored directly on scene CLOD mesh tex_coords[1])
                         let coords: Vec<[f32; 2]> = if let Datum::List(_, items, _) = value {
                             items.iter().map(|item_ref| {
                                 let item = player.get_datum(item_ref);
@@ -959,39 +1108,85 @@ impl Shockwave3dObjectDatumHandlers {
                             vec![]
                         };
 
+                        let uv_count = coords.len();
+
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                // Find the CLOD mesh key by suffix match — model_name is a face group
-                                // name like "w_terrain_wall-FACES01" but CLOD keys are compound like
-                                // "MAP_01_w_terrain_wall-FACES01_w_terrain_wall-FACES01"
-                                let suffix = format!("_{}", model_name);
-                                let clod_key = w3d.parsed_scene.as_ref().and_then(|scene| {
-                                    // Try exact match first, then suffix match
-                                    if scene.clod_meshes.contains_key(&model_name) {
-                                        Some(model_name.clone())
-                                    } else {
-                                        scene.clod_meshes.keys()
-                                            .find(|k| k.ends_with(&suffix))
-                                            .cloned()
-                                    }
+                                // Find the model resource name from the model node
+                                let resource_name = w3d.parsed_scene.as_ref().and_then(|scene| {
+                                    scene.nodes.iter().find(|n| n.name == model_name).map(|n| {
+                                        if !n.model_resource_name.is_empty() {
+                                            n.model_resource_name.clone()
+                                        } else {
+                                            n.resource_name.clone()
+                                        }
+                                    })
                                 });
-                                // Write UVs directly into the scene's CLOD mesh tex_coords[1]
-                                // so the Rc-shared scene data is visible to the renderer
+
+                                // Try resource name first, then model name, then suffix match
+                                let clod_key = w3d.parsed_scene.as_ref().and_then(|scene| {
+                                    // 1. Try resource name from node
+                                    if let Some(ref rn) = resource_name {
+                                        if scene.clod_meshes.contains_key(rn) {
+                                            return Some(rn.clone());
+                                        }
+                                    }
+                                    // 2. Try exact model name
+                                    if scene.clod_meshes.contains_key(&model_name) {
+                                        return Some(model_name.clone());
+                                    }
+                                    // 3. Try suffix match on model name
+                                    let suffix = format!("_{}", model_name);
+                                    if let Some(k) = scene.clod_meshes.keys().find(|k| k.ends_with(&suffix)) {
+                                        return Some(k.clone());
+                                    }
+                                    // 4. Try case-insensitive match
+                                    let lower = model_name.to_lowercase();
+                                    scene.clod_meshes.keys()
+                                        .find(|k| k.to_lowercase() == lower)
+                                        .cloned()
+                                });
+
+                                let found = clod_key.is_some();
+                                // Write UVs into the scene's CLOD mesh tex_coords.
+                                // Layer 0 → tex_coords[0] (primary UV), layers 1+ → tex_coords[1] (secondary UV).
+                                // Only write non-empty data to tex_coords[1] to avoid clearing shadow UVs
+                                // when the base layer (layer 0) is cleared.
+                                let tc_idx = if _layer_idx == 0 { 0 } else { 1 };
                                 if let Some(ref key) = clod_key {
                                     if let Some(scene) = w3d.scene_mut() {
                                         if let Some(clod_meshes) = scene.clod_meshes.get_mut(key) {
                                             if let Some(mesh) = clod_meshes.get_mut(mesh_idx) {
-                                                while mesh.tex_coords.len() < 2 {
-                                                    mesh.tex_coords.push(Vec::new());
+                                                // Only write to tex_coords[1] if we have actual data
+                                                // (avoid overwriting shadow UVs with empty layer 0 clear)
+                                                if tc_idx == 0 && coords.is_empty() {
+                                                    // Layer 0 clear — skip, don't overwrite primary UVs
+                                                } else {
+                                                    while mesh.tex_coords.len() <= tc_idx {
+                                                        mesh.tex_coords.push(Vec::new());
+                                                    }
+                                                    mesh.tex_coords[tc_idx] = coords;
                                                 }
-                                                mesh.tex_coords[1] = coords;
                                             }
                                         }
                                     }
                                 }
+
+                                // Diagnostic logging — always log for shadow map investigation
+                                web_sys::console::log_1(&format!(
+                                    "[W3D-UV2-SET] model=\"{}\" resource={:?} mesh_idx={} layer_idx={} uv_count={} clod_key={:?} found={}",
+                                    model_name, resource_name, mesh_idx, _layer_idx, uv_count, clod_key, found
+                                ).into());
                             }
                         }
                         return Ok(());
+                    }
+                    // Log unhandled set_prop for meshDeform types
+                    if s3d_ref.object_type.contains("meshDeform") || s3d_ref.object_type.contains("MeshDeform") {
+                        web_sys::console::warn_1(&format!(
+                            "[W3D-SETPROP] unhandled: type=\"{}\" name=\"{}\" prop=\"{}\"",
+                            s3d_ref.object_type, s3d_ref.name, prop_name
+                        ).into());
                     }
                     Ok(())
                   }
@@ -1271,7 +1466,54 @@ impl Shockwave3dObjectDatumHandlers {
                         name: clone_name,
                     })))
                 },
-                "addChild" => Ok(player.alloc_datum(Datum::Void)),
+                "addChild" => {
+                    // addChild(childNodeRef {, #preserveWorld | #preserveParent})
+                    // Sets child's parent to this node. Default is #preserveParent.
+                    if !args.is_empty() {
+                        let child_name = match player.get_datum(&args[0]) {
+                            Datum::Shockwave3dObjectRef(r) => r.name.clone(),
+                            Datum::String(s) => s.clone(),
+                            _ => String::new(),
+                        };
+                        if !child_name.is_empty() {
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.detached_nodes.remove(&child_name);
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == child_name) {
+                                            node.parent_name = s3d_ref.name.clone();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Void))
+                },
+                "removeChild" => {
+                    // removeChild(childNodeRef) — detach child from this node
+                    if !args.is_empty() {
+                        let child_name = match player.get_datum(&args[0]) {
+                            Datum::Shockwave3dObjectRef(r) => r.name.clone(),
+                            Datum::String(s) => s.clone(),
+                            _ => String::new(),
+                        };
+                        if !child_name.is_empty() {
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == child_name && n.parent_name == s3d_ref.name) {
+                                            node.parent_name = "World".to_string();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Void))
+                },
                 "addToWorld" => {
                     // Set model's parent to World and remove from detached nodes
                     let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
@@ -1323,6 +1565,10 @@ impl Shockwave3dObjectDatumHandlers {
                     // Initialize meshDeform state when #meshDeform modifier is added
                     if !args.is_empty() {
                         let mod_name = player.get_datum(&args[0]).string_value().unwrap_or_default();
+                        web_sys::console::log_1(&format!(
+                            "[W3D-ADDMOD] model=\"{}\" modifier=\"{}\" member=({},{})",
+                            s3d_ref.name, mod_name, s3d_ref.cast_lib, s3d_ref.cast_member
+                        ).into());
                         if mod_name == "lod" {
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
@@ -1333,19 +1579,26 @@ impl Shockwave3dObjectDatumHandlers {
                             }
                         } else if mod_name == "meshDeform" {
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
-                            let mesh_count = {
+                            let (mesh_count, node_found, res_found) = {
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 member.and_then(|m| m.member_type.as_shockwave3d())
                                     .and_then(|w3d| w3d.parsed_scene.as_ref())
                                     .map(|scene| {
                                         let node = scene.nodes.iter().find(|n| n.name == s3d_ref.name);
+                                        let nf = node.is_some();
                                         let res_name = node.map(|n| if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name });
-                                        res_name.and_then(|rn| scene.model_resources.get(rn.as_str()))
+                                        let rf = res_name.and_then(|rn| scene.model_resources.get(rn.as_str())).is_some();
+                                        let mc = res_name.and_then(|rn| scene.model_resources.get(rn.as_str()))
                                             .map(|res| res.mesh_infos.len())
-                                            .unwrap_or(1)
+                                            .unwrap_or(1);
+                                        (mc, nf, rf)
                                     })
-                                    .unwrap_or(1)
+                                    .unwrap_or((1, false, false))
                             };
+                            web_sys::console::log_1(&format!(
+                                "[W3D-MESHDEFORM] model=\"{}\" mesh_count={} node_found={} res_found={} member=({},{})",
+                                s3d_ref.name, mesh_count, node_found, res_found, s3d_ref.cast_lib, s3d_ref.cast_member
+                            ).into());
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     use crate::player::cast_member::{MeshDeformState, MeshDeformMesh};
@@ -1360,7 +1613,7 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "removeModifier" => Ok(player.alloc_datum(Datum::Void)),
-                "registerScript" => Ok(player.alloc_datum(Datum::Void)),
+                "registerScript" | "registerForEvent" => Ok(player.alloc_datum(Datum::Void)),
                 "isInWorld" => Ok(player.alloc_datum(Datum::Int(1))),
                 // ─── Camera methods ───
                 "modelUnderLoc" => {
@@ -1439,7 +1692,135 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "modelsUnderLoc" => {
-                    // Same as modelUnderLoc but returns a list (for now, just return 0-1 results)
+                    // modelsUnderLoc(point {, maxModels, #simple|#detailed})
+                    if !args.is_empty() {
+                        let (sx, sy) = match player.get_datum(&args[0]) {
+                            Datum::Point(refs) => {
+                                let x = player.get_datum(&refs[0]).int_value().unwrap_or(0) as f32;
+                                let y = player.get_datum(&refs[1]).int_value().unwrap_or(0) as f32;
+                                (x, y)
+                            }
+                            _ => (0.0, 0.0),
+                        };
+                        let max_models = if args.len() > 1 {
+                            player.get_datum(&args[1]).int_value().unwrap_or(100) as usize
+                        } else { 100 };
+                        let detailed = if args.len() > 2 {
+                            player.get_datum(&args[2]).string_value().unwrap_or_default() == "detailed"
+                        } else { false };
+
+                        let (scene, node_transforms, excluded) = {
+                            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                            if let Some(m) = member {
+                                if let Some(w3d) = m.member_type.as_shockwave3d() {
+                                    let s = w3d.parsed_scene.clone();
+                                    let nt = w3d.runtime_state.node_transforms.clone();
+                                    let ex = w3d.runtime_state.detached_nodes.clone();
+                                    (s, nt, ex)
+                                } else { (None, std::collections::HashMap::new(), std::collections::HashSet::new()) }
+                            } else { (None, std::collections::HashMap::new(), std::collections::HashSet::new()) }
+                        };
+
+                        if let Some(scene) = scene {
+                            use crate::director::chunks::w3d::raycast;
+
+                            let view_node = scene.nodes.iter().find(|n| n.name == s3d_ref.name);
+                            let (fov, near, far) = if let Some(n) = view_node {
+                                (n.fov.to_radians(), n.near_plane, n.far_plane)
+                            } else { (30.0f32.to_radians(), 1.0, 10000.0) };
+
+                            let width = player.movie.rect.width() as f32;
+                            let height = player.movie.rect.height() as f32;
+                            let width = if width > 0.0 { width } else { 320.0 };
+                            let height = if height > 0.0 { height } else { 240.0 };
+                            let aspect = width / height;
+
+                            let f = 1.0 / (fov / 2.0).tan();
+                            let nf = 1.0 / (near - far);
+                            let proj = [
+                                f/aspect, 0.0, 0.0, 0.0,
+                                0.0, f, 0.0, 0.0,
+                                0.0, 0.0, (far+near)*nf, -1.0,
+                                0.0, 0.0, 2.0*far*near*nf, 0.0,
+                            ];
+
+                            // Use runtime transform for the camera if available
+                            let cam_transform = node_transforms.get(&s3d_ref.name)
+                                .or_else(|| view_node.map(|n| &n.transform));
+                            let view = if let Some(t) = cam_transform {
+                                let tx = t[12]; let ty = t[13]; let tz = t[14];
+                                [
+                                    t[0], t[4], t[8], 0.0,
+                                    t[1], t[5], t[9], 0.0,
+                                    t[2], t[6], t[10], 0.0,
+                                    -(t[0]*tx+t[1]*ty+t[2]*tz), -(t[4]*tx+t[5]*ty+t[6]*tz), -(t[8]*tx+t[9]*ty+t[10]*tz), 1.0,
+                                ]
+                            } else {
+                                [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,-500.0,1.0]
+                            };
+
+                            let ray = raycast::screen_to_ray(sx, sy, width, height, &view, &proj);
+                            let hits = raycast::raycast_scene_multi(
+                                &ray, &scene, 100000.0, max_models,
+                                Some(&node_transforms), Some(&excluded),
+                            );
+
+                            if !hits.is_empty() {
+                                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                                let mut items = VecDeque::new();
+                                for hit in &hits {
+                                    if detailed {
+                                        // #detailed: return proplist with #model, #distance, #isectPosition, #isectNormal, #meshID, #faceID, #vertices, #uvCoord
+                                        let mk = player.alloc_datum(Datum::Symbol("model".to_string()));
+                                        let mv = player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                            cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member,
+                                            object_type: "model".to_string(), name: hit.model_name.clone(),
+                                        }));
+                                        let dk = player.alloc_datum(Datum::Symbol("distance".to_string()));
+                                        let dv = player.alloc_datum(Datum::Float(hit.distance as f64));
+                                        let pk = player.alloc_datum(Datum::Symbol("isectPosition".to_string()));
+                                        let pv = player.alloc_datum(Datum::Vector([
+                                            hit.position[0] as f64, hit.position[1] as f64, hit.position[2] as f64,
+                                        ]));
+                                        let nk = player.alloc_datum(Datum::Symbol("isectNormal".to_string()));
+                                        let nv = player.alloc_datum(Datum::Vector([
+                                            hit.normal[0] as f64, hit.normal[1] as f64, hit.normal[2] as f64,
+                                        ]));
+                                        let midk = player.alloc_datum(Datum::Symbol("meshID".to_string()));
+                                        let midv = player.alloc_datum(Datum::Int(1)); // mesh index (1-based)
+                                        let fidk = player.alloc_datum(Datum::Symbol("faceID".to_string()));
+                                        let fidv = player.alloc_datum(Datum::Int(hit.face_index as i32 + 1)); // 1-based
+                                        let vk = player.alloc_datum(Datum::Symbol("vertices".to_string()));
+                                        let vv = player.alloc_datum(Datum::List(
+                                            crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
+                                        ));
+                                        let uk = player.alloc_datum(Datum::Symbol("uvCoord".to_string()));
+                                        let u_ref = player.alloc_datum(Datum::Symbol("u".to_string()));
+                                        let u_val = player.alloc_datum(Datum::Float(0.0));
+                                        let v_ref = player.alloc_datum(Datum::Symbol("v".to_string()));
+                                        let v_val = player.alloc_datum(Datum::Float(0.0));
+                                        let uv = player.alloc_datum(Datum::PropList(
+                                            VecDeque::from(vec![(u_ref, u_val), (v_ref, v_val)]), false,
+                                        ));
+                                        let props = VecDeque::from(vec![
+                                            (mk, mv), (dk, dv), (pk, pv), (nk, nv),
+                                            (midk, midv), (fidk, fidv), (vk, vv), (uk, uv),
+                                        ]);
+                                        items.push_back(player.alloc_datum(Datum::PropList(props, false)));
+                                    } else {
+                                        // #simple: just return model refs
+                                        items.push_back(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                            cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member,
+                                            object_type: "model".to_string(), name: hit.model_name.clone(),
+                                        })));
+                                    }
+                                }
+                                return Ok(player.alloc_datum(Datum::List(
+                                    crate::director::lingo::datum::DatumType::List, items, false,
+                                )));
+                            }
+                        }
+                    }
                     Ok(player.alloc_datum(Datum::List(
                         crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
                     )))
@@ -1806,7 +2187,13 @@ impl Shockwave3dObjectDatumHandlers {
                                     if let Some(s) = shader {
                                         for layer in &s.texture_layers {
                                             if !layer.name.is_empty() {
-                                                items.push_back(player.alloc_datum(Datum::String(layer.name.clone())));
+                                                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                                                items.push_back(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                                    cast_lib: s3d_ref.cast_lib,
+                                                    cast_member: s3d_ref.cast_member,
+                                                    object_type: "texture".to_string(),
+                                                    name: layer.name.clone(),
+                                                })));
                                             } else {
                                                 items.push_back(player.alloc_datum(Datum::Void));
                                             }
@@ -1991,7 +2378,13 @@ impl Shockwave3dObjectDatumHandlers {
                                     if let Some(s) = shader {
                                         for layer in &s.texture_layers {
                                             if !layer.name.is_empty() {
-                                                items.push_back(player.alloc_datum(Datum::String(layer.name.clone())));
+                                                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                                                items.push_back(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                                    cast_lib: s3d_ref.cast_lib,
+                                                    cast_member: s3d_ref.cast_member,
+                                                    object_type: "texture".to_string(),
+                                                    name: layer.name.clone(),
+                                                })));
                                             } else {
                                                 items.push_back(player.alloc_datum(Datum::Void));
                                             }
@@ -2265,6 +2658,30 @@ impl Shockwave3dObjectDatumHandlers {
                                     Some(player.alloc_datum(Datum::Void))
                                 }
                             }
+                            // node.child[n] — return the n-th child node as a ref
+                            "child" => {
+                                let children: Vec<&crate::director::chunks::w3d::types::W3dNode> = scene.nodes.iter()
+                                    .filter(|n| n.parent_name == s3d_ref.name)
+                                    .collect();
+                                if idx < children.len() {
+                                    let child = &children[idx];
+                                    let obj_type = match child.node_type {
+                                        crate::director::chunks::w3d::types::W3dNodeType::View => "camera",
+                                        crate::director::chunks::w3d::types::W3dNodeType::Light => "light",
+                                        crate::director::chunks::w3d::types::W3dNodeType::Group => "group",
+                                        _ => "model",
+                                    };
+                                    Some(player.alloc_datum(Datum::Shockwave3dObjectRef(
+                                        crate::director::lingo::datum::Shockwave3dObjectRef {
+                                            cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member,
+                                            object_type: obj_type.to_string(),
+                                            name: child.name.clone(),
+                                        }
+                                    )))
+                                } else {
+                                    Some(player.alloc_datum(Datum::Void))
+                                }
+                            }
                             _ => None, // Not a known collection, fall through to general get_prop_inner
                         };
 
@@ -2440,6 +2857,9 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                                 count
                             }
+                            "child" => {
+                                scene.nodes.iter().filter(|n| n.parent_name == s3d_ref.name).count()
+                            }
                             _ => 0,
                         };
                         Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -2543,6 +2963,249 @@ impl Shockwave3dObjectDatumHandlers {
                     let wz = pos[2] + right[2] * cx + up[2] * cy + fwd[2] * proj_dist;
                     Ok(player.alloc_datum(Datum::Vector([wx as f64, wy as f64, wz as f64])))
                 },
+                // ─── Mesh build workflow: generateNormals() and build() ───
+                "generateNormals" => {
+                    // modelResource.generateNormals(#flat | #smooth)
+                    let style = if !args.is_empty() {
+                        match player.get_datum(&args[0]).string_value().unwrap_or_default().as_str() {
+                            "smooth" => 1u8,
+                            _ => 0u8, // #flat
+                        }
+                    } else { 0 };
+                    let res_name = s3d_ref.name.clone();
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            use crate::player::cast_member::MeshBuildData;
+                            w3d.runtime_state.mesh_build_data
+                                .entry(res_name)
+                                .or_insert_with(MeshBuildData::default)
+                                .generate_normals_style = Some(style);
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Void))
+                },
+                "build" => {
+                    // modelResource.build() — construct mesh geometry from face data
+                    let res_name = s3d_ref.name.clone();
+                    let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+
+                    // 1. Read face data from persistent face list
+                    let face_key = format!("face:{}", res_name);
+                    let face_list_ref = {
+                        let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                        member.and_then(|m| m.member_type.as_shockwave3d())
+                            .and_then(|w3d| w3d.runtime_state.shader_texture_lists.get(&face_key))
+                            .cloned()
+                    };
+
+                    // 2. Read build data (vertexList, textureCoordinateList, etc.)
+                    let build_data = {
+                        let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                        member.and_then(|m| m.member_type.as_shockwave3d())
+                            .and_then(|w3d| w3d.runtime_state.mesh_build_data.get(&res_name))
+                            .cloned()
+                            .unwrap_or_default()
+                    };
+
+                    // 3. Extract face vertex/texcoord/color indices and shader assignments
+                    struct FaceData {
+                        vertex_indices: [u32; 3],       // 1-based → 0-based
+                        texcoord_indices: [u32; 3],     // 1-based → 0-based
+                        shader_name: String,
+                    }
+                    let mut faces: Vec<FaceData> = Vec::new();
+
+                    if let Some(face_list_ref) = face_list_ref {
+                        let face_list = player.get_datum(&face_list_ref).clone();
+                        if let Datum::List(_, face_items, _) = face_list {
+                            for face_ref in &face_items {
+                                let face_datum = player.get_datum(face_ref).clone();
+                                if let Datum::PropList(props, _) = face_datum {
+                                    let mut verts = [0u32; 3];
+                                    let mut tcs = [0u32; 3];
+                                    let mut shader_name = String::new();
+
+                                    for (k_ref, v_ref) in &props {
+                                        let key = player.get_datum(k_ref).string_value().unwrap_or_default();
+                                        match key.as_str() {
+                                            "shader" => {
+                                                match player.get_datum(v_ref) {
+                                                    Datum::Shockwave3dObjectRef(r) => shader_name = r.name.clone(),
+                                                    _ => {}
+                                                }
+                                            }
+                                            "vertices" => {
+                                                if let Datum::List(_, items, _) = player.get_datum(v_ref) {
+                                                    for (i, item) in items.iter().enumerate().take(3) {
+                                                        let idx = player.get_datum(item).int_value().unwrap_or(1);
+                                                        verts[i] = (idx.max(1) - 1) as u32; // 1-based → 0-based
+                                                    }
+                                                }
+                                            }
+                                            "textureCoordinates" => {
+                                                if let Datum::List(_, items, _) = player.get_datum(v_ref) {
+                                                    for (i, item) in items.iter().enumerate().take(3) {
+                                                        let idx = player.get_datum(item).int_value().unwrap_or(1);
+                                                        tcs[i] = (idx.max(1) - 1) as u32; // 1-based → 0-based
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    faces.push(FaceData { vertex_indices: verts, texcoord_indices: tcs, shader_name });
+                                }
+                            }
+                        }
+                    }
+
+                    if faces.is_empty() || build_data.vertex_list.is_empty() {
+                        return Ok(player.alloc_datum(Datum::Void));
+                    }
+
+                    // 4. Group faces by shader
+                    let mut shader_groups: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+                    for (i, f) in faces.iter().enumerate() {
+                        shader_groups.entry(f.shader_name.clone()).or_default().push(i);
+                    }
+
+                    // 5. Build ClodDecodedMesh per shader group
+                    use crate::director::chunks::w3d::types::ClodDecodedMesh;
+                    let mut meshes: Vec<ClodDecodedMesh> = Vec::new();
+                    let gen_normals = build_data.generate_normals_style;
+
+                    for (_shader_name, face_indices) in &shader_groups {
+                        // Collect unique vertex indices used by this group
+                        let mut vert_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut tex_coords: Vec<[f32; 2]> = Vec::new();
+                        let mut mesh_faces: Vec<[u32; 3]> = Vec::new();
+
+                        // For flat normals, we emit unique vertices per face
+                        if gen_normals == Some(0) {
+                            // Flat shading: each face gets 3 unique vertices with the face normal
+                            for &fi in face_indices {
+                                let f = &faces[fi];
+                                let base = positions.len() as u32;
+                                for k in 0..3usize {
+                                    let vi = f.vertex_indices[k] as usize;
+                                    let pos = build_data.vertex_list.get(vi).copied().unwrap_or([0.0; 3]);
+                                    positions.push(pos);
+                                    let ti = f.texcoord_indices[k] as usize;
+                                    let tc = build_data.texture_coordinate_list.get(ti).copied().unwrap_or([0.0; 2]);
+                                    tex_coords.push(tc);
+                                }
+                                // Compute face normal from cross product
+                                let v0 = positions[(base) as usize];
+                                let v1 = positions[(base + 1) as usize];
+                                let v2 = positions[(base + 2) as usize];
+                                let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
+                                let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
+                                let nx = e1[1]*e2[2] - e1[2]*e2[1];
+                                let ny = e1[2]*e2[0] - e1[0]*e2[2];
+                                let nz = e1[0]*e2[1] - e1[1]*e2[0];
+                                let len = (nx*nx + ny*ny + nz*nz).sqrt().max(1e-10);
+                                let n = [nx/len, ny/len, nz/len];
+                                normals.push(n);
+                                normals.push(n);
+                                normals.push(n);
+                                mesh_faces.push([base, base+1, base+2]);
+                            }
+                        } else {
+                            // Smooth or no normals: share vertices
+                            for &fi in face_indices {
+                                let f = &faces[fi];
+                                let mut tri = [0u32; 3];
+                                for k in 0..3usize {
+                                    let vi = f.vertex_indices[k];
+                                    let new_idx = if let Some(&idx) = vert_map.get(&vi) {
+                                        idx
+                                    } else {
+                                        let idx = positions.len() as u32;
+                                        let pos = build_data.vertex_list.get(vi as usize).copied().unwrap_or([0.0; 3]);
+                                        positions.push(pos);
+                                        let ti = f.texcoord_indices[k] as usize;
+                                        let tc = build_data.texture_coordinate_list.get(ti).copied().unwrap_or([0.0; 2]);
+                                        tex_coords.push(tc);
+                                        if gen_normals == Some(1) {
+                                            normals.push([0.0; 3]); // Will accumulate
+                                        }
+                                        vert_map.insert(vi, idx);
+                                        idx
+                                    };
+                                    tri[k] = new_idx;
+                                }
+                                // Accumulate face normals for smooth shading
+                                if gen_normals == Some(1) {
+                                    let v0 = positions[tri[0] as usize];
+                                    let v1 = positions[tri[1] as usize];
+                                    let v2 = positions[tri[2] as usize];
+                                    let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
+                                    let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
+                                    let nx = e1[1]*e2[2] - e1[2]*e2[1];
+                                    let ny = e1[2]*e2[0] - e1[0]*e2[2];
+                                    let nz = e1[0]*e2[1] - e1[1]*e2[0];
+                                    for &idx in &tri {
+                                        let n = &mut normals[idx as usize];
+                                        n[0] += nx; n[1] += ny; n[2] += nz;
+                                    }
+                                }
+                                mesh_faces.push(tri);
+                            }
+                            // Normalize accumulated normals for smooth shading
+                            if gen_normals == Some(1) {
+                                for n in &mut normals {
+                                    let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt().max(1e-10);
+                                    n[0] /= len; n[1] /= len; n[2] /= len;
+                                }
+                            }
+                        }
+
+                        meshes.push(ClodDecodedMesh {
+                            name: res_name.clone(),
+                            positions,
+                            normals,
+                            tex_coords: vec![tex_coords],
+                            faces: mesh_faces,
+                            diffuse_colors: vec![],
+                            specular_colors: vec![],
+                            bone_indices: vec![],
+                            bone_weights: vec![],
+                        });
+                    }
+
+                    // 6. Store meshes in scene and update model_resources
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some(scene) = w3d.scene_mut() {
+                                // Update model resource info
+                                if let Some(res_info) = scene.model_resources.get_mut(&res_name) {
+                                    let total_faces: u32 = meshes.iter().map(|m| m.faces.len() as u32).sum();
+                                    if !res_info.mesh_infos.is_empty() {
+                                        res_info.mesh_infos[0].num_faces = total_faces;
+                                    }
+                                    // Add shader bindings from face data
+                                    res_info.shader_bindings.clear();
+                                    let shader_names: Vec<String> = shader_groups.keys().cloned().collect();
+                                    let mesh_bindings: Vec<String> = shader_names.iter().cloned().collect();
+                                    res_info.shader_bindings.push(crate::director::chunks::w3d::types::ModelShaderBinding {
+                                        name: "default".to_string(),
+                                        mesh_bindings,
+                                    });
+                                }
+                                scene.clod_meshes.insert(res_name.clone(), meshes);
+                                scene.texture_content_version += 1; // trigger GPU re-upload
+                            }
+                        }
+                    }
+
+                    web_sys::console::log_1(&format!(
+                        "[W3D] modelResource(\"{}\").build() — {} faces, {} vertices, {} shader groups",
+                        res_name, faces.len(), build_data.vertex_list.len(), shader_groups.len()
+                    ).into());
+                    Ok(player.alloc_datum(Datum::Void))
+                },
                 _ => {
                     // Treat as property get
                     Self::get_prop(datum, handler_name)
@@ -2620,12 +3283,35 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 }
             },
-            "child" | "child.count" | "childCount" => {
-                // Count children of this model
+            "child.count" | "childCount" => {
+                // Count children of this node
                 let count = scene.nodes.iter()
                     .filter(|n| n.parent_name == model_name)
                     .count();
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
+            },
+            "child" => {
+                // Return list of child node refs
+                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                let children: Vec<_> = scene.nodes.iter()
+                    .filter(|n| n.parent_name == model_name)
+                    .collect();
+                let mut items = VecDeque::new();
+                for child in &children {
+                    let obj_type = match child.node_type {
+                        crate::director::chunks::w3d::types::W3dNodeType::View => "camera",
+                        crate::director::chunks::w3d::types::W3dNodeType::Light => "light",
+                        crate::director::chunks::w3d::types::W3dNodeType::Group => "group",
+                        _ => "model",
+                    };
+                    items.push_back(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                        cast_lib: member_ref.cast_lib, cast_member: member_ref.cast_member,
+                        object_type: obj_type.to_string(), name: child.name.clone(),
+                    })));
+                }
+                Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List, items, false,
+                )))
             },
             "shader" => {
                 // Return shader as a Shockwave3dObjectRef
@@ -2884,35 +3570,31 @@ impl Shockwave3dObjectDatumHandlers {
             scene.materials.iter().find(|m| m.name == s.material_name)
         });
 
+        // Default material values matching Director's DefaultShader
+        let default_ambient = [63.0 / 255.0, 63.0 / 255.0, 63.0 / 255.0, 1.0];
+        let default_diffuse = [1.0_f32, 1.0, 1.0, 1.0];
+        let default_specular = [1.0_f32, 1.0, 1.0, 1.0];
+        let default_emissive = [0.0_f32, 0.0, 0.0, 1.0];
+
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(shader_name.to_string()))),
+            "ilk" => Ok(player.alloc_datum(Datum::Symbol("shader".to_string()))),
+            "type" => Ok(player.alloc_datum(Datum::Symbol("standard".to_string()))),
             "diffuse" => {
-                if let Some(mat) = material {
-                    Ok(player.alloc_datum(color_to_datum(mat.diffuse)))
-                } else {
-                    Ok(player.alloc_datum(color_to_datum([0.8, 0.8, 0.8, 1.0])))
-                }
+                let c = material.map(|m| m.diffuse).unwrap_or(default_diffuse);
+                Ok(player.alloc_datum(color_to_datum(c)))
             },
             "ambient" => {
-                if let Some(mat) = material {
-                    Ok(player.alloc_datum(color_to_datum(mat.ambient)))
-                } else {
-                    Ok(player.alloc_datum(color_to_datum([0.0, 0.0, 0.0, 1.0])))
-                }
+                let c = material.map(|m| m.ambient).unwrap_or(default_ambient);
+                Ok(player.alloc_datum(color_to_datum(c)))
             },
             "specular" => {
-                if let Some(mat) = material {
-                    Ok(player.alloc_datum(color_to_datum(mat.specular)))
-                } else {
-                    Ok(player.alloc_datum(color_to_datum([0.0, 0.0, 0.0, 1.0])))
-                }
+                let c = material.map(|m| m.specular).unwrap_or(default_specular);
+                Ok(player.alloc_datum(color_to_datum(c)))
             },
             "emissive" => {
-                if let Some(mat) = material {
-                    Ok(player.alloc_datum(color_to_datum(mat.emissive)))
-                } else {
-                    Ok(player.alloc_datum(color_to_datum([0.0, 0.0, 0.0, 1.0])))
-                }
+                let c = material.map(|m| m.emissive).unwrap_or(default_emissive);
+                Ok(player.alloc_datum(color_to_datum(c)))
             },
             "shininess" => {
                 let v = material.map(|m| m.shininess).unwrap_or(0.0);
@@ -2923,29 +3605,60 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(player.alloc_datum(Datum::Float(v as f64)))
             },
             "transparent" => {
-                let v = material.map(|m| m.opacity < 1.0).unwrap_or(false);
-                Ok(player.alloc_datum(Datum::Int(if v { 1 } else { 0 })))
+                // Director default is 1 (transparency enabled)
+                Ok(player.alloc_datum(Datum::Int(1)))
             },
             "renderStyle" => Ok(player.alloc_datum(Datum::Symbol("fill".to_string()))),
             "flat" => Ok(player.alloc_datum(Datum::Int(0))),
-            "textureRepeat" => Ok(player.alloc_datum(Datum::Int(1))),
-            "useDiffuseWithTexture" => Ok(player.alloc_datum(Datum::Int(1))),
+            "useDiffuseWithTexture" => Ok(player.alloc_datum(Datum::Int(0))),
+            "diffuseLightMap" | "glossMap" | "specularLightMap" => {
+                Ok(player.alloc_datum(Datum::Void))
+            },
+            "blendConstant" => {
+                // First texture layer's blend constant * 100
+                let v = shader.and_then(|s| s.texture_layers.first())
+                    .map(|l| l.blend_const * 100.0).unwrap_or(50.0);
+                Ok(player.alloc_datum(Datum::Float(v as f64)))
+            },
+            "blendFunction" => {
+                // First texture layer's blend function
+                let v = shader.and_then(|s| s.texture_layers.first())
+                    .map(|l| l.blend_func).unwrap_or(0);
+                let sym = match v { 1 => "add", 2 => "replace", 3 => "blend", _ => "multiply" };
+                Ok(player.alloc_datum(Datum::Symbol(sym.to_string())))
+            },
+            "blendSource" => {
+                // First texture layer's blend source
+                let v = shader.and_then(|s| s.texture_layers.first())
+                    .map(|l| l.blend_src).unwrap_or(0);
+                let sym = if v == 1 { "alpha" } else { "constant" };
+                Ok(player.alloc_datum(Datum::Symbol(sym.to_string())))
+            },
+            "textureMode" => {
+                let v = shader.and_then(|s| s.texture_layers.first())
+                    .map(|l| l.tex_mode).unwrap_or(0);
+                let sym = match v { 4 => "reflection", 5 => "wrapPlanar", 6 => "specular", _ => "none" };
+                Ok(player.alloc_datum(Datum::Symbol(sym.to_string())))
+            },
+            "textureRepeat" => {
+                let v = shader.and_then(|s| s.texture_layers.first())
+                    .map(|l| l.repeat_s as i32).unwrap_or(1);
+                Ok(player.alloc_datum(Datum::Int(v)))
+            },
             "texture" => {
                 // Return first texture as a Shockwave3dObjectRef
-                if let Some(s) = shader {
-                    if let Some(layer) = s.texture_layers.first() {
-                        if !layer.name.is_empty() {
-                            use crate::director::lingo::datum::Shockwave3dObjectRef;
-                            return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                                cast_lib: member_ref.cast_lib,
-                                cast_member: member_ref.cast_member,
-                                object_type: "texture".to_string(),
-                                name: layer.name.clone(),
-                            })));
-                        }
-                    }
-                }
-                Ok(player.alloc_datum(Datum::Void))
+                // Falls back to "DefaultTexture" (Director always has one)
+                let tex_name = shader.and_then(|s| s.texture_layers.first())
+                    .map(|l| l.name.as_str())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or("DefaultTexture");
+                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                    cast_lib: member_ref.cast_lib,
+                    cast_member: member_ref.cast_member,
+                    object_type: "texture".to_string(),
+                    name: tex_name.to_string(),
+                })))
             },
             "textureList" => {
                 // Return a persistent textureList so assignments like
@@ -2960,12 +3673,18 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(list_ref)
                 } else {
                     // Create with 8 slots (Director's max texture layers)
-                    // Fill from scene data, pad with VOID
+                    // Fill from scene data as texture object refs, pad with VOID
                     let mut items = VecDeque::new();
                     if let Some(s) = shader {
                         for layer in &s.texture_layers {
                             if !layer.name.is_empty() {
-                                items.push_back(player.alloc_datum(Datum::String(layer.name.clone())));
+                                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                                items.push_back(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                    cast_lib: member_ref.cast_lib,
+                                    cast_member: member_ref.cast_member,
+                                    object_type: "texture".to_string(),
+                                    name: layer.name.clone(),
+                                })));
                             } else {
                                 items.push_back(player.alloc_datum(Datum::Void));
                             }
@@ -3002,7 +3721,7 @@ impl Shockwave3dObjectDatumHandlers {
                         items.push_back(player.alloc_datum(Datum::Symbol(mode.to_string())));
                     }
                 }
-                if items.is_empty() {
+                while items.len() < 8 {
                     items.push_back(player.alloc_datum(Datum::Symbol("none".to_string())));
                 }
                 Ok(player.alloc_datum(Datum::List(
@@ -3022,7 +3741,7 @@ impl Shockwave3dObjectDatumHandlers {
                         items.push_back(player.alloc_datum(Datum::Symbol(sym.to_string())));
                     }
                 }
-                if items.is_empty() {
+                while items.len() < 8 {
                     items.push_back(player.alloc_datum(Datum::Symbol("multiply".to_string())));
                 }
                 Ok(player.alloc_datum(Datum::List(
@@ -3037,7 +3756,7 @@ impl Shockwave3dObjectDatumHandlers {
                         items.push_back(player.alloc_datum(Datum::Symbol(sym.to_string())));
                     }
                 }
-                if items.is_empty() {
+                while items.len() < 8 {
                     items.push_back(player.alloc_datum(Datum::Symbol("constant".to_string())));
                 }
                 Ok(player.alloc_datum(Datum::List(
@@ -3051,7 +3770,7 @@ impl Shockwave3dObjectDatumHandlers {
                         items.push_back(player.alloc_datum(Datum::Float((layer.blend_const as f64) * 100.0)));
                     }
                 }
-                if items.is_empty() {
+                while items.len() < 8 {
                     items.push_back(player.alloc_datum(Datum::Float(50.0)));
                 }
                 Ok(player.alloc_datum(Datum::List(
@@ -3059,9 +3778,17 @@ impl Shockwave3dObjectDatumHandlers {
                 )))
             },
             "textureRepeatList" => {
-                let item = player.alloc_datum(Datum::Int(1));
+                let mut items = VecDeque::new();
+                if let Some(s) = shader {
+                    for layer in &s.texture_layers {
+                        items.push_back(player.alloc_datum(Datum::Int(layer.repeat_s as i32)));
+                    }
+                }
+                while items.len() < 8 {
+                    items.push_back(player.alloc_datum(Datum::Int(1)));
+                }
                 Ok(player.alloc_datum(Datum::List(
-                    crate::director::lingo::datum::DatumType::List, VecDeque::from(vec![item]), false,
+                    crate::director::lingo::datum::DatumType::List, items, false,
                 )))
             },
             "textureTransformList" | "wrapTransformList" => {
@@ -3766,13 +4493,25 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
                     if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == shader_name) {
                         // Extend texture_layers if needed
                         use crate::director::chunks::w3d::types::W3dTextureLayer;
+                        let prev_len = shader.texture_layers.len();
                         while shader.texture_layers.len() < tex_names.len() {
                             shader.texture_layers.push(W3dTextureLayer::default());
                         }
+                        // Only sync names — do NOT overwrite blend_func/blend_src
+                        // which may have been set by Lingo blendFunctionList assignments
                         for (i, name) in tex_names.iter().enumerate() {
                             if !name.is_empty() {
                                 shader.texture_layers[i].name = name.clone();
                             }
+                        }
+                        // Log when shadow/lightmap layers are synced
+                        let non_empty: Vec<String> = tex_names.iter().filter(|n| !n.is_empty()).cloned().collect();
+                        if non_empty.len() > 1 {
+                            let blend_funcs: Vec<u8> = shader.texture_layers.iter().map(|l| l.blend_func).collect();
+                            web_sys::console::log_1(&format!(
+                                "[W3D-SYNC] shader=\"{}\" layers={} (was {}) textures={:?} blend_funcs={:?}",
+                                shader_name, shader.texture_layers.len(), prev_len, non_empty, blend_funcs
+                            ).into());
                         }
                     }
                 }

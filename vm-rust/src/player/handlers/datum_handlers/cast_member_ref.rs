@@ -201,6 +201,7 @@ impl CastMemberRefHandlers {
             | "deleteTexture" | "deleteShader" | "deleteModel" | "deleteModelResource" | "deleteLight" | "deleteCamera" | "deleteGroup" | "deleteMotion"
             | "cloneModelFromCastmember" | "cloneMotionFromCastmember" | "cloneDeep"
             | "loadFile" | "extrude3d" | "getPref" | "setPref"
+            | "registerForEvent" | "registerScript"
             | "image"
             | "modelsUnderRay" | "modelsUnderLoc" | "modelUnderLoc" => {
                 Shockwave3dMemberHandlers::call(datum, handler_name, args)

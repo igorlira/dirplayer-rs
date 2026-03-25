@@ -247,15 +247,61 @@ impl ListDatumHandlers {
                 return Ok(DatumRef::Void);
             }
             if args.is_empty() {
-                // add() with no args — add a PropList with textureCoordinateList key
-                // This is used by meshDeform.mesh[m].textureLayer.add()
-                let key = player.alloc_datum(Datum::Symbol("textureCoordinateList".to_string()));
-                let val = player.alloc_datum(Datum::List(
-                    crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
-                ));
-                let prop_list = player.alloc_datum(Datum::PropList(VecDeque::from(vec![(key, val)]), false));
-                let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-                list_vec.push_back(prop_list);
+                // add() with no args — used by meshDeform.mesh[m].textureLayer.add()
+                // Find the meshDeform context for this list to create proper meshDeformTexLayer refs
+                let tex_layer_context: Option<(i32, i32, String, usize)> = {
+                    let mut found = None;
+                    for cast in &player.movie.cast_manager.casts {
+                        for (member_num, member) in &cast.members {
+                            if let Some(w3d) = member.member_type.as_shockwave3d() {
+                                for (model_name, md) in &w3d.runtime_state.mesh_deform {
+                                    for (mesh_idx, mesh) in md.meshes.iter().enumerate() {
+                                        if let Some(ref list_ref) = mesh.texture_layer_datum_ref {
+                                            if *list_ref == *datum {
+                                                found = Some((cast.number as i32, *member_num as i32, model_name.clone(), mesh_idx));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if found.is_some() { break; }
+                    }
+                    found
+                };
+
+                // Debug: log context search result
+                web_sys::console::log_1(&format!(
+                    "[W3D-ADD] add() no-args on list datum_id={} context={:?}",
+                    datum.unwrap(), tex_layer_context
+                ).into());
+
+                if let Some((cast_lib, cast_member, model_name, mesh_idx)) = tex_layer_context {
+                    // Get current layer count to determine the new layer index
+                    let new_layer_idx = {
+                        let d = player.get_datum(datum);
+                        if let Datum::List(_, items, _) = d { items.len() } else { 0 }
+                    };
+                    // Create a meshDeformTexLayer ref so set_prop dispatches correctly
+                    use crate::director::lingo::datum::Shockwave3dObjectRef;
+                    let tex_layer_ref = player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                        cast_lib,
+                        cast_member,
+                        object_type: "meshDeformTexLayer".to_string(),
+                        name: format!("{}:{}:{}", model_name, mesh_idx, new_layer_idx),
+                    }));
+                    let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
+                    list_vec.push_back(tex_layer_ref);
+                } else {
+                    // Fallback: generic PropList (non-textureLayer list)
+                    let key = player.alloc_datum(Datum::Symbol("textureCoordinateList".to_string()));
+                    let val = player.alloc_datum(Datum::List(
+                        crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
+                    ));
+                    let prop_list = player.alloc_datum(Datum::PropList(VecDeque::from(vec![(key, val)]), false));
+                    let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
+                    list_vec.push_back(prop_list);
+                }
                 return Ok(DatumRef::Void);
             }
 

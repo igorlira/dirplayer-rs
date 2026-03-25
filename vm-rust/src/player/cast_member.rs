@@ -496,6 +496,23 @@ pub struct Shockwave3dRuntimeState {
     /// Per-camera overlay list: camera_name -> Vec<CameraOverlay>
     pub camera_overlays: std::collections::HashMap<String, Vec<CameraOverlay>>,
     pub camera_backdrops: std::collections::HashMap<String, Vec<CameraOverlay>>,
+
+    // ─── Mesh build data (for newMesh() → build() workflow) ───
+    /// Per-model-resource mesh build data: resource_name -> MeshBuildData
+    pub mesh_build_data: std::collections::HashMap<String, MeshBuildData>,
+}
+
+/// Stores intermediate data for newMesh() model resources before build() is called.
+/// Holds vertexList, textureCoordinateList, colorList, normalList, and the
+/// generateNormals style.
+#[derive(Clone, Debug, Default)]
+pub struct MeshBuildData {
+    pub vertex_list: Vec<[f32; 3]>,
+    pub texture_coordinate_list: Vec<[f32; 2]>,
+    pub color_list: Vec<(u8, u8, u8)>,
+    pub normal_list: Vec<[f32; 3]>,
+    /// #flat = 0, #smooth = 1, None = not called
+    pub generate_normals_style: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -1656,6 +1673,11 @@ impl CastMember {
     pub(crate) fn create_empty_w3d_scene() -> crate::director::chunks::w3d::types::W3dScene {
         use crate::director::chunks::w3d::types::*;
         let mut scene = W3dScene::default();
+        // Director always has a DefaultShader that cannot be deleted
+        scene.shaders.push(W3dShader {
+            name: "DefaultShader".to_string(),
+            ..Default::default()
+        });
         // Director always creates a DefaultView camera in empty 3D members
         scene.nodes.push(W3dNode {
             name: "DefaultView".to_string(),
