@@ -351,10 +351,7 @@ impl SoundChannelData {
 pub struct TempoChannelData {
     pub tempo: u8,            // Byte 6: tempo mode/value (D6+: 246=FPS, 247=delay, 248=wait click, etc.)
     pub tempo_cue_point: u16, // Bytes 4-5: FPS value or delay (when tempo==246 or 247)
-    pub flags1: u8,           // Byte 0
-    pub flags2: u8,           // Byte 1
-    pub unk3: u8,             // Byte 2
-    pub unk4: u8,             // Byte 3
+    pub sprite_list_idx: u32, // Bytes 0-3: index into sprite detail table (D6+)
     pub color_tempo: u8,      // Byte 7
     pub wait_flags: u16,      // Bytes 8-9
     pub channel_flags: u16,   // Bytes 10-11
@@ -363,19 +360,10 @@ pub struct TempoChannelData {
 
 impl TempoChannelData {
     pub fn read(reader: &mut BinaryReader) -> Result<TempoChannelData, String> {
-        // Bytes 0-3: tempoSpriteListIdx (u32) - split into individual bytes for compatibility
-        let flags1 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo flags1: {:?}", e))?;
-        let flags2 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo flags2: {:?}", e))?;
-        let unk3 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo unk3: {:?}", e))?;
-        let unk4 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo unk4: {:?}", e))?;
+        // Bytes 0-3: sprite detail table index (D6+)
+        let sprite_list_idx = reader
+            .read_u32()
+            .map_err(|e| format!("Failed to read tempo sprite_list_idx: {:?}", e))?;
 
         // Bytes 4-5: tempoCuePoint (u16) - FPS value when tempo==246, delay when tempo==247
         let tempo_cue_point = reader
@@ -417,10 +405,7 @@ impl TempoChannelData {
         Ok(TempoChannelData {
             tempo,
             tempo_cue_point,
-            flags1,
-            flags2,
-            unk3,
-            unk4,
+            sprite_list_idx,
             color_tempo,
             wait_flags,
             channel_flags,
@@ -429,13 +414,13 @@ impl TempoChannelData {
     }
     
     pub fn is_default(&self) -> bool {
-        // Check if this is a "no change" marker (0xff 0xfe pattern)
-        self.flags1 == 0xff && self.flags2 == 0xfe
+        // Check if this is a "no change" marker (0xFFFE in high 16 bits)
+        (self.sprite_list_idx >> 16) == 0xFFFE
     }
-    
+
     pub fn is_empty(&self) -> bool {
         // Check if all fields are zero (no tempo data)
-        self.flags1 == 0 && self.flags2 == 0 && self.tempo == 0
+        self.sprite_list_idx == 0 && self.tempo == 0
     }
 }
 
@@ -613,10 +598,7 @@ impl ScoreFrameData {
                         tempo_channel_data.push((frame_index, TempoChannelData {
                             tempo: tempo_val,
                             tempo_cue_point: 0,
-                            flags1: 0,
-                            flags2: 0,
-                            unk3: 0,
-                            unk4: 0,
+                            sprite_list_idx: 0,
                             color_tempo: 0,
                             wait_flags: 0,
                             channel_flags: 0,
