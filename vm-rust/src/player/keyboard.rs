@@ -70,7 +70,19 @@ impl KeyboardManager {
     }
 
     pub fn key(&self) -> String {
-        if self.down_keys.len() == 0 {
+        if self.down_keys.is_empty() {
+            return "".to_string();
+        }
+        let key = &self.down_keys.last().unwrap().key;
+        if key.len() == 1 && key.as_bytes()[0] < 0x80 {
+            key.clone()
+        } else {
+            "".to_string()
+        }
+    }
+
+    pub fn key_pressed(&self) -> String {
+        if self.down_keys.is_empty() {
             return "".to_string();
         }
         self.down_keys.last().unwrap().key.clone()

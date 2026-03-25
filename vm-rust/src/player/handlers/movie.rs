@@ -89,6 +89,19 @@ impl MovieHandlers {
     }
 
     pub async fn go(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.is_empty() {
+            // "go" with no args is gotoLoop: go to nearest marker at or before current frame,
+            // or frame 1 if no markers exist
+            reserve_player_mut(|player| {
+                let current = player.movie.current_frame as i32;
+                let label_frame = player.movie.score.frame_labels.iter()
+                    .rev()
+                    .find(|fl| fl.frame_num <= current)
+                    .map(|fl| fl.frame_num as u32);
+                player.next_frame = Some(label_frame.unwrap_or(1));
+            });
+            return Ok(DatumRef::Void);
+        }
         // If a second argument is provided, it's a movie path: go frame X of movie "path"
         let go_to_movie = if args.len() >= 2 {
             reserve_player_mut(|player| {
