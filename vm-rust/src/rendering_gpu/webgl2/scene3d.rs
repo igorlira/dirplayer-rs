@@ -409,10 +409,11 @@ void main() {
                 if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                     diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
                 }
-                // Per-light: ambient fill (lightColor * matAmbient) + diffuse (NdotL * lightColor * WHITE)
-                // WHITE because UseDiffuse=OFF forces materialDiffuse to (1,1,1)
+                // Per-light: ambient fill (lightColor * matAmbient) + diffuse (NdotL * lightColor * matDiffuse)
+                // IFX uses materialDiffuse in lighting even when UseDiffuseWithTexture=OFF.
+                // UseDiffuse only controls final texture*color multiply, not the lighting equation.
                 lighting += atten * (u_light_color[i] * u_ambient_color.rgb
-                          + diff * u_light_color[i]);
+                          + diff * u_light_color[i] * u_diffuse_color.rgb);
             }
         }
 
@@ -1120,7 +1121,7 @@ void main() {
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
         gl.uniform3f(shader.u_camera_pos.as_ref(), camera_pos[0], camera_pos[1], camera_pos[2]);
 
-        self.setup_lights(gl, shader, scene, &camera_pos);
+        self.setup_lights(gl, shader, scene, &camera_pos, runtime_state);
         gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
         gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
         gl.uniform1i(shader.u_has_texcoord2.as_ref(), 0);
@@ -1222,6 +1223,13 @@ void main() {
                             if mesh.tex_coords.len() >= 2 && !mesh.tex_coords[1].is_empty() {
                                 mesh_buf.update_texcoord2(context.gl(), &mesh.tex_coords[1]);
                                 mesh_buf.meshdeform_uv_synced = true;
+                                // Log UV2 sync for MAP models
+                                if resource_name.contains("MAP") || resource_name.starts_with("map") {
+                                    web_sys::console::log_1(&format!(
+                                        "[W3D-UV2] resource=\"{}\" mesh={} uv2_count={}",
+                                        resource_name, mesh_idx, mesh.tex_coords[1].len()
+                                    ).into());
+                                }
                             }
                         }
                     }
@@ -1281,7 +1289,7 @@ void main() {
         }
 
         // Set up lighting (pass camera pos for headlight direction)
-        self.setup_lights(gl, shader, scene, &camera_pos);
+        self.setup_lights(gl, shader, scene, &camera_pos, runtime_state);
 
         // Set texture samplers
         gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);   // unit 0 = base/diffuse
@@ -1458,8 +1466,14 @@ void main() {
                 // Classify nodes into opaque and transparent for proper rendering order
                 let mut transparent_nodes: Vec<(&W3dNode, f32)> = Vec::new(); // (node, distance_to_camera)
 
-                // PASS 1: Render opaque geometry
-                for model_node in &model_nodes {
+                // Sort: skybox nodes first so they render before scene geometry
+                let mut sorted_model_nodes: Vec<&W3dNode> = model_nodes.iter().copied().collect();
+                sorted_model_nodes.sort_by_key(|n| {
+                    if n.name.starts_with("SB_") && n.parent_name.contains("SkyBox") { 0 } else { 1 }
+                });
+
+                // PASS 1: Render opaque geometry (skybox first, then scene)
+                for model_node in &sorted_model_nodes {
                     if let Some(rs) = runtime_state {
                         if let Some(&visible) = rs.node_visibility.get(&model_node.name) {
                             if !visible { continue; }
@@ -1795,6 +1809,8 @@ void main() {
         };
         let res_info = scene.model_resources.get(resource);
 
+        let is_skybox = model_node.name.starts_with("SB_") && model_node.parent_name.contains("SkyBox");
+
         if let Some(gpu_data) = self.member_data.get(member_key) {
             let has_skeleton_data = self.setup_skinning_for_resource(
                 gl, shader, scene, resource, gpu_data, runtime_state,
@@ -1818,7 +1834,36 @@ void main() {
                 gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
             }
 
+            // Skybox: disable culling (viewed from inside) and depth writes
+            // Skybox is rendered first (sorted to front of opaque list) so depth test still works
+            if is_skybox {
+                gl.disable(WebGl2RenderingContext::CULL_FACE);
+                gl.depth_mask(false); // Don't write to depth buffer so scene renders on top
+            }
+
             if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
+                // One-time skybox draw diagnostic
+                if model_node.name.starts_with("SB_") {
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    static LOGGED_SB: AtomicBool = AtomicBool::new(false);
+                    if !LOGGED_SB.swap(true, Ordering::Relaxed) {
+                        let shader_name = runtime_state
+                            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
+                            .cloned()
+                            .unwrap_or_else(|| model_node.shader_name.clone());
+                        let w3d_shader = Self::find_shader_ci(&scene.shaders, &shader_name);
+                        let tex_names: Vec<String> = w3d_shader.map(|s| s.texture_layers.iter().map(|l| l.name.clone()).collect()).unwrap_or_default();
+                        web_sys::console::log_1(&format!(
+                            "[W3D-SKYBOX] model=\"{}\" resource=\"{}\" mesh_count={} shader=\"{}\" tex_layers={:?} world_pos=({:.0},{:.0},{:.0}) scale=({:.0},{:.0},{:.0})",
+                            model_node.name, resource, mesh_group.len(), shader_name, tex_names,
+                            world_matrix[12], world_matrix[13], world_matrix[14],
+                            (world_matrix[0]*world_matrix[0]+world_matrix[1]*world_matrix[1]+world_matrix[2]*world_matrix[2]).sqrt(),
+                            (world_matrix[4]*world_matrix[4]+world_matrix[5]*world_matrix[5]+world_matrix[6]*world_matrix[6]).sqrt(),
+                            (world_matrix[8]*world_matrix[8]+world_matrix[9]*world_matrix[9]+world_matrix[10]*world_matrix[10]).sqrt(),
+                        ).into());
+                    }
+                }
+
                 for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
                     let bound = self.bind_material_for_mesh(
                         gl, shader, scene, model_node,
@@ -1826,6 +1871,28 @@ void main() {
                     );
                     if !bound {
                         self.bind_material(gl, shader, scene, model_node, member_key, runtime_state);
+                        // Log models that fall back to bind_material (no per-mesh shader binding)
+                        {
+                            use std::sync::Mutex;
+                            use std::collections::HashSet;
+                            static LOGGED_FB: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+                            if let Ok(mut guard) = LOGGED_FB.lock() {
+                                let set = guard.get_or_insert_with(HashSet::new);
+                                if set.insert(model_node.name.clone()) {
+                                    let eff_shader = runtime_state
+                                        .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
+                                        .cloned()
+                                        .unwrap_or_else(|| model_node.shader_name.clone());
+                                    let is_default = eff_shader.is_empty() || eff_shader.eq_ignore_ascii_case("DefaultShader");
+                                    if is_default {
+                                        web_sys::console::log_1(&format!(
+                                            "[W3D-DEFSHADER] model=\"{}\" resource=\"{}\" shader=\"{}\" parent=\"{}\"",
+                                            model_node.name, resource, eff_shader, model_node.parent_name
+                                        ).into());
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     if mesh_buf.has_bones && has_skeleton_data {
@@ -1858,6 +1925,11 @@ void main() {
                     }
                 }
             }
+        }
+        // Restore state after skybox
+        if is_skybox {
+            gl.enable(WebGl2RenderingContext::CULL_FACE);
+            gl.depth_mask(true);
         }
         // Log when a player/actor/bot model is actually drawn (once per model name)
         if model_node.name.contains("PlayerModel") || model_node.name.contains("BotModel")
@@ -2627,6 +2699,33 @@ void main() {
             result.diffuse = Some(first.tex);
         }
 
+        // Diagnostic: log multi-layer binding results for shaders with 2+ named layers
+        {
+            let named_count = layers.iter().filter(|l| !l.name.is_empty()).count();
+            if named_count >= 2 {
+                use std::sync::Mutex;
+                use std::collections::HashSet;
+                static LOGGED_BIND: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+                let names: Vec<&str> = layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.name.as_str()).collect();
+                let key = format!("{:?}", names);
+                if let Ok(mut guard) = LOGGED_BIND.lock() {
+                    let set = guard.get_or_insert_with(HashSet::new);
+                    if set.insert(key) {
+                        let found_in_gpu: Vec<bool> = layers.iter()
+                            .filter(|l| !l.name.is_empty())
+                            .map(|l| gpu_data.textures.contains_key(&l.name.to_lowercase()))
+                            .collect();
+                        web_sys::console::log_1(&format!(
+                            "[W3D-TEXBIND] layers={:?} found_in_gpu={:?} diffuse={} extra_layers={} blend_funcs={:?}",
+                            names, found_in_gpu,
+                            result.diffuse.is_some(), result.extra_layers.len(),
+                            layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.blend_func).collect::<Vec<_>>()
+                        ).into());
+                    }
+                }
+            }
+        }
+
         result
     }
 
@@ -2813,10 +2912,52 @@ void main() {
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> bool {
+        // One-time skybox material diagnostic
+        if model_node.name.starts_with("SB_") {
+            use std::sync::Mutex;
+            use std::collections::HashSet;
+            static LOGGED_SB_MAT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+            let key = format!("{}:{}", model_node.name, mesh_idx);
+            if let Ok(mut guard) = LOGGED_SB_MAT.lock() {
+                let set = guard.get_or_insert_with(HashSet::new);
+                if set.insert(key) {
+                    let has_override = runtime_state
+                        .and_then(|rs| Self::node_shader_override(rs, &model_node.name, Some(mesh_idx)))
+                        .is_some();
+                    let binding_names: Vec<String> = res_info.map(|r| r.shader_bindings.iter()
+                        .map(|b| {
+                            let mesh_shader = b.mesh_bindings.get(mesh_idx).cloned().unwrap_or_default();
+                            format!("{}[{}]={}", b.name, mesh_idx, mesh_shader)
+                        }).collect()
+                    ).unwrap_or_default();
+                    let res_exists = res_info.is_some();
+                    web_sys::console::log_1(&format!(
+                        "[W3D-SB-MAT] model=\"{}\" mesh={} has_override={} res_exists={} bindings={:?} node_shader=\"{}\"",
+                        model_node.name, mesh_idx, has_override, res_exists, binding_names, model_node.shader_name
+                    ).into());
+                }
+            }
+        }
+
         // Check per-mesh shader override first (from Lingo shaderList[I] = shaderRef)
         if let Some(override_name) = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, &model_node.name, Some(mesh_idx)))
         {
+            // Log when DefaultShader override is used on MAP models
+            if override_name.eq_ignore_ascii_case("DefaultShader") && model_node.name.contains("MAP") {
+                use std::sync::Mutex;
+                use std::collections::HashSet;
+                static LOGGED_DS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+                if let Ok(mut guard) = LOGGED_DS.lock() {
+                    let set = guard.get_or_insert_with(HashSet::new);
+                    if set.insert(format!("{}:{}", model_node.name, mesh_idx)) {
+                        web_sys::console::log_1(&format!(
+                            "[W3D-DEFSHADER-OVERRIDE] model=\"{}\" mesh={} override=\"{}\"",
+                            model_node.name, mesh_idx, override_name
+                        ).into());
+                    }
+                }
+            }
             if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, override_name) {
                 let mat = if !w3d_shader.material_name.is_empty() {
                     Self::find_material_ci(&scene.materials, &w3d_shader.material_name)
@@ -2907,6 +3048,30 @@ void main() {
             if let (Some(gpu_data), Some(w3d_shader)) = (self.member_data.get(member_key), w3d_shader) {
                 let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
                 tex_bound = Self::bind_texture_layers(gl, shader, &layers);
+            }
+
+            // Skybox candidate diagnostic
+            if model_node.name.starts_with("SB_") {
+                use std::sync::Mutex;
+                use std::collections::HashSet;
+                static LOGGED_SBC: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+                let key = format!("{}:{}:{}", model_node.name, mesh_idx, candidate);
+                if let Ok(mut guard) = LOGGED_SBC.lock() {
+                    let set = guard.get_or_insert_with(HashSet::new);
+                    if set.insert(key) {
+                        let shader_found = w3d_shader.is_some();
+                        let tex_layers: Vec<String> = w3d_shader.map(|s| s.texture_layers.iter().map(|l| l.name.clone()).collect()).unwrap_or_default();
+                        let mat_info = mat.map(|m| format!("diffuse=[{:.2},{:.2},{:.2}] emissive=[{:.2},{:.2},{:.2}] ambient=[{:.2},{:.2},{:.2}]",
+                            m.diffuse[0], m.diffuse[1], m.diffuse[2],
+                            m.emissive[0], m.emissive[1], m.emissive[2],
+                            m.ambient[0], m.ambient[1], m.ambient[2],
+                        )).unwrap_or_else(|| "NO MATERIAL".to_string());
+                        web_sys::console::log_1(&format!(
+                            "[W3D-SB-CAND] model=\"{}\" mesh={} candidate=\"{}\" shader_found={} tex_bound={} mat={}",
+                            model_node.name, mesh_idx, candidate, shader_found, tex_bound, mat_info
+                        ).into());
+                    }
+                }
             }
 
             if tex_bound {
@@ -3233,7 +3398,9 @@ void main() {
     }
 
     /// Set up lighting uniforms from scene lights
-    fn setup_lights(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, scene: &W3dScene, camera_pos: &[f32; 3]) {
+    fn setup_lights(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, scene: &W3dScene, camera_pos: &[f32; 3],
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) {
         let mut positions = [0.0f32; 24]; // 8 * 3
         let mut colors = [0.0f32; 24];
         let mut types = [0i32; 8];
@@ -3242,6 +3409,21 @@ void main() {
         let mut spot_angles = [0.0f32; 8];   // cone angle in radians
         let mut global_ambient = [0.2f32, 0.2, 0.2];
         let mut num_lights = 0i32;
+
+        // One-time light diagnostic
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                let light_info: Vec<String> = scene.lights.iter().map(|l| {
+                    format!("{}({:?}, color=[{:.2},{:.2},{:.2}])", l.name, l.light_type, l.color[0], l.color[1], l.color[2])
+                }).collect();
+                web_sys::console::log_1(&format!(
+                    "[W3D-LIGHTS] {} lights: {:?}",
+                    scene.lights.len(), light_info
+                ).into());
+            }
+        }
 
         if scene.lights.is_empty() {
             // Default: one directional light from above-right
@@ -3256,10 +3438,38 @@ void main() {
             directions[0] = -0.5; directions[1] = -1.0; directions[2] = -0.7; // matches position
             num_lights = 1;
         } else {
-            for (i, light) in scene.lights.iter().enumerate() {
-                if i >= 8 || !light.enabled {
+            // Collect detached nodes to skip lights that are removeFromWorld()
+            let detached = runtime_state.map(|rs| &rs.detached_nodes);
+
+            // Sort lights: ambient first (handled separately), then directional, then point/spot.
+            // This ensures important scene lights (SunLight, KeyLight) aren't pushed out by
+            // weapon/effect point lights that may not even be in the world.
+            let mut sorted_lights: Vec<&W3dLight> = scene.lights.iter().collect();
+            sorted_lights.sort_by_key(|l| match l.light_type {
+                W3dLightType::Ambient => 0,
+                W3dLightType::Directional => 1,
+                W3dLightType::Spot => 2,
+                W3dLightType::Point => 3,
+            });
+
+            for light in &sorted_lights {
+                if !light.enabled {
                     continue;
                 }
+                // Skip lights that have been removed from world
+                if let Some(detached_set) = detached {
+                    if detached_set.contains(&light.name) {
+                        continue;
+                    }
+                }
+                // Also skip lights whose node has empty parent (detached)
+                let light_node = scene.nodes.iter().find(|n| n.name == light.name);
+                if let Some(node) = light_node {
+                    if node.parent_name.is_empty() {
+                        continue;
+                    }
+                }
+
                 let li = num_lights as usize;
                 let lt = match light.light_type {
                     W3dLightType::Ambient => {
@@ -3272,6 +3482,7 @@ void main() {
                     W3dLightType::Point => 2,
                     W3dLightType::Spot => 3,
                 };
+                if li >= 8 { continue; } // Max 8 non-ambient lights
 
                 // Per-light attenuation from W3dLight (constant, linear, quadratic)
                 attenuations[li * 3]     = light.attenuation[0]; // constant
@@ -3288,7 +3499,7 @@ void main() {
                 if let Some(light_node) = scene.nodes.iter().find(|n| {
                     n.node_type == W3dNodeType::Light && (n.resource_name == light.name || n.name == light.name)
                 }) {
-                    let world_t = self.accumulate_transform_with_state(scene, light_node, None);
+                    let world_t = self.accumulate_transform_with_state(scene, light_node, runtime_state);
                     if lt == 1 {
                         // Directional: direction = -Z axis of world transform
                         positions[li * 3]     = -world_t[8];
