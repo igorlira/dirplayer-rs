@@ -1951,7 +1951,7 @@ impl Bitmap {
                 }
 
                 // Indexed bitmap (1-8 bit) ink 36 color-key transparency
-                if ink == 36 && is_indexed {
+                if (ink == 2 || ink == 36) && is_indexed {
                     let color_ref = src.get_pixel_color_ref(sx, sy);
                     let ColorRef::PaletteIndex(i) = color_ref else {
                         let (sr, sg, sb) = match &color_ref {
