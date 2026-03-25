@@ -17,8 +17,8 @@ impl Default for W3dMaterial {
     fn default() -> Self {
         Self {
             name: String::new(),
-            ambient: [0.125, 0.125, 0.125, 1.0],
-            diffuse: [0.5, 0.5, 0.5, 1.0],
+            ambient: [63.0 / 255.0, 63.0 / 255.0, 63.0 / 255.0, 1.0],
+            diffuse: [1.0, 1.0, 1.0, 1.0],
             specular: [1.0, 1.0, 1.0, 1.0],
             emissive: [0.0, 0.0, 0.0, 1.0],
             reflectivity: 0.0,
@@ -49,10 +49,10 @@ impl Default for W3dTextureLayer {
             intensity: 1.0,
             blend_func: 0,
             blend_src: 0,
-            blend_const: 0.0,
+            blend_const: 0.5,
             tex_mode: 0,
-            tex_transform: [0.0; 16],
-            wrap_transform: [0.0; 16],
+            tex_transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+            wrap_transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
             repeat_s: 1,
             repeat_t: 1,
         }
@@ -73,6 +73,13 @@ impl Default for W3dShaderType {
     fn default() -> Self { W3dShaderType::LitTexture }
 }
 
+/// W3dShader: Director shader properties.
+/// `derive(Default)` works because all field types have correct defaults:
+/// - `String` → empty, `u32/f32` → 0, `Vec` → empty
+/// - `W3dShaderType` → LitTexture (#standard)
+/// - Color/blend/transform defaults come from `W3dMaterial::default()` and
+///   `W3dTextureLayer::default()` when accessed via `get_shader_prop`.
+/// - Fallback values in `get_shader_prop` match Director's DefaultShader spec.
 #[derive(Clone, Debug, Default)]
 pub struct W3dShader {
     pub name: String,

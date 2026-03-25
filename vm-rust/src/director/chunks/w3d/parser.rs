@@ -108,6 +108,14 @@ impl W3dFileParser {
         // Copy model resources to scene
         self.scene.model_resources = self.model_resources.clone();
 
+        // Ensure DefaultShader exists (Director always has one)
+        if !self.scene.shaders.iter().any(|s| s.name == "DefaultShader") {
+            self.scene.shaders.insert(0, W3dShader {
+                name: "DefaultShader".to_string(),
+                ..Default::default()
+            });
+        }
+
         log(&format!("Parse complete: {} materials, {} shaders, {} nodes, {} lights, {} textures, {} skeletons, {} motions, {} mesh resources",
             self.scene.materials.len(), self.scene.shaders.len(), self.scene.nodes.len(),
             self.scene.lights.len(), self.scene.texture_images.len(),
