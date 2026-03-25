@@ -248,6 +248,7 @@ impl Shockwave3dMemberHandlers {
             | "deleteTexture" | "deleteShader" | "deleteModel" | "deleteModelResource" | "deleteLight" | "deleteCamera" | "deleteGroup" | "deleteMotion"
             | "cloneModelFromCastmember" | "cloneMotionFromCastmember" | "cloneDeep"
             | "loadFile" | "extrude3d" | "getPref" | "setPref"
+            | "registerForEvent" | "registerScript"
             | "image" => {
                 reserve_player_mut(|player| {
                     let member_ref = match player.get_datum(datum) {
@@ -264,11 +265,45 @@ impl Shockwave3dMemberHandlers {
                             ))
                         })?;
 
-                    if handler_name == "resetWorld" || handler_name == "revertToWorldDefaults" {
+                    // registerForEvent / registerScript — stub (event system not implemented)
+                    if handler_name == "registerForEvent" || handler_name == "registerScript" {
+                        return Ok(player.alloc_datum(Datum::Void));
+                    }
+
+                    if handler_name == "resetWorld" {
                         let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            // Reset to initial state from 3DPR data (preserves camera, bg color)
+                            // resetWorld: restore to state when member was first loaded into memory
+                            if let Some(ref source) = w3d.source_scene {
+                                w3d.parsed_scene = Some(source.clone());
+                            }
+                            w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info, w3d.parsed_scene.as_deref());
+                        }
+                        return Ok(player.alloc_datum(Datum::Void));
+                    }
+                    if handler_name == "revertToWorldDefaults" {
+                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                            .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            // revertToWorldDefaults: restore to state when member was first created
+                            // (re-parse from original W3D data)
+                            if !w3d.w3d_data.is_empty() {
+                                match crate::director::chunks::w3d::parse_w3d(&w3d.w3d_data) {
+                                    Ok(scene) => {
+                                        w3d.parsed_scene = Some(std::rc::Rc::new(scene));
+                                    }
+                                    Err(_) => {
+                                        w3d.parsed_scene = Some(std::rc::Rc::new(
+                                            crate::player::cast_member::CastMember::create_empty_w3d_scene()
+                                        ));
+                                    }
+                                }
+                            } else {
+                                w3d.parsed_scene = Some(std::rc::Rc::new(
+                                    crate::player::cast_member::CastMember::create_empty_w3d_scene()
+                                ));
+                            }
                             w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info, w3d.parsed_scene.as_deref());
                         }
                         return Ok(player.alloc_datum(Datum::Void));
@@ -368,9 +403,70 @@ impl Shockwave3dMemberHandlers {
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
-                                        // Shaders: reuse existing by name (Director behavior).
+                                        // Determine which shaders are USED by the model being cloned.
+                                        // Director docs: "copies shaders...used by the model and its children"
+                                        let mut used_shader_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                        // From model resource shader bindings
+                                        let res_key = if !source_model_resource_name.is_empty() {
+                                            source_model_resource_name.as_str()
+                                        } else {
+                                            source_resource_name.as_str()
+                                        };
+                                        for (rname, rinfo) in &src_model_resources {
+                                            if rname == res_key {
+                                                for binding in &rinfo.shader_bindings {
+                                                    for shader_name in &binding.mesh_bindings {
+                                                        used_shader_names.insert(shader_name.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // From node shader_name
+                                        if !source_shader_name.is_empty() {
+                                            used_shader_names.insert(source_shader_name.clone());
+                                        }
+
+                                        // Collect texture names used by the used shaders
+                                        let mut used_texture_names: std::collections::HashSet<String> = std::collections::HashSet::new();
                                         for shader in &src_shaders {
-                                            if !scene.shaders.iter().any(|s| s.name == shader.name) {
+                                            if used_shader_names.contains(&shader.name) {
+                                                for layer in &shader.texture_layers {
+                                                    if !layer.name.is_empty() {
+                                                        used_texture_names.insert(layer.name.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // If no specific shaders identified, fall back to copying all
+                                        // (handles cases where shader bindings are empty/unknown)
+                                        let filter_shaders = !used_shader_names.is_empty();
+
+                                        // Shaders: only copy those used by the model.
+                                        // If name conflicts, create -clone<N> copy (Director behavior).
+                                        // DefaultShader is built-in to every cast member — never copy it.
+                                        for shader in &src_shaders {
+                                            if shader.name == "DefaultShader" {
+                                                continue;
+                                            }
+                                            if filter_shaders && !used_shader_names.contains(&shader.name) {
+                                                continue; // Skip shaders not used by this model
+                                            }
+                                            if scene.shaders.iter().any(|s| s.name == shader.name) {
+                                                // Name conflict — create a -clone<N> copy
+                                                let mut n = 1;
+                                                loop {
+                                                    let clone_name = format!("{}-clone{}", shader.name, n);
+                                                    if !scene.shaders.iter().any(|s| s.name == clone_name) {
+                                                        shader_name_map.insert(shader.name.clone(), clone_name.clone());
+                                                        let mut cloned = shader.clone();
+                                                        cloned.name = clone_name;
+                                                        scene.shaders.push(cloned);
+                                                        break;
+                                                    }
+                                                    n += 1;
+                                                }
+                                            } else {
                                                 scene.shaders.push(shader.clone());
                                             }
                                         }
@@ -396,8 +492,11 @@ impl Shockwave3dMemberHandlers {
                                                 scene.clod_meshes.insert(new_name, mesh_data.clone());
                                             }
                                         }
-                                        // Textures: keep original names
+                                        // Textures: only copy those used by copied shaders
                                         for (tex_name, tex_data) in &src_textures {
+                                            if filter_shaders && !used_texture_names.contains(tex_name) {
+                                                continue;
+                                            }
                                             if !scene.texture_images.contains_key(tex_name) {
                                                 scene.texture_images.insert(tex_name.clone(), tex_data.clone());
                                                 scene.texture_content_version += 1;
@@ -517,7 +616,10 @@ impl Shockwave3dMemberHandlers {
                                                 scene.nodes.retain(|n| n.name != obj_name);
                                             }
                                             "shader" => {
-                                                scene.shaders.retain(|s| s.name != obj_name);
+                                                // DefaultShader cannot be deleted (Director behavior)
+                                                if obj_name != "DefaultShader" {
+                                                    scene.shaders.retain(|s| s.name != obj_name);
+                                                }
                                             }
                                             "motion" => {
                                                 scene.motions.retain(|m| m.name != obj_name);
@@ -539,6 +641,25 @@ impl Shockwave3dMemberHandlers {
                             player.get_datum(&args[1]).int_value().unwrap_or(0) as u32
                         } else { 0 };
 
+                        // Pre-read model resource name for newModel(name, modelResource)
+                        let new_model_resource_name = if handler_name == "newModel" && args.len() >= 2 {
+                            match player.get_datum(&args[1]) {
+                                Datum::Shockwave3dObjectRef(r) if r.object_type == "modelResource" => r.name.clone(),
+                                _ => String::new(),
+                            }
+                        } else { String::new() };
+
+                        // Pre-read type arg for newModelResource(name, #type, #facing), newLight(name, #type)
+                        let new_res_type = if (handler_name.eq_ignore_ascii_case("newModelResource")
+                            || handler_name.eq_ignore_ascii_case("newMesh")
+                            || handler_name.eq_ignore_ascii_case("newLight")) && args.len() >= 2
+                        {
+                            player.get_datum(&args[1]).string_value().unwrap_or_default()
+                        } else { String::new() };
+                        let new_res_facing = if handler_name == "newModelResource" && args.len() >= 3 {
+                            player.get_datum(&args[2]).string_value().unwrap_or_default()
+                        } else { String::new() };
+
                         // Add to parsed scene
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -550,7 +671,8 @@ impl Shockwave3dMemberHandlers {
                                             scene.nodes.push(W3dNode {
                                                 name: obj_name.clone(), node_type: W3dNodeType::Model,
                                                 parent_name: "World".to_string(),
-                                                resource_name: String::new(), model_resource_name: String::new(),
+                                                resource_name: String::new(),
+                                                model_resource_name: new_model_resource_name.clone(),
                                                 shader_name: String::new(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
@@ -580,12 +702,22 @@ impl Shockwave3dMemberHandlers {
                                             });
                                         }
                                         "light" => {
+                                            let light_type = match_ci!(new_res_type.as_str(), {
+                                                "ambient" => W3dLightType::Ambient,
+                                                "directional" => W3dLightType::Directional,
+                                                "spot" => W3dLightType::Spot,
+                                                _ => W3dLightType::Point,
+                                            });
+                                            web_sys::console::log_1(&format!(
+                                                "[W3D-NEWLIGHT] name=\"{}\" type_arg=\"{}\" → {:?}",
+                                                obj_name, new_res_type, light_type
+                                            ).into());
                                             scene.lights.push(W3dLight {
                                                 name: obj_name.clone(),
-                                                light_type: W3dLightType::Point,
-                                                color: [1.0, 1.0, 1.0],
+                                                light_type,
+                                                color: [191.0/255.0, 191.0/255.0, 191.0/255.0], // Director default: color(191,191,191)
                                                 attenuation: [1.0, 0.0, 0.0],
-                                                spot_angle: 30.0,
+                                                spot_angle: 90.0, // Director default
                                                 enabled: true,
                                             });
                                             scene.nodes.push(W3dNode {
@@ -605,7 +737,183 @@ impl Shockwave3dMemberHandlers {
                                             });
                                         }
                                         "modelResource" => {
-                                            let num_faces = mesh_num_faces;
+                                            // Generate primitive geometry based on type
+                                            // For #plane default: both front+back (2 meshes). #front/#back = single mesh.
+                                            let want_front = new_res_facing.is_empty() || new_res_facing == "front" || new_res_facing == "both";
+                                            let want_back = new_res_facing.is_empty() || new_res_facing == "back" || new_res_facing == "both";
+                                            // For plane, default facing generates both sides; for others, default is #front only
+                                            let (plane_front, plane_back) = if new_res_type == "plane" {
+                                                (want_front, want_back)
+                                            } else {
+                                                let f = new_res_facing.is_empty() || new_res_facing == "front" || new_res_facing == "both";
+                                                let b = new_res_facing == "back" || new_res_facing == "both";
+                                                (f, b)
+                                            };
+
+                                            let mut meshes: Vec<ClodDecodedMesh> = Vec::new();
+                                            let (positions, normals, tex_coords, faces) = match new_res_type.as_str() {
+                                                "plane" => {
+                                                    // 1x1 quad centered at origin
+                                                    // Front face: normal +Z; Back face: normal -Z (reversed winding)
+                                                    if plane_front {
+                                                        meshes.push(ClodDecodedMesh {
+                                                            name: obj_name.clone(),
+                                                            positions: vec![[-0.5,-0.5,0.0],[0.5,-0.5,0.0],[0.5,0.5,0.0],[-0.5,0.5,0.0]],
+                                                            normals: vec![[0.0,0.0,1.0]; 4],
+                                                            tex_coords: vec![vec![[0.0,1.0],[1.0,1.0],[1.0,0.0],[0.0,0.0]]],
+                                                            faces: vec![[0,1,2],[0,2,3]],
+                                                            diffuse_colors: vec![], specular_colors: vec![],
+                                                            bone_indices: vec![], bone_weights: vec![],
+                                                        });
+                                                    }
+                                                    if plane_back {
+                                                        meshes.push(ClodDecodedMesh {
+                                                            name: obj_name.clone(),
+                                                            positions: vec![[-0.5,-0.5,0.0],[0.5,-0.5,0.0],[0.5,0.5,0.0],[-0.5,0.5,0.0]],
+                                                            normals: vec![[0.0,0.0,-1.0]; 4],
+                                                            tex_coords: vec![vec![[1.0,1.0],[0.0,1.0],[0.0,0.0],[1.0,0.0]]],
+                                                            faces: vec![[0,2,1],[0,3,2]],
+                                                            diffuse_colors: vec![], specular_colors: vec![],
+                                                            bone_indices: vec![], bone_weights: vec![],
+                                                        });
+                                                    }
+                                                    // Return empty tuple — meshes already pushed above
+                                                    (vec![], vec![], vec![vec![]], vec![])
+                                                },
+                                                "particle" => {
+                                                    // Particle resources use a single quad billboard
+                                                    let p = vec![
+                                                        [-0.5, -0.5, 0.0_f32],
+                                                        [ 0.5, -0.5, 0.0],
+                                                        [ 0.5,  0.5, 0.0],
+                                                        [-0.5,  0.5, 0.0],
+                                                    ];
+                                                    let n = vec![[0.0, 0.0, 1.0_f32]; 4];
+                                                    let uv = vec![vec![[0.0, 1.0_f32], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]];
+                                                    let f = vec![[0u32, 1, 2], [0, 2, 3]];
+                                                    (p, n, uv, f)
+                                                },
+                                                "box" => {
+                                                    // Unit cube centered at origin
+                                                    let p = vec![
+                                                        // Front face
+                                                        [-0.5, -0.5,  0.5_f32], [ 0.5, -0.5,  0.5], [ 0.5,  0.5,  0.5], [-0.5,  0.5,  0.5],
+                                                        // Back face
+                                                        [ 0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5,  0.5, -0.5], [ 0.5,  0.5, -0.5],
+                                                        // Top face
+                                                        [-0.5,  0.5,  0.5], [ 0.5,  0.5,  0.5], [ 0.5,  0.5, -0.5], [-0.5,  0.5, -0.5],
+                                                        // Bottom face
+                                                        [-0.5, -0.5, -0.5], [ 0.5, -0.5, -0.5], [ 0.5, -0.5,  0.5], [-0.5, -0.5,  0.5],
+                                                        // Right face
+                                                        [ 0.5, -0.5,  0.5], [ 0.5, -0.5, -0.5], [ 0.5,  0.5, -0.5], [ 0.5,  0.5,  0.5],
+                                                        // Left face
+                                                        [-0.5, -0.5, -0.5], [-0.5, -0.5,  0.5], [-0.5,  0.5,  0.5], [-0.5,  0.5, -0.5],
+                                                    ];
+                                                    let n = vec![
+                                                        [0.0, 0.0, 1.0_f32], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0],
+                                                        [0.0, 0.0, -1.0], [0.0, 0.0, -1.0], [0.0, 0.0, -1.0], [0.0, 0.0, -1.0],
+                                                        [0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0],
+                                                        [0.0, -1.0, 0.0], [0.0, -1.0, 0.0], [0.0, -1.0, 0.0], [0.0, -1.0, 0.0],
+                                                        [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                                                        [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0],
+                                                    ];
+                                                    let face_uv = vec![[0.0, 1.0_f32], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+                                                    let mut uv_all = Vec::with_capacity(24);
+                                                    for _ in 0..6 { uv_all.extend_from_slice(&face_uv); }
+                                                    let uv = vec![uv_all];
+                                                    let f = vec![
+                                                        [0u32,1,2],[0,2,3], [4,5,6],[4,6,7], [8,9,10],[8,10,11],
+                                                        [12,13,14],[12,14,15], [16,17,18],[16,18,19], [20,21,22],[20,22,23],
+                                                    ];
+                                                    (p, n, uv, f)
+                                                },
+                                                "sphere" => {
+                                                    // Simple UV sphere (8 segments, 6 rings)
+                                                    let segments = 8u32;
+                                                    let rings = 6u32;
+                                                    let mut p = Vec::new();
+                                                    let mut n = Vec::new();
+                                                    let mut uv_data = Vec::new();
+                                                    let mut f = Vec::new();
+                                                    for j in 0..=rings {
+                                                        let v = j as f32 / rings as f32;
+                                                        let phi = v * std::f32::consts::PI;
+                                                        for i in 0..=segments {
+                                                            let u = i as f32 / segments as f32;
+                                                            let theta = u * 2.0 * std::f32::consts::PI;
+                                                            let x = phi.sin() * theta.cos();
+                                                            let y = phi.cos();
+                                                            let z = phi.sin() * theta.sin();
+                                                            p.push([x * 0.5, y * 0.5, z * 0.5]);
+                                                            n.push([x, y, z]);
+                                                            uv_data.push([u, v]);
+                                                        }
+                                                    }
+                                                    for j in 0..rings {
+                                                        for i in 0..segments {
+                                                            let a = j * (segments + 1) + i;
+                                                            let b = a + 1;
+                                                            let c = a + segments + 1;
+                                                            let d = c + 1;
+                                                            f.push([a, c, d]);
+                                                            f.push([a, d, b]);
+                                                        }
+                                                    }
+                                                    (p, n, vec![uv_data], f)
+                                                },
+                                                "cylinder" => {
+                                                    // Simple cylinder (8 segments, height 1)
+                                                    let segments = 8u32;
+                                                    let mut p = Vec::new();
+                                                    let mut normals = Vec::new();
+                                                    let mut uv_data = Vec::new();
+                                                    let mut f = Vec::new();
+                                                    // Side vertices
+                                                    for j in 0..=1u32 {
+                                                        let y = j as f32 - 0.5;
+                                                        for i in 0..=segments {
+                                                            let u = i as f32 / segments as f32;
+                                                            let theta = u * 2.0 * std::f32::consts::PI;
+                                                            let x = theta.cos();
+                                                            let z = theta.sin();
+                                                            p.push([x * 0.5, y, z * 0.5]);
+                                                            normals.push([x, 0.0, z]);
+                                                            uv_data.push([u, j as f32]);
+                                                        }
+                                                    }
+                                                    for i in 0..segments {
+                                                        let a = i;
+                                                        let b = a + 1;
+                                                        let c = a + segments + 1;
+                                                        let d = c + 1;
+                                                        f.push([a, c, d]);
+                                                        f.push([a, d, b]);
+                                                    }
+                                                    (p, normals, vec![uv_data], f)
+                                                },
+                                                _ => {
+                                                    // Unknown type or newMesh — empty geometry
+                                                    (vec![], vec![], vec![vec![]], vec![])
+                                                }
+                                            };
+
+                                            // For non-plane types, build a single mesh from the returned geometry
+                                            if !positions.is_empty() && !faces.is_empty() {
+                                                meshes.push(ClodDecodedMesh {
+                                                    name: obj_name.clone(),
+                                                    positions,
+                                                    normals,
+                                                    tex_coords,
+                                                    faces,
+                                                    diffuse_colors: vec![],
+                                                    specular_colors: vec![],
+                                                    bone_indices: vec![],
+                                                    bone_weights: vec![],
+                                                });
+                                            }
+
+                                            let total_faces: u32 = meshes.iter().map(|m| m.faces.len() as u32).sum();
+                                            let num_faces = if total_faces > 0 { total_faces } else { mesh_num_faces };
                                             let mut mesh_info = ClodMeshInfo::default();
                                             mesh_info.num_faces = num_faces;
                                             scene.model_resources.insert(obj_name.clone(), ModelResourceInfo {
@@ -622,6 +930,11 @@ impl Shockwave3dMemberHandlers {
                                                 sync_table: None,
                                                 distal_edge_merges: None,
                                             });
+
+                                            // Store generated mesh geometry so the renderer can upload it
+                                            if !meshes.is_empty() {
+                                                scene.clod_meshes.insert(obj_name.clone(), meshes);
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -832,12 +1145,47 @@ impl Shockwave3dMemberHandlers {
                         return Ok(player.alloc_datum(Datum::Void));
                     }
 
+                    // Check if the named object actually exists in the scene.
+                    // Per Director docs: "If no [object] exists for the specified parameter, returns void."
+                    // Name comparisons are case-insensitive (Director behavior).
+                    use crate::director::chunks::w3d::types::W3dNodeType;
+                    let obj_name_lower = obj_name.to_lowercase();
+                    let resolved_name: Option<String> = match handler_name.as_str() {
+                        "modelResource" => scene.model_resources.keys()
+                            .find(|k| k.to_lowercase() == obj_name_lower).cloned(),
+                        "model" => scene.nodes.iter()
+                            .find(|n| n.node_type == W3dNodeType::Model && n.name.to_lowercase() == obj_name_lower)
+                            .map(|n| n.name.clone()),
+                        "shader" => scene.shaders.iter()
+                            .find(|s| s.name.to_lowercase() == obj_name_lower)
+                            .map(|s| s.name.clone()),
+                        "texture" => scene.texture_images.keys()
+                            .find(|k| k.to_lowercase() == obj_name_lower).cloned(),
+                        "light" => scene.lights.iter()
+                            .find(|l| l.name.to_lowercase() == obj_name_lower)
+                            .map(|l| l.name.clone()),
+                        "camera" => scene.nodes.iter()
+                            .find(|n| n.node_type == W3dNodeType::View && n.name.to_lowercase() == obj_name_lower)
+                            .map(|n| n.name.clone()),
+                        "group" => scene.nodes.iter()
+                            .find(|n| n.node_type == W3dNodeType::Group && n.name.to_lowercase() == obj_name_lower)
+                            .map(|n| n.name.clone()),
+                        "motion" => scene.motions.iter()
+                            .find(|m| m.name.to_lowercase() == obj_name_lower)
+                            .map(|m| m.name.clone()),
+                        _ => Some(obj_name.clone()), // Unknown collection types pass through
+                    };
+                    let resolved_name = match resolved_name {
+                        Some(name) => name,
+                        None => return Ok(player.alloc_datum(Datum::Void)),
+                    };
+
                     use crate::director::lingo::datum::Shockwave3dObjectRef;
                     Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                         cast_lib: member_ref.cast_lib,
                         cast_member: member_ref.cast_member,
                         object_type: handler_name.to_string(),
-                        name: obj_name,
+                        name: resolved_name,
                     })))
                 })
             }
