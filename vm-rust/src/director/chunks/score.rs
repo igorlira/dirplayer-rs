@@ -124,11 +124,11 @@ impl ScoreFrameChannelData {
         let mut editable = false;
 
         if sz >= 22 {
-            let unk3 = reader.read_u8()
-                .map_err(|e| format!("Failed to read unk3: {:?}", e))?;
-            color_flag = (unk3 >> 4) & 0x03;  // bits 4-5 only (bits 6-7 are editable/moveable)
-            editable = (unk3 & 0x40) != 0;  // bit 6
-            moveable = (unk3 & 0x80) != 0;  // bit 7
+            let color_code = reader.read_u8()
+                .map_err(|e| format!("Failed to read color_code: {:?}", e))?;
+            color_flag = (color_code >> 4) & 0x03;  // bits 4-5 only (bits 6-7 are editable/moveable)
+            editable = (color_code & 0x40) != 0;  // bit 6
+            moveable = (color_code & 0x80) != 0;  // bit 7
             blend_raw = reader.read_u8()
                 .map_err(|e| format!("Failed to read blend: {:?}", e))?;
         }
@@ -941,7 +941,7 @@ impl FrameIntervalPrimary {
 pub struct FrameIntervalSecondary {
     pub cast_lib: u16,
     pub cast_member: u16,
-    pub unk0: u32,
+    pub initializer_index: u32,
     pub parameter: Vec<DatumRef>,
 }
 
@@ -953,16 +953,16 @@ impl FrameIntervalSecondary {
         let cast_member = reader
             .read_u16()
             .map_err(|e| format!("Failed to read cast_member: {:?}", e))?;
-        let unk0 = reader
+        let initializer_index = reader
             .read_u32()
-            .map_err(|e| format!("Failed to read unk0: {:?}", e))?;
+            .map_err(|e| format!("Failed to read initializer_index: {:?}", e))?;
 
         let parameter = vec![];
 
         Ok(FrameIntervalSecondary {
             cast_lib,
             cast_member,
-            unk0,
+            initializer_index,
             parameter,
         })
     }
@@ -1617,7 +1617,7 @@ impl ScoreChunk {
                             debug!("  🔎 Checking entry {} (size={})", j, next_size);
 
                             // Check if this could be a behavior entry
-                            // Pattern: 8 bytes per behavior (cast_lib u16, cast_member u16, unk0 u32)
+                            // Pattern: 8 bytes per behavior (cast_lib u16, cast_member u16, initializer_index u32)
                             // Disambiguate from primary entries (40/44/48 bytes): peek at the
                             // content — a primary's first two u32s are start_frame/end_frame
                             // (small sequential numbers), while a behavior's first two u16s are
@@ -1648,21 +1648,21 @@ impl ScoreChunk {
                                 for behavior_idx in 0..behavior_count {
                                     if let Ok(cast_lib) = sec_reader.read_u16() {
                                         if let Ok(cast_member) = sec_reader.read_u16() {
-                                            if let Ok(unk0) = sec_reader.read_u32() {
+                                            if let Ok(initializer_index) = sec_reader.read_u32() {
                                                 // Only add if it looks like a valid behavior reference
                                                 if cast_lib > 0 && cast_member > 0 {
                                                     let mut secondary = FrameIntervalSecondary {
                                                         cast_lib,
                                                         cast_member,
-                                                        unk0,
+                                                        initializer_index,
                                                         parameter: vec![],
                                                     };
 
                                                     // Handle parameters
-                                                    if secondary.unk0 > 0
-                                                        && (secondary.unk0 as usize) < entries.len()
+                                                    if secondary.initializer_index > 0
+                                                        && (secondary.initializer_index as usize) < entries.len()
                                                     {
-                                                        let proplist_idx = secondary.unk0 as usize;
+                                                        let proplist_idx = secondary.initializer_index as usize;
                                                         if let Ok(proplist_string) =
                                                             String::from_utf8(
                                                                 entries[proplist_idx].clone(),
@@ -1688,11 +1688,11 @@ impl ScoreChunk {
                                                     }
 
                                                     debug!(
-                                                        "    ✅ Behavior {}: cast={}/{}, unk0={}",
+                                                        "    ✅ Behavior {}: cast={}/{}, initializer_index={}",
                                                         behavior_idx + 1,
                                                         cast_lib,
                                                         cast_member,
-                                                        unk0
+                                                        initializer_index
                                                     );
                                                     secondaries.push(secondary);
                                                     found_valid_behavior = true;
