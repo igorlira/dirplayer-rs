@@ -94,6 +94,7 @@ pub struct Score {
     pub channels: Vec<SpriteChannel>,
     pub sprite_spans: Vec<ScoreSpriteSpan>,
     pub channel_initialization_data: Vec<(u32, u16, ScoreFrameChannelData)>,
+    pub frame_script_data: Vec<(u32, crate::director::chunks::score::FrameScriptData)>,
     pub sound_channel_data: Vec<(u32, u16, SoundChannelData)>,
     pub tempo_channel_data: Vec<(u32, TempoChannelData)>,
     pub palette_channel_data: Vec<(u32, i16, i16)>,
@@ -203,6 +204,7 @@ impl Score {
             channels: vec![],
             frame_labels: vec![],
             channel_initialization_data: vec![],
+            frame_script_data: vec![],
             sound_channel_data: vec![],
             tempo_channel_data: vec![],
             palette_channel_data: vec![],
@@ -1113,182 +1115,18 @@ impl Score {
             ScoreRef::FilmLoop(member_ref) => Some(member_ref.cast_lib),
         };
 
-        // Debug: Log how many channels have behaviors
-        let total_scripts: usize = spans_by_channel.values()
-            .flat_map(|spans| spans.iter())
-            .map(|span| span.scripts.len())
-            .sum();
-        if total_scripts > 0 {
-            debug!(
-                "🔧 begin_sprites: {} channels, {} total behavior scripts to attach (score_ref: {:?})",
-                spans_by_channel.len(), total_scripts,
-                match &score_ref {
-                    ScoreRef::Stage => "Stage".to_string(),
-                    ScoreRef::FilmLoop(m) => format!("FilmLoop {}:{}", m.cast_lib, m.cast_member),
-                }
-            );
-        }
+        let dir_version = reserve_player_ref(|player| player.movie.dir_version);
 
-        for (channel_num, channel_spans) in spans_by_channel.iter() {
-            debug!(
-                "🔧 Attaching behaviors to channel {}: {} spans",
-                channel_num,
-                channel_spans.len()
-            );
-
-            for span in channel_spans {
-                if span.scripts.is_empty() {
-                    continue;
-                }
-
-                for behavior_ref in &span.scripts {
-                    debug!(
-                            "Creating behavior from cast {}/{} with {} parameters (default_cast_lib: {:?}) for channel {}",
-                            behavior_ref.cast_lib,
-                            behavior_ref.cast_member,
-                            behavior_ref.parameter.len(),
-                            default_cast_lib,
-                            channel_num
-                        );
-
-                    // Create the behavior instance
-                    let behavior_result = Self::create_behavior(
-                        behavior_ref.cast_lib as i32,
-                        behavior_ref.cast_member as i32,
-                        default_cast_lib,
-                    );
-
-                    // Skip this behavior if creation failed (script not found)
-                    let (script_instance_ref, datum_ref) = match behavior_result {
-                        Some(result) => result,
-                        None => {
-                            debug!("Skipping behavior from cast {}/{} - script not found",
-                                behavior_ref.cast_lib, behavior_ref.cast_member);
-                            continue;
-                        }
-                    };
-
-                    // Extract the ScriptInstanceRef from datum_ref
-                    let actual_instance_ref = reserve_player_mut(|player| {
-                        let datum = player.get_datum(&datum_ref);
-                        match datum {
-                            Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
-                            _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
-                        }
-                    })
-                    .expect("Failed to extract ScriptInstanceRef");
-
-                    // Set the spriteNum property so 'the currentSpriteNum' works correctly
-                    reserve_player_mut(|player| {
-                        let sprite_num_ref = player.alloc_datum(Datum::Int(*channel_num as i32));
-                        let _ = script_set_prop(
-                            player,
-                            &actual_instance_ref,
-                            &"spriteNum".to_string(),
-                            &sprite_num_ref,
-                            false,
-                        );
-                    });
-
-                    // Parameter setup
-                    if !behavior_ref.parameter.is_empty() {
-                        reserve_player_mut(|player| {
-                            debug!("🔧 Applying {} saved parameters", behavior_ref.parameter.len());
-                            for param_ref in &behavior_ref.parameter {
-                                let param_datum = player.get_datum(param_ref);
-                                debug!("  Parameter type: {:?}", param_datum.type_enum());
-                                if let Datum::PropList(props, _) = param_datum {
-                                    let props_to_set: Vec<(String, DatumRef)> = props.iter()
-                                        .filter_map(|(key_ref, value_ref)| {
-                                            let key = player.get_datum(key_ref);
-                                            if let Datum::Symbol(key_name) = key {
-                                                let value = player.get_datum(value_ref);
-                                                debug!(
-                                                    "    prop: {} type: {:?}",
-                                                    key_name,
-                                                    value.type_enum()
-                                                );
-
-                                                // Try to format value safely
-                                                match value {
-                                                    Datum::Int(n) => debug!("      value: {}", n),
-                                                    Datum::CastMember(ref m) => debug!("      value: member {} of castLib {}", m.cast_member, m.cast_lib),
-                                                    _ => debug!("      value: <{:?}>", value.type_enum()),
-                                                }
-
-                                                Some((key_name.clone(), value_ref.clone()))
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect();
-
-                                    for (prop_name, value_ref) in props_to_set {
-                                        let _ = script_set_prop(
-                                            player,
-                                            &actual_instance_ref,
-                                            &prop_name,
-                                            &value_ref,
-                                            false,
-                                        );
-                                    }
-                                }
-                            }
-                            Ok::<(), ScriptError>(())
-                        })
-                        .expect("Failed to set behavior parameters");
-                    }
-
-                    // Attach behavior to sprite - need to use the correct score (stage or filmloop)
-                    let score_ref_clone = score_ref.clone();
-                    reserve_player_mut(|player| {
-                        let sprite_num = *channel_num as i16;
-
-                        // Get mutable access to the correct sprite based on score_ref
-                        let sprite = match &score_ref_clone {
-                            ScoreRef::Stage => {
-                                player.movie.score.get_sprite_mut(sprite_num)
-                            }
-                            ScoreRef::FilmLoop(member_ref) => {
-                                // For filmloops, we need to get the sprite from the filmloop's score
-                                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
-                                    if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                                        film_loop.score.get_sprite_mut(sprite_num)
-                                    } else {
-                                        // Fallback to stage score if filmloop not found
-                                        player.movie.score.get_sprite_mut(sprite_num)
-                                    }
-                                } else {
-                                    // Fallback to stage score if member not found
-                                    player.movie.score.get_sprite_mut(sprite_num)
-                                }
-                            }
-                        };
-
-                        // Add the behavior to the sprite's script_instance_list
-                        sprite.script_instance_list.push(actual_instance_ref.clone());
-                        Ok::<(), ScriptError>(())
-                    })
-                    .expect("Failed to attach behavior to sprite");
-                }
-            }
-        }
-
-        // Attach behaviors from spriteListIdx (D6+ sprite detail mechanism)
-        // This is an alternative to frame_intervals for behavior attachment
-        // NOTE: spriteListIdx references the MAIN MOVIE's sprite detail table, not local filmloop tables
-        //
-        // Log summary of available sprite_details for diagnosis
-        let (sprite_details_info, dir_version) = reserve_player_ref(|player| {
+        // Attach behaviors from spriteListIdx (D6+ sprite detail mechanism).
+        // This runs FIRST so we know which channels are covered by sprite details,
+        // allowing the frame_interval fallback below to skip those channels.
+        let (sprite_details_info, _) = reserve_player_ref(|player| {
             let count = player.movie.score.sprite_details.len();
             let max_idx = player.movie.score.sprite_details.keys().max().cloned();
             ((count, max_idx), player.movie.dir_version)
         });
-        debug!(
-            "🔍 begin_sprites: main movie has {} sprite_details, max index: {:?}, score_ref: {:?}",
-            sprite_details_info.0, sprite_details_info.1, score_ref
-        );
-
+        let mut spritelistidx_attached_channels: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut spritelistidx_seen_channels: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (span, _channel_index, data) in span_init_data.iter() {
             let sprite_list_idx = data.sprite_list_idx();
             if sprite_list_idx == 0 && !(dir_version < 600 && data.sprite_list_idx_lo != 0) {
@@ -1717,6 +1555,132 @@ impl Score {
                             Ok::<(), ScriptError>(())
                         })
                         .expect("Failed to attach delta-data behavior to sprite");
+                    }
+                }
+            }
+        }
+
+        // D6+ channel 0 (frame script) behavior attachment from frame_script_data.
+        // The sprite_list_idx in frame_script_data references the sprite detail table,
+        // which contains the behavior scripts to attach to channel 0.
+        if dir_version >= 600 {
+            // Find the most recent frame_script_data entry for the current frame
+            let script_data = self.frame_script_data.iter()
+                .rev()
+                .find(|(frame_idx, _)| frame_idx + 1 <= frame_num)
+                .map(|(_, data)| data.clone());
+
+            if let Some(data) = script_data {
+                if data.sprite_list_idx != 0 {
+                    // Check if channel 0 already has behaviors
+                    let has_behaviors = reserve_player_ref(|player| {
+                        let score = match &score_ref {
+                            ScoreRef::Stage => &player.movie.score,
+                            ScoreRef::FilmLoop(member_ref) => {
+                                match player.movie.cast_manager.find_member_by_ref(member_ref) {
+                                    Some(member) => match &member.member_type {
+                                        super::cast_member::CastMemberType::FilmLoop(film_loop) => &film_loop.score,
+                                        _ => &player.movie.score,
+                                    },
+                                    None => &player.movie.score,
+                                }
+                            }
+                        };
+                        score.get_sprite(0)
+                            .map_or(false, |s| !s.script_instance_list.is_empty())
+                    });
+
+                    if !has_behaviors {
+                        let detail_info_opt = reserve_player_ref(|player| {
+                            player.movie.score.sprite_details.get(&data.sprite_list_idx).cloned()
+                        });
+
+                        if let Some(detail_info) = detail_info_opt {
+                            for behavior in &detail_info.behaviors {
+                                let behavior_result = Self::create_behavior(
+                                    behavior.cast_lib as i32,
+                                    behavior.cast_member as i32,
+                                    default_cast_lib,
+                                );
+
+                                let (_, datum_ref) = match behavior_result {
+                                    Some(result) => result,
+                                    None => continue,
+                                };
+
+                                let actual_instance_ref = reserve_player_mut(|player| {
+                                    let datum = player.get_datum(&datum_ref);
+                                    match datum {
+                                        Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
+                                        _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
+                                    }
+                                })
+                                .expect("Failed to extract ScriptInstanceRef");
+
+                                reserve_player_mut(|player| {
+                                    let sprite_num_ref = player.alloc_datum(Datum::Int(0));
+                                    let _ = script_set_prop(
+                                        player,
+                                        &actual_instance_ref,
+                                        &"spriteNum".to_string(),
+                                        &sprite_num_ref,
+                                        false,
+                                    );
+                                });
+
+                                // Apply behavior parameters
+                                if !behavior.parameter.is_empty() {
+                                    reserve_player_mut(|player| {
+                                        for param_ref in &behavior.parameter {
+                                            let param_datum = player.get_datum(param_ref);
+                                            if let Datum::PropList(props, _) = param_datum {
+                                                let props_to_set: Vec<(String, DatumRef)> = props.iter()
+                                                    .filter_map(|(key_ref, value_ref)| {
+                                                        let key = player.get_datum(key_ref);
+                                                        if let Datum::Symbol(key_name) = key {
+                                                            Some((key_name.clone(), value_ref.clone()))
+                                                        } else {
+                                                            None
+                                                        }
+                                                    })
+                                                    .collect();
+                                                for (prop_name, value_ref) in props_to_set {
+                                                    let _ = script_set_prop(
+                                                        player,
+                                                        &actual_instance_ref,
+                                                        &prop_name,
+                                                        &value_ref,
+                                                        false,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Ok::<(), ScriptError>(())
+                                    }).expect("Failed to set frame script behavior parameters");
+                                }
+
+                                let score_ref_clone = score_ref.clone();
+                                reserve_player_mut(|player| {
+                                    let sprite = match &score_ref_clone {
+                                        ScoreRef::Stage => player.movie.score.get_sprite_mut(0),
+                                        ScoreRef::FilmLoop(member_ref) => {
+                                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                                                if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                                    film_loop.score.get_sprite_mut(0)
+                                                } else {
+                                                    player.movie.score.get_sprite_mut(0)
+                                                }
+                                            } else {
+                                                player.movie.score.get_sprite_mut(0)
+                                            }
+                                        }
+                                    };
+                                    sprite.script_instance_list.push(actual_instance_ref.clone());
+                                    Ok::<(), ScriptError>(())
+                                })
+                                .expect("Failed to attach frame script behavior to channel 0");
+                            }
+                        }
                     }
                 }
             }
@@ -2395,6 +2359,7 @@ impl Score {
         self.sprite_details.clear();
 
         self.channel_initialization_data = score_chunk.frame_data.frame_channel_data.clone();
+        self.frame_script_data = score_chunk.frame_data.frame_script_data.clone();
         self.sound_channel_data = score_chunk.frame_data.sound_channel_data.clone();
         self.tempo_channel_data = score_chunk.frame_data.tempo_channel_data.clone();
         self.palette_channel_data = score_chunk.frame_data.palette_channel_data.clone();
@@ -2485,22 +2450,18 @@ impl Score {
         // Group by channel: find min/max frame for each channel with data
         let mut channel_frames: HashMap<u32, (u32, u32)> = HashMap::new();
 
-        // Collect frame script data (channel 0) separately
-        // Each frame may have a different script, so we track per-frame
+        // Collect frame script data (channel 0) from dedicated field
         let mut frame_scripts: Vec<(u32, u16, u16)> = Vec::new(); // (frame_num, cast_lib, cast_member)
+        for (frame_idx, script_data) in &self.frame_script_data {
+            if script_data.cast_member != 0 {
+                let frame_num = *frame_idx + 1; // 0-based → 1-based
+                let cast_lib = if script_data.cast_lib == 0 { 1 } else { script_data.cast_lib };
+                frame_scripts.push((frame_num, cast_lib, script_data.cast_member));
+            }
+        }
 
         for (frame_idx, channel_idx, data) in &self.channel_initialization_data {
-            if *channel_idx == 0 {
-                // D5 path: channel 0 holds frame scripts
-                if dir_version < 600 && data.cast_member != 0 {
-                    let frame_num = *frame_idx + 1; // 0-based → 1-based
-                    // D5 has a single cast library; cast_lib 0 means "default cast" which is 1
-                    let cast_lib = if data.cast_lib == 0 { 1 } else { data.cast_lib };
-                    frame_scripts.push((frame_num, cast_lib, data.cast_member));
-                }
-                continue;
-            }
-            // Skip other effect channels (1-5)
+            // Skip effect channels (0-5)
             if *channel_idx < 6 {
                 continue;
             }
