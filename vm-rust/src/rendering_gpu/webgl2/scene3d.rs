@@ -1479,7 +1479,6 @@ void main() {
                             if vis_mode == 0 { continue; } // #none → skip
                         }
                     }
-
                     // Check if this model is transparent
                     let opacity = self.get_model_opacity(scene, model_node, runtime_state);
                     // One-time log for lightbox/water/black opacity
