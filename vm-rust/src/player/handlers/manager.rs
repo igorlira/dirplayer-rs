@@ -1122,6 +1122,11 @@ impl BuiltInHandlerManager {
             "keypressed" => Self::key_pressed(args),
             "showglobals" => Self::show_globals(),
             "tellstreamstatus" => Self::tell_stream_status(args),
+            "frame" => {
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::Int(player.movie.current_frame as i32)))
+                })
+            }
             "label" => Self::label(args),
             "alert" => Self::alert(args),
             "objectp" => Self::object_p(args),
