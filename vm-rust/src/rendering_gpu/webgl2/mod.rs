@@ -1835,8 +1835,6 @@ impl WebGL2Renderer {
                     if let Some(ref parsed_scene) = w3d.parsed_scene {
                         // FBO dimensions from sprite rect
                         let (w, h) = (sprite_rect.width().max(1) as u32, sprite_rect.height().max(1) as u32);
-                        // Extra cameras only render when explicitly set by the game
-                        // (via sprite.w3d_cameras or camera.renderDirect/renderToTexture)
                         let extra_cams = w3d_extra_cams.clone();
                         TextureSource::Shockwave3dScene {
                             width: w,
@@ -2532,6 +2530,9 @@ impl WebGL2Renderer {
 
                 // Capture FBO pixels for world.image access (after releasing the scene3d borrow)
                 self.capture_w3d_frame(player, member_key, width, height);
+
+                // Unbind FBO so 2D compositor draws to the canvas, not the FBO
+                self.context.gl().bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
 
                 // The 3D renderer changed the active GL program and VAO —
                 // restore 2D state so subsequent sprite draws work correctly

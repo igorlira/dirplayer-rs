@@ -222,6 +222,16 @@ impl Scene3dRenderer {
         }
     }
 
+    /// Reset all cached state - forces full rebuild on next render
+    pub fn reset_all(&mut self) {
+        self.shader = None;
+        self.fbo = None;
+        self.fbo_texture = None;
+        self.fbo_depth = None;
+        self.member_data.clear();
+        self.logged_members.clear();
+    }
+
     /// Compile 3D shaders (lazy init on first use)
     fn ensure_shader(&mut self, context: &WebGL2Context) -> Result<(), JsValue> {
         if self.shader.is_some() {
@@ -855,7 +865,6 @@ void main() {
         let current_version = (scene.nodes.len(), scene.clod_meshes.len() + scene.raw_meshes.len(), scene.texture_images.len(), scene.shaders.len());
         if let Some(existing) = self.member_data.get(&key) {
             if existing.scene_version == current_version {
-                // Structure unchanged — check for texture content updates
                 if existing.texture_content_version != scene.texture_content_version {
                     self.update_textures_incremental(context, key, scene);
                 }
@@ -1245,6 +1254,21 @@ void main() {
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(fbo));
         gl.viewport(0, 0, width as i32, height as i32);
 
+        // Reset GL state that may have been left by 2D compositor.
+        // CRITICAL: unbind textures from all units to prevent feedback loop.
+        // The FBO texture may still be bound as a texture input from the 2D compositor's
+        // previous frame. Rendering to an FBO whose texture is also bound as input is
+        // undefined behavior in WebGL and silently discards draw calls.
+        for unit in 0..4 {
+            gl.active_texture(WebGl2RenderingContext::TEXTURE0 + unit);
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+        }
+        gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+        gl.disable(WebGl2RenderingContext::BLEND);
+        gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+        gl.disable(WebGl2RenderingContext::STENCIL_TEST);
+        gl.color_mask(true, true, true, true);
+        gl.depth_mask(true);
         gl.enable(WebGl2RenderingContext::DEPTH_TEST);
         gl.depth_func(WebGl2RenderingContext::LEQUAL);
         if clear_fbo {
@@ -1271,7 +1295,6 @@ void main() {
         gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
         gl.uniform3f(shader.u_camera_pos.as_ref(), camera_pos[0], camera_pos[1], camera_pos[2]);
-
         // Log camera info once
         {
             use std::sync::atomic::{AtomicBool, Ordering};

@@ -3920,7 +3920,10 @@ impl Shockwave3dObjectDatumHandlers {
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(camera_name.to_string()))),
             "transform" => {
-                Ok(get_persistent_node_transform(player, member_ref, camera_name))
+                let result = get_persistent_node_transform(player, member_ref, camera_name);
+                let typ = player.get_datum(&result).type_enum();
+                web_sys::console::log_1(&format!("[W3D-CAM] camera('{}').transform → type={:?}", camera_name, typ).into());
+                Ok(result)
             },
             "fieldOfView" | "projectionAngle" => {
                 let fov = node.map(|n| n.fov).unwrap_or(30.0);
