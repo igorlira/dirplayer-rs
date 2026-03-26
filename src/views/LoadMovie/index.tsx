@@ -5,6 +5,7 @@ import { useMountEffect } from '../../utils/hooks';
 import { isDebugSession } from '../../utils/debug';
 import { getBasePath, getFullPathFromOrigin } from '../../utils/path';
 import { isElectron, openFileDialog } from '../../utils/electron';
+import { APP_TITLE } from '../../constants';
 
 type ExternalParam = { key: string; value: string };
 
@@ -85,7 +86,7 @@ export default function LoadMovie() {
       window.history.pushState({ movieLoading: true }, '');
       set_base_path(getBasePath(fullPath));
       set_external_params(paramsArrayToRecord(params ?? externalParams));
-      document.title = `${fullPath.split('/').pop() || fullPath} - DirPlayer`;
+      document.title = `${fullPath.split('/').pop() || fullPath} - ${APP_TITLE}`;
       await load_movie_file(fullPath, autoPlay);
     } catch (e) {
       console.error('Failed to load movie', e);
