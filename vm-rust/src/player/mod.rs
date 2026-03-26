@@ -3070,6 +3070,17 @@ pub async fn run_frame_loop() {
         let skip_frame = reserve_player_ref(|player| player.command_handler_yielding || player.in_mouse_command);
 
         // Only advance frame if enough time has passed AND not paused AND not delayed
+        {
+            static FC3: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let c = FC3.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if c < 10 || c % 100 == 0 {
+                let cur_frame = reserve_player_ref(|p| p.movie.current_frame);
+                web_sys::console::log_1(&format!(
+                    "[FRAME-LOOP] iter={} frame={} should_advance={} paused={} delayed={} skip={}",
+                    c, cur_frame, should_advance_frame, is_script_paused, is_delayed, skip_frame
+                ).into());
+            }
+        }
         if should_advance_frame && !is_script_paused && !is_delayed && !skip_frame {
             let (has_player_frame_changed, has_frame_changed_in_go, go_direction) =
                 reserve_player_ref(|player| {
@@ -3086,6 +3097,11 @@ pub async fn run_frame_loop() {
             dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
 
             let mut stayed_on_same_frame = false;
+
+            // Clear stale go_same_frame from previous frame's processing
+            reserve_player_mut(|player| {
+                player.go_same_frame = false;
+            });
 
             if has_player_frame_changed {
                 player_wait_available().await;
@@ -3118,6 +3134,11 @@ pub async fn run_frame_loop() {
                 // current_frame+1, which wraps to frame 1 when at the last frame.
                 (is_playing, is_script_paused) = reserve_player_mut(|player| {
                     player.has_player_frame_changed = false;
+                    // Clear go_same_frame set during exitFrame processing of the transition.
+                    // Frame scripts like go(the frame) after go(frame+1) should not block
+                    // subsequent frame advancement.
+                    player.go_same_frame = false;
+                    player.has_frame_changed_in_go = false;
                     (player.is_playing, player.is_script_paused)
                 });
             } else {
@@ -3127,8 +3148,19 @@ pub async fn run_frame_loop() {
 
                 player_wait_available().await;
 
-                let (has_frame_changed, go_same_frame) = reserve_player_ref(|player|
-                    (player.has_frame_changed_in_go, player.go_same_frame));
+                let (has_frame_changed, go_same_frame, has_pfc) = reserve_player_ref(|player|
+                    (player.has_frame_changed_in_go, player.go_same_frame, player.has_player_frame_changed));
+                {
+                    static FC4: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let c = FC4.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if c < 10 {
+                        let cur = reserve_player_ref(|p| p.movie.current_frame);
+                        web_sys::console::log_1(&format!(
+                            "[FRAME-ADV] frame={} go_same={} has_frame_changed={} has_pfc={}",
+                            cur, go_same_frame, has_frame_changed, has_pfc
+                        ).into());
+                    }
+                }
 
                 if go_same_frame {
                     // go(the frame) — stay on current frame, no advancement

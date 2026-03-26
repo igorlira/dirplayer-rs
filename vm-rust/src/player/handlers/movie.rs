@@ -349,6 +349,14 @@ impl MovieHandlers {
             // ONLY set go_same_frame, NOT has_frame_changed_in_go
             reserve_player_mut(|player| {
                 player.go_same_frame = true;
+                static GC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let c = GC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if c < 10 {
+                    web_sys::console::log_1(&format!(
+                        "[GO-SAME] frame={} dest={} call #{}",
+                        player.movie.current_frame, destination_frame, c
+                    ).into());
+                }
             });
         }
 
@@ -907,7 +915,8 @@ impl MovieHandlers {
     pub fn delay(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let ticks = player.get_datum(&args[0]).int_value()?;
-            if ticks > 0 {
+            // Only set delay if not already delaying (prevent reset on every enterFrame)
+            if ticks > 0 && player.delay_until.is_none() {
                 let delay_ms = (ticks as f64) * (1000.0 / 60.0);
                 player.delay_until = Some(
                     chrono::Local::now() + chrono::Duration::milliseconds(delay_ms as i64),
