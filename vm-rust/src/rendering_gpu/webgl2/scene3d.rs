@@ -32,6 +32,8 @@ struct MemberGpuData {
     inverse_bind_cache: HashMap<String, Vec<[f32; 16]>>,
     /// Snapshot of scene content counts when GPU data was built
     scene_version: (usize, usize, usize, usize), // (nodes, clod_meshes, texture_images, shaders)
+    /// Scene's mesh_content_version at last upload
+    mesh_content_version: u64,
     /// Per-texture data length at upload time (for incremental re-upload detection)
     texture_versions: HashMap<String, u64>,
     /// Scene's texture_content_version at last check
@@ -864,7 +866,9 @@ void main() {
     ) -> Result<(), JsValue> {
         let current_version = (scene.nodes.len(), scene.clod_meshes.len() + scene.raw_meshes.len(), scene.texture_images.len(), scene.shaders.len());
         if let Some(existing) = self.member_data.get(&key) {
-            if existing.scene_version == current_version {
+            if existing.scene_version == current_version
+                && existing.mesh_content_version == scene.mesh_content_version
+            {
                 if existing.texture_content_version != scene.texture_content_version {
                     self.update_textures_incremental(context, key, scene);
                 }
@@ -1052,6 +1056,7 @@ void main() {
         self.member_data.insert(key, MemberGpuData {
             mesh_groups, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
             scene_version: current_version,
+            mesh_content_version: scene.mesh_content_version,
             texture_versions,
             texture_content_version: scene.texture_content_version,
         });

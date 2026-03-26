@@ -809,6 +809,11 @@ impl MovieHandlers {
             player.in_enter_frame = false;
         });
 
+        // enterFrame handlers are allowed to change the current visual state
+        // (camera/model transforms, tunnelDepth, etc.) without calling
+        // updateStage(), so flush one more redraw before the frame ends.
+        crate::rendering::draw_frame_immediate();
+
         player_wait_available().await;
 
         reserve_player_mut(|player| {
@@ -823,9 +828,12 @@ impl MovieHandlers {
             Ok(player.is_yield_safe() || player.command_handler_yielding || player.in_mouse_command)
         })?;
 
-        if should_yield {
-            crate::rendering::draw_frame_immediate();
+        // Director's updateStage() forces an immediate stage redraw even from
+        // inside enterFrame/prepareFrame loops. Yielding to the browser event loop
+        // is only needed for busy-wait input handlers.
+        crate::rendering::draw_frame_immediate();
 
+        if should_yield {
             // Yield to allow the browser event loop to process pending events
             // (mouse up/move, keyboard, etc.). This is essential for scripts
             // using "repeat while the mouseDown" or similar busy-wait loops.
