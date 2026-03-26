@@ -67,8 +67,15 @@ pub fn safe_string(s: &str) -> String {
     String::from_utf8_lossy(s.as_bytes()).into_owned()
 }
 
+#[cfg(target_arch = "wasm32")]
 pub fn safe_js_string(s: &str) -> JsValue {
     JsValue::from_str(&safe_string(s))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn safe_js_string(s: &str) -> JsValue {
+    let _ = s;
+    JsValue::NULL
 }
 
 #[wasm_bindgen(getter_with_clone)]

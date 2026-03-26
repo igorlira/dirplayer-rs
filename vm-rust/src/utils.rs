@@ -15,20 +15,37 @@ pub fn set_panic_hook() {
 }
 
 pub fn log_i(value: &str) {
-    web_sys::console::log_1(&safe_js_string(value))
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::console::log_1(&safe_js_string(value));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        println!("{value}");
+    }
 }
 
 #[macro_export]
 macro_rules! console_warn {
   ($($arg:tt)*) => (
-    web_sys::console::warn_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()))
+    {
+      #[cfg(target_arch = "wasm32")]
+      web_sys::console::warn_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()));
+      #[cfg(not(target_arch = "wasm32"))]
+      eprintln!("{}", format_args!($($arg)*));
+    }
   )
 }
 
 #[macro_export]
 macro_rules! console_error {
   ($($arg:tt)*) => (
-    web_sys::console::error_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()))
+    {
+      #[cfg(target_arch = "wasm32")]
+      web_sys::console::error_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()));
+      #[cfg(not(target_arch = "wasm32"))]
+      eprintln!("{}", format_args!($($arg)*));
+    }
   )
 }
 

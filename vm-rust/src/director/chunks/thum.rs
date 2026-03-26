@@ -1,6 +1,4 @@
 use binary_reader::{BinaryReader, Endian};
-use web_sys::console;
-
 pub struct ThumChunk {
     pub raw_data: Vec<u8>,
 }
@@ -17,18 +15,19 @@ impl ThumChunk {
 
         reader.endian = original_endian;
 
-        console::log_1(
-            &format!(
-                "Thum raw_data ({} bytes): {:?}",
-                raw_data.len(),
-                raw_data
-                    .iter()
-                    .map(|b| format!("{:02X}", b))
-                    .collect::<Vec<String>>()
-                    .join(" ")
-            )
-            .into(),
+        let dump = format!(
+            "Thum raw_data ({} bytes): {:?}",
+            raw_data.len(),
+            raw_data
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<String>>()
+                .join(" ")
         );
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&dump.as_str().into());
+        #[cfg(not(target_arch = "wasm32"))]
+        println!("{}", dump);
 
         Ok(ThumChunk { raw_data })
     }
