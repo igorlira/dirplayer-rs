@@ -407,12 +407,13 @@ impl DirPlayer {
     pub async fn load_movie_from_file(&mut self, path: &str) {
         let task_id = self.net_manager.preload_net_thing(path.to_owned());
         self.net_manager.await_task(task_id).await;
-        let task = self.net_manager.get_task(task_id).unwrap();
+        let task = self.net_manager.get_task(task_id)
+            .expect(&format!("Network task not found for '{}'", path));
         let data_bytes = self
             .net_manager
             .get_task_result(Some(task_id))
-            .unwrap()
-            .unwrap();
+            .expect(&format!("No response received for '{}'", path))
+            .expect(&format!("Network request failed for '{}'", path));
 
         let file_name = task.resolved_url
             .path_segments()
@@ -424,7 +425,7 @@ impl DirPlayer {
             &file_name,
             &get_base_url(&task.resolved_url).to_string(),
         )
-        .unwrap();
+        .expect(&format!("Failed to parse movie file '{}'", path));
         self.load_movie_from_dir(movie_file).await;
     }
 
