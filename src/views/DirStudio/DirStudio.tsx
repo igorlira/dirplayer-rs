@@ -5,6 +5,7 @@ import { useSelector } from "react-redux";
 import { RootState } from "../../store";
 import store from "../../store";
 import { movieUnloaded } from "../../store/vmSlice";
+import { clearAllTimeouts } from "../../vm/callbacks";
 import StudioLayout from "../StudioLayout";
 
 interface DirStudioProps {
@@ -19,11 +20,7 @@ export default function DirStudio({
   useEffect(() => {
     const onPopState = () => {
       if (store.getState().vm.isMovieLoaded) {
-        const handles = store.getState().vm.timeoutHandles;
-        Object.values(handles).forEach((handle) => {
-          clearInterval(handle as Parameters<typeof clearInterval>[0]);
-        });
-
+        clearAllTimeouts();
         store.dispatch(movieUnloaded());
         document.title = 'DirPlayer';
       }

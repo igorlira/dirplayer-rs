@@ -6,6 +6,14 @@ import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, Score
 import { onMemberSelected } from "../store/uiSlice";
 import { isUIShown } from "../utils/debug";
 
+export function clearAllTimeouts() {
+  const handles = store.getState().vm.timeoutHandles;
+  Object.keys(handles).forEach((key) => {
+    clearInterval(handles[key] as Parameters<typeof clearInterval>[0]);
+    store.dispatch(removeTimeoutHandle(key));
+  });
+}
+
 export function initVmCallbacks() {
   registerVmCallbacks({
     onMovieLoaded: (result: OnMovieLoadedCallbackData) => {
@@ -76,11 +84,7 @@ export function initVmCallbacks() {
       }
     },
     onClearAllTimeouts: () => {
-      const handles = store.getState().vm.timeoutHandles;
-      Object.keys(handles).forEach((key) => {
-        clearInterval(handles[key] as Parameters<typeof clearInterval>[0]);
-        store.dispatch(removeTimeoutHandle(key))
-      })
+      clearAllTimeouts();
       console.log("Cleared all timeouts");
     },
     onDatumSnapshot: (datumRef: DatumRef, datum: JsBridgeDatum) => {
