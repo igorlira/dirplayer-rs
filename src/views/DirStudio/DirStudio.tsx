@@ -6,6 +6,7 @@ import { RootState } from "../../store";
 import store from "../../store";
 import { movieUnloaded } from "../../store/vmSlice";
 import { clearAllTimeouts } from "../../vm/callbacks";
+import { APP_TITLE } from "../../constants";
 import StudioLayout from "../StudioLayout";
 
 interface DirStudioProps {
@@ -22,7 +23,7 @@ export default function DirStudio({
       if (store.getState().vm.isMovieLoaded) {
         clearAllTimeouts();
         store.dispatch(movieUnloaded());
-        document.title = 'DirPlayer';
+        document.title = APP_TITLE;
       }
     };
     window.addEventListener('popstate', onPopState);
