@@ -6,7 +6,7 @@ use crate::{
     director::lingo::datum::Datum,
     player::{
         cast_lib::CastMemberRef,
-        cast_member::CastMemberType,
+        cast_member::{CastMemberType, Shockwave3dMember, Text3dSource, Text3dState},
         reserve_player_mut,
         DatumRef, DirPlayer, ScriptError,
     },
@@ -15,12 +15,197 @@ use crate::{
 pub struct Shockwave3dMemberHandlers {}
 
 impl Shockwave3dMemberHandlers {
+    fn native_text_alignment(alignment: &str) -> crate::player::handlers::datum_handlers::cast_member::font::TextAlignment {
+        use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
+
+        match alignment.to_ascii_lowercase().as_str() {
+            "center" => TextAlignment::Center,
+            "right" => TextAlignment::Right,
+            "justify" => TextAlignment::Justify,
+            _ => TextAlignment::Left,
+        }
+    }
+
+    fn build_fallback_text_spans(
+        text_content: &str,
+        font_name: &str,
+        font_size: u16,
+        spans: &[crate::player::handlers::datum_handlers::cast_member::font::StyledSpan],
+    ) -> Vec<crate::player::handlers::datum_handlers::cast_member::font::StyledSpan> {
+        use crate::player::handlers::datum_handlers::cast_member::font::{HtmlStyle, StyledSpan};
+
+        if !spans.is_empty() {
+            return spans.to_vec();
+        }
+
+        vec![StyledSpan {
+            text: text_content.to_string(),
+            style: HtmlStyle {
+                font_face: Some(font_name.to_string()),
+                font_size: Some(font_size as i32),
+                color: Some(0xFFFFFF),
+                ..Default::default()
+            },
+        }]
+    }
+
+    fn scale_native_spans(
+        spans: &[crate::player::handlers::datum_handlers::cast_member::font::StyledSpan],
+        scale: i32,
+        fallback_font_size: u16,
+    ) -> Vec<crate::player::handlers::datum_handlers::cast_member::font::StyledSpan> {
+        let scale = scale.max(1);
+        spans
+            .iter()
+            .cloned()
+            .map(|mut span| {
+                let base_size = span.style.font_size.unwrap_or(fallback_font_size as i32).max(1);
+                span.style.font_size = Some(base_size * scale);
+                span
+            })
+            .collect()
+    }
+
+    fn native_text_supersample(smoothness: u32) -> i32 {
+        (2 + (smoothness as i32 / 4)).clamp(2, 5)
+    }
+
+    fn render_native_text_bitmap(
+        source: &Text3dSource,
+        smoothness: u32,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
+
+        let supersample = Self::native_text_supersample(smoothness);
+        let bw = (source.width as i32).max(128) * supersample;
+        let bh = (source.height as i32).max(32) * supersample;
+        let scaled_spans = Self::scale_native_spans(&source.spans, supersample, source.font_size);
+        let alignment = Self::native_text_alignment(&source.alignment);
+        let scaled_tab_stops: Vec<crate::player::cast_member::TabStop> = source
+            .tab_stops
+            .iter()
+            .cloned()
+            .map(|mut stop| {
+                stop.position *= supersample;
+                stop
+            })
+            .collect();
+
+        let mut bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+            bw as u16,
+            bh as u16,
+            32,
+            32,
+            8,
+            crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
+                crate::player::bitmap::bitmap::get_system_default_palette(),
+            ),
+        );
+        bitmap.use_alpha = true;
+        // Bitmap::new initializes 32-bit surfaces to opaque white. For native glyph
+        // extrusion we need a transparent background, otherwise the alpha-mask
+        // builder sees the entire text box as solid.
+        bitmap.data.fill(0);
+        let _ = FontMemberHandlers::render_native_text_to_bitmap(
+            &mut bitmap,
+            &scaled_spans,
+            0,
+            0,
+            bw,
+            bh,
+            alignment,
+            bw,
+            source.word_wrap,
+            None,
+            source.fixed_line_space.saturating_mul(supersample as u16),
+            source.top_spacing.saturating_mul(supersample as i16),
+            source.bottom_spacing.saturating_mul(supersample as i16),
+            &scaled_tab_stops,
+        );
+        Some((bw as u32, bh as u32, bitmap.data))
+    }
+
+    fn rebuild_native_text_mesh(w3d: &mut Shockwave3dMember) {
+        let (source, state) = match (&w3d.text3d_source, &w3d.text3d_state) {
+            (Some(source), Some(state)) if source.native_alpha_mesh => (source.clone(), state.clone()),
+            _ => return,
+        };
+
+        let Some((bw, bh, rgba)) = Self::render_native_text_bitmap(&source, state.smoothness) else {
+            return;
+        };
+
+        if let Some(scene) = w3d.scene_mut() {
+            let mesh = crate::director::chunks::w3d::primitives::extrude_alpha_mask_to_mesh(
+                bw,
+                bh,
+                &rgba,
+                source.width as f32,
+                source.height as f32,
+                state.tunnel_depth,
+                state.bevel_depth,
+                state.bevel_type,
+                state.smoothness,
+            );
+            scene.clod_meshes.insert("Text".to_string(), vec![mesh]);
+            scene.mesh_content_version += 1;
+        }
+    }
+
+    fn scale_text3d_mesh_depth(
+        scene: &mut crate::director::chunks::w3d::types::W3dScene,
+        old_depth: f32,
+        new_depth: f32,
+    ) {
+        let old_depth = old_depth.max(1.0);
+        let new_depth = new_depth.max(1.0);
+        let scale = new_depth / old_depth;
+
+        if let Some(meshes) = scene.clod_meshes.get_mut("Text") {
+            for mesh in meshes.iter_mut() {
+                for pos in mesh.positions.iter_mut() {
+                    pos[2] *= scale;
+                }
+            }
+        }
+        scene.mesh_content_version += 1;
+    }
+
+    fn apply_text3d_display_face(
+        runtime_state: &mut crate::player::cast_member::Shockwave3dRuntimeState,
+        display_face: i32,
+    ) {
+        let front = display_face == -1 || (display_face & 1) != 0;
+        let tunnel = display_face == -1 || (display_face & 2) != 0;
+        let back = display_face == -1 || (display_face & 4) != 0;
+
+        let mode = if !front && !back && !tunnel {
+            Some(0u8)
+        } else if tunnel || (front && back) {
+            // Tunnel faces need culling disabled to read as extruded text.
+            Some(3u8)
+        } else if back && !front {
+            Some(2u8)
+        } else {
+            Some(1u8)
+        };
+
+        match mode {
+            Some(1) => {
+                runtime_state.node_visibility.remove("Text");
+            }
+            Some(mode) => {
+                runtime_state.node_visibility.insert("Text".to_string(), mode);
+            }
+            None => {}
+        }
+    }
+
     /// Lazily initialize the embedded 3D world for text members.
     /// Builds 3D extruded text mesh from PFR glyph outlines when available,
-    /// or falls back to a textured box using Canvas2D-rendered text bitmap.
+    /// or falls back to an alpha-mask-derived glyph mesh for native/system fonts.
     fn ensure_text3d(player: &mut DirPlayer, member_ref: &CastMemberRef) {
         use crate::director::chunks::w3d::types::*;
-        use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
 
         // Check if this is a text member that needs 3D initialization
         let text_info = {
@@ -38,6 +223,8 @@ impl Shockwave3dMemberHandlers {
                             text.font_size,
                             text.width,
                             text.height,
+                            text.alignment.clone(),
+                            text.word_wrap,
                             text.html_styled_spans.clone(),
                             text.fixed_line_space,
                             text.top_spacing,
@@ -52,10 +239,11 @@ impl Shockwave3dMemberHandlers {
                 None => None,
             }
         };
-        let (text_content, font_name, font_size, tw, th, spans, fls, ts, bs, tab_stops, tunnel_depth, tex_member_name) = match text_info {
+        let (text_content, font_name, font_size, tw, th, alignment, word_wrap, spans, fls, ts, bs, tab_stops, tunnel_depth, tex_member_name) = match text_info {
             Some(info) => info,
             None => return,
         };
+        let spans = Self::build_fallback_text_spans(&text_content, &font_name, font_size, &spans);
 
         // Look up PFR glyph outlines from font cast members
         let glyph_data = {
@@ -119,8 +307,7 @@ impl Shockwave3dMemberHandlers {
             }
         }
 
-        // Load texture from textureMember if specified, otherwise render text to bitmap
-        let bitmap_texture: Option<(u32, u32, Vec<u8>)> = if let Some(ref tex_name) = tex_member_name {
+        let texture_bitmap: Option<(u32, u32, Vec<u8>)> = if let Some(ref tex_name) = tex_member_name {
             // Look up the texture cast member by name and get its RGBA data
             let mut tex_result = None;
             let tex_ref = player.movie.cast_manager.find_member_ref_by_name(tex_name);
@@ -157,23 +344,25 @@ impl Shockwave3dMemberHandlers {
                 ).into());
             }
             tex_result
-        } else if !has_pfr && !spans.is_empty() {
-            // No texture member, no PFR: render text to bitmap as fallback
-            let bw = (tw as i32).max(128);
-            let bh = (th as i32).max(32);
-            let mut bitmap = crate::player::bitmap::bitmap::Bitmap::new(
-                bw as u16, bh as u16, 32, 32, 8,
-                crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
-                    crate::player::bitmap::bitmap::get_system_default_palette()
-                ),
-            );
-            bitmap.use_alpha = true;
-            let _ = FontMemberHandlers::render_native_text_to_bitmap(
-                &mut bitmap, &spans, 0, 0, bw, bh,
-                crate::player::handlers::datum_handlers::cast_member::font::TextAlignment::Left,
-                bw, false, None, fls, ts, bs, &tab_stops,
-            );
-            Some((bw as u32, bh as u32, bitmap.data))
+        } else {
+            None
+        };
+
+        let glyph_bitmap: Option<(u32, u32, Vec<u8>)> = if !has_pfr && !spans.is_empty() {
+            let source = Text3dSource {
+                spans: spans.clone(),
+                font_size,
+                width: tw,
+                height: th,
+                alignment: alignment.clone(),
+                word_wrap,
+                fixed_line_space: fls,
+                top_spacing: ts,
+                bottom_spacing: bs,
+                tab_stops: tab_stops.clone(),
+                native_alpha_mesh: true,
+            };
+            Self::render_native_text_bitmap(&source, 10)
         } else {
             None
         };
@@ -184,7 +373,7 @@ impl Shockwave3dMemberHandlers {
         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
             if let CastMemberType::Text(ref mut text) = member.member_type {
                 text.ensure_w3d();
-                let depth = tunnel_depth as f32;
+                let depth = tunnel_depth.max(1) as f32;
 
                 // Take the w3d out of the text member
                 let mut w3d_member = match text.w3d.take() {
@@ -200,73 +389,48 @@ impl Shockwave3dMemberHandlers {
                     if !mesh.positions.is_empty() {
                         if let Some(scene) = w3d_member.scene_mut() {
                             scene.clod_meshes.insert("Text".to_string(), vec![mesh]);
-                            scene.texture_content_version += 1;
+                            scene.mesh_content_version += 1;
                         }
                     }
-                } else if let Some((bw, bh, rgba)) = bitmap_texture {
-                    let aspect = (bw as f32) / (bh as f32).max(1.0);
-                    let box_h = font_size as f32;
-                    let box_w = box_h * aspect;
-                    let hw = box_w / 2.0;
-                    let hh = box_h / 2.0;
-                    let hd = depth / 2.0;
-                    let positions = vec![
-                        [-hw,-hh,-hd],[hw,-hh,-hd],[hw,hh,-hd],[-hw,hh,-hd],
-                        [-hw,-hh,hd],[hw,-hh,hd],[hw,hh,hd],[-hw,hh,hd],
-                        [-hw,hh,-hd],[hw,hh,-hd],[hw,hh,hd],[-hw,hh,hd],
-                        [-hw,-hh,-hd],[hw,-hh,-hd],[hw,-hh,hd],[-hw,-hh,hd],
-                        [-hw,-hh,-hd],[-hw,hh,-hd],[-hw,hh,hd],[-hw,-hh,hd],
-                        [hw,-hh,-hd],[hw,hh,-hd],[hw,hh,hd],[hw,-hh,hd],
-                    ];
-                    let normals = vec![
-                        [0.0,0.0,-1.0],[0.0,0.0,-1.0],[0.0,0.0,-1.0],[0.0,0.0,-1.0],
-                        [0.0,0.0,1.0],[0.0,0.0,1.0],[0.0,0.0,1.0],[0.0,0.0,1.0],
-                        [0.0,1.0,0.0],[0.0,1.0,0.0],[0.0,1.0,0.0],[0.0,1.0,0.0],
-                        [0.0,-1.0,0.0],[0.0,-1.0,0.0],[0.0,-1.0,0.0],[0.0,-1.0,0.0],
-                        [-1.0,0.0,0.0],[-1.0,0.0,0.0],[-1.0,0.0,0.0],[-1.0,0.0,0.0],
-                        [1.0,0.0,0.0],[1.0,0.0,0.0],[1.0,0.0,0.0],[1.0,0.0,0.0],
-                    ];
-                    let tex_coords = vec![
-                        [1.0,1.0],[0.0,1.0],[0.0,0.0],[1.0,0.0],
-                        [0.0,1.0],[1.0,1.0],[1.0,0.0],[0.0,0.0],
-                        [0.0,0.0],[0.0,0.0],[0.0,0.0],[0.0,0.0],
-                        [0.0,0.0],[0.0,0.0],[0.0,0.0],[0.0,0.0],
-                        [0.0,0.0],[0.0,0.0],[0.0,0.0],[0.0,0.0],
-                        [0.0,0.0],[0.0,0.0],[0.0,0.0],[0.0,0.0],
-                    ];
-                    let faces = vec![
-                        [0,2,1],[0,3,2],[4,5,6],[4,6,7],
-                        [8,10,9],[8,11,10],[12,13,14],[12,14,15],
-                        [16,17,18],[16,18,19],[20,22,21],[20,23,22],
-                    ];
-                    let mesh = ClodDecodedMesh {
-                        name: "Text".to_string(),
-                        positions, normals,
-                        tex_coords: vec![tex_coords],
-                        faces,
-                        diffuse_colors: Vec::new(),
-                        specular_colors: Vec::new(),
-                        bone_indices: Vec::new(),
-                        bone_weights: Vec::new(),
-                    };
+                } else if let Some((bw, bh, rgba)) = glyph_bitmap {
+                    let bevel_depth = w3d_member.text3d_state.as_ref().map(|s| s.bevel_depth).unwrap_or(1.0);
+                    let bevel_type = w3d_member.text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(0);
+                    let smoothness = w3d_member.text3d_state.as_ref().map(|s| s.smoothness).unwrap_or(10);
                     if let Some(scene) = w3d_member.scene_mut() {
-                        let mut tex_data = Vec::with_capacity(8 + rgba.len());
-                        tex_data.extend_from_slice(&bw.to_le_bytes());
-                        tex_data.extend_from_slice(&bh.to_le_bytes());
-                        tex_data.extend_from_slice(&rgba);
-                        scene.texture_images.insert("TextBitmap".to_string(), tex_data);
-                        scene.texture_infos.push(W3dTextureInfo {
-                            name: "TextBitmap".to_string(),
-                            render_format: 0, mip_mode: 0, mag_filter: 0, image_type: 0,
-                        });
-                        if let Some(shader) = scene.shaders.first_mut() {
-                            shader.texture_layers.push(W3dTextureLayer {
-                                name: "TextBitmap".to_string(),
-                                ..Default::default()
-                            });
+                        let mesh = crate::director::chunks::w3d::primitives::extrude_alpha_mask_to_mesh(
+                            bw,
+                            bh,
+                            &rgba,
+                            tw as f32,
+                            th as f32,
+                            depth,
+                            bevel_depth,
+                            bevel_type,
+                            smoothness,
+                        );
+                        if let Some((tex_w, tex_h, tex_rgba)) = texture_bitmap.as_ref() {
+                            let mut tex_data = Vec::with_capacity(8 + tex_rgba.len());
+                            tex_data.extend_from_slice(&tex_w.to_le_bytes());
+                            tex_data.extend_from_slice(&tex_h.to_le_bytes());
+                            tex_data.extend_from_slice(tex_rgba);
+                            scene.texture_images.insert("TextBitmap".to_string(), tex_data);
+                            if !scene.texture_infos.iter().any(|t| t.name == "TextBitmap") {
+                                scene.texture_infos.push(W3dTextureInfo {
+                                    name: "TextBitmap".to_string(),
+                                    render_format: 0, mip_mode: 0, mag_filter: 0, image_type: 0,
+                                });
+                            }
+                            if let Some(shader) = scene.shaders.first_mut() {
+                                if !shader.texture_layers.iter().any(|l| l.name == "TextBitmap") {
+                                    shader.texture_layers.push(W3dTextureLayer {
+                                        name: "TextBitmap".to_string(),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
                         }
                         scene.clod_meshes.insert("Text".to_string(), vec![mesh]);
-                        scene.texture_content_version += 1;
+                        scene.mesh_content_version += 1;
                     }
                 }
 
@@ -277,6 +441,35 @@ impl Shockwave3dMemberHandlers {
                     web_sys::console::log_1(&format!("[Text3D] Converting Text member → Shockwave3d (count={})", c).into());
                 }
                 w3d_member.converted_from_text = true;
+                if let Some(state) = w3d_member.text3d_state.as_mut() {
+                    state.tunnel_depth = depth.max(1.0);
+                } else {
+                    w3d_member.text3d_state = Some(Text3dState {
+                        tunnel_depth: depth.max(1.0),
+                        smoothness: 10,
+                        bevel_depth: 1.0,
+                        bevel_type: 0,
+                        display_face: -1,
+                        display_mode: 1,
+                        diffuse_color: (0, 0, 0),
+                    });
+                }
+                if let Some(state) = w3d_member.text3d_state.as_ref() {
+                    Self::apply_text3d_display_face(&mut w3d_member.runtime_state, state.display_face);
+                }
+                w3d_member.text3d_source = Some(Text3dSource {
+                    spans: spans.clone(),
+                    font_size,
+                    width: tw,
+                    height: th,
+                    alignment,
+                    word_wrap,
+                    fixed_line_space: fls,
+                    top_spacing: ts,
+                    bottom_spacing: bs,
+                    tab_stops: tab_stops.clone(),
+                    native_alpha_mesh: !has_pfr,
+                });
                 member.member_type = CastMemberType::Shockwave3d(w3d_member);
             }
         }
@@ -289,7 +482,7 @@ impl Shockwave3dMemberHandlers {
     ) -> Result<Datum, ScriptError> {
         Self::ensure_text3d(player, cast_member_ref);
         // Clone info and scene data upfront to avoid borrow conflicts with player.alloc_datum
-        let (info, scene_data) = {
+        let (info, scene_data, text3d_state) = {
             let member = player
                 .movie
                 .cast_manager
@@ -297,7 +490,7 @@ impl Shockwave3dMemberHandlers {
                 .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
             let w3d = member.member_type.as_shockwave3d()
                 .ok_or_else(|| ScriptError::new("Not a Shockwave3D member".to_string()))?;
-            (w3d.info.clone(), w3d.parsed_scene.clone())
+            (w3d.info.clone(), w3d.parsed_scene.clone(), w3d.text3d_state.clone())
         };
 
         use crate::director::chunks::w3d::types::W3dNodeType;
@@ -416,12 +609,24 @@ impl Shockwave3dMemberHandlers {
             "antiAliasingEnabled" => Ok(Datum::Int(0)),
             "streamSize" => Ok(Datum::Int(0)),
             // Text3D properties (stub values after Text→Shockwave3d conversion)
-            "smoothness" => Ok(Datum::Int(10)),
-            "tunnelDepth" | "tunneldepth" => Ok(Datum::Int(10)),
-            "bevelDepth" | "beveldepth" => Ok(Datum::Float(1.0)),
-            "bevelType" | "beveltype" => Ok(Datum::Symbol("none".to_string())),
-            "displayFace" | "displayface" => Ok(Datum::Int(-1)),
-            "displayMode" | "displaymode" => Ok(Datum::Symbol("mode3d".to_string())),
+            "smoothness" => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.smoothness as i32).unwrap_or(10))),
+            "tunnelDepth" | "tunneldepth" => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.tunnel_depth.round() as i32).unwrap_or(10))),
+            "bevelDepth" | "beveldepth" => Ok(Datum::Float(text3d_state.as_ref().map(|s| s.bevel_depth as f64).unwrap_or(1.0))),
+            "bevelType" | "beveltype" => Ok(Datum::Symbol(match text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(0) {
+                1 => "miter".to_string(),
+                2 => "round".to_string(),
+                _ => "none".to_string(),
+            })),
+            "displayFace" | "displayface" => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.display_face).unwrap_or(-1))),
+            "displayMode" | "displaymode" => Ok(Datum::Symbol(if text3d_state.as_ref().map(|s| s.display_mode).unwrap_or(1) == 1 {
+                "mode3d".to_string()
+            } else {
+                "normal".to_string()
+            })),
+            "diffuseColor" | "diffusecolor" => {
+                let (r, g, b) = text3d_state.as_ref().map(|s| s.diffuse_color).unwrap_or((0, 0, 0));
+                Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)))
+            }
 
             _ => {
                 web_sys::console::log_1(&format!("[W3D] Unknown Shockwave3D property: {}", prop).into());
@@ -433,17 +638,88 @@ impl Shockwave3dMemberHandlers {
     }
 
     pub fn set_prop(
-        _player: &mut DirPlayer,
-        _cast_member_ref: &CastMemberRef,
+        player: &mut DirPlayer,
+        cast_member_ref: &CastMemberRef,
         prop: &String,
-        _value: &Datum,
+        value: &Datum,
     ) -> Result<(), ScriptError> {
         match prop.as_str() {
+            "diffuseColor" | "diffusecolor" => {
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        if let Some(state) = w3d.text3d_state.as_mut() {
+                            if let Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) = value {
+                                state.diffuse_color = (*r, *g, *b);
+                                if let Some(scene) = w3d.scene_mut() {
+                                    if let Some(mat) = scene.materials.iter_mut().find(|m| m.name == "TextMaterial") {
+                                        mat.diffuse = [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
             "directToStage" | "preLoad" | "preload" | "loop" | "animationEnabled"
             | "smoothness" | "tunnelDepth" | "tunneldepth" | "bevelDepth" | "beveldepth"
             | "bevelType" | "beveltype" | "displayFace" | "displayface"
             | "displayMode" | "displaymode" => {
-                // Accept text3D / general 3D properties (no-op for now)
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        let mut pending_depth_update: Option<(f32, f32)> = None;
+                        let mut needs_rebuild = false;
+                        if let Some(state) = w3d.text3d_state.as_mut() {
+                            match prop.as_str() {
+                                "smoothness" => {
+                                    state.smoothness = value.int_value()? as u32;
+                                    needs_rebuild = true;
+                                }
+                                "tunnelDepth" | "tunneldepth" => {
+                                    let new_depth = value
+                                        .float_value()
+                                        .or_else(|_| value.int_value().map(|v| v as f64))? as f32;
+                                    let new_depth = new_depth.max(1.0);
+                                    pending_depth_update = Some((state.tunnel_depth.max(1.0), new_depth));
+                                    state.tunnel_depth = new_depth;
+                                }
+                                "bevelDepth" | "beveldepth" => {
+                                    state.bevel_depth = value
+                                        .float_value()
+                                        .or_else(|_| value.int_value().map(|v| v as f64))? as f32;
+                                    needs_rebuild = true;
+                                }
+                                "bevelType" | "beveltype" => {
+                                    state.bevel_type = match value.string_value()?.trim_start_matches('#') {
+                                        "miter" => 1,
+                                        "round" => 2,
+                                        _ => 0,
+                                    };
+                                    needs_rebuild = true;
+                                }
+                                "displayFace" | "displayface" => state.display_face = value.int_value()?,
+                                "displayMode" | "displaymode" => {
+                                    state.display_mode = match value.string_value()?.trim_start_matches('#') {
+                                        "mode3d" => 1,
+                                        _ => 0,
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some((old_depth, new_depth)) = pending_depth_update {
+                            if let Some(scene) = w3d.scene_mut() {
+                                Self::scale_text3d_mesh_depth(scene, old_depth, new_depth);
+                            }
+                        }
+                        if needs_rebuild {
+                            Self::rebuild_native_text_mesh(w3d);
+                        }
+                        if let Some(state) = w3d.text3d_state.as_ref() {
+                            Self::apply_text3d_display_face(&mut w3d.runtime_state, state.display_face);
+                        }
+                    }
+                }
                 Ok(())
             }
             _ => {
@@ -1370,6 +1646,7 @@ impl Shockwave3dMemberHandlers {
                             lights: Vec::new(), texture_images: HashMap::new(), texture_infos: Vec::new(),
                             skeletons: Vec::new(), motions: Vec::new(), model_resources: HashMap::new(),
                             clod_meshes: HashMap::new(), raw_meshes: Vec::new(),
+                            mesh_content_version: 0,
                             texture_content_version: 0,
                         };
                         empty_scene.nodes.push(W3dNode {

@@ -176,6 +176,308 @@ pub fn extrude_contour(contour: &[[f32; 2]], depth: f32) -> (Vec<[f32; 3]>, Vec<
     (positions, normals, faces)
 }
 
+fn append_quad(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    tex_coords: &mut Vec<[f32; 2]>,
+    faces: &mut Vec<[u32; 3]>,
+    quad: [[f32; 3]; 4],
+    uv_quad: [[f32; 2]; 4],
+    normal: [f32; 3],
+) {
+    let base = positions.len() as u32;
+    positions.extend_from_slice(&quad);
+    normals.extend_from_slice(&[normal; 4]);
+    tex_coords.extend_from_slice(&uv_quad);
+    faces.push([base, base + 2, base + 1]);
+    faces.push([base, base + 3, base + 2]);
+}
+
+/// Extrude a native-rendered text alpha mask into a 3D glyph mesh.
+///
+/// This is intentionally pixel-based rather than outline-based: it works for
+/// movies that rely on system/native fonts and therefore have no embedded PFR1
+/// outline data available to the player.
+pub fn extrude_alpha_mask_to_mesh(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    world_width: f32,
+    world_height: f32,
+    tunnel_depth: f32,
+    bevel_depth: f32,
+    bevel_type: u32,
+    smoothness: u32,
+) -> super::types::ClodDecodedMesh {
+    let depth = tunnel_depth.max(1.0);
+    if width == 0 || height == 0 || rgba.len() < (width as usize) * (height as usize) * 4 {
+        return super::types::ClodDecodedMesh::default();
+    }
+
+    let world_width = world_width.max(1.0);
+    let world_height = world_height.max(1.0);
+    let pixel_width = world_width / (width as f32).max(1.0);
+    let pixel_height = world_height / (height as f32).max(1.0);
+    let alpha_threshold = 24u8;
+
+    let idx = |x: u32, y: u32| -> usize { ((y as usize) * (width as usize) + (x as usize)) * 4 + 3 };
+    let mut base_mask = vec![false; (width as usize) * (height as usize)];
+    for y in 0..height {
+        for x in 0..width {
+            base_mask[(y as usize) * (width as usize) + (x as usize)] =
+                rgba[idx(x, y)] >= alpha_threshold;
+        }
+    }
+    if !base_mask.iter().any(|&p| p) {
+        return super::types::ClodDecodedMesh::default();
+    }
+
+    let erode_mask = |mask: &[bool]| -> Vec<bool> {
+        let mut next = vec![false; mask.len()];
+        for y in 0..height as i32 {
+            for x in 0..width as i32 {
+                let i = (y as usize) * (width as usize) + (x as usize);
+                if !mask[i] {
+                    continue;
+                }
+                let left = x > 0 && mask[i - 1];
+                let right = x + 1 < width as i32 && mask[i + 1];
+                let up = y > 0 && mask[i - width as usize];
+                let down = y + 1 < height as i32 && mask[i + width as usize];
+                next[i] = left && right && up && down;
+            }
+        }
+        next
+    };
+
+    let bevel_world = if bevel_type == 0 {
+        0.0
+    } else {
+        bevel_depth.max(0.0).min(depth * 0.5)
+    };
+    let bevel_step_limit = ((smoothness.max(1) as usize) / 2).clamp(1, 6);
+    let mut erosion_levels: Vec<Vec<bool>> = Vec::new();
+    if bevel_world > 0.0 {
+        let mut current = base_mask.clone();
+        for _ in 0..bevel_step_limit {
+            let next = erode_mask(&current);
+            if !next.iter().any(|&p| p) {
+                break;
+            }
+            erosion_levels.push(next.clone());
+            current = next;
+        }
+    }
+
+    let bevel_steps = erosion_levels.len();
+    let mut slab_masks: Vec<Vec<bool>> = Vec::new();
+    let mut z_edges: Vec<f32> = vec![0.0];
+
+    if bevel_steps > 0 {
+        let step_depth = bevel_world / bevel_steps as f32;
+        for level in (0..bevel_steps).rev() {
+            slab_masks.push(erosion_levels[level].clone());
+            z_edges.push(z_edges.last().copied().unwrap_or(0.0) + step_depth);
+        }
+    }
+
+    let body_depth = (depth - bevel_world * 2.0).max(0.0);
+    if body_depth > 0.0 || slab_masks.is_empty() {
+        slab_masks.push(base_mask.clone());
+        z_edges.push(z_edges.last().copied().unwrap_or(0.0) + body_depth.max(depth));
+    }
+
+    if bevel_steps > 0 {
+        let step_depth = bevel_world / bevel_steps as f32;
+        for level in 0..bevel_steps {
+            slab_masks.push(erosion_levels[level].clone());
+            z_edges.push(z_edges.last().copied().unwrap_or(0.0) + step_depth);
+        }
+    }
+
+    if let Some(last) = z_edges.last_mut() {
+        *last = depth;
+    }
+
+    let solid = |layer: usize, x: i32, y: i32| -> bool {
+        if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 || layer >= slab_masks.len() {
+            return false;
+        }
+        slab_masks[layer][(y as usize) * (width as usize) + (x as usize)]
+    };
+
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut tex_coords = Vec::new();
+    let mut faces = Vec::new();
+
+    for layer in 0..slab_masks.len() {
+        let z0 = z_edges[layer];
+        let z1 = z_edges[layer + 1];
+        if z1 <= z0 {
+            continue;
+        }
+
+        for y in 0..height as i32 {
+            for x in 0..width as i32 {
+                if !solid(layer, x, y) {
+                    continue;
+                }
+
+                let x0 = x as f32 * pixel_width;
+                let x1 = (x + 1) as f32 * pixel_width;
+                let y_top = world_height - (y + 1) as f32 * pixel_height;
+                let y_bottom = world_height - y as f32 * pixel_height;
+                let u0 = (x as f32 / width as f32).clamp(0.0, 1.0);
+                let u1 = ((x + 1) as f32 / width as f32).clamp(0.0, 1.0);
+                let v_top = ((y + 1) as f32 / height as f32).clamp(0.0, 1.0);
+                let v_bottom = (y as f32 / height as f32).clamp(0.0, 1.0);
+                let z0_uv = (1.0 - z0 / depth).clamp(0.0, 1.0);
+                let z1_uv = (1.0 - z1 / depth).clamp(0.0, 1.0);
+
+                if layer == 0 || !solid(layer - 1, x, y) {
+                    append_quad(
+                        &mut positions,
+                        &mut normals,
+                        &mut tex_coords,
+                        &mut faces,
+                        [
+                            [x0, y_bottom, z0],
+                            [x1, y_bottom, z0],
+                            [x1, y_top, z0],
+                            [x0, y_top, z0],
+                        ],
+                        [
+                            [u0, v_bottom],
+                            [u1, v_bottom],
+                            [u1, v_top],
+                            [u0, v_top],
+                        ],
+                        [0.0, 0.0, -1.0],
+                    );
+                }
+                if layer + 1 == slab_masks.len() || !solid(layer + 1, x, y) {
+                    append_quad(
+                        &mut positions,
+                        &mut normals,
+                        &mut tex_coords,
+                        &mut faces,
+                        [
+                            [x0, y_bottom, z1],
+                            [x0, y_top, z1],
+                            [x1, y_top, z1],
+                            [x1, y_bottom, z1],
+                        ],
+                        [
+                            [u0, v_bottom],
+                            [u0, v_top],
+                            [u1, v_top],
+                            [u1, v_bottom],
+                        ],
+                        [0.0, 0.0, 1.0],
+                    );
+                }
+                if !solid(layer, x, y - 1) {
+                    append_quad(
+                        &mut positions,
+                        &mut normals,
+                        &mut tex_coords,
+                        &mut faces,
+                        [
+                            [x0, y_top, z0],
+                            [x1, y_top, z0],
+                            [x1, y_top, z1],
+                            [x0, y_top, z1],
+                        ],
+                        [
+                            [u0, z0_uv],
+                            [u1, z0_uv],
+                            [u1, z1_uv],
+                            [u0, z1_uv],
+                        ],
+                        [0.0, -1.0, 0.0],
+                    );
+                }
+                if !solid(layer, x, y + 1) {
+                    append_quad(
+                        &mut positions,
+                        &mut normals,
+                        &mut tex_coords,
+                        &mut faces,
+                        [
+                            [x0, y_bottom, z0],
+                            [x0, y_bottom, z1],
+                            [x1, y_bottom, z1],
+                            [x1, y_bottom, z0],
+                        ],
+                        [
+                            [u0, z0_uv],
+                            [u0, z1_uv],
+                            [u1, z1_uv],
+                            [u1, z0_uv],
+                        ],
+                        [0.0, 1.0, 0.0],
+                    );
+                }
+                if !solid(layer, x - 1, y) {
+                    append_quad(
+                        &mut positions,
+                        &mut normals,
+                        &mut tex_coords,
+                        &mut faces,
+                        [
+                            [x0, y_bottom, z0],
+                            [x0, y_top, z0],
+                            [x0, y_top, z1],
+                            [x0, y_bottom, z1],
+                        ],
+                        [
+                            [v_bottom, z0_uv],
+                            [v_top, z0_uv],
+                            [v_top, z1_uv],
+                            [v_bottom, z1_uv],
+                        ],
+                        [-1.0, 0.0, 0.0],
+                    );
+                }
+                if !solid(layer, x + 1, y) {
+                    append_quad(
+                        &mut positions,
+                        &mut normals,
+                        &mut tex_coords,
+                        &mut faces,
+                        [
+                            [x1, y_bottom, z0],
+                            [x1, y_bottom, z1],
+                            [x1, y_top, z1],
+                            [x1, y_top, z0],
+                        ],
+                        [
+                            [v_bottom, z0_uv],
+                            [v_bottom, z1_uv],
+                            [v_top, z1_uv],
+                            [v_top, z0_uv],
+                        ],
+                        [1.0, 0.0, 0.0],
+                    );
+                }
+            }
+        }
+    }
+
+    super::types::ClodDecodedMesh {
+        name: "Text".to_string(),
+        positions,
+        normals,
+        tex_coords: vec![tex_coords],
+        faces,
+        diffuse_colors: Vec::new(),
+        specular_colors: Vec::new(),
+        bone_indices: Vec::new(),
+        bone_weights: Vec::new(),
+    }
+}
+
 pub fn parse_physics_mesh(r: &mut W3dBlockReader) -> Result<W3dPrimitive, String> {
     let name = r.read_ifx_string()?;
     Ok(W3dPrimitive::PhysicsMesh { name })

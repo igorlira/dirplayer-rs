@@ -276,20 +276,18 @@ impl TextMember {
         let mut scene = CastMember::create_empty_w3d_scene();
         let ti = self.info.as_ref();
 
-        // Extract text foreground color for the shader
+        // Use TextInfo 3TEX colors for lighting, fall back to text foreground color
         let (cr, cg, cb) = self.html_styled_spans.first()
             .and_then(|s| s.style.color)
             .map(|c| (
-                ((c >> 16) & 0xFF) as f32 / 255.0,
-                ((c >> 8) & 0xFF) as f32 / 255.0,
-                (c & 0xFF) as f32 / 255.0,
+                ((c >> 16) & 0xFF) as u8,
+                ((c >> 8) & 0xFF) as u8,
+                (c & 0xFF) as u8,
             ))
-            .unwrap_or((1.0, 1.0, 1.0));
-
-        // Use TextInfo 3TEX colors for lighting, fall back to text foreground color
+            .unwrap_or((255, 255, 255));
         let (dir_r, dir_g, dir_b) = ti
             .map(|i| TextInfo::color_to_rgb(i.directional_color))
-            .unwrap_or(((cr * 255.0) as u8, (cg * 255.0) as u8, (cb * 255.0) as u8));
+            .unwrap_or((cr, cg, cb));
         let (amb_r, amb_g, amb_b) = ti
             .map(|i| TextInfo::color_to_rgb(i.ambient_color))
             .unwrap_or((64, 64, 64));
@@ -301,7 +299,7 @@ impl TextMember {
         // Set material from TextInfo colors
         scene.materials.push(W3dMaterial {
             name: "TextMaterial".to_string(),
-            diffuse: [cr, cg, cb, 1.0],
+            diffuse: [0.0, 0.0, 0.0, 1.0], // Director text3D defaults diffuseColor to #000000
             ambient: [amb_r as f32 / 255.0, amb_g as f32 / 255.0, amb_b as f32 / 255.0, 1.0],
             emissive: [0.0, 0.0, 0.0, 1.0],
             specular: [spec_r as f32 / 255.0, spec_g as f32 / 255.0, spec_b as f32 / 255.0, 1.0],
@@ -319,6 +317,15 @@ impl TextMember {
         }
         if let Some(light) = scene.lights.iter_mut().find(|l| l.name == "DefaultAmbient") {
             light.color = [amb_r as f32 / 255.0, amb_g as f32 / 255.0, amb_b as f32 / 255.0];
+        }
+
+        // Apply directionalPreset to light node transform
+        if let Some(ti) = ti {
+            if ti.directional_preset > 0 && ti.directional_preset <= 9 {
+                if let Some(light_node) = scene.nodes.iter_mut().find(|n| n.name == "DefaultDirectional") {
+                    light_node.transform = Self::directional_preset_to_transform(ti.directional_preset);
+                }
+            }
         }
 
         // Set camera position from TextInfo
@@ -344,6 +351,11 @@ impl TextMember {
                     (cx*sy*cz + sx*sz) as f32, (cx*sy*sz - sx*cz) as f32, (cx*cy) as f32, 0.0,
                     px, py, pz, 1.0,
                 ];
+                // Text3D is rendered into a dynamically sized sprite/FBO. Using the
+                // static empty-world 640x480 viewport here distorts the projection
+                // and makes the text appear much closer than in Director.
+                cam_node.screen_width = 0;
+                cam_node.screen_height = 0;
             }
         }
 
@@ -389,7 +401,64 @@ impl TextMember {
             parsed_scene: Some(rc_scene),
             runtime_state,
             converted_from_text: false,
+            text3d_state: ti.map(|i| Text3dState {
+                tunnel_depth: i.tunnel_depth.max(1) as f32,
+                smoothness: i.smoothness,
+                bevel_depth: i.bevel_depth as f32,
+                bevel_type: i.bevel_type,
+                display_face: i.display_face,
+                display_mode: i.display_mode,
+                diffuse_color: (0, 0, 0),
+            }),
+            text3d_source: None,
         }));
+    }
+
+    /// Build a rotation matrix for the DefaultDirectional light node
+    /// from a TextInfo directionalPreset value (1-9).
+    ///
+    /// The mesh front-face normal is (0,0,-1) and edge normals are inverted
+    /// (top edge = (0,-1,0), etc.) because of face winding conventions.
+    /// L (surface-to-light) must have matching signs for dot(N,L)>0.
+    fn directional_preset_to_transform(preset: u32) -> [f32; 16] {
+        // L direction: x component from left/right, y from top/bottom, z always -1 for front face
+        let (lx, ly): (f32, f32) = match preset {
+            1 => (-1.0, -1.0), // topLeft
+            2 => ( 0.0, -1.0), // topCenter
+            3 => ( 1.0, -1.0), // topRight
+            4 => (-1.0,  0.0), // middleLeft
+            5 => ( 0.0,  0.0), // middleCenter
+            6 => ( 1.0,  0.0), // middleRight
+            7 => (-1.0,  1.0), // bottomLeft
+            8 => ( 0.0,  1.0), // bottomCenter
+            9 => ( 1.0,  1.0), // bottomRight
+            _ => return [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+        };
+        let lz: f32 = -1.0;
+        let len = (lx * lx + ly * ly + lz * lz).sqrt();
+        let l = [lx / len, ly / len, lz / len];
+        // Z axis of transform = -L (shader extracts -Z as light direction)
+        let z = [-l[0], -l[1], -l[2]];
+        // Build orthonormal basis: X = normalize(up × Z), Y = Z × X
+        let up = if z[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+        let mut x = [
+            up[1] * z[2] - up[2] * z[1],
+            up[2] * z[0] - up[0] * z[2],
+            up[0] * z[1] - up[1] * z[0],
+        ];
+        let xlen = (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt();
+        x = [x[0] / xlen, x[1] / xlen, x[2] / xlen];
+        let y = [
+            z[1] * x[2] - z[2] * x[1],
+            z[2] * x[0] - z[0] * x[2],
+            z[0] * x[1] - z[1] * x[0],
+        ];
+        [
+            x[0], x[1], x[2], 0.0,
+            y[0], y[1], y[2], 0.0,
+            z[0], z[1], z[2], 0.0,
+            0.0,  0.0,  0.0,  1.0,
+        ]
     }
 
     pub fn has_html_styling(&self) -> bool {
@@ -499,6 +568,32 @@ pub struct FlashMember {
 }
 
 #[derive(Clone, Debug)]
+pub struct Text3dState {
+    pub tunnel_depth: f32,
+    pub smoothness: u32,
+    pub bevel_depth: f32,
+    pub bevel_type: u32,
+    pub display_face: i32,
+    pub display_mode: u32,
+    pub diffuse_color: (u8, u8, u8), // Director defaults to #000000
+}
+
+#[derive(Clone, Debug)]
+pub struct Text3dSource {
+    pub spans: Vec<StyledSpan>,
+    pub font_size: u16,
+    pub width: u16,
+    pub height: u16,
+    pub alignment: String,
+    pub word_wrap: bool,
+    pub fixed_line_space: u16,
+    pub top_spacing: i16,
+    pub bottom_spacing: i16,
+    pub tab_stops: Vec<TabStop>,
+    pub native_alpha_mesh: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct Shockwave3dMember {
     pub info: Shockwave3dInfo,
     pub w3d_data: Vec<u8>,
@@ -508,6 +603,10 @@ pub struct Shockwave3dMember {
     /// True if this member was converted from a Text member (3D Text feature).
     /// Used to report member.type as #text instead of #shockwave3d.
     pub converted_from_text: bool,
+    /// Live Text3D properties retained after Text -> Shockwave3d conversion.
+    pub text3d_state: Option<Text3dState>,
+    /// Source data retained so native-font Text3D meshes can be rebuilt.
+    pub text3d_source: Option<Text3dSource>,
 }
 
 impl Shockwave3dMember {
@@ -2268,7 +2367,7 @@ impl CastMember {
                     number,
                     name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                     comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
-                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info, parsed_scene.as_deref()); CastMemberType::Shockwave3d(Shockwave3dMember { info, w3d_data, source_scene, parsed_scene, runtime_state: rs, converted_from_text: false }) },
+                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info, parsed_scene.as_deref()); CastMemberType::Shockwave3d(Shockwave3dMember { info, w3d_data, source_scene, parsed_scene, runtime_state: rs, converted_from_text: false, text3d_state: None, text3d_source: None }) },
                     color: ColorRef::PaletteIndex(255),
                     bg_color: ColorRef::PaletteIndex(0),
                 });
@@ -3026,6 +3125,8 @@ impl CastMember {
                         info,
                         w3d_data,
                         converted_from_text: false,
+                        text3d_state: None,
+                        text3d_source: None,
                     }),
                         color: ColorRef::PaletteIndex(255),
                         bg_color: ColorRef::PaletteIndex(0),
