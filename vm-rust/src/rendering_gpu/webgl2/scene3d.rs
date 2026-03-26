@@ -1482,6 +1482,23 @@ void main() {
 
                     // Check if this model is transparent
                     let opacity = self.get_model_opacity(scene, model_node, runtime_state);
+                    // One-time log for lightbox/water/black opacity
+                    if model_node.name.contains("lightbox") || model_node.name.contains("water")
+                        || model_node.name.contains("BLACK") || model_node.name.contains("BAR_")
+                    {
+                        use std::sync::Mutex;
+                        use std::collections::HashSet;
+                        static LOGGED_OP: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+                        if let Ok(mut guard) = LOGGED_OP.lock() {
+                            let set = guard.get_or_insert_with(HashSet::new);
+                            if set.insert(model_node.name.clone()) {
+                                web_sys::console::log_1(&format!(
+                                    "[W3D-OPACITY] model=\"{}\" opacity={:.3} pass={}",
+                                    model_node.name, opacity, if opacity < 0.999 { "transparent" } else { "opaque" }
+                                ).into());
+                            }
+                        }
+                    }
                     if opacity < 0.999 {
                         // Defer to transparent pass — compute distance for sorting
                         let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
@@ -3059,31 +3076,31 @@ void main() {
             None => return false,
         };
 
-        let mut candidate_names: Vec<&str> = Vec::new();
+        let mut candidate_names: Vec<String> = Vec::new();
         for binding in &res_info.shader_bindings {
             if mesh_idx < binding.mesh_bindings.len() && !binding.mesh_bindings[mesh_idx].is_empty() {
-                candidate_names.push(&binding.mesh_bindings[mesh_idx]);
+                candidate_names.push(binding.mesh_bindings[mesh_idx].clone());
             }
         }
 
         let effective_shader_name = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
-            .map(|s| s.as_str())
-            .unwrap_or(model_node.shader_name.as_str());
+            .cloned()
+            .unwrap_or_else(|| model_node.shader_name.clone());
         if !effective_shader_name.is_empty() {
             candidate_names.push(effective_shader_name);
         }
 
         for binding in &res_info.shader_bindings {
             if !binding.name.is_empty() {
-                candidate_names.push(&binding.name);
+                candidate_names.push(binding.name.clone());
             }
         }
 
         let mut best_material: Option<&W3dMaterial> = None;
         let mut best_blend_func = 0u8;
 
-        for candidate in candidate_names {
+        for candidate in &candidate_names {
             if candidate.is_empty() {
                 continue;
             }
@@ -3113,6 +3130,37 @@ void main() {
             if let (Some(gpu_data), Some(w3d_shader)) = (self.member_data.get(member_key), w3d_shader) {
                 let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
                 tex_bound = Self::bind_texture_layers(gl, shader, &layers);
+            }
+
+            // Log MAPSTC models where shader is found but texture binding fails
+            if !tex_bound && w3d_shader.is_some() && model_node.name.contains("MAPSTC") {
+                use std::sync::Mutex;
+                use std::collections::HashSet;
+                static LOGGED_NOTEX: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+                let key = format!("{}:{}:{}", model_node.name, mesh_idx, candidate);
+                if let Ok(mut guard) = LOGGED_NOTEX.lock() {
+                    let set = guard.get_or_insert_with(HashSet::new);
+                    if set.insert(key) {
+                        let tex_names: Vec<String> = w3d_shader.map(|s| s.texture_layers.iter()
+                            .map(|l| l.name.clone()).collect()).unwrap_or_default();
+                        // Check if textures exist in GPU
+                        let tex_in_gpu: Vec<bool> = w3d_shader.map(|s| s.texture_layers.iter()
+                            .map(|l| {
+                                self.member_data.get(member_key)
+                                    .map(|gpu| gpu.textures.contains_key(&l.name.to_lowercase()))
+                                    .unwrap_or(false)
+                            }).collect()).unwrap_or_default();
+                        let mat_opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
+                        let all_candidates: Vec<&str> = candidate_names.iter().map(|s| s.as_str()).collect();
+                        // Only log non-DefaultShader candidates (these are the real issues)
+                        if candidate != "DefaultShader" && candidate != "default" {
+                            web_sys::console::log_1(&format!(
+                                "[W3D-NOTEX] model=\"{}\" mesh={} shader=\"{}\" tex={:?} in_gpu={:?} all_candidates={:?}",
+                                model_node.name, mesh_idx, candidate, tex_names, tex_in_gpu, all_candidates
+                            ).into());
+                        }
+                    }
+                }
             }
 
             // Skybox candidate diagnostic

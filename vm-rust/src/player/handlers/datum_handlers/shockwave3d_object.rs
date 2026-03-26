@@ -766,6 +766,12 @@ impl Shockwave3dObjectDatumHandlers {
                   if s3d_ref.object_type != "shader" { return Ok(()); }
                     // blend = 0-100 → opacity 0.0-1.0
                     let blend_val = value.to_float().unwrap_or(100.0) as f32;
+                    if s3d_ref.name == "DefaultShader" || blend_val < 99.0 {
+                        web_sys::console::log_1(&format!(
+                            "[W3D-BLEND] shader=\"{}\" blend={:.1} → opacity={:.3}",
+                            s3d_ref.name, blend_val, blend_val / 100.0
+                        ).into());
+                    }
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
@@ -3327,19 +3333,42 @@ impl Shockwave3dObjectDatumHandlers {
                 )))
             },
             "shader" => {
-                // Return shader as a Shockwave3dObjectRef
+                // Return the model's first shader (equivalent to shaderList[1])
                 use crate::director::lingo::datum::Shockwave3dObjectRef;
                 let mut shader_name = String::new();
-                // 1) Model index → shader index
-                let model_index = scene.nodes.iter()
-                    .filter(|n| n.node_type == W3dNodeType::Model)
-                    .position(|n| n.name == model_name);
-                if let Some(mi) = model_index {
-                    if mi < scene.shaders.len() {
-                        shader_name = scene.shaders[mi].name.clone();
+                // 1) Check runtime shader override (from Lingo shaderList[1] = shaderRef)
+                if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d() {
+                        if let Some(overrides) = w3d.runtime_state.node_shaders.get(model_name) {
+                            if let Some(name) = overrides.get(&0) {
+                                shader_name = name.clone();
+                            }
+                        }
                     }
                 }
-                // 2) Fallback: node's shader_name
+                // 2) Check model resource shader bindings (first mesh's shader)
+                if shader_name.is_empty() {
+                    let resource = node.map(|n| {
+                        if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name }
+                    });
+                    if let Some(rn) = resource {
+                        if let Some(res) = scene.model_resources.get(rn.as_str()) {
+                            for binding in &res.shader_bindings {
+                                if !binding.mesh_bindings.is_empty() && !binding.mesh_bindings[0].is_empty() {
+                                    // Prefer non-DefaultShader bindings
+                                    let name = &binding.mesh_bindings[0];
+                                    if !name.eq_ignore_ascii_case("DefaultShader") {
+                                        shader_name = name.clone();
+                                        break;
+                                    } else if shader_name.is_empty() {
+                                        shader_name = name.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // 3) Fallback: node's shader_name
                 if shader_name.is_empty() {
                     if let Some(n) = node {
                         if !n.shader_name.is_empty() {
@@ -3347,8 +3376,19 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                     }
                 }
+                // 4) Last resort: model index → shader index (Director behavior for W3D-loaded scenes)
                 if shader_name.is_empty() {
-                    shader_name = format!("{}_shader", model_name);
+                    let model_index = scene.nodes.iter()
+                        .filter(|n| n.node_type == W3dNodeType::Model)
+                        .position(|n| n.name == model_name);
+                    if let Some(mi) = model_index {
+                        if mi < scene.shaders.len() {
+                            shader_name = scene.shaders[mi].name.clone();
+                        }
+                    }
+                }
+                if shader_name.is_empty() {
+                    shader_name = "DefaultShader".to_string();
                 }
                 // Find cast_lib/cast_member from parent context
                 // We don't have it here directly, use 0 as placeholder
