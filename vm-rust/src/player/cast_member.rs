@@ -136,6 +136,9 @@ pub struct TextMember {
     pub tab_stops: Vec<TabStop>,
     pub html_styled_spans: Vec<StyledSpan>,
     pub info: Option<TextInfo>,
+    /// Embedded 3D world for Director's "3D Text" feature (text extrusion).
+    /// Lazily initialized when 3D methods (.model(), .camera(), etc.) are called.
+    pub w3d: Option<Box<Shockwave3dMember>>,
 }
 
 pub struct PfrBitmap {
@@ -258,7 +261,135 @@ impl TextMember {
             tab_stops: Vec::new(),
             html_styled_spans: Vec::new(),
             info: None,
+            w3d: None,
         }
+    }
+
+    /// Ensure the embedded 3D world is initialized for 3D text operations.
+    /// Uses TextInfo's 3TEX section for camera, lights, and material colors.
+    pub fn ensure_w3d(&mut self) {
+        if self.w3d.is_some() {
+            return;
+        }
+        use crate::director::chunks::w3d::types::*;
+        use crate::director::enums::TextInfo;
+        let mut scene = CastMember::create_empty_w3d_scene();
+        let ti = self.info.as_ref();
+
+        // Extract text foreground color for the shader
+        let (cr, cg, cb) = self.html_styled_spans.first()
+            .and_then(|s| s.style.color)
+            .map(|c| (
+                ((c >> 16) & 0xFF) as f32 / 255.0,
+                ((c >> 8) & 0xFF) as f32 / 255.0,
+                (c & 0xFF) as f32 / 255.0,
+            ))
+            .unwrap_or((1.0, 1.0, 1.0));
+
+        // Use TextInfo 3TEX colors for lighting, fall back to text foreground color
+        let (dir_r, dir_g, dir_b) = ti
+            .map(|i| TextInfo::color_to_rgb(i.directional_color))
+            .unwrap_or(((cr * 255.0) as u8, (cg * 255.0) as u8, (cb * 255.0) as u8));
+        let (amb_r, amb_g, amb_b) = ti
+            .map(|i| TextInfo::color_to_rgb(i.ambient_color))
+            .unwrap_or((64, 64, 64));
+        let (spec_r, spec_g, spec_b) = ti
+            .map(|i| TextInfo::color_to_rgb(i.specular_color))
+            .unwrap_or((34, 34, 34));
+        let reflectivity = ti.map(|i| i.reflectivity as f32 / 100.0).unwrap_or(0.3);
+
+        // Set material from TextInfo colors
+        scene.materials.push(W3dMaterial {
+            name: "TextMaterial".to_string(),
+            diffuse: [cr, cg, cb, 1.0],
+            ambient: [amb_r as f32 / 255.0, amb_g as f32 / 255.0, amb_b as f32 / 255.0, 1.0],
+            emissive: [0.0, 0.0, 0.0, 1.0],
+            specular: [spec_r as f32 / 255.0, spec_g as f32 / 255.0, spec_b as f32 / 255.0, 1.0],
+            reflectivity,
+            opacity: 1.0,
+            shininess: 50.0,
+        });
+        if let Some(shader) = scene.shaders.first_mut() {
+            shader.material_name = "TextMaterial".to_string();
+        }
+
+        // Update directional light color from TextInfo
+        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == "DefaultDirectional") {
+            light.color = [dir_r as f32 / 255.0, dir_g as f32 / 255.0, dir_b as f32 / 255.0];
+        }
+        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == "DefaultAmbient") {
+            light.color = [amb_r as f32 / 255.0, amb_g as f32 / 255.0, amb_b as f32 / 255.0];
+        }
+
+        // Set camera position from TextInfo
+        let cam_pos: Option<(f32, f32, f32)> = ti
+            .map(|i| (i.camera_position_x, i.camera_position_y, i.camera_position_z))
+            .filter(|&(x, y, z)| x != 0.0 || y != 0.0 || z != 0.0);
+        let cam_rot: Option<(f32, f32, f32)> = ti
+            .map(|i| (i.camera_rotation_x, i.camera_rotation_y, i.camera_rotation_z));
+        if let Some((px, py, pz)) = cam_pos {
+            // Override DefaultView camera transform with TextInfo values
+            if let Some(cam_node) = scene.nodes.iter_mut().find(|n| n.name == "DefaultView") {
+                // Build transform from position (rotation applied if non-zero)
+                let (rx, ry, rz) = cam_rot.unwrap_or((0.0, 0.0, 0.0));
+                let rx_rad = (-rx as f64).to_radians();
+                let ry_rad = (-ry as f64).to_radians();
+                let rz_rad = (-rz as f64).to_radians();
+                let (sx, cx) = (rx_rad.sin(), rx_rad.cos());
+                let (sy, cy) = (ry_rad.sin(), ry_rad.cos());
+                let (sz, cz) = (rz_rad.sin(), rz_rad.cos());
+                cam_node.transform = [
+                    (cy*cz) as f32, (cy*sz) as f32, (-sy) as f32, 0.0,
+                    (sx*sy*cz - cx*sz) as f32, (sx*sy*sz + cx*cz) as f32, (sx*cy) as f32, 0.0,
+                    (cx*sy*cz + sx*sz) as f32, (cx*sy*sz - sx*cz) as f32, (cx*cy) as f32, 0.0,
+                    px, py, pz, 1.0,
+                ];
+            }
+        }
+
+        // Model resource for extruded text — mesh populated by ensure_text3d()
+        scene.model_resources.insert("Text".to_string(), ModelResourceInfo {
+            name: "Text".to_string(),
+            ..Default::default()
+        });
+        scene.nodes.push(W3dNode {
+            name: "Text".to_string(),
+            node_type: W3dNodeType::Model,
+            parent_name: "World".to_string(),
+            resource_name: "Text".to_string(),
+            model_resource_name: "Text".to_string(),
+            shader_name: "DefaultShader".to_string(),
+            transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
+            screen_width: 640, screen_height: 480,
+        });
+
+        let info = Shockwave3dInfo {
+            loops: false,
+            duration: 0,
+            direct_to_stage: ti.map_or(false, |i| i.direct_to_stage),
+            animation_enabled: ti.map_or(false, |i| i.display_mode == 1), // display_mode 1 = #mode3d
+            preload: ti.map_or(false, |i| i.save_bitmap),
+            reg_point: ti.map_or((0, 0), |i| (i.reg_x, i.reg_y)),
+            default_rect: (0, 0, self.width as i32, self.height as i32),
+            camera_position: cam_pos,
+            camera_rotation: cam_rot.filter(|&(x, y, z)| x != 0.0 || y != 0.0 || z != 0.0),
+            bg_color: None, // TODO: find bgColor field in TextInfo
+            ambient_color: ti.map(|i| {
+                let (r, g, b) = crate::director::enums::TextInfo::color_to_rgb(i.ambient_color);
+                (r, g, b)
+            }),
+        };
+        let rc_scene = std::rc::Rc::new(scene);
+        let runtime_state = Shockwave3dRuntimeState::from_info(&info, Some(&rc_scene));
+        self.w3d = Some(Box::new(Shockwave3dMember {
+            info,
+            w3d_data: Vec::new(),
+            source_scene: Some(rc_scene.clone()),
+            parsed_scene: Some(rc_scene),
+            runtime_state,
+            converted_from_text: false,
+        }));
     }
 
     pub fn has_html_styling(&self) -> bool {
@@ -374,6 +505,9 @@ pub struct Shockwave3dMember {
     pub source_scene: Option<std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>>,
     pub parsed_scene: Option<std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>>,
     pub runtime_state: Shockwave3dRuntimeState,
+    /// True if this member was converted from a Text member (3D Text feature).
+    /// Used to report member.type as #text instead of #shockwave3d.
+    pub converted_from_text: bool,
 }
 
 impl Shockwave3dMember {
@@ -955,7 +1089,7 @@ impl CastMemberType {
             Self::Sound(_) => "sound",
             Self::Font(_) => "font",
             Self::Flash(_) => "flash",
-            Self::Shockwave3d(_) => "shockwave3d",
+            Self::Shockwave3d(w3d) => if w3d.converted_from_text { "text" } else { "shockwave3d" },
             _ => "unknown",
         };
     }
@@ -1076,6 +1210,7 @@ impl CastMemberType {
     pub fn as_shockwave3d(&self) -> Option<&Shockwave3dMember> {
         match self {
             Self::Shockwave3d(data) => Some(data),
+            Self::Text(text) => text.w3d.as_deref(),
             _ => None,
         }
     }
@@ -1083,6 +1218,7 @@ impl CastMemberType {
     pub fn as_shockwave3d_mut(&mut self) -> Option<&mut Shockwave3dMember> {
         match self {
             Self::Shockwave3d(data) => Some(data),
+            Self::Text(text) => text.w3d.as_deref_mut(),
             _ => None,
         }
     }
@@ -2132,7 +2268,7 @@ impl CastMember {
                     number,
                     name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                     comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
-                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info, parsed_scene.as_deref()); CastMemberType::Shockwave3d(Shockwave3dMember { info, w3d_data, source_scene, parsed_scene, runtime_state: rs }) },
+                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info, parsed_scene.as_deref()); CastMemberType::Shockwave3d(Shockwave3dMember { info, w3d_data, source_scene, parsed_scene, runtime_state: rs, converted_from_text: false }) },
                     color: ColorRef::PaletteIndex(255),
                     bg_color: ColorRef::PaletteIndex(0),
                 });
@@ -2359,6 +2495,7 @@ impl CastMember {
             tab_stops: Vec::new(),
             html_styled_spans: styled_text.styled_spans,
             info: Some(text_info),
+            w3d: None,
         };
 
         let member_name = chunk
@@ -2651,20 +2788,9 @@ impl CastMember {
                     .map(|ctx| ctx.scripts.contains_key(&script_id))
                     .unwrap_or(false);
 
-                // Fallback: if script_id is 0 or not found, try the member number as script_id
-                if !has_script && script_id == 0 {
-                    let member_num = number as u32;
-                    let fallback_found = lctx.as_ref()
-                        .map(|ctx| ctx.scripts.contains_key(&member_num))
-                        .unwrap_or(false);
-                    if fallback_found {
-                        web_sys::console::log_1(&format!(
-                            "Script member {}: script_id 0, using member number {} as fallback",
-                            number, member_num
-                        ).into());
-                        script_id = member_num;
-                    }
-                }
+                // Note: script_id == 0 means the script was recycled/deleted.
+                // Do NOT fall back to using the member number — the Lscr chunk at that
+                // index may contain stale bytecode from before the script was recycled.
 
                 let has_script = lctx.as_ref()
                     .map(|ctx| ctx.scripts.contains_key(&script_id))
@@ -2899,6 +3025,7 @@ impl CastMember {
                         runtime_state,
                         info,
                         w3d_data,
+                        converted_from_text: false,
                     }),
                         color: ColorRef::PaletteIndex(255),
                         bg_color: ColorRef::PaletteIndex(0),

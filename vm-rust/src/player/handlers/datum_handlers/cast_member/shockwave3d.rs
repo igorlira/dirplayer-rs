@@ -15,11 +15,279 @@ use crate::{
 pub struct Shockwave3dMemberHandlers {}
 
 impl Shockwave3dMemberHandlers {
+    /// Lazily initialize the embedded 3D world for text members.
+    /// Builds 3D extruded text mesh from PFR glyph outlines when available,
+    /// or falls back to a textured box using Canvas2D-rendered text bitmap.
+    fn ensure_text3d(player: &mut DirPlayer, member_ref: &CastMemberRef) {
+        use crate::director::chunks::w3d::types::*;
+        use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
+
+        // Check if this is a text member that needs 3D initialization
+        let text_info = {
+            let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+            match member {
+                Some(m) => match &m.member_type {
+                    CastMemberType::Text(text) => {
+                        let tex_member_name = text.info.as_ref()
+                            .filter(|i| i.texture_type == 2) // 2 = #member
+                            .map(|i| i.texture_member.clone())
+                            .filter(|s| !s.is_empty() && s != "NoTexture");
+                        Some((
+                            text.text.clone(),
+                            text.font.clone(),
+                            text.font_size,
+                            text.width,
+                            text.height,
+                            text.html_styled_spans.clone(),
+                            text.fixed_line_space,
+                            text.top_spacing,
+                            text.bottom_spacing,
+                            text.tab_stops.clone(),
+                            text.info.as_ref().map(|i| i.tunnel_depth).unwrap_or(10),
+                            tex_member_name,
+                        ))
+                    }
+                    _ => None,
+                },
+                None => None,
+            }
+        };
+        let (text_content, font_name, font_size, tw, th, spans, fls, ts, bs, tab_stops, tunnel_depth, tex_member_name) = match text_info {
+            Some(info) => info,
+            None => return,
+        };
+
+        // Look up PFR glyph outlines from font cast members
+        let glyph_data = {
+            let mut result = None;
+            for cast_lib in &player.movie.cast_manager.casts {
+                for member in cast_lib.members.values() {
+                    if let CastMemberType::Font(font_member) = &member.member_type {
+                        if font_member.font_info.name.eq_ignore_ascii_case(&font_name) {
+                            if let Some(ref pfr) = font_member.pfr_parsed {
+                                result = Some((
+                                    pfr.glyphs.clone(),
+                                    pfr.physical_font.outline_resolution,
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+                if result.is_some() { break; }
+            }
+            result
+        };
+
+        let has_pfr = glyph_data.is_some();
+
+        web_sys::console::log_1(&format!(
+            "[Text3D] text='{}' font='{}' size={} has_pfr={} spans={} w={} h={} tex_member={:?}",
+            text_content, font_name, font_size, has_pfr, spans.len(), tw, th, tex_member_name
+        ).into());
+        // Log frame script assignments
+        {
+            let frame_scripts: Vec<String> = player.movie.score.sprite_spans.iter()
+                .filter(|s| s.channel_number == 0)
+                .map(|s| format!("frames {}-{}: member {}:{}", s.start_frame, s.end_frame,
+                    s.scripts.first().map(|sc| sc.cast_lib).unwrap_or(0),
+                    s.scripts.first().map(|sc| sc.cast_member).unwrap_or(0)))
+                .collect();
+            web_sys::console::log_1(&format!("[Text3D] Frame scripts: {:?}", frame_scripts).into());
+        }
+        // Log TextInfo 3TEX details if available
+        {
+            let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+            if let Some(m) = member {
+                if let CastMemberType::Text(text) = &m.member_type {
+                    if let Some(ti) = &text.info {
+                        let raw_hex = if ti.raw_data.len() > 152 {
+                            ti.raw_data[152..ti.raw_data.len().min(210)].iter()
+                                .enumerate()
+                                .map(|(i, b)| {
+                                    if (i % 4) == 0 && i > 0 { format!("| {:02X}", b) } else { format!("{:02X}", b) }
+                                }).collect::<Vec<_>>().join(" ")
+                        } else { "too short".to_string() };
+                        web_sys::console::log_1(&format!(
+                            "[Text3D] TextInfo: cam_pos=({},{},{}) cam_rot=({},{},{}) raw[152..]=[{}]",
+                            ti.camera_position_x, ti.camera_position_y, ti.camera_position_z,
+                            ti.camera_rotation_x, ti.camera_rotation_y, ti.camera_rotation_z,
+                            raw_hex,
+                        ).into());
+                    }
+                }
+            }
+        }
+
+        // Load texture from textureMember if specified, otherwise render text to bitmap
+        let bitmap_texture: Option<(u32, u32, Vec<u8>)> = if let Some(ref tex_name) = tex_member_name {
+            // Look up the texture cast member by name and get its RGBA data
+            let mut tex_result = None;
+            let tex_ref = player.movie.cast_manager.find_member_ref_by_name(tex_name);
+            if let Some(tref) = tex_ref {
+                if let Some(tmember) = player.movie.cast_manager.find_member_by_ref(&tref) {
+                    if let CastMemberType::Bitmap(bm) = &tmember.member_type {
+                        if let Some(bmp) = player.bitmap_manager.get_bitmap(bm.image_ref) {
+                            let w = bmp.width;
+                            let h = bmp.height;
+                            let palettes = player.movie.cast_manager.palettes();
+                            let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                            for y in 0..h as usize {
+                                for x in 0..w as usize {
+                                    let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
+                                    let idx = (y * w as usize + x) * 4;
+                                    rgba[idx] = r;
+                                    rgba[idx + 1] = g;
+                                    rgba[idx + 2] = b;
+                                    rgba[idx + 3] = a;
+                                }
+                            }
+                            web_sys::console::log_1(&format!(
+                                "[Text3D] texture from member '{}': {}x{} rgba_len={}",
+                                tex_name, w, h, rgba.len()
+                            ).into());
+                            tex_result = Some((w as u32, h as u32, rgba));
+                        }
+                    }
+                }
+            }
+            if tex_result.is_none() {
+                web_sys::console::log_1(&format!(
+                    "[Text3D] texture member '{}' not found or not a bitmap", tex_name
+                ).into());
+            }
+            tex_result
+        } else if !has_pfr && !spans.is_empty() {
+            // No texture member, no PFR: render text to bitmap as fallback
+            let bw = (tw as i32).max(128);
+            let bh = (th as i32).max(32);
+            let mut bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+                bw as u16, bh as u16, 32, 32, 8,
+                crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
+                    crate::player::bitmap::bitmap::get_system_default_palette()
+                ),
+            );
+            bitmap.use_alpha = true;
+            let _ = FontMemberHandlers::render_native_text_to_bitmap(
+                &mut bitmap, &spans, 0, 0, bw, bh,
+                crate::player::handlers::datum_handlers::cast_member::font::TextAlignment::Left,
+                bw, false, None, fls, ts, bs, &tab_stops,
+            );
+            Some((bw as u32, bh as u32, bitmap.data))
+        } else {
+            None
+        };
+
+        // Convert Text member → Shockwave3d member
+        // Build the 3D scene, add mesh + texture, then replace the member type entirely.
+        // This ensures the member goes through the exact same rendering path as regular 3D.
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+            if let CastMemberType::Text(ref mut text) = member.member_type {
+                text.ensure_w3d();
+                let depth = tunnel_depth as f32;
+
+                // Take the w3d out of the text member
+                let mut w3d_member = match text.w3d.take() {
+                    Some(boxed) => *boxed,
+                    None => return,
+                };
+
+                // Add mesh to the scene
+                if let Some((glyphs, outline_res)) = glyph_data {
+                    let mesh = crate::director::chunks::w3d::primitives::extrude_text_to_mesh(
+                        &text_content, &glyphs, outline_res, font_size as f32, depth,
+                    );
+                    if !mesh.positions.is_empty() {
+                        if let Some(scene) = w3d_member.scene_mut() {
+                            scene.clod_meshes.insert("Text".to_string(), vec![mesh]);
+                            scene.texture_content_version += 1;
+                        }
+                    }
+                } else if let Some((bw, bh, rgba)) = bitmap_texture {
+                    let aspect = (bw as f32) / (bh as f32).max(1.0);
+                    let box_h = font_size as f32;
+                    let box_w = box_h * aspect;
+                    let hw = box_w / 2.0;
+                    let hh = box_h / 2.0;
+                    let hd = depth / 2.0;
+                    let positions = vec![
+                        [-hw,-hh,-hd],[hw,-hh,-hd],[hw,hh,-hd],[-hw,hh,-hd],
+                        [-hw,-hh,hd],[hw,-hh,hd],[hw,hh,hd],[-hw,hh,hd],
+                        [-hw,hh,-hd],[hw,hh,-hd],[hw,hh,hd],[-hw,hh,hd],
+                        [-hw,-hh,-hd],[hw,-hh,-hd],[hw,-hh,hd],[-hw,-hh,hd],
+                        [-hw,-hh,-hd],[-hw,hh,-hd],[-hw,hh,hd],[-hw,-hh,hd],
+                        [hw,-hh,-hd],[hw,hh,-hd],[hw,hh,hd],[hw,-hh,hd],
+                    ];
+                    let normals = vec![
+                        [0.0,0.0,-1.0],[0.0,0.0,-1.0],[0.0,0.0,-1.0],[0.0,0.0,-1.0],
+                        [0.0,0.0,1.0],[0.0,0.0,1.0],[0.0,0.0,1.0],[0.0,0.0,1.0],
+                        [0.0,1.0,0.0],[0.0,1.0,0.0],[0.0,1.0,0.0],[0.0,1.0,0.0],
+                        [0.0,-1.0,0.0],[0.0,-1.0,0.0],[0.0,-1.0,0.0],[0.0,-1.0,0.0],
+                        [-1.0,0.0,0.0],[-1.0,0.0,0.0],[-1.0,0.0,0.0],[-1.0,0.0,0.0],
+                        [1.0,0.0,0.0],[1.0,0.0,0.0],[1.0,0.0,0.0],[1.0,0.0,0.0],
+                    ];
+                    let tex_coords = vec![
+                        [1.0,1.0],[0.0,1.0],[0.0,0.0],[1.0,0.0],
+                        [0.0,1.0],[1.0,1.0],[1.0,0.0],[0.0,0.0],
+                        [0.0,0.0],[0.0,0.0],[0.0,0.0],[0.0,0.0],
+                        [0.0,0.0],[0.0,0.0],[0.0,0.0],[0.0,0.0],
+                        [0.0,0.0],[0.0,0.0],[0.0,0.0],[0.0,0.0],
+                        [0.0,0.0],[0.0,0.0],[0.0,0.0],[0.0,0.0],
+                    ];
+                    let faces = vec![
+                        [0,2,1],[0,3,2],[4,5,6],[4,6,7],
+                        [8,10,9],[8,11,10],[12,13,14],[12,14,15],
+                        [16,17,18],[16,18,19],[20,22,21],[20,23,22],
+                    ];
+                    let mesh = ClodDecodedMesh {
+                        name: "Text".to_string(),
+                        positions, normals,
+                        tex_coords: vec![tex_coords],
+                        faces,
+                        diffuse_colors: Vec::new(),
+                        specular_colors: Vec::new(),
+                        bone_indices: Vec::new(),
+                        bone_weights: Vec::new(),
+                    };
+                    if let Some(scene) = w3d_member.scene_mut() {
+                        let mut tex_data = Vec::with_capacity(8 + rgba.len());
+                        tex_data.extend_from_slice(&bw.to_le_bytes());
+                        tex_data.extend_from_slice(&bh.to_le_bytes());
+                        tex_data.extend_from_slice(&rgba);
+                        scene.texture_images.insert("TextBitmap".to_string(), tex_data);
+                        scene.texture_infos.push(W3dTextureInfo {
+                            name: "TextBitmap".to_string(),
+                            render_format: 0, mip_mode: 0, mag_filter: 0, image_type: 0,
+                        });
+                        if let Some(shader) = scene.shaders.first_mut() {
+                            shader.texture_layers.push(W3dTextureLayer {
+                                name: "TextBitmap".to_string(),
+                                ..Default::default()
+                            });
+                        }
+                        scene.clod_meshes.insert("Text".to_string(), vec![mesh]);
+                        scene.texture_content_version += 1;
+                    }
+                }
+
+                // Convert: replace the Text member type with Shockwave3d (one-time)
+                {
+                    static CNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let c = CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    web_sys::console::log_1(&format!("[Text3D] Converting Text member → Shockwave3d (count={})", c).into());
+                }
+                w3d_member.converted_from_text = true;
+                member.member_type = CastMemberType::Shockwave3d(w3d_member);
+            }
+        }
+    }
+
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
         prop: &String,
     ) -> Result<Datum, ScriptError> {
+        Self::ensure_text3d(player, cast_member_ref);
         // Clone info and scene data upfront to avoid borrow conflicts with player.alloc_datum
         let (info, scene_data) = {
             let member = player
@@ -147,6 +415,13 @@ impl Shockwave3dMemberHandlers {
             "depthBufferDepth" => Ok(Datum::Int(24)),
             "antiAliasingEnabled" => Ok(Datum::Int(0)),
             "streamSize" => Ok(Datum::Int(0)),
+            // Text3D properties (stub values after Text→Shockwave3d conversion)
+            "smoothness" => Ok(Datum::Int(10)),
+            "tunnelDepth" | "tunneldepth" => Ok(Datum::Int(10)),
+            "bevelDepth" | "beveldepth" => Ok(Datum::Float(1.0)),
+            "bevelType" | "beveltype" => Ok(Datum::Symbol("none".to_string())),
+            "displayFace" | "displayface" => Ok(Datum::Int(-1)),
+            "displayMode" | "displaymode" => Ok(Datum::Symbol("mode3d".to_string())),
 
             _ => {
                 web_sys::console::log_1(&format!("[W3D] Unknown Shockwave3D property: {}", prop).into());
@@ -164,8 +439,11 @@ impl Shockwave3dMemberHandlers {
         _value: &Datum,
     ) -> Result<(), ScriptError> {
         match prop.as_str() {
-            "directToStage" | "preLoad" | "preload" | "loop" | "animationEnabled" => {
-                // Accept but don't apply yet
+            "directToStage" | "preLoad" | "preload" | "loop" | "animationEnabled"
+            | "smoothness" | "tunnelDepth" | "tunneldepth" | "bevelDepth" | "beveldepth"
+            | "bevelType" | "beveltype" | "displayFace" | "displayface"
+            | "displayMode" | "displaymode" => {
+                // Accept text3D / general 3D properties (no-op for now)
                 Ok(())
             }
             _ => {
@@ -184,6 +462,16 @@ impl Shockwave3dMemberHandlers {
         handler_name: &String,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        // Lazily init 3D world for text members before any 3D operation
+        reserve_player_mut(|player| {
+            let member_ref = match player.get_datum(datum) {
+                Datum::CastMember(r) => r.to_owned(),
+                _ => return Ok(()),
+            };
+            Self::ensure_text3d(player, &member_ref);
+            Ok(())
+        })?;
+
         match handler_name.as_str() {
             "getPropRef" => {
                 // member("x").model[1] → getPropRef(#model, 1)
@@ -1359,6 +1647,16 @@ impl Shockwave3dMemberHandlers {
             _ => None,
         }
     }
+}
+
+/// Public wrapper for render_3d_to_rgba (used by text3D software rendering path)
+pub fn render_3d_to_rgba_pub(
+    scene_data: &Option<std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>>,
+    runtime_state: &crate::player::cast_member::Shockwave3dRuntimeState,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    render_3d_to_rgba(scene_data, runtime_state, width, height)
 }
 
 /// Render a Shockwave3D scene to RGBA pixels using a temporary offscreen WebGL2 context.

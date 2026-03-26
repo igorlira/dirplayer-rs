@@ -955,6 +955,7 @@ impl TextMemberHandlers {
                     Ok(Datum::String(format!("{{\\rtf1 {}}}", escaped)))
                 }
             }
+            "state" => Ok(Datum::Int(4)), // 4 = loaded (all embedded members are fully loaded)
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for text",
                 prop

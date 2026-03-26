@@ -1160,10 +1160,9 @@ pub struct TextInfo {
     pub camera_position_x: f32,      // Offset 152-155: camera position X (e.g., 48.5)
     pub camera_position_y: f32,      // Offset 156-159: camera position Y (e.g., 9.0)
     pub camera_position_z: f32,      // Offset 160-163: camera position Z (e.g., 27.36)
-    pub camera_rotation_x: f32,      // Offset 164-167: camera rotation X (e.g., 0.0)
-    pub camera_rotation_y: f32,      // Offset 168-171: camera rotation Y (e.g., -0.0)
-    pub camera_rotation_z: f32,      // Offset 172-175: camera rotation Z (e.g., 0.0)
-    pub tex_unknown_176: u32,        // Offset 176-179
+    pub camera_rotation_x: f32,      // Offset 168-171: camera rotation X
+    pub camera_rotation_y: f32,      // Offset 172-175: camera rotation Y
+    pub camera_rotation_z: f32,      // Offset 176-179: camera rotation Z
     pub tex_unknown_180: u32,        // Offset 180-183
     pub tex_unknown_184: u32,        // Offset 184-187
     pub texture_member: String,      // Offset 188+: texture member reference string (e.g., "NoTexture", "(member 0 of castLib 0)")
@@ -1242,19 +1241,16 @@ impl From<&[u8]> for TextInfo {
         let camera_position_x = reader.read_f32().unwrap_or(0.0);
         let camera_position_y = reader.read_f32().unwrap_or(0.0);
         let camera_position_z = reader.read_f32().unwrap_or(0.0);
+        let _tex_unknown_164 = reader.read_f32().unwrap_or(0.0); // unknown field between cam pos and rot
         let camera_rotation_x = reader.read_f32().unwrap_or(0.0);
         let camera_rotation_y = reader.read_f32().unwrap_or(0.0);
         let camera_rotation_z = reader.read_f32().unwrap_or(0.0);
-        let tex_unknown_176 = reader.read_u32().unwrap_or(0);
         let tex_unknown_180 = reader.read_u32().unwrap_or(0);
-        let tex_unknown_184 = reader.read_u32().unwrap_or(0);
-
-        // Read texture_member as null-terminated string (fixed buffer size)
+        // Offset 184: texture_member name as null-terminated string
+        let tex_unknown_184 = 0;
         let mut texture_member_bytes = Vec::new();
         while let Ok(byte) = reader.read_u8() {
-            if byte == 0 {
-                break;
-            }
+            if byte == 0 { break; }
             texture_member_bytes.push(byte);
         }
         let texture_member = String::from_utf8_lossy(&texture_member_bytes).to_string();
@@ -1306,7 +1302,6 @@ impl From<&[u8]> for TextInfo {
             camera_rotation_x,
             camera_rotation_y,
             camera_rotation_z,
-            tex_unknown_176,
             tex_unknown_180,
             tex_unknown_184,
             texture_member,

@@ -362,7 +362,21 @@ impl CastMemberRefHandlers {
                 BitmapMemberHandlers::get_prop(player, cast_member_ref, prop)
             }
             CastMemberTypeId::Field => FieldMemberHandlers::get_prop(player, cast_member_ref, prop),
-            CastMemberTypeId::Text => TextMemberHandlers::get_prop(player, cast_member_ref, prop),
+            CastMemberTypeId::Text => {
+                TextMemberHandlers::get_prop(player, cast_member_ref, prop)
+                    .or_else(|_| {
+                        // Forward to 3D handler if text member has embedded 3D world
+                        if player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                            .and_then(|m| m.member_type.as_shockwave3d()).is_some()
+                        {
+                            Shockwave3dMemberHandlers::get_prop(player, cast_member_ref, prop)
+                        } else {
+                            Err(ScriptError::new(format!(
+                                "Cannot get castMember property {} for text", prop
+                            )))
+                        }
+                    })
+            }
             CastMemberTypeId::Button => ButtonMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::FilmLoop => {
                 FilmLoopMemberHandlers::get_prop(player, cast_member_ref, prop)
@@ -657,7 +671,25 @@ impl CastMemberRefHandlers {
 
         match member_type {
             CastMemberTypeId::Field => FieldMemberHandlers::set_prop(member_ref, prop, value),
-            CastMemberTypeId::Text => TextMemberHandlers::set_prop(member_ref, prop, value),
+            CastMemberTypeId::Text => {
+                let text_result = TextMemberHandlers::set_prop(member_ref, prop, value.clone());
+                if text_result.is_err() {
+                    // Forward to 3D handler if text member has embedded 3D world
+                    let has_w3d = reserve_player_ref(|player| {
+                        player.movie.cast_manager.find_member_by_ref(member_ref)
+                            .and_then(|m| m.member_type.as_shockwave3d()).is_some()
+                    });
+                    if has_w3d {
+                        reserve_player_mut(|player| {
+                            Shockwave3dMemberHandlers::set_prop(player, member_ref, prop, &value)
+                        })
+                    } else {
+                        text_result
+                    }
+                } else {
+                    text_result
+                }
+            }
             CastMemberTypeId::Button => ButtonMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Font => reserve_player_mut(|player| {
                 FontMemberHandlers::set_prop(player, member_ref, prop, value)
