@@ -140,6 +140,14 @@
   cursor: pointer;
 }
 
+.inputError {
+  border-color: #c44;
+
+  &:focus {
+    border-color: #c44;
+  }
+}
+
 /* Primary button */
 
 .button {
