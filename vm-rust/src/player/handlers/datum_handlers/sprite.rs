@@ -211,26 +211,31 @@ impl SpriteDatumHandlers {
                 reserve_player_mut(|player| {
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
                     // addCamera(cameraRef, index)
+                    // index 1 = primary camera, 2+ = additional cameras rendered on top
                     let cam_name = if !args.is_empty() {
                         match player.get_datum(&args[0]) {
                             Datum::Shockwave3dObjectRef(r) => r.name.clone(),
                             Datum::String(s) => s.clone(),
-                            _ => {
-                                web_sys::console::warn_1(&format!(
-                                    "[SPRITE] addCamera: arg0 is {:?}, not a camera ref",
-                                    player.get_datum(&args[0]).type_str()
-                                ).into());
-                                String::new()
-                            },
+                            _ => String::new(),
                         }
                     } else { String::new() };
-                    web_sys::console::warn_1(&format!(
-                        "[SPRITE] addCamera called: sprite={}, cam='{}', args={}",
-                        sprite_num, cam_name, args.len()
-                    ).into());
+                    let index = if args.len() >= 2 {
+                        player.get_datum(&args[1]).int_value().unwrap_or(1) as usize
+                    } else { 1 };
                     if !cam_name.is_empty() {
                         let sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
-                        sprite.w3d_cameras.push(cam_name);
+                        if index <= 1 {
+                            // Index 1: set as primary camera
+                            sprite.w3d_camera = Some(cam_name);
+                        } else {
+                            // Index 2+: add to extra cameras list
+                            let extra_idx = index.saturating_sub(2);
+                            if extra_idx >= sprite.w3d_cameras.len() {
+                                sprite.w3d_cameras.push(cam_name);
+                            } else {
+                                sprite.w3d_cameras.insert(extra_idx, cam_name);
+                            }
+                        }
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 })

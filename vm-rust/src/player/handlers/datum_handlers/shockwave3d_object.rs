@@ -405,26 +405,39 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(())
                 },
                 "visible" => {
-                    let visible = match value {
+                    // visible = TRUE/FALSE — show/hide only, does NOT change face culling mode.
+                    // The culling mode is controlled separately by the "visibility" property.
+                    let show = match value {
                         Datum::Int(v) => *v != 0,
                         _ => true,
                     };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.node_visibility.insert(s3d_ref.name.clone(), visible);
+                            if show {
+                                // Remove hide override — render with default culling
+                                w3d.runtime_state.node_visibility.remove(&s3d_ref.name);
+                            } else {
+                                w3d.runtime_state.node_visibility.insert(s3d_ref.name.clone(), 0); // #none
+                            }
                         }
                     }
                     Ok(())
                 },
                 "visibility" => {
-                    // #both, #front, #back, #none
-                    let visible = match value {
-                        Datum::Symbol(s) => s != "none",
-                        _ => true,
+                    // #front=1, #back=2, #both=3, #none=0
+                    let mode: u8 = match value {
+                        Datum::Symbol(s) => match_ci!(s.as_str(), {
+                            "front" => 1u8,
+                            "back" => 2,
+                            "both" => 3,
+                            "none" => 0,
+                            _ => 3,
+                        }),
+                        _ => 3,
                     };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.node_visibility.insert(s3d_ref.name.clone(), visible);
+                            w3d.runtime_state.node_visibility.insert(s3d_ref.name.clone(), mode);
                         }
                     }
                     Ok(())

@@ -1475,8 +1475,8 @@ void main() {
                 // PASS 1: Render opaque geometry (skybox first, then scene)
                 for model_node in &sorted_model_nodes {
                     if let Some(rs) = runtime_state {
-                        if let Some(&visible) = rs.node_visibility.get(&model_node.name) {
-                            if !visible { continue; }
+                        if let Some(&vis_mode) = rs.node_visibility.get(&model_node.name) {
+                            if vis_mode == 0 { continue; } // #none → skip
                         }
                     }
 
@@ -1810,6 +1810,7 @@ void main() {
         let res_info = scene.model_resources.get(resource);
 
         let is_skybox = model_node.name.starts_with("SB_") && model_node.parent_name.contains("SkyBox");
+        let mut vis_mode = 1u8; // default #front
 
         if let Some(gpu_data) = self.member_data.get(member_key) {
             let has_skeleton_data = self.setup_skinning_for_resource(
@@ -1834,12 +1835,24 @@ void main() {
                 gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
             }
 
-            // Skybox: disable culling (viewed from inside) and depth writes
-            // Skybox is rendered first (sorted to front of opaque list) so depth test still works
-            if is_skybox {
+            // Per-model visibility culling
+            // Only explicitly set #both or #back modes change GL state.
+            // Default (#front / no entry) keeps the global cull_face(FRONT).
+            vis_mode = if is_skybox {
                 gl.disable(WebGl2RenderingContext::CULL_FACE);
-                gl.depth_mask(false); // Don't write to depth buffer so scene renders on top
-            }
+                gl.depth_mask(false);
+                3u8
+            } else {
+                let mode = runtime_state
+                    .and_then(|rs| rs.node_visibility.get(&model_node.name))
+                    .copied()
+                    .unwrap_or(1); // no entry = default #front
+                if mode == 2 || mode == 3 {
+                    // #back or #both — disable culling (show both sides)
+                    gl.disable(WebGl2RenderingContext::CULL_FACE);
+                }
+                mode
+            };
 
             if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
                 // One-time skybox draw diagnostic
@@ -1926,10 +1939,15 @@ void main() {
                 }
             }
         }
-        // Restore state after skybox
+        // Restore culling/depth state if changed
         if is_skybox {
             gl.enable(WebGl2RenderingContext::CULL_FACE);
+            gl.cull_face(WebGl2RenderingContext::FRONT); // restore default
             gl.depth_mask(true);
+        } else if vis_mode >= 2 {
+            // Restore default culling after #back or #both
+            gl.enable(WebGl2RenderingContext::CULL_FACE);
+            gl.cull_face(WebGl2RenderingContext::FRONT);
         }
         // Log when a player/actor/bot model is actually drawn (once per model name)
         if model_node.name.contains("PlayerModel") || model_node.name.contains("BotModel")
@@ -1991,6 +2009,7 @@ void main() {
         model_node: &W3dNode,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> f32 {
+        // 1. Check node-level shader override
         let effective_shader_name = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
             .cloned()
@@ -1999,6 +2018,52 @@ void main() {
             if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, &effective_shader_name) {
                 if let Some(mat) = Self::find_material_ci(&scene.materials, &w3d_shader.material_name) {
                     return mat.opacity;
+                }
+                if let Some(mat) = Self::find_material_ci(&scene.materials, &w3d_shader.name) {
+                    return mat.opacity;
+                }
+            }
+        }
+        // 2. Check per-mesh shader bindings from model resource
+        let resource = if !model_node.model_resource_name.is_empty() {
+            &model_node.model_resource_name
+        } else {
+            &model_node.resource_name
+        };
+        if let Some(res_info) = scene.model_resources.get(resource) {
+            for binding in &res_info.shader_bindings {
+                for shader_name in &binding.mesh_bindings {
+                    if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, shader_name) {
+                        let mat = if !w3d_shader.material_name.is_empty() {
+                            Self::find_material_ci(&scene.materials, &w3d_shader.material_name)
+                        } else {
+                            Self::find_material_ci(&scene.materials, &w3d_shader.name)
+                        };
+                        if let Some(mat) = mat {
+                            if mat.opacity < 0.999 {
+                                return mat.opacity; // Any transparent mesh → whole model is transparent
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 3. Check per-mesh runtime shader overrides
+        if let Some(rs) = runtime_state {
+            if let Some(shader_map) = rs.node_shaders.get(&model_node.name) {
+                for shader_name in shader_map.values() {
+                    if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, shader_name) {
+                        let mat = if !w3d_shader.material_name.is_empty() {
+                            Self::find_material_ci(&scene.materials, &w3d_shader.material_name)
+                        } else {
+                            Self::find_material_ci(&scene.materials, &w3d_shader.name)
+                        };
+                        if let Some(mat) = mat {
+                            if mat.opacity < 0.999 {
+                                return mat.opacity;
+                            }
+                        }
+                    }
                 }
             }
         }

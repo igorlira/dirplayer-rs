@@ -425,8 +425,8 @@ pub struct Shockwave3dRuntimeState {
     pub node_transform_datums: std::collections::HashMap<String, crate::player::DatumRef>,
     /// Director-friendly Euler readback hints for nodes oriented via pointAt().
     pub node_rotation_hints: std::collections::HashMap<String, [f64; 3]>,
-    /// Visibility overrides for nodes
-    pub node_visibility: std::collections::HashMap<String, bool>,
+    /// Visibility overrides for nodes: 0=#none, 1=#front, 2=#back, 3=#both
+    pub node_visibility: std::collections::HashMap<String, u8>,
     /// Shader overrides for nodes: model_name → (mesh_index → shader_name)
     /// mesh_index is 0-based; index 0 is also the whole-model fallback
     pub node_shaders: std::collections::HashMap<String, std::collections::HashMap<usize, String>>,

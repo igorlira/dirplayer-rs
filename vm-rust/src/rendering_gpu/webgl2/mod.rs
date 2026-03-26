@@ -1835,19 +1835,9 @@ impl WebGL2Renderer {
                     if let Some(ref parsed_scene) = w3d.parsed_scene {
                         // FBO dimensions from sprite rect
                         let (w, h) = (sprite_rect.width().max(1) as u32, sprite_rect.height().max(1) as u32);
-                        // Auto-populate extra cameras from non-DefaultView View nodes
-                        let extra_cams = if w3d_extra_cams.is_empty() {
-                            let active = w3d_camera.as_deref().unwrap_or("DefaultView");
-                            let cams: Vec<String> = parsed_scene.nodes.iter()
-                                .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::View
-                                    && !n.name.eq_ignore_ascii_case("DefaultView")
-                                    && !n.name.eq_ignore_ascii_case(active))
-                                .map(|n| n.name.clone())
-                                .collect();
-                            cams
-                        } else {
-                            w3d_extra_cams.clone()
-                        };
+                        // Extra cameras only render when explicitly set by the game
+                        // (via sprite.w3d_cameras or camera.renderDirect/renderToTexture)
+                        let extra_cams = w3d_extra_cams.clone();
                         TextureSource::Shockwave3dScene {
                             width: w,
                             height: h,

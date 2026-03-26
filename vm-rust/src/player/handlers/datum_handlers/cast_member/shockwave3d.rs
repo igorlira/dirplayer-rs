@@ -1219,8 +1219,8 @@ impl Shockwave3dMemberHandlers {
                         if let Some(w3d) = member.and_then(|m| m.member_type.as_shockwave3d()) {
                             let transforms = w3d.runtime_state.node_transforms.clone();
                             let mut excluded = std::collections::HashSet::new();
-                            for (name, &visible) in &w3d.runtime_state.node_visibility {
-                                if !visible { excluded.insert(name.clone()); }
+                            for (name, &vis_mode) in &w3d.runtime_state.node_visibility {
+                                if vis_mode == 0 { excluded.insert(name.clone()); } // #none
                             }
                             for name in &w3d.runtime_state.detached_nodes {
                                 excluded.insert(name.clone());
