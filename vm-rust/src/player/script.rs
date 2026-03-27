@@ -33,7 +33,7 @@ use super::{
     },
     reserve_player_mut, reserve_player_ref,
     scope::Scope,
-    score::{sprite_get_prop, sprite_set_prop},
+    score::{sprite_get_prop, sprite_set_prop_from_lingo},
     script_ref::ScriptInstanceRef,
     stage::{get_stage_prop, set_stage_prop},
     DatumRef, DirPlayer, ScriptError,
@@ -415,7 +415,7 @@ pub async fn player_set_obj_prop(
             script_set_prop(player, &script_instance_ref, &prop_name, value_ref, false)
         }),
         Datum::SpriteRef(sprite_id) => {
-            sprite_set_prop(sprite_id, prop_name, value_clone)
+            sprite_set_prop_from_lingo(sprite_id, prop_name, value_clone)
         }
         Datum::CastMember(member_ref) => {
             // TODO should we really pass a clone of the value here?
