@@ -22,7 +22,7 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_global_handler, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, trace_output, xtra::manager::call_xtra_instance_handler
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_global_handler, player_call_script_handler, reserve_player_mut, reserve_player_ref, score::get_concrete_sprite_rect, script_ref::ScriptInstanceRef, xtra::manager::call_xtra_instance_handler
     },
 };
 
@@ -345,7 +345,7 @@ impl BuiltInHandlerManager {
 
                     Ok(())
                 }
-                Datum::List(_, list, ..) => {
+                Datum::List(_, ref mut list, ..) => {
                     if index < list.len() {
                         list[index] = new_value;
                         
@@ -362,7 +362,7 @@ impl BuiltInHandlerManager {
                         Err(ScriptError::new(format!("Index {} out of bounds", position)))
                     }
                 }
-                Datum::PropList(prop_list, ..) => {
+                Datum::PropList(ref mut prop_list, ..) => {
                     if index < prop_list.len() {
                         prop_list[index].1 = new_value;
                         Ok(())
@@ -382,7 +382,7 @@ impl BuiltInHandlerManager {
     pub fn put(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_ref(|player| {
             if args.is_empty() {
-                trace_output(player, "--");
+                JsApi::dispatch_debug_message("--");
                 return Ok(());
             }
             
@@ -407,7 +407,7 @@ impl BuiltInHandlerManager {
                 parts.join(" ")
             };
             
-            trace_output(player, &format!("-- {}", output));
+            JsApi::dispatch_debug_message(&format!("-- {}", output));
             Ok(())
         })?;
         Ok(DatumRef::Void)
@@ -594,19 +594,76 @@ impl BuiltInHandlerManager {
     async fn do_command(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         // Get the code string from the first argument
         let code = reserve_player_ref(|player| player.get_datum(&args[0]).string_value())?;
-        let code = code.trim().to_string();
         debug!("do: executing code: {}", code);
 
-        if code.is_empty() || code == "nothing" {
-            return Ok(DatumRef::Void);
+        let code = code.trim();
+
+        // Determine handler name and argument references
+        let (handler_name, arg_refs) = if let Some(paren_pos) = code.find('(') {
+            let handler_name = code[..paren_pos].trim().to_string();
+            let args_str = &code[paren_pos + 1..];
+
+            if let Some(close_paren) = args_str.rfind(')') {
+                let args_str = &args_str[..close_paren];
+                let arg_refs = if args_str.trim().is_empty() {
+                    vec![]
+                } else {
+                    reserve_player_mut(|player| {
+                        args_str.split(',')
+                            .map(|arg| {
+                                let arg = arg.trim();
+                                if let Ok(i) = arg.parse::<i32>() {
+                                    player.alloc_datum(Datum::Int(i))
+                                } else if let Ok(f) = arg.parse::<f64>() {
+                                    player.alloc_datum(Datum::Float(f))
+                                } else if arg.starts_with('"') && arg.ends_with('"') {
+                                    player.alloc_datum(Datum::String(arg[1..arg.len()-1].to_string()))
+                                } else if arg.starts_with('#') {
+                                    player.alloc_datum(Datum::Symbol(arg[1..].to_string()))
+                                } else {
+                                    player.alloc_datum(Datum::String(arg.to_string()))
+                                }
+                            })
+                            .collect()
+                    })
+                };
+                (handler_name, arg_refs)
+            } else {
+                (code.to_string(), vec![])
+            }
+        } else {
+            (code.to_string(), vec![])
+        };
+
+        // Call the global handler
+        let result = player_call_global_handler(&handler_name, &arg_refs).await;
+
+        // Log the result
+        match &result {
+            Ok(datum_ref) => {
+                let formatted_res: Result<String, ScriptError> = reserve_player_ref(|player| {
+                    Ok(format_concrete_datum(player.get_datum(datum_ref), player))
+                });
+
+                match formatted_res {
+                    Ok(formatted) => {
+                        debug!("do completed: {}", formatted);
+                    }
+                    Err(_) => {
+                        debug!("do completed: <formatting failed>");
+                    }
+                }
+            }
+            Err(e) => {
+                error!("do failed: {}", e.message);
+            }
         }
 
-        use crate::player::eval::eval_lingo_command;
-        eval_lingo_command(code).await
+        result
     }
 
-    pub fn has_async_handler(name: &str) -> bool {
-        match name {
+    pub fn has_async_handler(name: &String) -> bool {
+        match name.as_str() {
             "call" => true,
             "new" => true,
             "newObject" => true,
@@ -623,10 +680,10 @@ impl BuiltInHandlerManager {
     }
 
     pub async fn call_async_handler(
-        name: &str,
+        name: &String,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match name {
+        match name.as_str() {
             "call" => Self::call(args).await,
             "new" => TypeHandlers::new(args).await,
             "newObject" => TypeHandlers::new_object(args).await,
@@ -645,8 +702,8 @@ impl BuiltInHandlerManager {
         }
     }
 
-    pub fn call_handler(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        match name.to_lowercase().as_str() {
+    pub fn call_handler(name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        match name.as_str().to_lowercase().as_str() {
             "castlib" => CastHandlers::cast_lib(args),
             "preloadnetthing" => NetHandlers::preload_net_thing(args),
             "netdone" => NetHandlers::net_done(args),
@@ -693,6 +750,34 @@ impl BuiltInHandlerManager {
                     let x_ref = player.alloc_datum(Datum::Int(player.movie.click_loc.0));
                     let y_ref = player.alloc_datum(Datum::Int(player.movie.click_loc.1));
                     Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                })
+            }
+            "constrainh" => {
+                reserve_player_mut(|player| {
+                    let sprite_num = player.get_datum(&args[0]).int_value()? as i16;
+                    let posn = player.get_datum(&args[1]).int_value()?;
+                    let sprite = player.movie.score.get_sprite(sprite_num);
+                    let (left, right) = if let Some(sprite) = sprite {
+                        let rect = get_concrete_sprite_rect(player, sprite);
+                        (rect.left, rect.right)
+                    } else {
+                        (0, 0)
+                    };
+                    Ok(player.alloc_datum(Datum::Int(posn.max(left).min(right))))
+                })
+            }
+            "constrainv" => {
+                reserve_player_mut(|player| {
+                    let sprite_num = player.get_datum(&args[0]).int_value()? as i16;
+                    let posn = player.get_datum(&args[1]).int_value()?;
+                    let sprite = player.movie.score.get_sprite(sprite_num);
+                    let (top, bottom) = if let Some(sprite) = sprite {
+                        let rect = get_concrete_sprite_rect(player, sprite);
+                        (rect.top, rect.bottom)
+                    } else {
+                        (0, 0)
+                    };
+                    Ok(player.alloc_datum(Datum::Int(posn.max(top).min(bottom))))
                 })
             }
             "cursor" => TypeHandlers::cursor(args),
@@ -988,15 +1073,6 @@ impl BuiltInHandlerManager {
                     )),
                 }
             }
-            "getpos" => reserve_player_mut(|player| {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                match player.get_datum(list) {
-                    Datum::List(..) => ListDatumHandlers::find_pos(list, &args),
-                    Datum::PropList(..) => PropListDatumHandlers::get_pos(list, &args),
-                    _ => Err(ScriptError::new("Cannot getPos of non-list".to_string())),
-                }
-            }),
             "setaprop" => {
                 let datum = &args[0];
                 let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
@@ -1215,14 +1291,12 @@ impl BuiltInHandlerManager {
             _ => {
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
                 if !args.is_empty() {
-                    if let Some(res) = reserve_player_ref(|player| {
-                        if let Ok((xtra_name, instance_id)) = player.get_datum(&args[0]).to_xtra_instance() {
-                            let remaining_args = args[1..].to_vec();
-                            return Some(call_xtra_instance_handler(&xtra_name, *instance_id, &name.to_string(), &remaining_args));
-                        }
-                        None
-                    }) {
-                        return res;
+                    let xtra_info = reserve_player_ref(|player| {
+                        player.get_datum(&args[0]).to_xtra_instance().map(|(n, id)| (n.clone(), *id)).ok()
+                    });
+                    if let Some((xtra_name, instance_id)) = xtra_info {
+                        let remaining_args = args[1..].to_vec();
+                        return call_xtra_instance_handler(&xtra_name, instance_id, &name.to_string(), &remaining_args);
                     }
                 }
                 let formatted_args = reserve_player_ref(|player| {
@@ -1243,7 +1317,7 @@ impl BuiltInHandlerManager {
     fn alert(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let message = player.get_datum(&args[0]).string_value()?;
-            trace_output(player, &format!("Alert: {}", message));
+            JsApi::dispatch_debug_message(&format!("Alert: {}", message));
             Ok(DatumRef::Void)
         })
     }
@@ -1281,10 +1355,10 @@ impl BuiltInHandlerManager {
 
     fn show_globals() -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            trace_output(player, "--- Global Variables ---");
+            JsApi::dispatch_debug_message("--- Global Variables ---");
             for (name, value) in &player.globals {
                 let value = format_datum(value, player);
-                trace_output(player, &format!("{} = {}", name, value));
+                JsApi::dispatch_debug_message(&format!("{} = {}", name, value));
             }
         });
         Ok(DatumRef::Void)
