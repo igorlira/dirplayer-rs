@@ -773,10 +773,23 @@ pub fn divide_datums(
     let right = player.get_datum(&right).clone();
 
     let result = match (&left, &right) {
-        (Datum::Int(left), Datum::Int(right)) => Datum::Int(left / right),
-        (Datum::Int(left), Datum::Float(right)) => Datum::Float((*left as f64) / right),
-        (Datum::Float(left), Datum::Int(right)) => Datum::Float(left / (*right as f64)),
-        (Datum::Float(left), Datum::Float(right)) => Datum::Float(left / right),
+        (Datum::Int(left), Datum::Int(right)) => {
+            // Lingo coerces divisor 0 to 1 (ScummVM: LC::divData)
+            let d = if *right == 0 { 1 } else { *right };
+            Datum::Int(left / d)
+        }
+        (Datum::Int(left), Datum::Float(right)) => {
+            let d = if *right == 0.0 { 1.0 } else { *right };
+            Datum::Float((*left as f64) / d)
+        }
+        (Datum::Float(left), Datum::Int(right)) => {
+            let d = if *right == 0 { 1.0 } else { *right as f64 };
+            Datum::Float(left / d)
+        }
+        (Datum::Float(left), Datum::Float(right)) => {
+            let d = if *right == 0.0 { 1.0 } else { *right };
+            Datum::Float(left / d)
+        }
         (Datum::Point(a), Datum::Int(right)) => {
             let right_ref = player.alloc_datum(Datum::Int(*right));
             let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
