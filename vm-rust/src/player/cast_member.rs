@@ -328,9 +328,26 @@ impl TextMember {
             }
         }
 
-        // Set camera position from TextInfo
+        // Set camera position from TextInfo.
+        // When TextInfo stores x=0,y=0 (default), Director auto-computes the camera
+        // to center the text box in the viewport using the default FOV and aspect ratio.
+        let default_fov = 34.516_f32;
         let cam_pos: Option<(f32, f32, f32)> = ti
-            .map(|i| (i.camera_position_x, i.camera_position_y, i.camera_position_z))
+            .map(|i| {
+                let (mut px, mut py, mut pz) = (i.camera_position_x, i.camera_position_y, i.camera_position_z);
+                if px == 0.0 && py == 0.0 {
+                    // Auto-compute: center camera on text box
+                    let w = self.width as f32;
+                    let h = self.height as f32;
+                    let aspect = w / h.max(1.0);
+                    let v_fov_rad = (default_fov / 2.0).to_radians();
+                    let h_half_fov = (v_fov_rad.tan() * aspect).atan();
+                    px = w / 2.0;
+                    py = h / 2.0;
+                    pz = (w / 2.0) / h_half_fov.tan();
+                }
+                (px, py, pz)
+            })
             .filter(|&(x, y, z)| x != 0.0 || y != 0.0 || z != 0.0);
         let cam_rot: Option<(f32, f32, f32)> = ti
             .map(|i| (i.camera_rotation_x, i.camera_rotation_y, i.camera_rotation_z));
@@ -890,8 +907,26 @@ impl Shockwave3dRuntimeState {
             animation_end_time: -1.0,
             ..Default::default()
         };
-        // Seed camera transform from 3DPR camera position/rotation
-        if let Some((px, py, pz)) = info.camera_position {
+        // Seed camera transform from 3DPR camera position/rotation.
+        // When stored position has x=0 and y=0, Director auto-computes the camera
+        // to center the member's default_rect in the viewport using the default FOV.
+        let camera_position = info.camera_position.map(|(px, py, pz)| {
+            if px == 0.0 && py == 0.0 {
+                let w = (info.default_rect.2 - info.default_rect.0) as f32;
+                let h = (info.default_rect.3 - info.default_rect.1) as f32;
+                if w > 0.0 && h > 0.0 {
+                    let default_fov = 34.516_f32;
+                    let aspect = w / h;
+                    let h_half_fov = ((default_fov / 2.0).to_radians().tan() * aspect).atan();
+                    ((w / 2.0), (h / 2.0), (w / 2.0) / h_half_fov.tan())
+                } else {
+                    (px, py, pz)
+                }
+            } else {
+                (px, py, pz)
+            }
+        });
+        if let Some((px, py, pz)) = camera_position {
             let (rx, ry, rz) = info.camera_rotation.unwrap_or((0.0, 0.0, 0.0));
             // Build camera transform from position + Euler rotation (degrees)
             // Director uses negative rotation convention, order: Z * Y * X
@@ -1923,7 +1958,7 @@ impl CastMember {
             shader_name: String::new(),
             near_plane: 1.0,
             far_plane: 10000.0,
-            fov: 30.0,
+            fov: 34.516,
             screen_width: 640,
             screen_height: 480,
             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,100.0,1.0],
@@ -2293,11 +2328,11 @@ impl CastMember {
             let Some(Chunk::XMedia(xm)) = opt_child else { continue };
 
             let member_name = chunk.member_info.as_ref().map(|i| i.name.as_str()).unwrap_or("");
-            web_sys::console::log_1(&format!("Checking XMedia child (member #{}, name='{}', {} bytes)", number, member_name, xm.raw_data.len()).into());
+            debug!("Checking XMedia child (member #{}, name='{}', {} bytes)", number, member_name, xm.raw_data.len());
 
             // 1) If SWF: return SWF
             if let Some(cm) = Self::try_parse_swf(xm.raw_data.to_vec(), number, chunk) {
-                web_sys::console::log_1(&"Detected as SWF".into());
+                debug!("Detected as SWF");
                 return Some(cm);
             }
 
@@ -2317,11 +2352,13 @@ impl CastMember {
             let is_text_ole = ole_type.is_empty() || ole_type == "text";
             if is_text_ole {
                 if let Some(styled_text) = xm.parse_styled_text() {
-                    web_sys::console::log_1(&"Detected as XMED styled text".into());
+                    debug!("Detected as XMED styled text");
+                    let stxt_font_size: Option<u16> = None;
                     return Some(Self::create_text_member_from_xmed(
                         number,
                         chunk,
                         styled_text,
+                        stxt_font_size,
                     ));
                 }
             }
@@ -2336,8 +2373,8 @@ impl CastMember {
                 let parsed_scene = if !w3d_data.is_empty() {
                     match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
                         Ok(mut scene) => {
-                            web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes",
-                                scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len()).into());
+                            debug!("W3D parsed: {} materials, {} nodes, {} meshes",
+                                scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len());
                             // Ensure DefaultShader exists
                             if !scene.shaders.iter().any(|s| s.name == "DefaultShader") {
                                 scene.shaders.push(crate::director::chunks::w3d::types::W3dShader {
@@ -2348,7 +2385,7 @@ impl CastMember {
                             Some(std::rc::Rc::new(scene))
                         }
                         Err(e) => {
-                            web_sys::console::log_1(&format!("W3D parse error: {}", e).into());
+                            warn!("W3D parse error: {}", e);
                             Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                         }
                     }
@@ -2376,7 +2413,7 @@ impl CastMember {
             // 4) Check if this is a real PFR font or just text content
             let has_pfr = Self::extract_pfr(member_def).is_some();
             if has_pfr {
-                web_sys::console::log_1(&"Detected as PFR font".into());
+                debug!("Detected as PFR font");
                 return Some(Self::parse_xmedia_font(member_def, number, chunk, xm, bitmap_manager));
             }
 
@@ -2480,7 +2517,8 @@ impl CastMember {
     fn create_text_member_from_xmed(
         number: u32,
         chunk: &CastMemberChunk,
-        styled_text: crate::director::chunks::xmedia::XmedStyledText,
+        mut styled_text: crate::director::chunks::xmedia::XmedStyledText,
+        stxt_font_size: Option<u16>,
     ) -> CastMember {
         use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
 
@@ -2496,7 +2534,10 @@ impl CastMember {
         };
 
         // Use first span font face, but member fontSize should track the largest styled size.
-        let (font_name, font_size) = if !styled_text.styled_spans.is_empty() {
+        // XMED may store cell height (ascent+descent+leading) instead of point size.
+        // When STXT font_size is available, use it as the authoritative value and
+        // correct all styled span font_sizes proportionally.
+        let (font_name, mut font_size) = if !styled_text.styled_spans.is_empty() {
             let first_style = &styled_text.styled_spans[0].style;
             let max_span_size = styled_text
                 .styled_spans
@@ -2512,6 +2553,18 @@ impl CastMember {
         } else {
             ("Arial".to_string(), 12)
         };
+        // Correct XMED font sizes using STXT point size when available
+        if let Some(stxt_size) = stxt_font_size {
+            if stxt_size > 0 && stxt_size != font_size && font_size > 0 {
+                let ratio = stxt_size as f32 / font_size as f32;
+                for span in &mut styled_text.styled_spans {
+                    if let Some(ref mut sz) = span.style.font_size {
+                        *sz = ((*sz as f32 * ratio).round() as i32).max(1);
+                    }
+                }
+                font_size = stxt_size;
+            }
+        }
 
         debug!(
             "[XMED]   text='{}', alignment={}, font='{}', size={}, spans={}, word_wrap={}",
@@ -3298,7 +3351,7 @@ impl CastMember {
                     None
                 };
 
-                web_sys::console::log_1(&format!("Shape member {} script_id={}", number, script_id).into());
+                debug!("Shape member {} script_id={}", number, script_id);
 
                 CastMemberType::Shape(ShapeMember {
                     shape_info: chunk.specific_data.shape_info().unwrap().clone(),

@@ -3512,7 +3512,7 @@ void main() {
             };
             (fov.to_radians(), n, f, cam_aspect)
         } else {
-            (30.0f32.to_radians(), 1.0, 10000.0, _fbo_aspect)
+            (34.516f32.to_radians(), 1.0, 10000.0, _fbo_aspect)
         };
 
         // Check for orthographic projection mode

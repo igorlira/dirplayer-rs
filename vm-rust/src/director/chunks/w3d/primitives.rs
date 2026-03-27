@@ -312,11 +312,14 @@ pub fn extrude_alpha_mask_to_mesh(
     let mut faces = Vec::new();
 
     for layer in 0..slab_masks.len() {
-        let z0 = z_edges[layer];
-        let z1 = z_edges[layer + 1];
-        if z1 <= z0 {
+        let z0_raw = z_edges[layer];
+        let z1_raw = z_edges[layer + 1];
+        if z1_raw <= z0_raw {
             continue;
         }
+        // Director uses left-handed Z (into screen); negate for OpenGL right-handed
+        let z0 = -z0_raw;
+        let z1 = -z1_raw;
 
         for y in 0..height as i32 {
             for x in 0..width as i32 {
@@ -332,8 +335,8 @@ pub fn extrude_alpha_mask_to_mesh(
                 let u1 = ((x + 1) as f32 / width as f32).clamp(0.0, 1.0);
                 let v_top = ((y + 1) as f32 / height as f32).clamp(0.0, 1.0);
                 let v_bottom = (y as f32 / height as f32).clamp(0.0, 1.0);
-                let z0_uv = (1.0 - z0 / depth).clamp(0.0, 1.0);
-                let z1_uv = (1.0 - z1 / depth).clamp(0.0, 1.0);
+                let z0_uv = (1.0 - z0_raw / depth).clamp(0.0, 1.0);
+                let z1_uv = (1.0 - z1_raw / depth).clamp(0.0, 1.0);
 
                 if layer == 0 || !solid(layer - 1, x, y) {
                     append_quad(
@@ -353,7 +356,7 @@ pub fn extrude_alpha_mask_to_mesh(
                             [u1, v_top],
                             [u0, v_top],
                         ],
-                        [0.0, 0.0, -1.0],
+                        [0.0, 0.0, 1.0],
                     );
                 }
                 if layer + 1 == slab_masks.len() || !solid(layer + 1, x, y) {
@@ -374,7 +377,7 @@ pub fn extrude_alpha_mask_to_mesh(
                             [u1, v_top],
                             [u1, v_bottom],
                         ],
-                        [0.0, 0.0, 1.0],
+                        [0.0, 0.0, -1.0],
                     );
                 }
                 if !solid(layer, x, y - 1) {
