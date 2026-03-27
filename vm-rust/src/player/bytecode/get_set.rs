@@ -14,7 +14,7 @@ use crate::{
             string_chunk::StringChunkUtils,
         },
         reserve_player_mut,
-        score::{sprite_get_prop, sprite_set_prop},
+        score::{sprite_get_prop, sprite_set_prop_from_lingo},
         script::{
             get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop,
             player_set_obj_prop, script_get_prop, script_get_static_prop, script_set_prop,
@@ -40,6 +40,7 @@ impl GetSetUtils {
                 player.scopes.get(ctx.scope_ref).unwrap().args.len() as i32,
             ))),
             "result" => Ok(player.last_handler_result.clone()),
+            "pi" => Ok(player.alloc_datum(Datum::Float(std::f64::consts::PI))),
             _ => player.get_movie_prop(prop_name),
         }
     }
@@ -261,7 +262,7 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap()
                     };
                     let sprite_num = player.get_datum(&datum_ref).int_value()?;
-                    sprite_set_prop(sprite_num as i16, prop_name, value)?;
+                    sprite_set_prop_from_lingo(sprite_num as i16, prop_name, value)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
                 0x07 => {
