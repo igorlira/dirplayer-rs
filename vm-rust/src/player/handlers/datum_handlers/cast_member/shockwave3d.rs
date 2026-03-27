@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use log::debug;
+use wasm_bindgen::JsCast;
 
 use crate::{
     director::lingo::datum::Datum,
@@ -49,6 +50,42 @@ impl Shockwave3dMemberHandlers {
         }]
     }
 
+    /// XMED stores font cell height (ascent+descent) rather than point/em size.
+    /// Use canvas font metrics to convert back to the actual point size.
+    fn xmed_cell_height_to_point_size(cell_height: i32, font_face: &str) -> i32 {
+        if cell_height <= 0 { return cell_height; }
+        let ref_size = 100.0_f64;
+        let doc = match web_sys::window().and_then(|w| w.document()) {
+            Some(d) => d,
+            None => return cell_height,
+        };
+        let canvas: web_sys::HtmlCanvasElement = match doc.create_element("canvas")
+            .ok().and_then(|e| e.dyn_into().ok()) {
+            Some(c) => c,
+            None => return cell_height,
+        };
+        let ctx: web_sys::CanvasRenderingContext2d = match canvas.get_context("2d")
+            .ok().flatten().and_then(|c| c.dyn_into().ok()) {
+            Some(c) => c,
+            None => return cell_height,
+        };
+        let font_str = format!("{}px {}", ref_size as i32, font_face);
+        ctx.set_font(&font_str);
+        let metrics = match ctx.measure_text("M") {
+            Ok(m) => m,
+            Err(_) => return cell_height,
+        };
+        let ascent = metrics.font_bounding_box_ascent();
+        let descent = metrics.font_bounding_box_descent();
+        let measured_height = ascent + descent;
+        if measured_height <= 0.0 || measured_height <= ref_size {
+            return cell_height; // metrics unavailable or font has no extra leading
+        }
+        let ratio = measured_height / ref_size;
+        let point_size = (cell_height as f64 / ratio).round() as i32;
+        point_size.max(1)
+    }
+
     fn scale_native_spans(
         spans: &[crate::player::handlers::datum_handlers::cast_member::font::StyledSpan],
         scale: i32,
@@ -79,7 +116,21 @@ impl Shockwave3dMemberHandlers {
         let supersample = Self::native_text_supersample(smoothness);
         let bw = (source.width as i32).max(128) * supersample;
         let bh = (source.height as i32).max(32) * supersample;
-        let scaled_spans = Self::scale_native_spans(&source.spans, supersample, source.font_size);
+        // Correct XMED cell-height values to actual point sizes before scaling
+        let corrected_spans: Vec<_> = source.spans.iter().cloned().map(|mut span| {
+            if let Some(sz) = span.style.font_size {
+                let font_face = span.style.font_face.as_deref().unwrap_or("Arial");
+                span.style.font_size = Some(Self::xmed_cell_height_to_point_size(sz, font_face));
+            }
+            span
+        }).collect();
+        let corrected_font_size = {
+            let font_face = source.spans.first()
+                .and_then(|s| s.style.font_face.as_deref())
+                .unwrap_or("Arial");
+            Self::xmed_cell_height_to_point_size(source.font_size as i32, font_face) as u16
+        };
+        let scaled_spans = Self::scale_native_spans(&corrected_spans, supersample, corrected_font_size);
         let alignment = Self::native_text_alignment(&source.alignment);
         let scaled_tab_stops: Vec<crate::player::cast_member::TabStop> = source
             .tab_stops
@@ -610,7 +661,7 @@ impl Shockwave3dMemberHandlers {
             "streamSize" => Ok(Datum::Int(0)),
             // Text3D properties (stub values after Text→Shockwave3d conversion)
             "smoothness" => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.smoothness as i32).unwrap_or(10))),
-            "tunnelDepth" | "tunneldepth" => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.tunnel_depth.round() as i32).unwrap_or(10))),
+            "tunnelDepth" | "tunneldepth" => Ok(Datum::Float(text3d_state.as_ref().map(|s| s.tunnel_depth as f64).unwrap_or(10.0))),
             "bevelDepth" | "beveldepth" => Ok(Datum::Float(text3d_state.as_ref().map(|s| s.bevel_depth as f64).unwrap_or(1.0))),
             "bevelType" | "beveltype" => Ok(Datum::Symbol(match text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(0) {
                 1 => "miter".to_string(),
