@@ -3366,6 +3366,20 @@ void main() {
             }
         }
 
+        // Debug: log root bone matrices once
+        {
+            static BONE_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !BONE_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let w = &world_matrices[0];
+                let ib = &inv_bind[0];
+                web_sys::console::log_1(&format!(
+                    "[3D-BONE0] rootLock={} world_pos=({:.1},{:.1},{:.1}) inv_bind_pos=({:.1},{:.1},{:.1}) skin_pos=({:.2},{:.2},{:.2})",
+                    root_lock, w[12], w[13], w[14], ib[12], ib[13], ib[14],
+                    skinning_matrices[12], skinning_matrices[13], skinning_matrices[14]
+                ).into());
+            }
+        }
+
         gl.uniform_matrix4fv_with_f32_array(
             shader.u_bone_matrices.as_ref(),
             false,
@@ -3995,6 +4009,7 @@ fn mat4_multiply_row_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     }
     r
 }
+
 
 /// Convert row-major matrix to column-major for OpenGL uniforms
 fn row_major_to_column_major(m: &[f32; 16]) -> [f32; 16] {
