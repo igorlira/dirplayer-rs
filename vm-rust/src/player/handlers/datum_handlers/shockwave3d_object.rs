@@ -490,6 +490,15 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
+                "rootLock" => {
+                    let locked = match value { Datum::Int(i) => *i != 0, _ => false };
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.runtime_state.root_lock = locked;
+                        }
+                    }
+                    Ok(())
+                },
                 "currentTime" => {
                     let time = match value {
                         Datum::Int(i) => *i as f32 / 1000.0,
@@ -1874,25 +1883,26 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                     } else { [0.0, 0.0, 0.0] };
 
-                    // Get camera view and projection from scene
+                    // Get viewport size: use movie rect (actual rendered viewport)
+                    let vw = player.movie.rect.width().max(1) as f32;
+                    let vh = player.movie.rect.height().max(1) as f32;
+
                     let (sx, sy) = if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d() {
                             if let Some(ref _scene) = w3d.parsed_scene {
-                                // Use the scene3d renderer to do the projection
-                                // For now, use the camera transform from runtime state
                                 let cam_t = w3d.runtime_state.node_transforms.get("DefaultView")
                                     .or_else(|| w3d.runtime_state.node_transforms.get("defaultview"));
                                 if let Some(cam_t) = cam_t {
-                                    // Simple projection: transform to camera space
+                                    // Transform to camera space
                                     let vx = world_pt[0] - cam_t[12];
                                     let vy = world_pt[1] - cam_t[13];
                                     let vz = world_pt[2] - cam_t[14];
-                                    // Perspective divide (simplified)
+                                    // Perspective divide
                                     let depth = (cam_t[8]*vx + cam_t[9]*vy + cam_t[10]*vz).abs().max(0.01);
-                                    let sx = (cam_t[0]*vx + cam_t[1]*vy + cam_t[2]*vz) / depth;
-                                    let sy = (cam_t[4]*vx + cam_t[5]*vy + cam_t[6]*vz) / depth;
-                                    // NDC to screen (assume 320x240 center)
-                                    (160.0 + sx * 160.0, 120.0 - sy * 120.0)
+                                    let ndx = (cam_t[0]*vx + cam_t[1]*vy + cam_t[2]*vz) / depth;
+                                    let ndy = (cam_t[4]*vx + cam_t[5]*vy + cam_t[6]*vz) / depth;
+                                    // NDC to screen: center of viewport + NDC offset
+                                    (vw * 0.5 + ndx * vw * 0.5, vh * 0.5 - ndy * vh * 0.5)
                                 } else {
                                     (0.0, 0.0)
                                 }
@@ -3920,9 +3930,12 @@ impl Shockwave3dObjectDatumHandlers {
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(camera_name.to_string()))),
             "transform" => {
-                let result = get_persistent_node_transform(player, member_ref, camera_name);
+                // Use the actual W3D node name (e.g. "defaultview") not the sprite property name ("DefaultView")
+                // so that node_transform_datums keys match what the renderer looks up via node.name
+                let resolved_name = node.map(|n| n.name.as_str()).unwrap_or(camera_name);
+                let result = get_persistent_node_transform(player, member_ref, resolved_name);
                 let typ = player.get_datum(&result).type_enum();
-                web_sys::console::log_1(&format!("[W3D-CAM] camera('{}').transform → type={:?}", camera_name, typ).into());
+                web_sys::console::log_1(&format!("[W3D-CAM] camera('{}').transform → type={:?}", resolved_name, typ).into());
                 Ok(result)
             },
             "fieldOfView" | "projectionAngle" => {
