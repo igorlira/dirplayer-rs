@@ -4363,34 +4363,90 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             )
         }
         CastMemberType::Shockwave3d(w3d) => {
-            // Use sprite dimensions if set, otherwise fall back to member's default_rect
             let default_rect = w3d.info.default_rect;
-            let member_width = (default_rect.2 - default_rect.0).max(0) as i32;
-            let member_height = (default_rect.3 - default_rect.1).max(0) as i32;
+            let member_width = (default_rect.2 - default_rect.0).max(1) as i32;
+            let member_height = (default_rect.3 - default_rect.1).max(1) as i32;
 
-            // Use the larger of sprite dimensions and member rect
-            let display_width = if sprite.width > member_width { sprite.width } else if member_width > 0 { member_width } else { sprite.width };
-            let display_height = if sprite.height > member_height { sprite.height } else if member_height > 0 { member_height } else { sprite.height };
+            let reg_x = w3d.info.reg_point.0 as i32;
+            let reg_y = w3d.info.reg_point.1 as i32;
 
-            // RegPoint handling: when sprite is much larger than member (>2x = fullscreen),
-            // skip regPoint offset. Otherwise use raw regPoint.
-            let (reg_x, reg_y) = if member_width > 0 && member_height > 0
-                && display_width <= member_width * 2 && display_height <= member_height * 2 {
-                // Normal size: use raw regPoint
-                (w3d.info.reg_point.0, w3d.info.reg_point.1)
-            } else {
-                // Fullscreen/stretched: no regPoint offset
-                (0, 0)
-            };
-
-            IntRect::from(
-                sprite.loc_h - reg_x,
-                sprite.loc_v - reg_y,
-                sprite.loc_h - reg_x + display_width,
-                sprite.loc_v - reg_y + display_height,
+            calc_shockwave3d_rect(
+                player,
+                sprite,
+                member_width,
+                member_height,
+                reg_x,
+                reg_y,
             )
         }
         _ => IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height),
+    }
+}
+
+fn rect_intersection_area(a: &IntRect, b: &IntRect) -> i32 {
+    let left = a.left.max(b.left);
+    let top = a.top.max(b.top);
+    let right = a.right.min(b.right);
+    let bottom = a.bottom.min(b.bottom);
+
+    let w = (right - left).max(0);
+    let h = (bottom - top).max(0);
+    w * h
+}
+
+fn calc_shockwave3d_rect(
+    player: &DirPlayer,
+    sprite: &Sprite,
+    member_width: i32,
+    member_height: i32,
+    reg_x: i32,
+    reg_y: i32,
+) -> IntRect {
+    let sprite_width = sprite.width.max(1);
+    let sprite_height = sprite.height.max(1);
+
+    let scaled_reg_x = if member_width > 0 {
+        reg_x as f32 * sprite_width as f32 / member_width as f32
+    } else {
+        reg_x as f32
+    };
+
+    let scaled_reg_y = if member_height > 0 {
+        reg_y as f32 * sprite_height as f32 / member_height as f32
+    } else {
+        reg_y as f32
+    };
+
+    // Candidate 1: loc already in stage coordinates
+    let left1 = (sprite.loc_h as f32 - scaled_reg_x).floor() as i32;
+    let top1 = (sprite.loc_v as f32 - scaled_reg_y).floor() as i32;
+    let rect1 = IntRect::from(left1, top1, left1 + sprite_width, top1 + sprite_height);
+
+    // Candidate 2: loc is center-origin
+    let stage_center_x = player.movie.rect.width() / 2;
+    let stage_center_y = player.movie.rect.height() / 2;
+
+    let loc2_h = sprite.loc_h + stage_center_x;
+    let loc2_v = sprite.loc_v + stage_center_y;
+
+    let left2 = (loc2_h as f32 - scaled_reg_x).floor() as i32;
+    let top2 = (loc2_v as f32 - scaled_reg_y).floor() as i32;
+    let rect2 = IntRect::from(left2, top2, left2 + sprite_width, top2 + sprite_height);
+
+    let movie_rect = IntRect::from(
+        0,
+        0,
+        player.movie.rect.width(),
+        player.movie.rect.height(),
+    );
+
+    let overlap1 = rect_intersection_area(&rect1, &movie_rect);
+    let overlap2 = rect_intersection_area(&rect2, &movie_rect);
+
+    if overlap2 > overlap1 {
+        rect2
+    } else {
+        rect1
     }
 }
 
