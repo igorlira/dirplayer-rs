@@ -83,7 +83,6 @@ export default function LoadMovie() {
     try {
       setIsLoading(true);
       setHasError(false);
-      window.history.pushState({ movieLoading: true }, '');
       set_base_path(getBasePath(fullPath));
       set_external_params(paramsArrayToRecord(params ?? externalParams));
       document.title = `${fullPath.split('/').pop() || fullPath} - ${APP_TITLE}`;
