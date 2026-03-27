@@ -30,8 +30,9 @@ use crate::player::{
     handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
     score::{get_concrete_sprite_rect, get_sprite_at, ScoreRef},
     sprite::{ColorRef, CursorRef, is_skew_flip},
-    DirPlayer,
+    datum_ref::DatumRef, DirPlayer,
 };
+use crate::director::lingo::datum::Datum;
 use crate::js_api::JsApi;
 use crate::rendering::{render_score_to_bitmap_with_offset, FilmLoopParentProps};
 
@@ -1270,6 +1271,45 @@ impl WebGL2Renderer {
             }
         }
 
+        // Sync persistent Transform3d datums back to node_transforms so the
+        // renderer sees in-place mutations made by Lingo scripts (identity, translate, rotate, etc.)
+        {
+            let datum_pairs: Vec<(String, DatumRef)> = {
+                player.movie.cast_manager.find_member_by_ref(&member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .map(|w3d| w3d.runtime_state.node_transform_datums.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect())
+                    .unwrap_or_default()
+            };
+            let updates: Vec<(String, [f32; 16])> = datum_pairs.iter()
+                .filter_map(|(name, datum_ref)| {
+                    match player.get_datum(datum_ref) {
+                        Datum::Transform3d(m) => Some((name.clone(), m.map(|v| v as f32))),
+                        _ => None,
+                    }
+                })
+                .collect();
+            if !updates.is_empty() {
+                static SYNC_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !SYNC_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    for (name, t) in &updates {
+                        web_sys::console::log_1(&format!(
+                            "[3D-SYNC] '{}' pos=({:.1},{:.1},{:.1}) rot_col0=({:.3},{:.3},{:.3})",
+                            name, t[12], t[13], t[14], t[0], t[1], t[2]
+                        ).into());
+                    }
+                }
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        for (name, transform) in updates {
+                            w3d.runtime_state.node_transforms.insert(name, transform);
+                        }
+                    }
+                }
+            }
+        }
+
         let texture_source = {
             let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
                 Some(m) => m,
@@ -1835,6 +1875,17 @@ impl WebGL2Renderer {
                     if let Some(ref parsed_scene) = w3d.parsed_scene {
                         // FBO dimensions from sprite rect
                         let (w, h) = (sprite_rect.width().max(1) as u32, sprite_rect.height().max(1) as u32);
+                        {
+                            static RECT_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if !RECT_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                web_sys::console::log_1(&format!(
+                                    "[3D-RECT] sprite_rect=({},{},{},{}) fbo={}x{} loc=({},{}) sprite_wh=({},{}) regPt=({},{})",
+                                    sprite_rect.left, sprite_rect.top, sprite_rect.right, sprite_rect.bottom,
+                                    w, h, raw_loc.0, raw_loc.1, sprite_width, sprite_height,
+                                    w3d.info.reg_point.0, w3d.info.reg_point.1
+                                ).into());
+                            }
+                        }
                         let extra_cams = w3d_extra_cams.clone();
                         TextureSource::Shockwave3dScene {
                             width: w,
