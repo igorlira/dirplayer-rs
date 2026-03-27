@@ -4596,7 +4596,9 @@ fn apply_rotation(
     rx_deg: f32, ry_deg: f32, rz_deg: f32,
 ) {
     let m = get_or_init_node_transform(player, member_ref, node_name);
-    let rot = euler_to_matrix_f32(rx_deg, ry_deg, rz_deg);
+    // Director uses left-handed coordinates where Y rotation is opposite to OpenGL's
+    // right-handed convention, so negate Y.
+    let rot = euler_to_matrix_f32(rx_deg, -ry_deg, rz_deg);
     // Apply rotation in world axes but keep the node positioned in place.
     let mut result = mat4_mul_f32(&rot, &m);
     result[12] = m[12];
