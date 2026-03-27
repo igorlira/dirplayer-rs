@@ -54,11 +54,24 @@ pub enum CursorRef {
     Member(Vec<i32>),
 }
 
+pub const AP_BLEND: u32 = 1 << 0;
+pub const AP_WIDTH: u32 = 1 << 1;
+pub const AP_HEIGHT: u32 = 1 << 2;
+pub const AP_LOC: u32 = 1 << 3;
+pub const AP_MEMBER: u32 = 1 << 4;
+pub const AP_INK: u32 = 1 << 5;
+pub const AP_FORE_COLOR: u32 = 1 << 6;
+pub const AP_BACK_COLOR: u32 = 1 << 7;
+pub const AP_MOVEABLE: u32 = 1 << 8;
+pub const AP_EDITABLE: u32 = 1 << 9;
+
+
 #[derive(Clone)]
 pub struct Sprite {
     pub number: usize,
     pub name: String,
     pub puppet: bool,
+    pub auto_puppet: u32,
     pub visible: bool,
     pub stretch: i32,
     pub loc_h: i32,
@@ -129,6 +142,7 @@ impl Sprite {
             number,
             name: "".to_owned(),
             puppet: false,
+            auto_puppet: 0,
             visible: true,
             stretch: 0,
             loc_h: 0,
@@ -185,6 +199,7 @@ impl Sprite {
     pub fn reset(&mut self) {
         self.name = "".to_owned();
         self.puppet = false;
+        self.auto_puppet = 0;
         self.visible = true;
         self.stretch = 0;
         self.loc_h = 0;
