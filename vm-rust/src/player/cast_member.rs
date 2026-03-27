@@ -2392,13 +2392,14 @@ impl CastMember {
                 } else {
                     Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                 };
-                let info = Shockwave3dInfo {
-                    loops: false, duration: 0, direct_to_stage: false,
-                    animation_enabled: false, preload: false,
-                    reg_point: (0, 0), default_rect: (0, 0, 0, 0),
-                    camera_position: None, camera_rotation: None,
-                    bg_color: None, ambient_color: None,
-                };
+                let info = Shockwave3dInfo::from(&chunk.specific_data_raw)
+                    .unwrap_or(Shockwave3dInfo {
+                        loops: false, duration: 0, direct_to_stage: false,
+                        animation_enabled: false, preload: false,
+                        reg_point: (0, 0), default_rect: (0, 0, 320, 240),
+                        camera_position: None, camera_rotation: None,
+                        bg_color: None, ambient_color: None,
+                    });
                 let source_scene = parsed_scene.clone();
                 return Some(CastMember {
                     number,

@@ -587,8 +587,8 @@ impl Shockwave3dInfo {
         // rect   @ abs 0x5E, 0x62, 0x66, 0x6A → (left=0, top=0, bottom=240, right=320)
         // preload@ abs 0x6E → o+0x53 = 1
         if bytes.len() < o + 0x57 { return None; }
-        let reg_y       = i32::from_be_bytes([bytes[o+0x3B], bytes[o+0x3C], bytes[o+0x3D], bytes[o+0x3E]]);
-        let reg_x       = i32::from_be_bytes([bytes[o+0x3F], bytes[o+0x40], bytes[o+0x41], bytes[o+0x42]]);
+        let mut reg_y       = i32::from_be_bytes([bytes[o+0x3B], bytes[o+0x3C], bytes[o+0x3D], bytes[o+0x3E]]);
+        let mut reg_x       = i32::from_be_bytes([bytes[o+0x3F], bytes[o+0x40], bytes[o+0x41], bytes[o+0x42]]);
         let rect_left   = i32::from_be_bytes([bytes[o+0x43], bytes[o+0x44], bytes[o+0x45], bytes[o+0x46]]);
         let rect_top    = i32::from_be_bytes([bytes[o+0x47], bytes[o+0x48], bytes[o+0x49], bytes[o+0x4A]]);
         let rect_bottom = i32::from_be_bytes([bytes[o+0x4B], bytes[o+0x4C], bytes[o+0x4D], bytes[o+0x4E]]);
