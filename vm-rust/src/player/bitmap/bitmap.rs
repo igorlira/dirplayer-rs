@@ -42,7 +42,7 @@ impl PaletteRef {
     /// - i < 0: builtin palette enum value (e.g., -1=SystemMac, -3=GrayScale)
     /// - i > 0: custom palette member number
     /// - clut_cast_lib: the cast lib containing the palette (0 = search all cast libs)
-    pub fn from(i: i16, clut_cast_lib: i16, _bitmap_cast_lib: u32) -> Self {
+    pub fn from(i: i16, clut_cast_lib: i16, bitmap_cast_lib: u32) -> Self {
         if i < 0 {
             match BuiltInPalette::from_i16(i) {
                 Some(palette) => PaletteRef::BuiltIn(palette),
@@ -56,11 +56,12 @@ impl PaletteRef {
         } else if i == 0 {
             PaletteRef::BuiltIn(get_system_default_palette())
         } else {
-            // Use clut_cast_lib if specified, otherwise 0 = search all cast libs
-            let cast_lib = if clut_cast_lib > 0 {
+            // clut_cast_lib >= 0: use as-is (0 = search all, >0 = explicit cast lib)
+            // clut_cast_lib < 0: not set, use bitmap's own cast lib (ScummVM: _cast->_castLibID)
+            let cast_lib = if clut_cast_lib >= 0 {
                 clut_cast_lib as i32
             } else {
-                0
+                bitmap_cast_lib as i32
             };
             PaletteRef::Member(CastMemberRef {
                 cast_lib,
