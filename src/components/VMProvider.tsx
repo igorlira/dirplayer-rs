@@ -14,7 +14,7 @@ import { initAudioContext, initAudioBackend } from "../audio/audioInit";
 import { useDispatch } from "react-redux";
 import { ready } from "../store/vmSlice";
 import { isElectron } from "../utils/electron";
-import { initMcpServer } from "../mcp";
+import { initMcpServer, isMcpEnabled } from "../mcp";
 
 interface VMProviderProps {
   children?: string | JSX.Element | JSX.Element[];
@@ -82,12 +82,14 @@ export default function VMProvider({ children, systemFontPath, wasmUrl }: VMProv
           }
         }
 
-        // Step 5: Initialize MCP server (Electron only)
+        // Step 5: Initialize MCP server (Electron only, opt-in)
         if (isElectron()) {
           try {
             const mcpServer = initMcpServer(wasm);
-            mcpServer.start();
-            console.log("MCP server initialized");
+            if (isMcpEnabled()) {
+              mcpServer.start();
+              console.log("MCP server initialized");
+            }
           } catch (err) {
             console.warn("Failed to initialize MCP server:", err);
           }
