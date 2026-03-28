@@ -416,7 +416,8 @@ void main() {
                         else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
                     }
                 }
-                float diff = max(dot(N, L), 0.0);
+                // Two-sided lighting: use abs(N·L) so back faces also receive light
+                float diff = abs(dot(N, L));
                 // Toon shading: quantize NdotL into discrete steps
                 if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                     diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
