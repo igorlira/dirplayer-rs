@@ -241,6 +241,7 @@ pub struct DirPlayer {
     pub date_objects: HashMap<u32, DateObject>,
     pub math_objects: HashMap<u32, MathObject>,
     pub enable_stream_status_handler: bool,
+    pub pending_stream_status_complete: bool,
     pub is_in_frame_update: bool,
     pub is_dispatching_events: bool, // Prevents re-entrant event dispatch
     pub is_in_send_all_sprites: bool, // Prevents re-entrant sendAllSprites calls
@@ -400,6 +401,7 @@ impl DirPlayer {
             math_objects: HashMap::new(),
             click_on_sprite: 0,
             enable_stream_status_handler: false,
+            pending_stream_status_complete: false,
             is_in_frame_update: false,
             is_dispatching_events: false,
             is_in_send_all_sprites: false,
@@ -2625,6 +2627,26 @@ async fn run_movie_init_sequence() {
         return;
     }
     web_sys::console::log_1(&">>> prepareMovie completed successfully".into());
+
+    // If tellStreamStatus(1) was called during prepareMovie, fire on streamStatus
+    // with "Complete" state since all media is already loaded from the file.
+    let should_fire_stream_status = reserve_player_mut(|player| {
+        let fire = player.pending_stream_status_complete;
+        player.pending_stream_status_complete = false;
+        fire
+    });
+    if should_fire_stream_status {
+        let args = reserve_player_mut(|player| {
+            vec![
+                player.alloc_datum(Datum::String("".to_string())),
+                player.alloc_datum(Datum::String("Complete".to_string())),
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::Int(0)),
+                player.alloc_datum(Datum::String("OK".to_string())),
+            ]
+        });
+        let _ = player_invoke_global_event(&"streamStatus".to_string(), &args).await;
+    }
 
     // Log bPreloadCasts state after prepareMovie
     reserve_player_ref(|player| {

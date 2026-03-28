@@ -1479,9 +1479,15 @@ impl BuiltInHandlerManager {
         }
 
         reserve_player_mut(|player| {
-            player.enable_stream_status_handler =
-                player.get_datum(&args[0]).bool_value().unwrap_or(false);
-            Ok(player.alloc_datum(Datum::Int(player.enable_stream_status_handler as i32)))
+            let enabled = player.get_datum(&args[0]).bool_value().unwrap_or(false);
+            player.enable_stream_status_handler = enabled;
+            // When enabled, schedule a "Complete" streamStatus event on the next frame.
+            // Since all media is loaded synchronously from the file, we signal completion
+            // immediately so movies waiting for streamStatus can proceed.
+            if enabled {
+                player.pending_stream_status_complete = true;
+            }
+            Ok(player.alloc_datum(Datum::Int(enabled as i32)))
         })
     }
     
