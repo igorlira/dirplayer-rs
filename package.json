@@ -63,7 +63,7 @@
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "proxy": "node ws-tcp-proxy-all.cjs",
-    "electron-dev": "concurrently \"BROWSER=none npm run start\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron-dev": "mkdir -p build && cp public/electron.cjs build/electron.cjs && concurrently \"BROWSER=none npm run start\" \"wait-on http://localhost:3000 && electron .\"",
     "electron-pack": "electron-builder",
     "preelectron-pack": "npm run build"
   },
