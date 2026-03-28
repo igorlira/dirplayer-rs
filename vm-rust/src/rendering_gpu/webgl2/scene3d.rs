@@ -1787,8 +1787,17 @@ void main() {
         // once through skinning and again through u_model.
         // But Model nodes WITHOUT skeletons need motion overrides for keyframe animation.
         let allow_motion_override = if node.node_type == W3dNodeType::Model {
-            // Allow keyframe animation on models that have no skeleton
-            !scene.skeletons.iter().any(|s| s.name == node.resource_name && s.bones.len() > 1)
+            // Allow keyframe animation on models that have no skeleton.
+            // For W3D model nodes the skinned resource key can live in
+            // model_resource_name instead of resource_name; if we only check
+            // resource_name, a root bone track like "bip01" gets applied twice:
+            // once in skinning and again through u_model.
+            let skeleton_key = if !node.model_resource_name.is_empty() {
+                node.model_resource_name.as_str()
+            } else {
+                node.resource_name.as_str()
+            };
+            !scene.skeletons.iter().any(|s| s.name == skeleton_key && s.bones.len() > 1)
         } else {
             true
         };
@@ -1862,19 +1871,30 @@ void main() {
             );
 
             let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
-            // For skinned models, pre-multiply Ry(90°) to align the Biped mesh
-            // convention (+X forward) with the euler/movement convention (-Z forward).
-            // Ry(90°) * (x,y,z) = (z, y, -x) — only affects orientation, not position.
             if has_skeleton_data {
-                let mut m = world_matrix;
-                for col in 0..3 {
-                    let o = col * 4;
-                    let r0 = m[o];     // row 0
-                    let r2 = m[o + 2]; // row 2
-                    m[o]     = r2;     // new row 0 = old row 2
-                    m[o + 2] = -r0;    // new row 2 = -old row 0
+                let has_runtime_model_override = runtime_state
+                    .map(|rs| rs.node_transforms.contains_key(&model_node.name))
+                    .unwrap_or(false);
+
+                if has_runtime_model_override {
+                    // If Lingo is explicitly driving model.transform, use that
+                    // authored transform directly. Applying the legacy skinned
+                    // basis correction here would rotate the whole skeleton a
+                    // second time for scripted movies like the dinosaur test.
+                    gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
+                } else {
+                    // Passive W3D skinned content still needs the historical
+                    // Z-up -> render-basis correction.
+                    let mut m = world_matrix;
+                    for col in 0..3 {
+                        let o = col * 4;
+                        let r1 = m[o + 1];
+                        let r2 = m[o + 2];
+                        m[o + 1] = r2;
+                        m[o + 2] = -r1;
+                    }
+                    gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &m);
                 }
-                gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &m);
             } else {
                 gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
             }
