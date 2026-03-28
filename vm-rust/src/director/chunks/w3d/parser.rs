@@ -250,7 +250,7 @@ impl W3dFileParser {
         if (attrs & 0x40) != 0 { let _ = r.read_f32()?; } // reserved
         if (attrs & 0x80) != 0 { mat.shininess = r.read_f32()?; }
 
-        log(&format!("  Material: \"{}\" diffuse=({:.2},{:.2},{:.2}) opacity={:.2} attrs=0x{:02X}", name, mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.opacity, attrs));
+        log(&format!("  Material: \"{}\" diffuse=({:.2},{:.2},{:.2}) opacity={:.2} reflectivity={:.4} shininess={:.4} attrs=0x{:02X}", name, mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.opacity, mat.reflectivity, mat.shininess, attrs));
         self.scene.materials.push(mat);
         Ok(())
     }

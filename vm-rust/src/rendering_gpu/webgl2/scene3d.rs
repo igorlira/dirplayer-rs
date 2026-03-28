@@ -421,11 +421,7 @@ void main() {
                 if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                     diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
                 }
-                // Per-light: ambient fill (lightColor * matAmbient) + diffuse (NdotL * lightColor * matDiffuse)
-                // IFX uses materialDiffuse in lighting even when UseDiffuseWithTexture=OFF.
-                // UseDiffuse only controls final texture*color multiply, not the lighting equation.
-                lighting += atten * (u_light_color[i] * u_ambient_color.rgb
-                          + diff * u_light_color[i] * u_diffuse_color.rgb);
+                lighting += atten * diff * u_light_color[i] * u_diffuse_color.rgb;
             }
         }
 
@@ -487,12 +483,12 @@ void main() {
                 atten = 1.0 / (1.0 + 0.01 * dist + 0.0001 * dist * dist);
             }
 
-            float diff = max(dot(N, L), 0.0);
+            // Two-sided lighting: use abs(N·L) so back faces also receive light
+            float diff = abs(dot(N, L));
             if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                 diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
             }
-            result += atten * (u_light_color[i] * u_ambient_color.rgb
-                    + u_light_color[i] * base_color * diff);
+            result += atten * u_light_color[i] * base_color * diff;
 
             if (u_shininess > 0.0 && diff > 0.0) {
                 vec3 H = normalize(L + V);
@@ -3307,7 +3303,9 @@ void main() {
         gl.uniform4f(shader.u_ambient_color.as_ref(), mat.ambient[0], mat.ambient[1], mat.ambient[2], mat.ambient[3]);
         gl.uniform4f(shader.u_specular_color.as_ref(), mat.specular[0], mat.specular[1], mat.specular[2], mat.specular[3]);
         gl.uniform4f(shader.u_emissive_color.as_ref(), mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.emissive[3]);
-        gl.uniform1f(shader.u_shininess.as_ref(), mat.shininess);
+        // IFX maps material reflectivity to shader shininess (scaled by 100)
+        let shininess = if mat.shininess > 0.0 { mat.shininess } else { mat.reflectivity * 100.0 };
+        gl.uniform1f(shader.u_shininess.as_ref(), shininess);
         gl.uniform1f(shader.u_opacity.as_ref(), mat.opacity);
     }
 

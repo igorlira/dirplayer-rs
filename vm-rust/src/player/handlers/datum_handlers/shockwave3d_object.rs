@@ -3671,7 +3671,9 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(player.alloc_datum(color_to_datum(c)))
             },
             "shininess" => {
-                let v = material.map(|m| m.shininess).unwrap_or(0.0);
+                let v = material.map(|m| {
+                    if m.shininess > 0.0 { m.shininess } else { m.reflectivity * 100.0 }
+                }).unwrap_or(0.0);
                 Ok(player.alloc_datum(Datum::Float(v as f64)))
             },
             "blend" => {
