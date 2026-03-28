@@ -492,7 +492,7 @@ pub fn mcp_get_script(player: &DirPlayer, cast_lib: i32, cast_member: i32) -> St
         .handlers
         .iter()
         .map(|(name, handler)| McpHandlerInfo {
-            name: name.clone(),
+            name: name.to_string(),
             arguments: get_argument_names(Some(ctx.lctx), &handler.argument_name_ids),
             locals: handler
                 .local_name_ids
@@ -515,7 +515,7 @@ pub fn mcp_get_script(player: &DirPlayer, cast_lib: i32, cast_member: i32) -> St
         name: ctx.script.name.clone(),
         script_type: script_type_str(&ctx.script.script_type).to_string(),
         handlers,
-        properties: ctx.script.properties.borrow().keys().cloned().collect(),
+        properties: ctx.script.properties.borrow().keys().map(|k| k.to_string()).collect(),
     })
 }
 
@@ -655,7 +655,12 @@ pub fn mcp_get_call_stack(player: &DirPlayer, depth: Option<usize>, include_loca
                     Some(scope
                         .locals
                         .iter()
-                        .map(|(name, datum_ref)| (name.clone(), datum_to_mcp_value_compact(player, datum_ref)))
+                        .map(|(name_id, datum_ref)| {
+                            let name = lctx.and_then(|l| l.names.get(*name_id as usize))
+                                .cloned()
+                                .unwrap_or_else(|| format!("local_{}", name_id));
+                            (name, datum_to_mcp_value_compact(player, datum_ref))
+                        })
                         .collect())
                 } else {
                     None
@@ -787,7 +792,12 @@ pub fn mcp_get_locals(player: &DirPlayer, scope_index: Option<usize>) -> String 
         locals: scope
             .locals
             .iter()
-            .map(|(name, datum_ref)| (name.clone(), datum_to_mcp_value(player, datum_ref)))
+            .map(|(name_id, datum_ref)| {
+                let name = lctx.and_then(|l| l.names.get(*name_id as usize))
+                    .cloned()
+                    .unwrap_or_else(|| format!("local_{}", name_id));
+                (name, datum_to_mcp_value(player, datum_ref))
+            })
             .collect(),
         args: scope
             .args
@@ -818,7 +828,7 @@ pub fn mcp_inspect_datum(player: &DirPlayer, datum_id: DatumId) -> String {
                 .get_script_instance(instance_ref)
                 .properties
                 .iter()
-                .map(|(name, datum_ref)| (name.clone(), datum_to_mcp_value(player, datum_ref)))
+                .map(|(name, datum_ref)| (name.to_string(), datum_to_mcp_value(player, datum_ref)))
                 .collect(),
         ),
         crate::director::lingo::datum::Datum::PropList(entries, _) => Some(
