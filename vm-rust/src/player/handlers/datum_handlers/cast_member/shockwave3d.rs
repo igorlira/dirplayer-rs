@@ -1901,14 +1901,33 @@ impl Shockwave3dMemberHandlers {
                                     hit.normal[0] as f64, hit.normal[1] as f64, hit.normal[2] as f64,
                                 ]));
                                 let mesh_key = player.alloc_datum(Datum::Symbol("meshID".to_string()));
-                                let mesh_val = player.alloc_datum(Datum::Int(1));
+                                let mesh_val = player.alloc_datum(Datum::Int(hit.mesh_id as i32));
                                 let face_key = player.alloc_datum(Datum::Symbol("faceID".to_string()));
-                                let face_val = player.alloc_datum(Datum::Int(hit.face_index as i32));
+                                let face_val = player.alloc_datum(Datum::Int(hit.face_index as i32 + 1));
+                                let vert_key = player.alloc_datum(Datum::Symbol("vertices".to_string()));
+                                let mut vert_items = VecDeque::new();
+                                for vtx in &hit.vertices {
+                                    vert_items.push_back(player.alloc_datum(Datum::Vector([
+                                        vtx[0] as f64, vtx[1] as f64, vtx[2] as f64,
+                                    ])));
+                                }
+                                let vert_val = player.alloc_datum(Datum::List(
+                                    crate::director::lingo::datum::DatumType::List, vert_items, false,
+                                ));
+                                let uv_key = player.alloc_datum(Datum::Symbol("uvCoord".to_string()));
+                                let u_key = player.alloc_datum(Datum::Symbol("u".to_string()));
+                                let u_val = player.alloc_datum(Datum::Float(hit.uv_coord[0] as f64));
+                                let v_key = player.alloc_datum(Datum::Symbol("v".to_string()));
+                                let v_val = player.alloc_datum(Datum::Float(hit.uv_coord[1] as f64));
+                                let uv_val = player.alloc_datum(Datum::PropList(
+                                    VecDeque::from(vec![(u_key, u_val), (v_key, v_val)]), false,
+                                ));
 
                                 let hit_proplist = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                                     (model_key, model_val), (dist_key, dist_val),
                                     (pos_key, pos_val), (norm_key, norm_val),
                                     (mesh_key, mesh_val), (face_key, face_val),
+                                    (vert_key, vert_val), (uv_key, uv_val),
                                 ]), false));
                                 results.push(hit_proplist);
                             } else {
