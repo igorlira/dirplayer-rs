@@ -136,6 +136,25 @@ impl W3dFileParser {
             });
         }
 
+        // Director always creates a "UIAmbient" light (black ambient, no visual contribution)
+        // so Lingo scripts can reference it by name.
+        if !self.scene.lights.iter().any(|l| l.name == "UIAmbient") {
+            self.scene.lights.push(W3dLight {
+                name: "UIAmbient".to_string(),
+                light_type: W3dLightType::Ambient,
+                color: [0.0, 0.0, 0.0],
+                enabled: true,
+                spot_angle: 90.0,
+                attenuation: [1.0, 0.0, 0.0],
+            });
+            self.scene.nodes.push(W3dNode {
+                name: "UIAmbient".to_string(),
+                node_type: W3dNodeType::Light,
+                parent_name: "World".to_string(),
+                ..Default::default()
+            });
+        }
+
         log(&format!("Parse complete: {} materials, {} shaders, {} nodes, {} lights, {} textures, {} skeletons, {} motions, {} mesh resources",
             self.scene.materials.len(), self.scene.shaders.len(), self.scene.nodes.len(),
             self.scene.lights.len(), self.scene.texture_images.len(),

@@ -3130,6 +3130,31 @@ void main() {
             }
         }
 
+        // Diagnostic: log per-mesh shader candidates for multi-mesh models
+        if res_info.shader_bindings.iter().any(|b| b.mesh_bindings.len() > 1) {
+            use std::sync::Mutex;
+            use std::collections::HashSet;
+            static LOGGED_MM: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+            let key = format!("{}:{}", model_node.name, mesh_idx);
+            if let Ok(mut guard) = LOGGED_MM.lock() {
+                let set = guard.get_or_insert_with(HashSet::new);
+                if set.insert(key) {
+                    let tex_info: Vec<String> = candidate_names.iter().map(|c| {
+                        let s = Self::resolve_shader_candidate_ci(scene, c);
+                        let layers: Vec<String> = s.map(|s| s.texture_layers.iter().map(|l| l.name.clone()).collect()).unwrap_or_default();
+                        let in_gpu: Vec<bool> = s.map(|s| s.texture_layers.iter().map(|l| {
+                            self.member_data.get(member_key).map(|g| g.textures.contains_key(&l.name.to_lowercase())).unwrap_or(false)
+                        }).collect()).unwrap_or_default();
+                        format!("{}(tex={:?},gpu={:?})", c, layers, in_gpu)
+                    }).collect();
+                    web_sys::console::log_1(&format!(
+                        "[W3D-MESH-SHADER] model=\"{}\" mesh={} candidates={:?}",
+                        model_node.name, mesh_idx, tex_info,
+                    ).into());
+                }
+            }
+        }
+
         let effective_shader_name = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
             .cloned()
@@ -3245,6 +3270,24 @@ void main() {
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
                 Self::apply_blend_mode(gl, opacity, first_bf);
                 return true;
+            }
+        }
+
+        // Log multi-mesh models that end up without texture
+        if res_info.shader_bindings.iter().any(|b| b.mesh_bindings.len() > 1) {
+            use std::sync::Mutex;
+            use std::collections::HashSet;
+            static LOGGED_NOTEX2: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+            let key = format!("{}:{}", model_node.name, mesh_idx);
+            if let Ok(mut guard) = LOGGED_NOTEX2.lock() {
+                let set = guard.get_or_insert_with(HashSet::new);
+                if set.insert(key) {
+                    let has_best = best_material.is_some();
+                    web_sys::console::log_1(&format!(
+                        "[W3D-NOTEX-MESH] model=\"{}\" mesh={} candidates={:?} has_best_material={} → using material-only (no texture)",
+                        model_node.name, mesh_idx, candidate_names, has_best,
+                    ).into());
+                }
             }
         }
 
