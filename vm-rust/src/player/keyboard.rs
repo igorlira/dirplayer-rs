@@ -32,7 +32,7 @@ impl KeyboardManager {
         }
     }
 
-    pub fn key_up(&mut self, _: &String, code: u16) {
+    pub fn key_up(&mut self, _: &str, code: u16) {
         // Map the code the same way as key_down does
         let code_mapped = keyboard_map::get_keyboard_key_map_js_to_sw().get(&code);
         let code_to_remove = *code_mapped.unwrap_or(&code);

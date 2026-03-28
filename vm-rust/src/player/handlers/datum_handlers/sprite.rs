@@ -86,9 +86,9 @@ impl SpriteDatumHandlers {
     /// This returns true for:
     /// 1. Handlers found on the sprite's attached script instances
     /// 2. Any handler that isn't a built-in sync handler (to allow fallback to global handlers)
-    pub fn has_async_handler(datum: &DatumRef, handler_name: &String) -> Result<bool, ScriptError> {
+    pub fn has_async_handler(datum: &DatumRef, handler_name: &str) -> Result<bool, ScriptError> {
         // First check if it's a built-in sync handler
-        let is_sync_handler = matches!(handler_name.as_str(), "intersects" | "getProp" | "getAt" | "setAt" | "getaProp" | "setaProp" | "pointToWord" | "pointToLine");
+        let is_sync_handler = matches!(handler_name, "intersects" | "getProp" | "getAt" | "setAt" | "getaProp" | "setaProp" | "pointToWord" | "pointToLine");
         if is_sync_handler {
             return Ok(false);
         }
@@ -101,10 +101,10 @@ impl SpriteDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "intersects" => {
                 reserve_player_mut(|player| {
                     if args.is_empty() {
@@ -363,7 +363,7 @@ impl SpriteDatumHandlers {
 
     pub async fn call_async(
         datum: DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         // First, try the sprite's attached script instances

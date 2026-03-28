@@ -14,7 +14,7 @@ pub fn read_pascal_string(item_bufs: &Vec<Vec<u8>>, index: usize, item_endian: E
         return "".to_owned();
     }
 
-    return reader.read_pascal_string().unwrap();
+    return reader.read_pascal_string().unwrap_or_else(|e| panic!("Failed to read pascal string: {e}"));
 }
 
 pub fn read_string(item_bufs: &Vec<Vec<u8>>, index: usize) -> String {

@@ -759,7 +759,7 @@ impl DirPlayer {
     }
 
     #[allow(dead_code)]
-    pub fn get_global(&self, name: &String) -> Option<&Datum> {
+    pub fn get_global(&self, name: &str) -> Option<&Datum> {
         self.globals
             .get(name)
             .map(|datum_ref| self.get_datum(datum_ref))
@@ -1031,7 +1031,7 @@ impl DirPlayer {
                 if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
                     let sn = self.movie.cast_manager.get_script_by_ref(&entry.script_instance.script)
                         .map(|s| s.name.clone()).unwrap_or_else(|| format!("si#{}", si_id));
-                    let dtype = self.allocator.datums.get(id).map(|e| e.datum.type_str()).unwrap_or("?".to_string());
+                    let dtype = self.allocator.datums.get(id).map(|e| e.datum.type_str()).unwrap_or("?");
                     *si_new.entry(format!("si({}).{} [{}]", sn, prop_name.as_str(), dtype)).or_insert(0) += 1;
                     accounted.insert(id);
                 }
@@ -1430,16 +1430,16 @@ impl DirPlayer {
         })
     }
 
-    fn get_player_prop(&mut self, prop: &String) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+    fn get_player_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
+        match prop {
             "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
             "productVersion" => Ok(self.alloc_datum(Datum::String("10.1".to_string()))), // TODO
             _ => Err(ScriptError::new(format!("Unknown player prop {}", prop))),
         }
     }
 
-    fn set_player_prop(&mut self, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
-        match prop.as_str() {
+    fn set_player_prop(&mut self, prop: &str, value: &DatumRef) -> Result<(), ScriptError> {
+        match prop {
             "itemDelimiter" => {
                 let value = self.get_datum(value);
                 self.movie.item_delimiter = (value.string_value()?).chars().next().unwrap();
@@ -1622,7 +1622,7 @@ impl DirPlayer {
         // Get the loop setting from the cast member
         let loop_count = {
             let member_datum = self.get_datum(&member_ref);
-            if let Datum::CastMember(ref cast_member_ref) = member_datum {
+            if let Datum::CastMember(cast_member_ref) = member_datum {
                 if let Some(cast_member) = self.movie.cast_manager.find_member_by_ref(cast_member_ref) {
                     if let CastMemberType::Sound(sound_member) = &cast_member.member_type {
                         if sound_member.info.loop_enabled {
@@ -1938,7 +1938,7 @@ pub fn player_handle_scope_return(scope: &ScopeResult) {
 }
 
 pub async fn player_call_global_handler(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     let receiver_handler = unsafe {

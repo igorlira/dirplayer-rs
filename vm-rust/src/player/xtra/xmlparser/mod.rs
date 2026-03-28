@@ -313,13 +313,13 @@ impl XmlParserXtraManager {
         self.instance_counter
     }
 
-    pub fn has_instance_async_handler(_name: &String) -> bool {
+    pub fn has_instance_async_handler(_name: &str) -> bool {
         // parseURL could be async, but we'll implement it synchronously for now
         false
     }
 
     pub async fn call_instance_async_handler(
-        handler_name: &String,
+        handler_name: &str,
         instance_id: u32,
         _args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
@@ -330,7 +330,7 @@ impl XmlParserXtraManager {
     }
 
     pub fn call_instance_handler(
-        handler_name: &String,
+        handler_name: &str,
         instance_id: u32,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {

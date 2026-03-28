@@ -34,7 +34,7 @@ pub enum HttpMethod {
 }
 
 impl NetTask {
-    pub fn new<'b>(id: u32, url: &String, resolved_url: &Url) -> NetTask {
+    pub fn new<'b>(id: u32, url: &str, resolved_url: &Url) -> NetTask {
         return NetTask {
             id: id.clone().to_owned(),
             url: url.clone().to_owned(),

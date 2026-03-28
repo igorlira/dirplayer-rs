@@ -35,10 +35,10 @@ impl RectDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
             "intersect" => Self::intersect(datum, args),
@@ -157,7 +157,7 @@ impl RectDatumHandlers {
         })
     }
 
-    pub fn get_prop(player: &DirPlayer, datum: &DatumRef, prop: &String) -> Result<Datum, ScriptError> {
+    pub fn get_prop(player: &DirPlayer, datum: &DatumRef, prop: &str) -> Result<Datum, ScriptError> {
         let rect = player.get_datum(datum);
         let rect_arr = match rect {
             Datum::Rect(arr) => arr,
@@ -169,7 +169,7 @@ impl RectDatumHandlers {
         let right = Datum::to_f64(player, &rect_arr[2])?;
         let bottom = Datum::to_f64(player, &rect_arr[3])?;
 
-        match prop.as_str() {
+        match prop {
             "ilk" => Ok(Datum::Symbol("rect".to_string())),
             "width" => Ok(Datum::from_f64(right - left)),
             "height" => Ok(Datum::from_f64(bottom - top)),
@@ -181,8 +181,8 @@ impl RectDatumHandlers {
         }
     }
 
-    pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &String, value_ref: &DatumRef) -> Result<(), ScriptError> {
-        let idx = match prop.as_str() {
+    pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &str, value_ref: &DatumRef) -> Result<(), ScriptError> {
+        let idx = match prop {
             "left" => 0,
             "top" => 1,
             "right" => 2,

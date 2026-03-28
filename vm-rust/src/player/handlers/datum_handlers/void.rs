@@ -9,10 +9,10 @@ impl VoidDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "addAt" | "add" | "append" => {
                 // Calling addAt/add/append on void should just return void
                 // In Director, operations on void typically no-op and return void
@@ -27,9 +27,9 @@ impl VoidDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         _: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+        match prop {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("void".to_owned()))),
             "length" => Ok(player.alloc_datum(Datum::Int(0))),
             "string" => Ok(player.alloc_datum(Datum::String("".to_owned()))),

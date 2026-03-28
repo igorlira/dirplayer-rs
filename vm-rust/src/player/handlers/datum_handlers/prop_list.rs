@@ -79,7 +79,7 @@ impl PropListUtils {
     pub fn get_prop_or_built_in(
         player: &mut DirPlayer,
         prop_list: &Vec<PropListPair>,
-        key: &String,
+        key: &str,
     ) -> Result<DatumRef, ScriptError> {
         let key_index =
             Self::get_key_index(prop_list, &Datum::String(key.to_owned()), &player.allocator)?;
@@ -100,9 +100,9 @@ impl PropListUtils {
 
     pub fn get_built_in_prop(
         prop_list: &Vec<PropListPair>,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
-        match prop.as_str() {
+        match prop {
             "count" => Ok(Datum::Int(prop_list.len() as i32)),
             "ilk" => Ok(Datum::Symbol("propList".to_owned())),
             _ => {
@@ -152,7 +152,7 @@ impl PropListUtils {
         value_ref: &DatumRef,
         player: &mut DirPlayer,
         is_required: bool,
-        formatted_key: String,
+        formatted_key: &str,
     ) -> Result<(), ScriptError> {
         let key = player.get_datum(key_ref);
         let (prop_list, is_sorted) = player.get_datum(prop_list_ref).to_map_tuple()?;
@@ -222,7 +222,7 @@ impl PropListUtils {
         prop_list_ref: &DatumRef,
         key_ref: &DatumRef,
         value_ref: &DatumRef,
-        formatted_key: String,
+        formatted_key: &str,
     ) -> Result<(), ScriptError> {
         let key = &player.get_datum(key_ref);
         match key {
@@ -254,10 +254,10 @@ impl PropListUtils {
 impl PropListDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
             "sort" => Self::sort(datum, args),
@@ -312,7 +312,7 @@ impl PropListDatumHandlers {
                                     value_ref,
                                     player,
                                     false,
-                                    formatted_key,
+                                    &formatted_key,
                                 )?;
                                 Ok(DatumRef::Void)
                             }
@@ -498,7 +498,7 @@ impl PropListDatumHandlers {
             );
 
             match prop_list {
-                Datum::PropList(ref entries, ..) => {
+                Datum::PropList(entries, ..) => {
                     debug!(
                         "PropList has {} entries", 
                         entries.len()
@@ -588,7 +588,7 @@ impl PropListDatumHandlers {
                 &value_ref,
                 player,
                 false,
-                formatted_key,
+                &formatted_key,
             )?;
             Ok(DatumRef::Void)
         })
@@ -645,7 +645,7 @@ impl PropListDatumHandlers {
                 &value_ref,
                 player,
                 true,
-                formatted_key,
+                &formatted_key,
             )?;
             Ok(DatumRef::Void)
         })
@@ -666,7 +666,7 @@ impl PropListDatumHandlers {
             let prop_name_ref = &args[0];
             let value_ref = &args[1];
 
-            PropListUtils::set_at(player, datum, &prop_name_ref, &value_ref, formatted_key)?;
+            PropListUtils::set_at(player, datum, &prop_name_ref, &value_ref, &formatted_key)?;
             Ok(DatumRef::Void)
         })
     }

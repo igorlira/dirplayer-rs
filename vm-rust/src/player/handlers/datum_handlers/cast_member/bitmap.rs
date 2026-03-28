@@ -12,7 +12,7 @@ impl BitmapMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -31,7 +31,7 @@ impl BitmapMemberHandlers {
                 "Cannot get prop of invalid bitmap ref"
             )));
         }
-        match prop.as_str() {
+        match prop {
             "width" => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
             "height" => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
             "image" | "picture" => Ok(Datum::BitmapRef(bitmap_ref)),
@@ -81,10 +81,10 @@ impl BitmapMemberHandlers {
 
     pub fn set_prop(
         member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop {
             "image" | "picture" => {
                 if value.is_void() {
                     return Ok(()); // Setting image to VOID is a no-op in Director

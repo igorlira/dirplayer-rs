@@ -313,7 +313,7 @@ pub fn render_preview_bitmap(
             let font_info = font_member.font_info.clone();
 
             let font: Rc<BitmapFont> =
-                if let (Some(req_size), Some(ref raw), Some(ref parsed)) = (preview_font_size, &pfr_data, &pfr_parsed) {
+                if let (Some(req_size), Some(raw), Some(parsed)) = (preview_font_size, &pfr_data, &pfr_parsed) {
                     // PFR font with size override — rasterize this member's data at requested size
                     if let Some(f) = player.font_manager.rasterize_pfr_at_size(
                         raw, parsed, &font_name, font_style, req_size, &mut player.bitmap_manager,
