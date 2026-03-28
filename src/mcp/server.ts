@@ -7,7 +7,8 @@ import { mcpTools, McpToolName } from './tools';
 // These will be available after WASM initialization
 type WasmModule = typeof import('vm-rust');
 
-const MCP_PORT = 9847;
+const MCP_DEFAULT_PORT = 9847;
+const MCP_PORT_KEY = 'mcp:port';
 
 // MCP Protocol types
 interface McpRequest {
@@ -38,6 +39,7 @@ interface McpNotification {
 export class McpServer {
   private wasm: WasmModule | null = null;
   private ws: WebSocket | null = null;
+  private requestHandler: ((_event: any, data: { requestId: string; request: McpRequest }) => void) | null = null;
   private serverInfo = {
     name: 'dirplayer-vm',
     version: '1.0.0',
@@ -58,16 +60,22 @@ export class McpServer {
       const { ipcRenderer } = (window as any).require('electron');
 
       // Request the main process to start the HTTP server
-      ipcRenderer.send('mcp:start-server', { port: MCP_PORT });
+      ipcRenderer.send('mcp:start-server', { port: getMcpPort() });
+
+      // Remove any existing listener before adding a new one
+      if (this.requestHandler) {
+        ipcRenderer.removeListener('mcp:request', this.requestHandler);
+      }
 
       // Listen for incoming MCP requests from the main process
-      ipcRenderer.on('mcp:request', (_event: any, data: { requestId: string; request: McpRequest }) => {
+      this.requestHandler = (_event: any, data: { requestId: string; request: McpRequest }) => {
         this.handleRequest(data.request).then((response) => {
           ipcRenderer.send('mcp:response', { requestId: data.requestId, response });
         });
-      });
+      };
+      ipcRenderer.on('mcp:request', this.requestHandler);
 
-      console.log(`MCP server bridge initialized, requesting main process to listen on http://localhost:${MCP_PORT}`);
+      console.log(`MCP server bridge initialized, requesting main process to listen on ${getMcpUrl()}`);
     } else {
       console.warn('MCP server can only run in Electron environment');
     }
@@ -302,6 +310,10 @@ export class McpServer {
     if (typeof window !== 'undefined' && (window as any).require) {
       const { ipcRenderer } = (window as any).require('electron');
       ipcRenderer.send('mcp:stop-server');
+      if (this.requestHandler) {
+        ipcRenderer.removeListener('mcp:request', this.requestHandler);
+        this.requestHandler = null;
+      }
     }
   }
 }
@@ -320,4 +332,40 @@ export function initMcpServer(wasm: WasmModule): McpServer {
   const server = getMcpServer();
   server.setWasm(wasm);
   return server;
+}
+
+// MCP settings (opt-in, off by default)
+const MCP_ENABLED_KEY = 'mcp:enabled';
+
+export function getMcpPort(): number {
+  const stored = window.localStorage.getItem(MCP_PORT_KEY);
+  return stored ? parseInt(stored, 10) || MCP_DEFAULT_PORT : MCP_DEFAULT_PORT;
+}
+
+export function setMcpPort(port: number): void {
+  window.localStorage.setItem(MCP_PORT_KEY, String(port));
+  // Restart server if currently running
+  if (isMcpEnabled()) {
+    const server = getMcpServer();
+    server.stop();
+    server.start();
+  }
+}
+
+export function getMcpUrl(): string {
+  return `http://localhost:${getMcpPort()}`;
+}
+
+export function isMcpEnabled(): boolean {
+  return window.localStorage.getItem(MCP_ENABLED_KEY) === 'true';
+}
+
+export function setMcpEnabled(enabled: boolean): void {
+  window.localStorage.setItem(MCP_ENABLED_KEY, enabled ? 'true' : 'false');
+  const server = getMcpServer();
+  if (enabled) {
+    server.start();
+  } else {
+    server.stop();
+  }
 }
