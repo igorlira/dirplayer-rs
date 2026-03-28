@@ -39,13 +39,13 @@ pub fn datum_equals(
             Float(f) => (*i as f64) == *f, // TODO: is this correct? Flutter compares ints instead
             String(s) => s.parse::<i32>().ok() == Some(*i), // Handle string-to-int comparison (e.g., "2" should match key 2)
             sc @ StringChunk(..) => sc.string_value()?.parse::<i32>().ok() == Some(*i),
-            Void | Null => *i == 0,
+            Void => *i == 0,
             _ => false,
         }),
 
         (Float(f), other) | (other, Float(f)) => Ok(match other {
             Float(other_f) => *f == *other_f,
-            Void | Null => *f == 0.0,
+            Void => *f == 0.0,
             _ => false,
         }),
 
