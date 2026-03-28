@@ -577,6 +577,7 @@ impl BuiltInHandlerManager {
     pub fn call_handler(name: &String, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         match name.as_str().to_lowercase().as_str() {
             "castlib" => CastHandlers::cast_lib(args),
+            "findempty" => CastHandlers::find_empty(args),
             "preloadnetthing" => NetHandlers::preload_net_thing(args),
             "netdone" => NetHandlers::net_done(args),
             "movetofront" | "preloadmember" | "preloadbuffer" | "unloadmember" | "beep" => Ok(DatumRef::Void),

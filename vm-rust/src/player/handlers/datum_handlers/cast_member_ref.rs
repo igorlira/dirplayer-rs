@@ -293,6 +293,15 @@ impl CastMemberRefHandlers {
         prop: &String,
     ) -> Result<Datum, ScriptError> {
         debug!("Getting prop '{}' for member type {:?}", prop, member_type);
+        if prop.eq_ignore_ascii_case("regPoint") {
+            let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+            let rp = member.reg_point;
+            return Ok(Datum::Point([
+                player.alloc_datum(Datum::Int(rp.0)),
+                player.alloc_datum(Datum::Int(rp.1)),
+            ]));
+        }
         match &member_type {
             CastMemberTypeId::Bitmap => {
                 BitmapMemberHandlers::get_prop(player, cast_member_ref, prop)
@@ -495,6 +504,21 @@ impl CastMemberRefHandlers {
             Some(t) => t,
             None => return Ok(()), // Member was erased, silently ignore
         };
+
+        if prop.eq_ignore_ascii_case("regPoint") {
+            return reserve_player_mut(|player| {
+                let point = value.to_point()?;
+                let x = player.get_datum(&point[0]).int_value()?;
+                let y = player.get_datum(&point[1]).int_value()?;
+                let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
+                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+                member.reg_point = (x, y);
+                if let CastMemberType::Bitmap(ref mut bm) = member.member_type {
+                    bm.reg_point = (x as i16, y as i16);
+                }
+                Ok(())
+            });
+        }
 
         // Handle Script-specific props before the main match so unrecognized
         // props fall through to the wildcard arm (e.g. implicit bitmap conversion).

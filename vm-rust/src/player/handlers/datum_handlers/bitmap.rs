@@ -9,7 +9,7 @@ use crate::{
             mask::BitmapMask,
         },
         geometry::IntRect,
-        player_duplicate_datum, reserve_player_mut, DatumRef, DirPlayer, ScriptError,
+        player_duplicate_datum, reserve_player_mut, ColorRef, DatumRef, DirPlayer, ScriptError,
     },
 };
 
@@ -499,8 +499,25 @@ impl BitmapDatumHandlers {
                 let y = player.get_datum(&args[1]).int_value()?;
                 let width = player.get_datum(&args[2]).int_value()?;
                 let height = player.get_datum(&args[3]).int_value()?;
-                let color = player.get_datum(&args[4]).to_color_ref()?;
-                ((x, y, width, height), color.clone())
+                let params = player.get_datum(&args[4]);
+                let color = match params {
+                    Datum::ColorRef(color_ref) => color_ref.clone(),
+                    Datum::PropList(prop_list, ..) => {
+                        let color_ref = PropListUtils::get_by_concrete_key(
+                            &prop_list,
+                            &Datum::Symbol("color".to_string()),
+                            &player.allocator,
+                        )?;
+                        player.get_datum(&color_ref).to_color_ref()?.clone()
+                    }
+                    Datum::Int(i) => ColorRef::PaletteIndex(*i as u8),
+                    _ => {
+                        return Err(ScriptError::new(
+                            "Invalid color parameter for fill".to_string(),
+                        ))
+                    }
+                };
+                ((x, y, width, height), color)
             } else {
                 return Err(ScriptError::new(
                     "Invalid number of arguments for fill".to_string(),

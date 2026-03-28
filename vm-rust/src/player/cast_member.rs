@@ -31,6 +31,7 @@ pub struct CastMember {
     pub member_type: CastMemberType,
     pub color: ColorRef,
     pub bg_color: ColorRef,
+    pub reg_point: (i32, i32),
 }
 
 #[derive(Clone)]
@@ -145,6 +146,7 @@ impl CastMember {
             member_type,
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point: (0, 0),
         }
     }
 }
@@ -1079,6 +1081,7 @@ impl CastMember {
             member_type: CastMemberType::Flash(FlashMember { data }),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point: (0, 0),
         }
     }
 
@@ -1147,6 +1150,7 @@ impl CastMember {
             member_type: CastMemberType::VectorShape(vector_member),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point: (0, 0),
         })
     }
 
@@ -1494,6 +1498,7 @@ impl CastMember {
             }),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point: (0, 0),
         }
     }
 
@@ -1655,12 +1660,16 @@ impl CastMember {
             .map(|(r, g, b)| ColorRef::Rgb(r, g, b))
             .unwrap_or(ColorRef::PaletteIndex(0));
 
+        let reg_point = text_member.info.as_ref()
+            .map(|info| (info.reg_x, info.reg_y))
+            .unwrap_or((0, 0));
         CastMember {
             number,
             name: member_name,
             member_type: CastMemberType::Text(text_member),
             color: member_color,
             bg_color: member_bg_color,
+            reg_point,
         }
     }
 
@@ -1939,6 +1948,7 @@ impl CastMember {
                         }),
                         color: ColorRef::PaletteIndex(255),
                         bg_color: ColorRef::PaletteIndex(0),
+                        reg_point: (0, 0),
                     }
                 }
 
@@ -1974,6 +1984,7 @@ impl CastMember {
                             }),
                             color: ColorRef::PaletteIndex(255),
                             bg_color: ColorRef::PaletteIndex(0),
+                            reg_point: (0, 0),
                         }
                     }
                 }
@@ -2487,6 +2498,10 @@ impl CastMember {
                 CastMemberType::Unknown
             }
         };
+        let reg_point = match &member_type {
+            CastMemberType::Bitmap(bm) => (bm.reg_point.0 as i32, bm.reg_point.1 as i32),
+            _ => (0, 0),
+        };
         CastMember {
             number,
             name: chunk
@@ -2497,6 +2512,7 @@ impl CastMember {
             member_type: member_type,
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point,
         }
     }
 }

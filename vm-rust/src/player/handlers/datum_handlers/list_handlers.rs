@@ -134,6 +134,7 @@ impl ListDatumHandlers {
             "deleteAt" => Self::delete_at(datum, args),
             "deleteAll" => Self::delete_all(datum, args),
             "findPos" => Self::find_pos(datum, args),
+            "findPosNear" => Self::find_pos_near(datum, args),
             "getPos" => Self::find_pos(datum, args),
             "join" => Self::join(datum, args),
             "getPropRef" => Self::get_prop_ref(datum, args),
@@ -221,6 +222,24 @@ impl ListDatumHandlers {
             let result = position.unwrap_or(-1) + 1;
 
             Ok(player.alloc_datum(Datum::Int(result)))
+        })
+    }
+
+    pub fn find_pos_near(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
+            if is_sorted {
+                let pos = ListDatumUtils::find_index_to_add(&list_vec, &args[0], &player.allocator)?;
+                Ok(player.alloc_datum(Datum::Int(pos + 1)))
+            } else {
+                let find = player.get_datum(&args[0]);
+                let position = list_vec
+                    .iter()
+                    .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
+                    .map(|x| x as i32);
+                let result = position.unwrap_or(-1) + 1;
+                Ok(player.alloc_datum(Datum::Int(result)))
+            }
         })
     }
 

@@ -16,6 +16,7 @@ impl CastLibDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.as_str() {
             "getPropRef" => Self::get_prop_ref(datum, args),
+            "findEmpty" => Self::find_empty(datum, args),
             _ => Err(ScriptError::new_code(
                 ScriptErrorCode::HandlerNotFound,
                 format!("No handler {handler_name} for castLib datum"),
@@ -94,6 +95,43 @@ impl CastLibDatumHandlers {
                     prop_name
                 ))),
             }
+        })
+    }
+
+    fn find_empty(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let cast_lib_num = match player.get_datum(datum) {
+                Datum::CastLib(num) => *num,
+                _ => {
+                    return Err(ScriptError::new(
+                        "findEmpty: datum is not a castLib".to_string(),
+                    ))
+                }
+            };
+
+            let (c_start, c_end) = match &player.movie.file {
+                Some(file) => (file.config.min_member as u32, file.config.max_member as u32),
+                None => return Err(ScriptError::new("findEmpty: no movie file loaded".to_string())),
+            };
+
+            let start = if !args.is_empty() {
+                let member_ref = player.get_datum(&args[0]).to_member_ref()?;
+                let member_num = member_ref.cast_member as u32;
+                if member_num > c_end {
+                    return Ok(player.alloc_datum(Datum::Int(member_num as i32)));
+                }
+                if member_num > c_start { member_num } else { c_start }
+            } else {
+                c_start
+            };
+
+            let cast = player.movie.cast_manager.get_cast(cast_lib_num)?;
+            for slot in start..=c_end {
+                if !cast.members.contains_key(&slot) {
+                    return Ok(player.alloc_datum(Datum::Int(slot as i32)));
+                }
+            }
+            Ok(player.alloc_datum(Datum::Int(c_end as i32 + 1)))
         })
     }
 }
