@@ -1100,9 +1100,13 @@ impl BuiltInHandlerManager {
         }
 
         reserve_player_mut(|player| {
-            player.enable_stream_status_handler =
-                player.get_datum(&args[0]).bool_value().unwrap_or(false);
-            Ok(player.alloc_datum(Datum::Int(player.enable_stream_status_handler as i32)))
+            let enable = player.get_datum(&args[0]).bool_value().unwrap_or(false);
+            player.enable_stream_status_handler = enable;
+            if enable {
+                // Clear reported state so all tasks get fresh callbacks
+                player.stream_status_reported.clear();
+            }
+            Ok(player.alloc_datum(Datum::Int(enable as i32)))
         })
     }
     

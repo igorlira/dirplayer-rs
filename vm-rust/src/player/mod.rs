@@ -43,6 +43,7 @@ pub mod stage;
 pub mod timeout;
 pub mod xtra;
 pub mod score_keyframes;
+pub mod stream_status;
 pub mod virtual_scripts;
 pub mod console;
 
@@ -225,6 +226,8 @@ pub struct DirPlayer {
     pub date_objects: HashMap<u32, DateObject>,
     pub math_objects: HashMap<u32, MathObject>,
     pub enable_stream_status_handler: bool,
+    /// Tracks the last streamStatus phase reported per net task.
+    pub stream_status_reported: HashMap<u32, net_task::StreamStatusPhase>,
     pub is_in_frame_update: bool,
     pub is_dispatching_events: bool, // Prevents re-entrant event dispatch
     pub is_in_send_all_sprites: bool, // Prevents re-entrant sendAllSprites calls
@@ -372,6 +375,7 @@ impl DirPlayer {
             math_objects: HashMap::new(),
             click_on_sprite: 0,
             enable_stream_status_handler: false,
+            stream_status_reported: HashMap::new(),
             is_in_frame_update: false,
             is_dispatching_events: false,
             is_in_send_all_sprites: false,
@@ -2480,6 +2484,10 @@ async fn run_movie_init_sequence() {
 
     player_wait_available().await;
 
+    // Dispatch streamStatus for any resources already loaded by the time prepareMovie
+    // enables the handler (movie file, external casts, etc.)
+    stream_status::dispatch_pending_stream_status().await;
+
     // Initialize sprites
     reserve_player_mut(|player| {
         player.movie.frame_script_instance = None;
@@ -2807,6 +2815,9 @@ pub async fn run_frame_loop() {
             last_frame_time = chrono::Local::now();
             continue;
         }
+
+        // Dispatch streamStatus for any net tasks that completed since last check
+        stream_status::dispatch_pending_stream_status().await;
 
         if !is_script_paused {
             player_wait_available().await;
