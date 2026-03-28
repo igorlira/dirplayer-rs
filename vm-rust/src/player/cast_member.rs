@@ -929,10 +929,10 @@ impl Shockwave3dRuntimeState {
         if let Some((px, py, pz)) = camera_position {
             let (rx, ry, rz) = info.camera_rotation.unwrap_or((0.0, 0.0, 0.0));
             // Build camera transform from position + Euler rotation (degrees)
-            // Director uses negative rotation convention, order: Z * Y * X
-            let rx_rad = (-rx).to_radians();
-            let ry_rad = (-ry).to_radians();
-            let rz_rad = (-rz).to_radians();
+            // Rotation order: R = Rz * Ry * Rx
+            let rx_rad = rx.to_radians();
+            let ry_rad = ry.to_radians();
+            let rz_rad = rz.to_radians();
             let (sx, cx) = (rx_rad.sin(), rx_rad.cos());
             let (sy, cy) = (ry_rad.sin(), ry_rad.cos());
             let (sz, cz) = (rz_rad.sin(), rz_rad.cos());
