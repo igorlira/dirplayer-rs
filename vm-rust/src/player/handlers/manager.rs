@@ -21,7 +21,7 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, trace_output, xtra::manager::call_xtra_instance_handler
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_global_handler, player_call_script_handler, reserve_player_mut, reserve_player_ref, score::get_concrete_sprite_rect, script_ref::ScriptInstanceRef, trace_output, xtra::manager::call_xtra_instance_handler
     },
 };
 
@@ -818,8 +818,36 @@ impl BuiltInHandlerManager {
                 })
             }
             "spritebox" => {
-                log::warn!("spriteBox is not implemented, returning <Void>");
-                Ok(DatumRef::Void)
+                // spriteBox(sprite, left, top, right, bottom)
+                if args.len() < 5 {
+                    return Err(ScriptError::new(
+                        "spriteBox requires 5 arguments (sprite, left, top, right, bottom)".to_string(),
+                    ));
+                }
+                reserve_player_mut(|player| {
+                    let sprite_num = player.get_datum(&args[0]).to_sprite_ref()?;
+                    let left = player.get_datum(&args[1]).int_value()?;
+                    let top = player.get_datum(&args[2]).int_value()?;
+                    let right = player.get_datum(&args[3]).int_value()?;
+                    let bottom = player.get_datum(&args[4]).int_value()?;
+
+                    // Set dimensions first so the rect computation uses the new size
+                    let sprite = player.movie.score.get_sprite_mut(sprite_num);
+                    sprite.width = right - left;
+                    sprite.height = bottom - top;
+                    sprite.has_size_changed = true;
+
+                    // Now compute the rect with the new dimensions (scaled reg_point reflects new size)
+                    let sprite = player.movie.score.get_sprite(sprite_num).unwrap();
+                    let current_rect = get_concrete_sprite_rect(player, sprite);
+
+                    // Adjust position so the displayed left/top match the desired values
+                    let sprite = player.movie.score.get_sprite_mut(sprite_num);
+                    sprite.loc_h += left - current_rect.left;
+                    sprite.loc_v += top - current_rect.top;
+
+                    Ok(DatumRef::Void)
+                })
             }
             "puppettransition" => {
                 log::warn!("puppetTransition is not implemented");
