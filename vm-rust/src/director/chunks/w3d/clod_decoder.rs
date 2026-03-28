@@ -7,6 +7,7 @@ use super::bitstream::IFXBitStreamCompressed;
 use super::clod_types::*;
 use super::types::*;
 
+#[derive(Clone, Debug)]
 pub struct ClodMeshDecoder {
     meshes: Vec<MeshState>,
     res_managers: Vec<ResManagerState>,
@@ -670,29 +671,33 @@ impl ClodMeshDecoder {
                     face_count += step.face_delta;
                 }
 
-                // Truncate geometry to target resolution
                 let vert_count = (vert_count as usize).min(mesh.positions.len());
                 let face_count = (face_count as usize).min(mesh.faces.len());
 
-                // Clone faces up to target count, then apply patches for each step up to target
-                let mut faces: Vec<[u32; 3]> = mesh.faces[..face_count].to_vec();
+                // mesh.faces is in its final (fully-patched) state. To get the
+                // face state at target_steps, start from the full faces and
+                // reverse-apply patches from the end back to target_steps,
+                // restoring old_vertex_index for each undone patch.
+                let mut faces = mesh.faces.clone();
 
-                // Apply patch records for steps up to target
-                let mut patch_cursor = 0usize;
-                for step_idx in 0..target_steps {
+                // Walk patches in reverse, undoing steps from total_steps-1 down to target_steps
+                let mut patch_cursor = mesh.patch_records.len();
+                for step_idx in (target_steps..total_steps).rev() {
                     let step = &mesh.step_records[step_idx];
-                    for _ in 0..step.patch_count {
-                        if patch_cursor < mesh.patch_records.len() {
-                            let patch = &mesh.patch_records[patch_cursor];
-                            let fi = patch.face_index as usize;
-                            let ci = patch.corner_index as usize;
-                            if fi < faces.len() && ci < 3 {
-                                faces[fi][ci] = patch.new_vertex_index;
-                            }
-                            patch_cursor += 1;
+                    let step_start = patch_cursor - step.patch_count as usize;
+                    for pi in (step_start..patch_cursor).rev() {
+                        let patch = &mesh.patch_records[pi];
+                        let fi = patch.face_index as usize;
+                        let ci = patch.corner_index as usize;
+                        if fi < faces.len() && ci < 3 {
+                            faces[fi][ci] = patch.old_vertex_index;
                         }
                     }
+                    patch_cursor = step_start;
                 }
+
+                // Truncate to target face count
+                faces.truncate(face_count);
 
                 let tc = mesh.tex_coords.iter().map(|layer| {
                     layer[..vert_count.min(layer.len())].to_vec()

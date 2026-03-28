@@ -424,6 +424,7 @@ pub struct W3dScene {
     pub motions: Vec<W3dMotion>,
     pub model_resources: HashMap<String, ModelResourceInfo>,
     pub clod_meshes: HashMap<String, Vec<ClodDecodedMesh>>,
+    pub clod_decoders: HashMap<String, super::clod_decoder::ClodMeshDecoder>,
     pub raw_meshes: Vec<W3dRawMesh>,
     /// Monotonically increasing counter; bumped whenever mesh geometry changes
     pub mesh_content_version: u64,

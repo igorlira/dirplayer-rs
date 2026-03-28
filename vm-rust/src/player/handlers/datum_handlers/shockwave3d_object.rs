@@ -926,7 +926,34 @@ impl Shockwave3dObjectDatumHandlers {
                                 "auto" => lod.auto_mode = value.int_value().unwrap_or(1) != 0,
                                 "bias" => lod.bias = value.to_float().unwrap_or(100.0) as f32,
                                 _ => {},
-                            })
+                            });
+                            // Re-decode CLOD meshes at the new LOD level
+                            let lod_level = lod.level;
+                            let node_name = s3d_ref.name.clone();
+                            if let Some(scene) = w3d.scene_mut() {
+                                // Find the resource name for this model node
+                                let resource_key = scene.nodes.iter()
+                                    .find(|n| n.name == node_name)
+                                    .map(|n| {
+                                        if !n.model_resource_name.is_empty() {
+                                            n.model_resource_name.clone()
+                                        } else {
+                                            n.resource_name.clone()
+                                        }
+                                    });
+                                if let Some(ref key) = resource_key {
+                                    if let Some(decoder) = scene.clod_decoders.get(key) {
+                                        let lod_f = (lod_level as f32) / 100.0;
+                                        let meshes = decoder.get_decoded_meshes_at_lod(lod_f);
+                                        web_sys::console::log_1(&format!(
+                                            "[W3D-LOD] model=\"{}\" resource=\"{}\" level={} lod_f={:.2} meshes={}",
+                                            node_name, key, lod_level, lod_f, meshes.len()
+                                        ).into());
+                                        scene.clod_meshes.insert(key.clone(), meshes);
+                                        scene.mesh_content_version += 1;
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(())

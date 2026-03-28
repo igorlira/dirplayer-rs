@@ -122,6 +122,9 @@ impl W3dFileParser {
             self.scene.clod_meshes.insert(name.clone(), meshes);
         }
 
+        // Store CLOD decoders for runtime LOD changes
+        self.scene.clod_decoders = std::mem::take(&mut self.clod_decoders);
+
         // Copy model resources to scene
         self.scene.model_resources = self.model_resources.clone();
 
