@@ -26,7 +26,7 @@ impl TextMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         let member_ref = player.get_datum(datum).to_member_ref()?;
@@ -36,7 +36,7 @@ impl TextMemberHandlers {
             .find_member_by_ref(&member_ref)
             .unwrap();
         let text = member.member_type.as_text().unwrap();
-        match handler_name.as_str() {
+        match handler_name {
             "count" => {
                 let count_of = player.get_datum(&args[0]).string_value()?;
                 if args.len() != 1 {
@@ -117,7 +117,7 @@ impl TextMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -946,7 +946,7 @@ impl TextMemberHandlers {
 
     pub fn set_prop(
         member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
         // Director property names are case-insensitive

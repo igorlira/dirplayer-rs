@@ -420,10 +420,10 @@ pub struct XmlDatumHandlers {}
 impl XmlDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "parseXML" => Self::parse_xml(datum, args),
             "createElement" => Self::create_element(datum, args),
             "appendChild" => Self::append_child(datum, args),
@@ -437,7 +437,7 @@ impl XmlDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let xml_id = match player.get_datum(datum) {
             Datum::XmlRef(id) => *id,
@@ -453,7 +453,7 @@ impl XmlDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
         let xml_id = match player.get_datum(datum) {

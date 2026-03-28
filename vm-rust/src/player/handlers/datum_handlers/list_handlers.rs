@@ -38,10 +38,10 @@ impl ListDatumUtils {
 
     pub fn get_prop(
         list_vec: &Vec<DatumRef>,
-        prop_name: &String,
+        prop_name: &str,
         _datums: &DatumAllocator,
     ) -> Result<Datum, ScriptError> {
-        match prop_name.as_str() {
+        match prop_name {
             "count" => Ok(Datum::Int(list_vec.len() as i32)),
             "length" => Ok(Datum::Int(list_vec.len() as i32)),
             "ilk" => Ok(Datum::Symbol("list".to_string())),
@@ -56,7 +56,7 @@ impl ListDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
-        prop_name: &String,
+        prop_name: &str,
     ) -> Result<DatumRef, ScriptError> {
         let list_vec = player.get_datum(datum_ref).to_list()?;
         let result = ListDatumUtils::get_prop(&list_vec, prop_name, &player.allocator)?;
@@ -116,10 +116,10 @@ impl ListDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "count" => Self::count(datum, args),
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),

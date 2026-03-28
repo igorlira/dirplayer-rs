@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use num_derive::FromPrimitive;
@@ -61,15 +62,21 @@ pub enum StringChunkType {
     Line,
 }
 
-impl From<&String> for StringChunkType {
-    fn from(s: &String) -> Self {
-        match s.as_str() {
+impl From<&str> for StringChunkType {
+    fn from(s: &str) -> Self {
+        match s {
             "item" => StringChunkType::Item,
             "word" => StringChunkType::Word,
             "char" => StringChunkType::Char,
             "line" => StringChunkType::Line,
             _ => panic!("Invalid string chunk type"),
         }
+    }
+}
+
+impl From<&String> for StringChunkType {
+    fn from(s: &String) -> Self {
+        StringChunkType::from(s.as_str())
     }
 }
 
@@ -167,50 +174,50 @@ pub enum Datum {
 }
 
 impl DatumType {
-    pub fn type_str(&self) -> String {
+    pub fn type_str(&self) -> &'static str {
         match self {
-            DatumType::Int => "int".to_string(),
-            DatumType::Float => "float".to_string(),
-            DatumType::String => "string".to_string(),
-            DatumType::StringChunk => "string_chunk".to_string(),
-            DatumType::Void => "void".to_string(),
-            DatumType::VarRef => "var_ref".to_string(),
-            DatumType::List => "list".to_string(),
-            DatumType::XmlChildNodes => "list".to_string(),
-            DatumType::PropList => "prop_list".to_string(),
-            DatumType::Symbol => "symbol".to_string(),
-            DatumType::CastLibRef => "cast_lib".to_string(),
-            DatumType::StageRef => "stage".to_string(),
-            DatumType::ScriptRef => "script_ref".to_string(),
-            DatumType::ScriptInstanceRef => "script_instance".to_string(),
-            DatumType::CastMemberRef => "cast_member".to_string(),
-            DatumType::SpriteRef => "sprite_ref".to_string(),
-            DatumType::Null => "null".to_string(),
-            DatumType::ArgList => "arg_list".to_string(),
-            DatumType::ArgListNoRet => "arg_list_no_ret".to_string(),
-            DatumType::Eval => "eval".to_string(),
-            DatumType::Rect => "rect".to_string(),
-            DatumType::Point => "point".to_string(),
-            DatumType::SoundChannel => "sound_channel".to_string(),
-            DatumType::SoundRef => "sound".to_string(),
-            DatumType::CursorRef => "cursor_ref".to_string(),
-            DatumType::TimeoutRef => "timeout".to_string(),
-            DatumType::TimeoutFactory => "timeout_factory".to_string(),
-            DatumType::TimeoutInstance => "timeout_instance".to_string(),
-            DatumType::ColorRef => "color_ref".to_string(),
-            DatumType::BitmapRef => "bitmap_ref".to_string(),
-            DatumType::PaletteRef => "palette_ref".to_string(),
-            DatumType::Xtra => "xtra".to_string(),
-            DatumType::XtraInstance => "xtra_instance".to_string(),
-            DatumType::Matte => "matte".to_string(),
-            DatumType::PlayerRef => "player_ref".to_string(),
-            DatumType::MovieRef => "movie_ref".to_string(),
-            DatumType::XmlRef => "xml".to_string(),
-            DatumType::DateRef => "date".to_string(),
-            DatumType::MathRef => "math".to_string(),
-            DatumType::Vector => "vector".to_string(),
-            DatumType::Media => "media".to_string(),
-            DatumType::JavaScript => "javascript".to_string(),
+            DatumType::Int => "int",
+            DatumType::Float => "float",
+            DatumType::String => "string",
+            DatumType::StringChunk => "string_chunk",
+            DatumType::Void => "void",
+            DatumType::VarRef => "var_ref",
+            DatumType::List => "list",
+            DatumType::XmlChildNodes => "list",
+            DatumType::PropList => "prop_list",
+            DatumType::Symbol => "symbol",
+            DatumType::CastLibRef => "cast_lib",
+            DatumType::StageRef => "stage",
+            DatumType::ScriptRef => "script_ref",
+            DatumType::ScriptInstanceRef => "script_instance",
+            DatumType::CastMemberRef => "cast_member",
+            DatumType::SpriteRef => "sprite_ref",
+            DatumType::Null => "null",
+            DatumType::ArgList => "arg_list",
+            DatumType::ArgListNoRet => "arg_list_no_ret",
+            DatumType::Eval => "eval",
+            DatumType::Rect => "rect",
+            DatumType::Point => "point",
+            DatumType::SoundChannel => "sound_channel",
+            DatumType::SoundRef => "sound",
+            DatumType::CursorRef => "cursor_ref",
+            DatumType::TimeoutRef => "timeout",
+            DatumType::TimeoutFactory => "timeout_factory",
+            DatumType::TimeoutInstance => "timeout_instance",
+            DatumType::ColorRef => "color_ref",
+            DatumType::BitmapRef => "bitmap_ref",
+            DatumType::PaletteRef => "palette_ref",
+            DatumType::Xtra => "xtra",
+            DatumType::XtraInstance => "xtra_instance",
+            DatumType::Matte => "matte",
+            DatumType::PlayerRef => "player_ref",
+            DatumType::MovieRef => "movie_ref",
+            DatumType::XmlRef => "xml",
+            DatumType::DateRef => "date",
+            DatumType::MathRef => "math",
+            DatumType::Vector => "vector",
+            DatumType::Media => "media",
+            DatumType::JavaScript => "javascript",
         }
     }
 }
@@ -259,10 +266,11 @@ impl Datum {
         }
     }
 
-    pub fn type_str(&self) -> String {
+    pub fn type_str(&self) -> &'static str {
         self.type_enum().type_str()
     }
 
+    // TODO(zdimension): this should really return a Cow<str> instead of allocating a String
     pub fn string_value(&self) -> Result<String, ScriptError> {
         match self {
             Datum::String(s) => Ok(s.clone()),
@@ -273,6 +281,26 @@ impl Datum {
             Datum::Rect(r) => Ok(format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3])),
             Datum::ColorRef(cr) => Ok(format!("{:?}", cr)),
             Datum::Void => Ok("VOID".to_string()),
+            Datum::CastMember(member_ref) => Ok(format!(
+                "(member {} of castLib {})", member_ref.cast_member, member_ref.cast_lib
+            )),
+            _ => Err(ScriptError::new(format!(
+                "Cannot convert datum type {} to string",
+                self.type_str()
+            ))),
+        }
+    }
+
+    pub fn string_value_cow(&self) -> Result<Cow<'_, str>, ScriptError> {
+        match self {
+            Datum::String(s) => Ok(Cow::Borrowed(s)),
+            Datum::StringChunk(_, _, str_value) => Ok(Cow::Borrowed(str_value)),
+            Datum::Int(n) => Ok(Cow::Owned(n.to_string())),
+            Datum::Symbol(s) => Ok(Cow::Borrowed(s)),
+            Datum::Vector(v) => Ok(Cow::Owned(format!("[{},{},{}]", v[0], v[1], v[2]))),
+            Datum::Rect(r) => Ok(Cow::Owned(format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3]))),
+            Datum::ColorRef(cr) => Ok(Cow::Owned(format!("{:?}", cr))),
+            Datum::Void => Ok(Cow::Borrowed("VOID")),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum type {} to string",
                 self.type_str()
@@ -555,7 +583,7 @@ impl Datum {
         }
     }
 
-    pub fn to_xtra_instance(&self) -> Result<(&String, &XtraInstanceId), ScriptError> {
+    pub fn to_xtra_instance(&self) -> Result<(&str, &XtraInstanceId), ScriptError> {
         match self {
             Datum::XtraInstance(xtra_name, xtra_instance) => Ok((xtra_name, xtra_instance)),
             _ => Err(ScriptError::new(
@@ -564,7 +592,7 @@ impl Datum {
         }
     }
 
-    pub fn to_xtra_name(&self) -> Result<&String, ScriptError> {
+    pub fn to_xtra_name(&self) -> Result<&str, ScriptError> {
         match self {
             Datum::Xtra(name) => Ok(name),
             _ => Err(ScriptError::new(
@@ -575,7 +603,7 @@ impl Datum {
 
     pub fn to_string_chunk(
         &self,
-    ) -> Result<(&StringChunkSource, &StringChunkExpr, &String), ScriptError> {
+    ) -> Result<(&StringChunkSource, &StringChunkExpr, &str), ScriptError> {
         match self {
             Datum::StringChunk(datum_ref, expr, value) => Ok((datum_ref, expr, value)),
             _ => Err(ScriptError::new(
@@ -585,11 +613,17 @@ impl Datum {
     }
 
     pub fn to_string_mut(&mut self) -> Result<&mut String, ScriptError> {
+        // Coerce non-string types to String first (Lingo allows chunk ops on any value)
+        match self {
+            Datum::String(_) => {}
+            _ => {
+                let s = self.string_value()?;
+                *self = Datum::String(s);
+            }
+        }
         match self {
             Datum::String(s) => Ok(s),
-            _ => Err(ScriptError::new(
-                "Cannot convert datum to string".to_string(),
-            )),
+            _ => unreachable!(),
         }
     }
 

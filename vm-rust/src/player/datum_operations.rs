@@ -565,7 +565,7 @@ pub fn multiply_datums(
             Datum::Point(result)
         }
         (Datum::List(_, list, _), Datum::Float(right)) => {
-            let mut new_list = vec![];
+            let mut ref_list = vec![];
             for item in list {
                 let item_datum = player.get_datum(item).clone();
                 let result_datum = match &item_datum {
@@ -578,11 +578,61 @@ pub fn multiply_datums(
                         )))
                     }
                 };
-                new_list.push(result_datum);
+                ref_list.push(player.alloc_datum(result_datum));
             }
+            Datum::List(DatumType::List, ref_list, false)
+        }
+        (Datum::Int(left), Datum::List(_, list, _)) => {
             let mut ref_list = vec![];
-            for item in new_list {
-                ref_list.push(player.alloc_datum(item));
+            for item in list {
+                let item_datum = player.get_datum(item).clone();
+                let result_datum = match &item_datum {
+                    Datum::Int(n) => Datum::Int(left * n),
+                    Datum::Float(n) => Datum::Float((*left as f64) * n),
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Mul operator in list only works with ints and floats. Given: {}",
+                            format_datum(item, player)
+                        )))
+                    }
+                };
+                ref_list.push(player.alloc_datum(result_datum));
+            }
+            Datum::List(DatumType::List, ref_list, false)
+        }
+        (Datum::Float(left), Datum::List(_, list, _)) => {
+            let mut ref_list = vec![];
+            for item in list {
+                let item_datum = player.get_datum(item).clone();
+                let result_datum = match &item_datum {
+                    Datum::Int(n) => Datum::Float(left * (*n as f64)),
+                    Datum::Float(n) => Datum::Float(left * n),
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Mul operator in list only works with ints and floats. Given: {}",
+                            format_datum(item, player)
+                        )))
+                    }
+                };
+                ref_list.push(player.alloc_datum(result_datum));
+            }
+            Datum::List(DatumType::List, ref_list, false)
+        }
+        (Datum::List(_, list, _), Datum::Int(right)) => {
+            let mut ref_list = vec![];
+            for item in list {
+                let item_datum = player.get_datum(item).clone();
+                let result_datum = match &item_datum {
+                    Datum::Int(n) => Datum::Int(n * right),
+                    Datum::Float(n) => Datum::Float(n * (*right as f64)),
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Mul operator in list only works with ints and floats. Given: {}",
+                            format_datum(item, player)
+                        )))
+                    }
+                };
+                ref_list.push(player.alloc_datum(result_datum));
             }
             Datum::List(DatumType::List, ref_list, false)
         }
@@ -691,67 +741,6 @@ pub fn multiply_datums(
             }
             Datum::Point(result)
         }
-        // List (2 elements) as Point multiplication
-        (Datum::List(_, list, _), Datum::Int(right)) if list.len() == 2 => {
-            let right_ref = player.alloc_datum(Datum::Int(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&list[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::List(DatumType::List, result.to_vec(), false)
-        }
-        (Datum::List(_, list, _), Datum::Float(right)) if list.len() == 2 => {
-            let right_ref = player.alloc_datum(Datum::Float(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&list[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::List(DatumType::List, result.to_vec(), false)
-        }
-        (Datum::Int(left), Datum::List(_, list, _)) if list.len() == 2 => {
-            let left_ref = player.alloc_datum(Datum::Int(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&list[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::List(DatumType::List, result.to_vec(), false)
-        }
-        (Datum::Float(left), Datum::List(_, list, _)) if list.len() == 2 => {
-            let left_ref = player.alloc_datum(Datum::Float(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&list[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::List(DatumType::List, result.to_vec(), false)
-        }
 
         _ => {
             return Err(ScriptError::new(format!(
@@ -773,10 +762,23 @@ pub fn divide_datums(
     let right = player.get_datum(&right).clone();
 
     let result = match (&left, &right) {
-        (Datum::Int(left), Datum::Int(right)) => Datum::Int(left / right),
-        (Datum::Int(left), Datum::Float(right)) => Datum::Float((*left as f64) / right),
-        (Datum::Float(left), Datum::Int(right)) => Datum::Float(left / (*right as f64)),
-        (Datum::Float(left), Datum::Float(right)) => Datum::Float(left / right),
+        (Datum::Int(left), Datum::Int(right)) => {
+            // Lingo coerces divisor 0 to 1 (ScummVM: LC::divData)
+            let d = if *right == 0 { 1 } else { *right };
+            Datum::Int(left / d)
+        }
+        (Datum::Int(left), Datum::Float(right)) => {
+            let d = if *right == 0.0 { 1.0 } else { *right };
+            Datum::Float((*left as f64) / d)
+        }
+        (Datum::Float(left), Datum::Int(right)) => {
+            let d = if *right == 0 { 1.0 } else { *right as f64 };
+            Datum::Float(left / d)
+        }
+        (Datum::Float(left), Datum::Float(right)) => {
+            let d = if *right == 0.0 { 1.0 } else { *right };
+            Datum::Float(left / d)
+        }
         (Datum::Point(a), Datum::Int(right)) => {
             let right_ref = player.alloc_datum(Datum::Int(*right));
             let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
@@ -902,6 +904,20 @@ pub fn divide_datums(
             Datum::Float(left_float / right)
         }
         (Datum::Void, _) => Datum::Int(0),
+        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
+            let mut result = vec![];
+            for item in list {
+                let a_val = player.get_datum(item).clone();
+                let b_val = right.clone();
+                let quot = divide_datums(
+                    player.alloc_datum(a_val),
+                    player.alloc_datum(b_val),
+                    player,
+                )?;
+                result.push(player.alloc_datum(quot));
+            }
+            Datum::List(DatumType::List, result, false)
+        }
         _ => {
             return Err(ScriptError::new(format!(
                 "Div operator only works with ints and floats (Provided: {} and {})",

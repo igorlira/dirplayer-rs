@@ -242,7 +242,15 @@ impl CastManager {
     }
 
     pub fn get_cast_mut(&mut self, number: u32) -> &mut CastLib {
-        return self.casts.get_mut(number as usize - 1).unwrap();
+        let n_casts = self.casts.len();
+        match self.casts.get_mut(number as usize - 1) {
+            Some(cast) => cast,
+            None => panic!(
+                "Cast index out of bounds: {} (# casts={})",
+                number,
+                n_casts
+            ),
+        }
     }
 
     pub fn get_cast_by_name(&self, name: &str) -> Option<&CastLib> {
@@ -296,7 +304,7 @@ impl CastManager {
         self.palette_cache.borrow().as_ref().unwrap().clone()
     }
 
-    pub fn find_member_ref_by_name(&self, name: &String) -> Option<CastMemberRef> {
+    pub fn find_member_ref_by_name(&self, name: &str) -> Option<CastMemberRef> {
         for cast in &self.casts {
             if let Some(member) = cast.find_member_by_name(name) {
                 return Some(CastMemberRef {
@@ -343,7 +351,7 @@ impl CastManager {
                 "Cast number or name invalid: {}",
                 cast_name_or_num
                     .map(|x| x.type_str())
-                    .unwrap_or("None".to_string())
+                    .unwrap_or("None")
             );
             None
         };

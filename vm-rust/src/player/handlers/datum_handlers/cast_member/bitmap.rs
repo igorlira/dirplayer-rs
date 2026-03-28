@@ -12,7 +12,7 @@ impl BitmapMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -31,7 +31,7 @@ impl BitmapMemberHandlers {
                 "Cannot get prop of invalid bitmap ref"
             )));
         }
-        match prop.as_str() {
+        match prop {
             "width" => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
             "height" => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
             "image" | "picture" => Ok(Datum::BitmapRef(bitmap_ref)),
@@ -81,10 +81,10 @@ impl BitmapMemberHandlers {
 
     pub fn set_prop(
         member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop {
             "image" | "picture" => {
                 if value.is_void() {
                     return Ok(()); // Setting image to VOID is a no-op in Director
@@ -195,10 +195,7 @@ impl BitmapMemberHandlers {
                     Datum::CastMember(member_ref) => {
                         reserve_player_mut(|player| {
                             let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
-                            bitmap.palette_ref = PaletteRef::from(
-                                member_ref.cast_member as i16,
-                                member_ref.cast_lib as u32,
-                            );
+                            bitmap.palette_ref = PaletteRef::Member(member_ref.clone());
                             Ok(())
                         })?;
                     }
@@ -239,10 +236,7 @@ impl BitmapMemberHandlers {
                                     BuiltInPalette::from_i16(palette_ref as i16).unwrap(),
                                 )
                             } else {
-                                bitmap.palette_ref = PaletteRef::from(
-                                    member.cast_member as i16,
-                                    member.cast_lib as u32,
-                                );
+                                bitmap.palette_ref = PaletteRef::Member(member.clone());
                             }
                             Ok(())
                         })?;
@@ -250,10 +244,7 @@ impl BitmapMemberHandlers {
                     Datum::CastMember(member_ref) => {
                         reserve_player_mut(|player| {
                             let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
-                            bitmap.palette_ref = PaletteRef::from(
-                                member_ref.cast_member as i16,
-                                member_ref.cast_lib as u32,
-                            );
+                            bitmap.palette_ref = PaletteRef::Member(member_ref.clone());
                             Ok(())
                         })?;
                     }

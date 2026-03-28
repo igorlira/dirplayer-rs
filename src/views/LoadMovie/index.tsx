@@ -5,6 +5,7 @@ import { useMountEffect } from '../../utils/hooks';
 import { isDebugSession } from '../../utils/debug';
 import { getBasePath, getFullPathFromOrigin } from '../../utils/path';
 import { isElectron, openFileDialog } from '../../utils/electron';
+import { APP_TITLE } from '../../constants';
 
 type ExternalParam = { key: string; value: string };
 
@@ -58,6 +59,7 @@ export default function LoadMovie() {
   const defaultMovieUrl = process.env.REACT_APP_MOVIE_URL ? getFullPathFromOrigin(process.env.REACT_APP_MOVIE_URL) : '';
   const [movieUrl, setMovieUrl] = useState<string>(defaultMovieUrl || '');
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [hasError, setHasError] = useState(false);
   const [autoPlay, setAutoPlay] = useState<boolean>(process.env.REACT_APP_MOVIE_AUTO_PLAY === 'true');
   const [externalParams, setExternalParams] = useState<ExternalParam[]>([]);
   const [recentMovies, setRecentMovies] = useState<RecentMovie[]>(() => loadRecentMovies());
@@ -80,8 +82,10 @@ export default function LoadMovie() {
   const loadMovieFile = useCallback(async (fullPath: string, params?: ExternalParam[]) => {
     try {
       setIsLoading(true);
+      setHasError(false);
       set_base_path(getBasePath(fullPath));
       set_external_params(paramsArrayToRecord(params ?? externalParams));
+      document.title = `${fullPath.split('/').pop() || fullPath} - ${APP_TITLE}`;
       await load_movie_file(fullPath, autoPlay);
     } catch (e) {
       console.error('Failed to load movie', e);
@@ -91,6 +95,7 @@ export default function LoadMovie() {
   }, [autoPlay, externalParams]);
 
   const onLoadClick = useCallback(async () => {
+    if (!movieUrl.trim()) { setHasError(true); return; }
     const updated = saveRecentMovie(movieUrl, externalParams);
     setRecentMovies(updated);
     await loadMovieFile(movieUrl);
@@ -157,10 +162,10 @@ export default function LoadMovie() {
               id="url"
               name="url"
               type="text"
-              className={styles.input}
+              className={`${styles.input} ${hasError ? styles.inputError : ''}`}
               placeholder={isInElectron ? '/path/to/movie.dcr' : 'https://example.com/movie.dcr'}
               value={movieUrl}
-              onChange={e => setMovieUrl(e.currentTarget.value)}
+              onChange={e => { setMovieUrl(e.currentTarget.value); setHasError(false); }}
               disabled={isLoading}
             />
             {isInElectron && (

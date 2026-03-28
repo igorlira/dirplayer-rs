@@ -9,10 +9,10 @@ impl PointDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
             "inside" => Self::inside(datum, args),
@@ -118,7 +118,7 @@ impl PointDatumHandlers {
     pub fn get_prop(
         player: &DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let point_arr = match player.get_datum(datum) {
             Datum::Point(arr) => arr,
@@ -128,7 +128,7 @@ impl PointDatumHandlers {
         let x = Datum::to_f64(player, &point_arr[0])?;
         let y = Datum::to_f64(player, &point_arr[1])?;
 
-        match prop.as_str() {
+        match prop {
             "locH" => Ok(Datum::from_f64(x)),
             "locV" => Ok(Datum::from_f64(y)),
             "ilk"  => Ok(Datum::Symbol("point".to_string())),
@@ -139,12 +139,12 @@ impl PointDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
         let new_val = player.get_datum(value_ref).clone();
 
-        let idx = match prop.as_str() {
+        let idx = match prop {
             "locH" => 0,
             "locV" => 1,
             _ => return Err(ScriptError::new(format!("Cannot set point property {}", prop))),

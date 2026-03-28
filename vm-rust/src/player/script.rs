@@ -127,7 +127,7 @@ pub type ScriptHandlerRef = (CastMemberRef, String);
 pub fn script_get_prop_opt(
     player: &mut DirPlayer,
     script_instance_ref: &ScriptInstanceRef,
-    prop_name: &String,
+    prop_name: &str,
 ) -> Option<DatumRef> {
     // Check virtual script handler first
     match super::virtual_scripts::VirtualScriptRegistry::try_get_instance_prop(player, script_instance_ref, prop_name) {
@@ -145,6 +145,9 @@ pub fn script_get_prop_opt(
         } else {
             return Some(DatumRef::Void);
         }
+    } else if prop_name == "script" {
+        let script_instance = player.allocator.get_script_instance(&script_instance_ref);
+        return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
     }
 
     // Try to find the property on the current instance first
@@ -172,7 +175,7 @@ pub fn script_get_prop_opt(
 pub fn script_get_static_prop(
     player: &mut DirPlayer,
     script_ref: &CastMemberRef,
-    prop_name: &String,
+    prop_name: &str,
 ) -> Result<DatumRef, ScriptError> {
     let script_rc = player
         .movie
@@ -194,7 +197,7 @@ pub fn script_get_static_prop(
 pub fn script_set_static_prop(
     player: &mut DirPlayer,
     script_ref: &CastMemberRef,
-    prop_name: &String,
+    prop_name: &str,
     value_ref: &DatumRef,
     required: bool,
 ) -> Result<(), ScriptError> {
@@ -220,7 +223,7 @@ pub fn script_set_static_prop(
 pub fn script_get_prop(
     player: &mut DirPlayer,
     script_instance_ref: &ScriptInstanceRef,
-    prop_name: &String,
+    prop_name: &str,
 ) -> Result<DatumRef, ScriptError> {
     if let Some(prop) = script_get_prop_opt(player, script_instance_ref, prop_name) {
         Ok(prop)
@@ -242,7 +245,7 @@ pub fn script_get_prop(
 pub fn script_set_prop(
     player: &mut DirPlayer,
     script_instance_ref: &ScriptInstanceRef,
-    prop_name: &String,
+    prop_name: &str,
     value_ref: &DatumRef,
     required: bool,
 ) -> Result<(), ScriptError> {
@@ -398,7 +401,7 @@ pub fn get_name<'a>(
 
 pub async fn player_set_obj_prop(
     obj_ref: &DatumRef,
-    prop_name: &String,
+    prop_name: &str,
     value_ref: &DatumRef,
 ) -> Result<(), ScriptError> {
     let (obj_clone, value_clone) = reserve_player_ref(|player| {
@@ -433,14 +436,14 @@ pub async fn player_set_obj_prop(
             TimeoutDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
         Datum::PropList(..) => reserve_player_mut(|player| {
-            let key_ref = player.alloc_datum(Datum::Symbol(prop_name.clone()));
+            let key_ref = player.alloc_datum(Datum::Symbol(prop_name.to_owned()));
             PropListUtils::set_prop(
                 obj_ref,
                 &key_ref,
                 value_ref,
                 player,
                 false,
-                prop_name.clone(),
+                prop_name,
             )
         }),
         Datum::Rect(..) => reserve_player_mut(|player| {
@@ -501,12 +504,12 @@ pub async fn player_set_obj_prop(
 pub fn get_obj_prop(
     player: &mut DirPlayer,
     obj_ref: &DatumRef,
-    prop_name: &String,
+    prop_name: &str,
 ) -> Result<DatumRef, ScriptError> {
     let obj_clone = player.get_datum(obj_ref).clone();
 
     // Universal type-check properties (work on any datum type)
-    match prop_name.as_str() {
+    match prop_name {
         "integerp" => {
             let is_int = matches!(obj_clone, Datum::Int(_));
             return Ok(player.alloc_datum(Datum::Int(if is_int { 1 } else { 0 })));

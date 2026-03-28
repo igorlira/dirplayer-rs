@@ -13,10 +13,10 @@ pub struct ColorDatumHandlers {}
 impl ColorDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         _args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "hexString" => reserve_player_mut(|player| {
                 let color_ref = player.get_datum(datum).to_color_ref()?;
                 let (r, g, b) = resolve_color_ref(
@@ -37,10 +37,10 @@ impl ColorDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let color_ref = player.get_datum(datum).to_color_ref()?;
-        match prop.as_str() {
+        match prop {
             "red" => match color_ref {
                 ColorRef::Rgb(r, _, _timeout_name) => Ok(player.alloc_datum(Datum::Int(*r as i32))),
                 ColorRef::PaletteIndex(i) => match i {
@@ -80,10 +80,10 @@ impl ColorDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop {
             "red" => {
                 let r = player.get_datum(value).int_value()?;
                 let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;

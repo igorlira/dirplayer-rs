@@ -66,7 +66,7 @@ impl SoundChannelDatumHandlers {
         prop_list: &Datum,
         key_name: &str,
     ) -> Option<Datum> {
-        if let Datum::PropList(ref props, _) = prop_list {
+        if let Datum::PropList(props, _) = prop_list {
             for (key_ref, value_ref) in props {
                 let key = player.get_datum(key_ref);
                 if let Ok(sym) = key.symbol_value() {
@@ -89,7 +89,7 @@ impl SoundChannelDatumHandlers {
 
         let sound_member = {
             let member_datum = player.get_datum(&member_ref);
-            if let Datum::CastMember(ref cast_member_ref) = member_datum {
+            if let Datum::CastMember(cast_member_ref) = member_datum {
                 if let Some(cast_member) = player
                     .movie
                     .cast_manager
@@ -138,7 +138,7 @@ impl SoundChannelDatumHandlers {
     pub fn call(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         let handler_name_lower = handler_name.to_lowercase();
@@ -248,7 +248,7 @@ impl SoundChannelDatumHandlers {
     pub fn get_prop(
         player: &DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         // Get the Rc<RefCell<SoundChannel>>
         let channel_rc = Self::get_sound_channel(player, datum)?;
@@ -256,7 +256,7 @@ impl SoundChannelDatumHandlers {
         // Borrow the inner SoundChannel
         let channel = channel_rc.borrow();
 
-        match prop.as_str() {
+        match prop {
             "volume" => Ok(Datum::Float(channel.volume as f64)),
             "duration" => Ok(Datum::Float(channel.get_duration() as f64)),
             "pan" => Ok(Datum::Float(channel.pan as f64)),
@@ -281,10 +281,10 @@ impl SoundChannelDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &String,
+        prop: &str,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop {
             "volume" => {
                 let vol = player.get_datum(value_ref).float_value()?;
                 Self::set_sound_volume(player, datum, vol)?;
@@ -1317,7 +1317,7 @@ impl SoundChannel {
     }
 
     fn get_proplist_prop(player: &DirPlayer, prop_list: &Datum, key_name: &str) -> Option<Datum> {
-        if let Datum::PropList(ref props, _) = prop_list {
+        if let Datum::PropList(props, _) = prop_list {
             for (key_ref, value_ref) in props {
                 let key = player.get_datum(key_ref);
                 if let Ok(sym) = key.symbol_value() {
@@ -1550,7 +1550,7 @@ impl SoundChannel {
 
     fn resolve_sound_member(player: &DirPlayer, datum: &Datum) -> Option<SoundMember> {
         // Case 1: Direct CastMember reference
-        if let Datum::CastMember(ref member_ref) = datum {
+        if let Datum::CastMember(member_ref) = datum {
             let cast_member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
             match &cast_member.member_type {
                 CastMemberType::Sound(sound_member) => return Some(sound_member.clone()),
@@ -1829,8 +1829,8 @@ impl SoundChannel {
             let my_generation = {
                 let mut ch = self_rc.borrow_mut();
                 *ch.decode_generation.borrow_mut() += 1;
-                let gen = *ch.decode_generation.borrow();
-                gen  // Return the copied value
+                let gen_ = *ch.decode_generation.borrow();
+                gen_  // Return the copied value
             };
             
             wasm_bindgen_futures::spawn_local(async move {
@@ -2043,8 +2043,8 @@ impl SoundChannel {
             let mut ch = self_rc.borrow_mut();
             *ch.is_decoding.borrow_mut() = true;
             *ch.decode_generation.borrow_mut() += 1;
-            let gen = *ch.decode_generation.borrow();
-            gen  // Return the copied value
+            let gen_ = *ch.decode_generation.borrow();
+            gen_  // Return the copied value
         };
         
         debug!("🔢 Starting decode generation {}", my_generation);
@@ -3449,7 +3449,7 @@ impl SoundChannel {
         let datum = player.get_datum(&datum_ref);
 
         let props = match datum {
-            Datum::PropList(ref p, _) if !p.is_empty() => p,
+            Datum::PropList(p, _) if !p.is_empty() => p,
             _ => {
                 console::log_1(
                     &"⚠️ queue(): called with non-propList or empty list — ignored".into(),
@@ -3810,7 +3810,7 @@ impl SoundChannel {
         let member_datum = player.get_datum(member_ref);
 
         // Check if it's a CastMember
-        if let Datum::CastMember(ref cast_member_ref) = member_datum {
+        if let Datum::CastMember(cast_member_ref) = member_datum {
             // Find the actual cast member
             if let Some(cast_member) = player
                 .movie
@@ -4330,7 +4330,7 @@ impl SoundChannel {
         // First, get the datum and extract CastMemberRef
         let datum = player.get_datum(member_ref);
         let cast_member_ref = match datum {
-            Datum::CastMember(ref r) => r,
+            Datum::CastMember(r) => r,
             _ => return Err(JsValue::from_str("Expected CastMember datum")),
         };
 

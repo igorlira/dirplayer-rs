@@ -25,7 +25,7 @@ pub enum PlayerVMEvent {
     Callback(DatumRef, String, Vec<DatumRef>),
 }
 
-pub fn player_dispatch_global_event(handler_name: &String, args: &Vec<DatumRef>) {
+pub fn player_dispatch_global_event(handler_name: &str, args: &Vec<DatumRef>) {
     let tx = unsafe { PLAYER_EVENT_TX.clone() }.unwrap();
     tx.try_send(PlayerVMEvent::Global(
         handler_name.to_owned(),
@@ -36,7 +36,7 @@ pub fn player_dispatch_global_event(handler_name: &String, args: &Vec<DatumRef>)
 
 pub fn player_dispatch_callback_event(
     receiver: DatumRef,
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) {
     let tx = unsafe { PLAYER_EVENT_TX.clone() }.unwrap();
@@ -49,7 +49,7 @@ pub fn player_dispatch_callback_event(
 }
 
 pub fn player_dispatch_targeted_event(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
     instance_ids: Option<&Vec<ScriptInstanceRef>>,
 ) {
@@ -63,7 +63,7 @@ pub fn player_dispatch_targeted_event(
 }
 
 pub fn player_dispatch_event_to_sprite(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
     sprite_num: u16,
 ) {
@@ -104,7 +104,7 @@ pub fn player_dispatch_event_to_sprite(
 }
 
 pub async fn player_dispatch_event_to_sprite_targeted(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
     sprite_num: u16,
 ) {
@@ -145,7 +145,7 @@ pub async fn player_dispatch_event_to_sprite_targeted(
 }
 
 pub async fn player_invoke_event_to_instances(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
     instance_refs: &Vec<ScriptInstanceRef>,
 ) -> Result<bool, ScriptError> {
@@ -198,7 +198,7 @@ pub async fn player_invoke_event_to_instances(
 }
 
 pub async fn player_invoke_targeted_event(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
     instance_refs: Option<&Vec<ScriptInstanceRef>>,
 ) -> Result<DatumRef, ScriptError> {
@@ -215,7 +215,7 @@ pub async fn player_invoke_targeted_event(
 }
 
 pub async fn player_invoke_frame_and_movie_scripts(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     let active_static_scripts = reserve_player_mut(|player| {
@@ -292,7 +292,7 @@ pub async fn player_invoke_frame_and_movie_scripts(
 }
 
 pub async fn player_invoke_static_event(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<bool, ScriptError> {
     let active_static_scripts = reserve_player_mut(|player| {
@@ -354,7 +354,7 @@ pub async fn player_invoke_static_event(
 }
 
 pub async fn player_invoke_global_event(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     // First stage behavior script
@@ -494,7 +494,7 @@ pub fn player_unwrap_result(result: Result<DatumRef, ScriptError>) -> DatumRef {
 }
 
 pub async fn player_dispatch_event_beginsprite(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>
 ) -> Result<Vec<(ScoreRef, u32)>, ScriptError> {
     let (mut sprite_instances, mut frame_instances, all_channels) =
@@ -729,7 +729,7 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
 }
 
 pub async fn dispatch_event_to_all_behaviors(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) {
     use crate::player::allocator::ScriptInstanceAllocatorTrait;
@@ -883,7 +883,7 @@ pub async fn player_wait_available() {
 /// Dispatch system events to all timeout targets
 /// System events include: prepareMovie, startMovie, stopMovie, prepareFrame, exitFrame
 pub async fn dispatch_system_event_to_timeouts(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) {
     // Get all timeout targets that are currently scheduled

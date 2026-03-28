@@ -9,7 +9,7 @@ impl FilmLoopMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -31,7 +31,7 @@ impl FilmLoopMemberHandlers {
         let rect_width = rect_right - rect_left;
         let rect_height = rect_bottom - rect_top;
 
-        match prop.as_str() {
+        match prop {
             "rect" => Ok(Datum::Rect([
                 player.alloc_datum(Datum::Int(rect_left)),
                 player.alloc_datum(Datum::Int(rect_top)),

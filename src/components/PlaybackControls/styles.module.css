@@ -4,4 +4,71 @@
   flex-direction: row;
   gap: 16px;
   justify-content: start;
+  align-items: center;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.mcpButton {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid #aaa;
+  border-radius: 3px;
+  background: #e8e8e8;
+  color: #666;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+}
+
+.mcpButton:hover {
+  background: #ddd;
+  border-color: #888;
+}
+
+.mcpButtonActive {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid #2a7a2a;
+  border-radius: 3px;
+  background: #d4edda;
+  color: #1a5c1a;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+}
+
+.mcpButtonActive:hover {
+  background: #c3e6cb;
+  border-color: #1a5c1a;
+}
+
+.mcpContainer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcpUrl {
+  font-size: 11px;
+  color: #1a5c1a;
+  font-family: monospace;
+  cursor: pointer;
+  border-bottom: 1px dashed #1a5c1a;
+}
+
+.mcpUrl:hover {
+  color: #0d3d0d;
+}
+
+.mcpPortInput {
+  font-size: 11px;
+  font-family: monospace;
+  padding: 1px 4px;
+  border: 1px solid #007acc;
+  border-radius: 2px;
+  outline: none;
+  width: 50px;
 }

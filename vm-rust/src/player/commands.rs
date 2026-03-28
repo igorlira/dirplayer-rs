@@ -156,7 +156,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         }
         PlayerVMCommand::SetBasePath(path) => {
             reserve_player_mut(|player| {
-                player.net_manager.set_base_path(Url::parse(&path).unwrap());
+                player.net_manager.set_base_path(Url::parse(&path)
+                    .expect(&format!("Invalid base path URL: '{}'", path)));
             });
         }
         PlayerVMCommand::SetSystemFontPath(path) => {

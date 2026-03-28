@@ -231,6 +231,12 @@ const vmSlice = createSlice({
         isMovieLoaded: true,
       }
     },
+    movieUnloaded: (state) => {
+      return {
+        ...initialState,
+        isReady: state.isReady,
+      }
+    },
     debugMessageAdded: (state, action: PayloadAction<string>) => {
       return {
         ...state,
@@ -265,5 +271,5 @@ export const selectGlobals = (state: VMSliceState) => state.globals
 export const selectDebugMessages = (state: VMSliceState) => state.debugMessages
 
 // Action creators are generated for each case reducer function
-export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, debugMessageAdded, debugContentAdded, debugMessagesCleared } = vmSlice.actions
+export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, movieUnloaded, debugMessageAdded, debugContentAdded, debugMessagesCleared } = vmSlice.actions
 export default vmSlice.reducer

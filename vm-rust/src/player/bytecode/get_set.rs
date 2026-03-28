@@ -40,6 +40,7 @@ impl GetSetUtils {
                 player.scopes.get(ctx.scope_ref).unwrap().args.len() as i32,
             ))),
             "result" => Ok(player.last_handler_result.clone()),
+            "pi" => Ok(player.alloc_datum(Datum::Float(std::f64::consts::PI))),
             _ => player.get_movie_prop(prop_name),
         }
     }

@@ -1960,6 +1960,8 @@ dependencies = [
  "pest",
  "pest_derive",
  "rgb565",
+ "serde",
+ "serde_json",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",

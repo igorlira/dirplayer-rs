@@ -29,6 +29,7 @@ pub mod handlers;
 pub mod keyboard;
 pub mod keyboard_events;
 pub mod keyboard_map;
+pub mod mcp;
 pub mod movie;
 pub mod net_manager;
 pub mod net_task;
@@ -43,6 +44,7 @@ pub mod timeout;
 pub mod xtra;
 pub mod score_keyframes;
 pub mod virtual_scripts;
+pub mod console;
 
 use std::{
     collections::HashMap,
@@ -137,9 +139,11 @@ use crate::player::handlers::datum_handlers::xml::{XmlDocument, XmlNode};
 use crate::player::handlers::movie::MovieHandlers;
 use crate::player::handlers::datum_handlers::player_call_datum_handler;
 
-fn trace_output(message: &str, trace_log_file: &str) {
+fn trace_output(player: &DirPlayer, message: &str) {
     use crate::js_api::JsApi;
     
+    player.console.write_line(message);
+    let trace_log_file = &player.movie.trace_log_file;
     if trace_log_file.is_empty() {
         // Use the same output as 'put' command, but without the "-- " prefix
         // since trace messages already have their own prefixes (-->, ==, etc.)
@@ -265,6 +269,7 @@ pub struct DirPlayer {
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
     pub last_sprite_prop_ref: Option<DatumRef>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
+    pub console: console::ConsoleBuffer,
 }
 
 /// Target frame for a movie transition (gotoNetMovie or go movie).
@@ -398,6 +403,7 @@ impl DirPlayer {
             script_instance_list_cache: FxHashMap::default(),
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
+            console: console::ConsoleBuffer::new(),
         };
 
         result.reset();
@@ -407,12 +413,13 @@ impl DirPlayer {
     pub async fn load_movie_from_file(&mut self, path: &str) {
         let task_id = self.net_manager.preload_net_thing(path.to_owned());
         self.net_manager.await_task(task_id).await;
-        let task = self.net_manager.get_task(task_id).unwrap();
+        let task = self.net_manager.get_task(task_id)
+            .expect(&format!("Network task not found for '{}'", path));
         let data_bytes = self
             .net_manager
             .get_task_result(Some(task_id))
-            .unwrap()
-            .unwrap();
+            .expect(&format!("No response received for '{}'", path))
+            .expect(&format!("Network request failed for '{}'", path));
 
         let file_name = task.resolved_url
             .path_segments()
@@ -424,7 +431,7 @@ impl DirPlayer {
             &file_name,
             &get_base_url(&task.resolved_url).to_string(),
         )
-        .unwrap();
+        .expect(&format!("Failed to parse movie file '{}'", path));
         self.load_movie_from_dir(movie_file).await;
     }
 
@@ -758,7 +765,7 @@ impl DirPlayer {
     }
 
     #[allow(dead_code)]
-    pub fn get_global(&self, name: &String) -> Option<&Datum> {
+    pub fn get_global(&self, name: &str) -> Option<&Datum> {
         self.globals
             .get(name)
             .map(|datum_ref| self.get_datum(datum_ref))
@@ -1030,7 +1037,7 @@ impl DirPlayer {
                 if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
                     let sn = self.movie.cast_manager.get_script_by_ref(&entry.script_instance.script)
                         .map(|s| s.name.clone()).unwrap_or_else(|| format!("si#{}", si_id));
-                    let dtype = self.allocator.datums.get(id).map(|e| e.datum.type_str()).unwrap_or("?".to_string());
+                    let dtype = self.allocator.datums.get(id).map(|e| e.datum.type_str()).unwrap_or("?");
                     *si_new.entry(format!("si({}).{} [{}]", sn, prop_name.as_str(), dtype)).or_insert(0) += 1;
                     accounted.insert(id);
                 }
@@ -1280,6 +1287,7 @@ impl DirPlayer {
             },
             "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
             "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
+            "keyPressed" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key_pressed()))),
             "floatPrecision" => Ok(self.alloc_datum(Datum::Int(self.float_precision as i32))),
             "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
             "ticks" => Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))),
@@ -1429,16 +1437,16 @@ impl DirPlayer {
         })
     }
 
-    fn get_player_prop(&mut self, prop: &String) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+    fn get_player_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
+        match prop {
             "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
             "productVersion" => Ok(self.alloc_datum(Datum::String("10.1".to_string()))), // TODO
             _ => Err(ScriptError::new(format!("Unknown player prop {}", prop))),
         }
     }
 
-    fn set_player_prop(&mut self, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
-        match prop.as_str() {
+    fn set_player_prop(&mut self, prop: &str, value: &DatumRef) -> Result<(), ScriptError> {
+        match prop {
             "itemDelimiter" => {
                 let value = self.get_datum(value);
                 self.movie.item_delimiter = (value.string_value()?).chars().next().unwrap();
@@ -1465,6 +1473,7 @@ impl DirPlayer {
             "beepOn" | "centerStage" | "fixStageSize" => Ok(Datum::Int(0)),
             "exitLock" => Ok(datum_bool(self.movie.exit_lock)),
             "key" => Ok(Datum::String(self.keyboard_manager.key())),
+            "keyPressed" => Ok(Datum::String(self.keyboard_manager.key_pressed())),
             "keyCode" => Ok(Datum::Int(self.keyboard_manager.key_code() as i32)),
             "stageColor" => Ok(Datum::Int(0)),
             "doubleClick" => Ok(datum_bool(self.is_double_click)),
@@ -1621,7 +1630,7 @@ impl DirPlayer {
         // Get the loop setting from the cast member
         let loop_count = {
             let member_datum = self.get_datum(&member_ref);
-            if let Datum::CastMember(ref cast_member_ref) = member_datum {
+            if let Datum::CastMember(cast_member_ref) = member_datum {
                 if let Some(cast_member) = self.movie.cast_manager.find_member_by_ref(cast_member_ref) {
                     if let CastMemberType::Sound(sound_member) = &cast_member.member_type {
                         if sound_member.info.loop_enabled {
@@ -1937,7 +1946,7 @@ pub fn player_handle_scope_return(scope: &ScopeResult) {
 }
 
 pub async fn player_call_global_handler(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     let receiver_handler = unsafe {
@@ -2213,7 +2222,7 @@ pub async fn player_call_script_handler_raw_args(
                 "== Script: (member {} of castLib {}) Handler: {}",
                 cast_member, cast_lib, handler_name
             );
-            trace_output(&msg, &trace_file);
+            trace_output(player, &msg);
             
             // ADD THIS BLOCK HERE - Clear expression tracker for new handler
             use crate::player::bytecode::handler_manager::EXPRESSION_TRACKER;
@@ -2392,8 +2401,7 @@ pub async fn player_call_script_handler_raw_args(
     let scope = reserve_player_mut(|player| {
         // Trace handler exit
         if player.movie.trace_script {
-            let trace_file = player.movie.trace_log_file.clone();
-            trace_output("--> end", &trace_file);
+            trace_output(player, "--> end");
         }
 
         let result = {

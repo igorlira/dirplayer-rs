@@ -284,7 +284,7 @@ impl TypeUtils {
                 value_ref,
                 player,
                 false,
-                formatted_key,
+                &formatted_key,
             ),
             DatumType::List => {
                 let position = player.get_datum(prop_key_ref).int_value()?;

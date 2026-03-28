@@ -124,11 +124,11 @@ impl ScoreFrameChannelData {
         let mut editable = false;
 
         if sz >= 22 {
-            let unk3 = reader.read_u8()
-                .map_err(|e| format!("Failed to read unk3: {:?}", e))?;
-            color_flag = (unk3 >> 4) & 0x03;  // bits 4-5 only (bits 6-7 are editable/moveable)
-            editable = (unk3 & 0x40) != 0;  // bit 6
-            moveable = (unk3 & 0x80) != 0;  // bit 7
+            let color_code = reader.read_u8()
+                .map_err(|e| format!("Failed to read color_code: {:?}", e))?;
+            color_flag = (color_code >> 4) & 0x03;  // bits 4-5 only (bits 6-7 are editable/moveable)
+            editable = (color_code & 0x40) != 0;  // bit 6
+            moveable = (color_code & 0x80) != 0;  // bit 7
             blend_raw = reader.read_u8()
                 .map_err(|e| format!("Failed to read blend: {:?}", e))?;
         }
@@ -351,10 +351,7 @@ impl SoundChannelData {
 pub struct TempoChannelData {
     pub tempo: u8,            // Byte 6: tempo mode/value (D6+: 246=FPS, 247=delay, 248=wait click, etc.)
     pub tempo_cue_point: u16, // Bytes 4-5: FPS value or delay (when tempo==246 or 247)
-    pub flags1: u8,           // Byte 0
-    pub flags2: u8,           // Byte 1
-    pub unk3: u8,             // Byte 2
-    pub unk4: u8,             // Byte 3
+    pub sprite_list_idx: u32, // Bytes 0-3: index into sprite detail table (D6+)
     pub color_tempo: u8,      // Byte 7
     pub wait_flags: u16,      // Bytes 8-9
     pub channel_flags: u16,   // Bytes 10-11
@@ -363,19 +360,10 @@ pub struct TempoChannelData {
 
 impl TempoChannelData {
     pub fn read(reader: &mut BinaryReader) -> Result<TempoChannelData, String> {
-        // Bytes 0-3: tempoSpriteListIdx (u32) - split into individual bytes for compatibility
-        let flags1 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo flags1: {:?}", e))?;
-        let flags2 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo flags2: {:?}", e))?;
-        let unk3 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo unk3: {:?}", e))?;
-        let unk4 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read tempo unk4: {:?}", e))?;
+        // Bytes 0-3: sprite detail table index (D6+)
+        let sprite_list_idx = reader
+            .read_u32()
+            .map_err(|e| format!("Failed to read tempo sprite_list_idx: {:?}", e))?;
 
         // Bytes 4-5: tempoCuePoint (u16) - FPS value when tempo==246, delay when tempo==247
         let tempo_cue_point = reader
@@ -417,10 +405,7 @@ impl TempoChannelData {
         Ok(TempoChannelData {
             tempo,
             tempo_cue_point,
-            flags1,
-            flags2,
-            unk3,
-            unk4,
+            sprite_list_idx,
             color_tempo,
             wait_flags,
             channel_flags,
@@ -429,13 +414,13 @@ impl TempoChannelData {
     }
     
     pub fn is_default(&self) -> bool {
-        // Check if this is a "no change" marker (0xff 0xfe pattern)
-        self.flags1 == 0xff && self.flags2 == 0xfe
+        // Check if this is a "no change" marker (0xFFFE in high 16 bits)
+        (self.sprite_list_idx >> 16) == 0xFFFE
     }
-    
+
     pub fn is_empty(&self) -> bool {
         // Check if all fields are zero (no tempo data)
-        self.flags1 == 0 && self.flags2 == 0 && self.tempo == 0
+        self.sprite_list_idx == 0 && self.tempo == 0
     }
 }
 
@@ -613,10 +598,7 @@ impl ScoreFrameData {
                         tempo_channel_data.push((frame_index, TempoChannelData {
                             tempo: tempo_val,
                             tempo_cue_point: 0,
-                            flags1: 0,
-                            flags2: 0,
-                            unk3: 0,
-                            unk4: 0,
+                            sprite_list_idx: 0,
                             color_tempo: 0,
                             wait_flags: 0,
                             channel_flags: 0,
@@ -941,7 +923,7 @@ impl FrameIntervalPrimary {
 pub struct FrameIntervalSecondary {
     pub cast_lib: u16,
     pub cast_member: u16,
-    pub unk0: u32,
+    pub initializer_index: u32,
     pub parameter: Vec<DatumRef>,
 }
 
@@ -953,16 +935,16 @@ impl FrameIntervalSecondary {
         let cast_member = reader
             .read_u16()
             .map_err(|e| format!("Failed to read cast_member: {:?}", e))?;
-        let unk0 = reader
+        let initializer_index = reader
             .read_u32()
-            .map_err(|e| format!("Failed to read unk0: {:?}", e))?;
+            .map_err(|e| format!("Failed to read initializer_index: {:?}", e))?;
 
         let parameter = vec![];
 
         Ok(FrameIntervalSecondary {
             cast_lib,
             cast_member,
-            unk0,
+            initializer_index,
             parameter,
         })
     }
@@ -1617,7 +1599,7 @@ impl ScoreChunk {
                             debug!("  🔎 Checking entry {} (size={})", j, next_size);
 
                             // Check if this could be a behavior entry
-                            // Pattern: 8 bytes per behavior (cast_lib u16, cast_member u16, unk0 u32)
+                            // Pattern: 8 bytes per behavior (cast_lib u16, cast_member u16, initializer_index u32)
                             // Disambiguate from primary entries (40/44/48 bytes): peek at the
                             // content — a primary's first two u32s are start_frame/end_frame
                             // (small sequential numbers), while a behavior's first two u16s are
@@ -1648,21 +1630,21 @@ impl ScoreChunk {
                                 for behavior_idx in 0..behavior_count {
                                     if let Ok(cast_lib) = sec_reader.read_u16() {
                                         if let Ok(cast_member) = sec_reader.read_u16() {
-                                            if let Ok(unk0) = sec_reader.read_u32() {
+                                            if let Ok(initializer_index) = sec_reader.read_u32() {
                                                 // Only add if it looks like a valid behavior reference
                                                 if cast_lib > 0 && cast_member > 0 {
                                                     let mut secondary = FrameIntervalSecondary {
                                                         cast_lib,
                                                         cast_member,
-                                                        unk0,
+                                                        initializer_index,
                                                         parameter: vec![],
                                                     };
 
                                                     // Handle parameters
-                                                    if secondary.unk0 > 0
-                                                        && (secondary.unk0 as usize) < entries.len()
+                                                    if secondary.initializer_index > 0
+                                                        && (secondary.initializer_index as usize) < entries.len()
                                                     {
-                                                        let proplist_idx = secondary.unk0 as usize;
+                                                        let proplist_idx = secondary.initializer_index as usize;
                                                         if let Ok(proplist_string) =
                                                             String::from_utf8(
                                                                 entries[proplist_idx].clone(),
@@ -1688,11 +1670,11 @@ impl ScoreChunk {
                                                     }
 
                                                     debug!(
-                                                        "    ✅ Behavior {}: cast={}/{}, unk0={}",
+                                                        "    ✅ Behavior {}: cast={}/{}, initializer_index={}",
                                                         behavior_idx + 1,
                                                         cast_lib,
                                                         cast_member,
-                                                        unk0
+                                                        initializer_index
                                                     );
                                                     secondaries.push(secondary);
                                                     found_valid_behavior = true;

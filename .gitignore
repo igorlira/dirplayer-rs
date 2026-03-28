@@ -31,4 +31,6 @@ public/dcr*
 
 /dist-extension
 /dist-extension.zip
+/dist-extension-firefox
+/dist-extension-firefox.zip
 /dist-polyfill

@@ -9,10 +9,10 @@ impl SymbolDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for symbol"
             ))),
@@ -22,9 +22,9 @@ impl SymbolDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         _: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+        match prop {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("symbol".to_string()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get symbol property {}",
