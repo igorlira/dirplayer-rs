@@ -1694,44 +1694,30 @@ impl Shockwave3dObjectDatumHandlers {
 
                         if let Some(scene) = scene {
                             use crate::director::chunks::w3d::raycast;
+                            use crate::player::score::get_concrete_sprite_rect;
 
-                            // Build view/projection from scene
                             let view_node = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View);
-                            let (fov, near, far) = if let Some(n) = view_node {
-                                (n.fov.to_radians(), n.near_plane, n.far_plane)
+                            let fov_deg = view_node.map(|n| n.fov).unwrap_or(30.0);
+                            let cam_transform = view_node.map(|n| n.transform).unwrap_or([
+                                1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0,
+                            ]);
+
+                            // Find the sprite that holds this 3D member for viewport dimensions.
+                            // Coordinates are sprite-relative (not stage-relative).
+                            let sprite_rect = player.movie.score.channels.iter()
+                                .find(|ch| ch.sprite.member.as_ref() == Some(&member_ref))
+                                .map(|ch| get_concrete_sprite_rect(player, &ch.sprite));
+                            let (width, height) = if let Some(r) = sprite_rect {
+                                (r.width() as f32, r.height() as f32)
                             } else {
-                                (30.0f32.to_radians(), 1.0, 10000.0)
+                                let w = player.movie.rect.width() as f32;
+                                let h = player.movie.rect.height() as f32;
+                                (if w > 0.0 { w } else { 320.0 }, if h > 0.0 { h } else { 240.0 })
                             };
+                            // IFX uses the member's original (default_rect) dimensions for distToProj
+                            let (orig_w, orig_h) = get_member_default_rect_size(player, &member_ref);
 
-                            let width = 320.0f32; // default viewport
-                            let height = 240.0f32;
-                            let aspect = width / height;
-
-                            // Simple perspective + view matrices (column-major)
-                            let f = 1.0 / (fov / 2.0).tan();
-                            let nf = 1.0 / (near - far);
-                            let proj = [
-                                f/aspect, 0.0, 0.0, 0.0,
-                                0.0, f, 0.0, 0.0,
-                                0.0, 0.0, (far+near)*nf, -1.0,
-                                0.0, 0.0, 2.0*far*near*nf, 0.0,
-                            ];
-
-                            let view = if let Some(n) = view_node {
-                                // Simplified inverse of view node transform
-                                let t = &n.transform;
-                                let tx = t[12]; let ty = t[13]; let tz = t[14];
-                                [
-                                    t[0], t[4], t[8], 0.0,
-                                    t[1], t[5], t[9], 0.0,
-                                    t[2], t[6], t[10], 0.0,
-                                    -(t[0]*tx+t[1]*ty+t[2]*tz), -(t[4]*tx+t[5]*ty+t[6]*tz), -(t[8]*tx+t[9]*ty+t[10]*tz), 1.0,
-                                ]
-                            } else {
-                                [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,-500.0,1.0]
-                            };
-
-                            let ray = raycast::screen_to_ray(sx, sy, width, height, &view, &proj);
+                            let ray = raycast::screen_to_ray_shockwave(sx, sy, width, height, orig_w, orig_h, fov_deg, &cam_transform);
                             if let Some(hit) = raycast::raycast_scene(&ray, &scene, 100000.0) {
                                 // Return the model name as a Shockwave3dObjectRef
                                 use crate::director::lingo::datum::Shockwave3dObjectRef;
@@ -1778,43 +1764,35 @@ impl Shockwave3dObjectDatumHandlers {
 
                         if let Some(scene) = scene {
                             use crate::director::chunks::w3d::raycast;
+                            use crate::player::score::get_concrete_sprite_rect;
 
-                            let view_node = scene.nodes.iter().find(|n| n.name == s3d_ref.name);
-                            let (fov, near, far) = if let Some(n) = view_node {
-                                (n.fov.to_radians(), n.near_plane, n.far_plane)
-                            } else { (30.0f32.to_radians(), 1.0, 10000.0) };
+                            let view_node = scene.nodes.iter()
+                                .find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case(&s3d_ref.name))
+                                .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View));
+                            let fov_deg = view_node.map(|n| n.fov).unwrap_or(30.0);
 
-                            let width = player.movie.rect.width() as f32;
-                            let height = player.movie.rect.height() as f32;
-                            let width = if width > 0.0 { width } else { 320.0 };
-                            let height = if height > 0.0 { height } else { 240.0 };
-                            let aspect = width / height;
-
-                            let f = 1.0 / (fov / 2.0).tan();
-                            let nf = 1.0 / (near - far);
-                            let proj = [
-                                f/aspect, 0.0, 0.0, 0.0,
-                                0.0, f, 0.0, 0.0,
-                                0.0, 0.0, (far+near)*nf, -1.0,
-                                0.0, 0.0, 2.0*far*near*nf, 0.0,
-                            ];
-
-                            // Use runtime transform for the camera if available
-                            let cam_transform = node_transforms.get(&s3d_ref.name)
-                                .or_else(|| view_node.map(|n| &n.transform));
-                            let view = if let Some(t) = cam_transform {
-                                let tx = t[12]; let ty = t[13]; let tz = t[14];
-                                [
-                                    t[0], t[4], t[8], 0.0,
-                                    t[1], t[5], t[9], 0.0,
-                                    t[2], t[6], t[10], 0.0,
-                                    -(t[0]*tx+t[1]*ty+t[2]*tz), -(t[4]*tx+t[5]*ty+t[6]*tz), -(t[8]*tx+t[9]*ty+t[10]*tz), 1.0,
-                                ]
+                            // Find the sprite that holds this 3D member for viewport dimensions.
+                            // Coordinates are sprite-relative (not stage-relative).
+                            let sprite_rect = player.movie.score.channels.iter()
+                                .find(|ch| ch.sprite.member.as_ref() == Some(&member_ref))
+                                .map(|ch| get_concrete_sprite_rect(player, &ch.sprite));
+                            let (width, height) = if let Some(r) = sprite_rect {
+                                (r.width() as f32, r.height() as f32)
                             } else {
-                                [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,-500.0,1.0]
+                                let w = player.movie.rect.width() as f32;
+                                let h = player.movie.rect.height() as f32;
+                                (if w > 0.0 { w } else { 320.0 }, if h > 0.0 { h } else { 240.0 })
                             };
 
-                            let ray = raycast::screen_to_ray(sx, sy, width, height, &view, &proj);
+                            // Read camera transform from persistent datum (which Lingo keeps
+                            // up to date) rather than node_transforms which may have a stale
+                            // initial value under a different case key.
+                            let cam_name = view_node.map(|n| n.name.as_str()).unwrap_or(&s3d_ref.name);
+                            let cam_world = get_node_transform(player, &member_ref, cam_name);
+                            // IFX uses the member's original (default_rect) dimensions for distToProj
+                            let (orig_w, orig_h) = get_member_default_rect_size(player, &member_ref);
+
+                            let ray = raycast::screen_to_ray_shockwave(sx, sy, width, height, orig_w, orig_h, fov_deg, &cam_world);
                             let hits = raycast::raycast_scene_multi(
                                 &ray, &scene, 100000.0, max_models,
                                 Some(&node_transforms), Some(&excluded),
@@ -1842,18 +1820,24 @@ impl Shockwave3dObjectDatumHandlers {
                                             hit.normal[0] as f64, hit.normal[1] as f64, hit.normal[2] as f64,
                                         ]));
                                         let midk = player.alloc_datum(Datum::Symbol("meshID".to_string()));
-                                        let midv = player.alloc_datum(Datum::Int(1)); // mesh index (1-based)
+                                        let midv = player.alloc_datum(Datum::Int(hit.mesh_id as i32));
                                         let fidk = player.alloc_datum(Datum::Symbol("faceID".to_string()));
                                         let fidv = player.alloc_datum(Datum::Int(hit.face_index as i32 + 1)); // 1-based
                                         let vk = player.alloc_datum(Datum::Symbol("vertices".to_string()));
+                                        let mut vert_items = VecDeque::new();
+                                        for vtx in &hit.vertices {
+                                            vert_items.push_back(player.alloc_datum(Datum::Vector([
+                                                vtx[0] as f64, vtx[1] as f64, vtx[2] as f64,
+                                            ])));
+                                        }
                                         let vv = player.alloc_datum(Datum::List(
-                                            crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
+                                            crate::director::lingo::datum::DatumType::List, vert_items, false,
                                         ));
                                         let uk = player.alloc_datum(Datum::Symbol("uvCoord".to_string()));
                                         let u_ref = player.alloc_datum(Datum::Symbol("u".to_string()));
-                                        let u_val = player.alloc_datum(Datum::Float(0.0));
+                                        let u_val = player.alloc_datum(Datum::Float(hit.uv_coord[0] as f64));
                                         let v_ref = player.alloc_datum(Datum::Symbol("v".to_string()));
-                                        let v_val = player.alloc_datum(Datum::Float(0.0));
+                                        let v_val = player.alloc_datum(Datum::Float(hit.uv_coord[1] as f64));
                                         let uv = player.alloc_datum(Datum::PropList(
                                             VecDeque::from(vec![(u_ref, u_val), (v_ref, v_val)]), false,
                                         ));
@@ -4411,6 +4395,25 @@ const IDENTITY: [f32; 16] = [
     0.0, 0.0, 1.0, 0.0,
     0.0, 0.0, 0.0, 1.0,
 ];
+
+/// Get the member's default_rect dimensions (original content size).
+/// IFX uses these for distToProj and pixelAspect in the picking ray.
+fn get_member_default_rect_size(
+    player: &crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+) -> (f32, f32) {
+    if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+        if let Some(w3d) = member.member_type.as_shockwave3d() {
+            let r = &w3d.info.default_rect;
+            let w = (r.2 - r.0) as f32;
+            let h = (r.3 - r.1) as f32;
+            if w > 0.0 && h > 0.0 {
+                return (w, h);
+            }
+        }
+    }
+    (320.0, 240.0)
+}
 
 fn get_node_transform(
     player: &crate::player::DirPlayer,

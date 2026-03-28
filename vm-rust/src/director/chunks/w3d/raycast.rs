@@ -13,6 +13,9 @@ pub struct RayHit {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub face_index: u32,
+    pub mesh_id: u32,
+    pub vertices: [[f32; 3]; 3],
+    pub uv_coord: [f32; 2],
 }
 
 /// Unproject a screen point to a world-space ray.
@@ -51,6 +54,56 @@ pub fn screen_to_ray(
         origin: near_world,
         direction: dir,
     }
+}
+
+/// Generate a picking ray using the IFX/Director approach.
+/// Converts a screen pixel to a camera-space film point, then transforms
+/// it to world space using the camera's world matrix. No projection or
+/// view matrix inversion needed.
+///
+/// `width`/`height` are the current viewport (sprite) dimensions.
+/// `original_width`/`original_height` are the member's default_rect dimensions
+/// (used for distToProj and pixelAspect, matching IFX CIFXView).
+pub fn screen_to_ray_shockwave(
+    screen_x: f32,
+    screen_y: f32,
+    width: f32,
+    height: f32,
+    original_width: f32,
+    original_height: f32,
+    fov_degrees: f32,
+    camera_world_matrix: &[f32; 16],
+) -> Ray {
+    // IFX WindowToFilm: center-origin, flip Y, project onto film plane
+    let half_fov_rad = (fov_degrees * 0.5).to_radians();
+    // IFX uses originalHeight for distToProj (field_108)
+    let dist_to_proj = (original_height * 0.5) / half_fov_rad.tan();
+    // IFX pixelAspect = (currentWidth / currentHeight) / (originalWidth / originalHeight)
+    let orig_aspect = if original_height > 0.0 { original_width / original_height } else { 1.0 };
+    let pixel_aspect = if orig_aspect > 0.0 { (width / height) / orig_aspect } else { 1.0 };
+
+    let film_x = (screen_x - (width - 1.0) * 0.5) * pixel_aspect;
+    let film_y = (height - 1.0) * 0.5 - screen_y;
+    let film_z = -dist_to_proj;
+
+    // IFX GenerateRay (perspective): transform film point by camera world matrix
+    let world_point = transform_point_4x4(camera_world_matrix, film_x, film_y, film_z);
+
+    // Camera world position = translation column of the world matrix
+    let origin = [
+        camera_world_matrix[12],
+        camera_world_matrix[13],
+        camera_world_matrix[14],
+    ];
+
+    // Direction = worldPoint - origin (normalize for consistent ray math)
+    let dir = normalize([
+        world_point[0] - origin[0],
+        world_point[1] - origin[1],
+        world_point[2] - origin[2],
+    ]);
+
+    Ray { origin, direction: dir }
 }
 
 /// Test ray against all meshes in a scene, returning hits sorted by distance.
@@ -101,12 +154,15 @@ pub fn raycast_scene_multi(
 
         // Test CLOD meshes
         if let Some(meshes) = scene.clod_meshes.get(resource.as_str()) {
-            for mesh in meshes {
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, &node.name, max_dist) {
-                    // Transform hit position back to world space
+            for (mi, mesh) in meshes.iter().enumerate() {
+                let tc = mesh.tex_coords.first().map(|v| v.as_slice());
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, &node.name, (mi + 1) as u32, max_dist) {
+                    // Transform hit position and vertices back to world space
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
-                    // Recompute distance in world space
+                    for v in &mut hit.vertices {
+                        *v = transform_point_4x4(&world_transform, v[0], v[1], v[2]);
+                    }
                     let dx = hit.position[0] - ray.origin[0];
                     let dy = hit.position[1] - ray.origin[1];
                     let dz = hit.position[2] - ray.origin[2];
@@ -119,11 +175,15 @@ pub fn raycast_scene_multi(
         }
 
         // Test raw meshes
-        for mesh in &scene.raw_meshes {
+        for (mi, mesh) in scene.raw_meshes.iter().enumerate() {
             if mesh.name == *resource {
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, &node.name, max_dist) {
+                let tc = if !mesh.tex_coords.is_empty() { Some(mesh.tex_coords.as_slice()) } else { None };
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, &node.name, (mi + 1) as u32, max_dist) {
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
+                    for v in &mut hit.vertices {
+                        *v = transform_point_4x4(&world_transform, v[0], v[1], v[2]);
+                    }
                     let dx = hit.position[0] - ray.origin[0];
                     let dy = hit.position[1] - ray.origin[1];
                     let dz = hit.position[2] - ray.origin[2];
@@ -157,14 +217,16 @@ fn raycast_mesh(
     positions: &[[f32; 3]],
     _normals: &[[f32; 3]],
     faces: &[[u32; 3]],
+    tex_coords: Option<&[[f32; 2]]>,
     model_name: &str,
+    mesh_id: u32,
     max_dist: f32,
 ) -> Option<RayHit> {
     // Use BVH for meshes with enough faces to benefit
     if faces.len() > 32 {
         let mut indices: Vec<usize> = (0..faces.len()).collect();
         let bvh = build_bvh(positions, faces, &mut indices);
-        return raycast_bvh(ray, &bvh, positions, faces, model_name, max_dist);
+        return raycast_bvh(ray, &bvh, positions, faces, tex_coords, model_name, mesh_id, max_dist);
     }
 
     // Brute-force for small meshes
@@ -174,7 +236,13 @@ fn raycast_mesh(
         let i1 = face[1] as usize;
         let i2 = face[2] as usize;
         if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() { continue; }
-        if let Some((t, _u, _v)) = ray_triangle_intersect(ray, &positions[i0], &positions[i1], &positions[i2]) {
+        if let Some((t, u, v)) = ray_triangle_intersect(ray, &positions[i0], &positions[i1], &positions[i2]) {
+            // Backface culling: skip triangles facing away from the ray
+            let edge1 = sub(positions[i1], positions[i0]);
+            let edge2 = sub(positions[i2], positions[i0]);
+            let normal = normalize(cross(edge1, edge2));
+            if dot(normal, ray.direction) > 0.0 { continue; }
+
             if t > 0.0 && t < max_dist {
                 if closest.as_ref().map_or(true, |c| t < c.distance) {
                     let pos = [
@@ -182,15 +250,16 @@ fn raycast_mesh(
                         ray.origin[1] + ray.direction[1] * t,
                         ray.origin[2] + ray.direction[2] * t,
                     ];
-                    let edge1 = sub(positions[i1], positions[i0]);
-                    let edge2 = sub(positions[i2], positions[i0]);
-                    let normal = normalize(cross(edge1, edge2));
+                    let uv = interpolate_uv(tex_coords, i0, i1, i2, u, v);
                     closest = Some(RayHit {
                         model_name: model_name.to_string(),
                         distance: t,
                         position: pos,
                         normal,
                         face_index: face_idx as u32,
+                        mesh_id,
+                        vertices: [positions[i0], positions[i1], positions[i2]],
+                        uv_coord: uv,
                     });
                 }
             }
@@ -367,7 +436,9 @@ fn raycast_bvh(
     node: &BvhNode,
     positions: &[[f32; 3]],
     faces: &[[u32; 3]],
+    tex_coords: Option<&[[f32; 2]]>,
     model_name: &str,
+    mesh_id: u32,
     max_dist: f32,
 ) -> Option<RayHit> {
     match node {
@@ -379,7 +450,12 @@ fn raycast_bvh(
                 let i1 = face[1] as usize;
                 let i2 = face[2] as usize;
                 if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() { continue; }
-                if let Some((t, _u, _v)) = ray_triangle_intersect(ray, &positions[i0], &positions[i1], &positions[i2]) {
+                if let Some((t, u, v)) = ray_triangle_intersect(ray, &positions[i0], &positions[i1], &positions[i2]) {
+                    let edge1 = sub(positions[i1], positions[i0]);
+                    let edge2 = sub(positions[i2], positions[i0]);
+                    let normal = normalize(cross(edge1, edge2));
+                    if dot(normal, ray.direction) > 0.0 { continue; }
+
                     let cdist = closest.as_ref().map(|c| c.distance).unwrap_or(max_dist);
                     if t > 0.0 && t < cdist {
                         let pos = [
@@ -387,15 +463,16 @@ fn raycast_bvh(
                             ray.origin[1] + ray.direction[1] * t,
                             ray.origin[2] + ray.direction[2] * t,
                         ];
-                        let edge1 = sub(positions[i1], positions[i0]);
-                        let edge2 = sub(positions[i2], positions[i0]);
-                        let normal = normalize(cross(edge1, edge2));
+                        let uv = interpolate_uv(tex_coords, i0, i1, i2, u, v);
                         closest = Some(RayHit {
                             model_name: model_name.to_string(),
                             distance: t,
                             position: pos,
                             normal,
                             face_index: fi as u32,
+                            mesh_id,
+                            vertices: [positions[i0], positions[i1], positions[i2]],
+                            uv_coord: uv,
                         });
                     }
                 }
@@ -406,9 +483,9 @@ fn raycast_bvh(
             if !bounds.ray_intersect(ray, max_dist) {
                 return None;
             }
-            let hit_left = raycast_bvh(ray, left, positions, faces, model_name, max_dist);
+            let hit_left = raycast_bvh(ray, left, positions, faces, tex_coords, model_name, mesh_id, max_dist);
             let new_max = hit_left.as_ref().map(|h| h.distance).unwrap_or(max_dist);
-            let hit_right = raycast_bvh(ray, right, positions, faces, model_name, new_max);
+            let hit_right = raycast_bvh(ray, right, positions, faces, tex_coords, model_name, mesh_id, new_max);
 
             match (hit_left, hit_right) {
                 (Some(l), Some(r)) => if l.distance <= r.distance { Some(l) } else { Some(r) },
@@ -417,6 +494,21 @@ fn raycast_bvh(
             }
         }
     }
+}
+
+/// Interpolate UV coordinates using barycentric coords (u, v) from ray-triangle intersection.
+/// The barycentric weights are: w0 = 1-u-v, w1 = u, w2 = v.
+fn interpolate_uv(tex_coords: Option<&[[f32; 2]]>, i0: usize, i1: usize, i2: usize, u: f32, v: f32) -> [f32; 2] {
+    if let Some(tc) = tex_coords {
+        if i0 < tc.len() && i1 < tc.len() && i2 < tc.len() {
+            let w0 = 1.0 - u - v;
+            return [
+                w0 * tc[i0][0] + u * tc[i1][0] + v * tc[i2][0],
+                w0 * tc[i0][1] + u * tc[i1][1] + v * tc[i2][1],
+            ];
+        }
+    }
+    [0.0, 0.0]
 }
 
 // ─── Vector math helpers ───
