@@ -342,11 +342,10 @@ fn mat4_invert_affine(m: &[f64; 16]) -> [f64; 16] {
 }
 
 /// Euler angles to column-major rotation matrix (R = Rz * Ry * Rx)
-/// Y rotation is negated for Director LH → OpenGL RH coordinate conversion.
 pub fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
     // Guard against NaN/infinity — use 0 for any invalid input
     let rx = if rx_deg.is_finite() { rx_deg } else { 0.0 }.to_radians();
-    let ry = if ry_deg.is_finite() { (-ry_deg) } else { 0.0 }.to_radians();
+    let ry = if ry_deg.is_finite() { ry_deg } else { 0.0 }.to_radians();
     let rz = if rz_deg.is_finite() { rz_deg } else { 0.0 }.to_radians();
 
     let (sx, cx) = (rx.sin(), rx.cos());
@@ -391,5 +390,5 @@ fn matrix_to_euler(m: &[f64; 16]) -> (f64, f64, f64) {
         rz = n[4].atan2(n[5]);
     }
 
-    (rx.to_degrees(), -ry.to_degrees(), rz.to_degrees())
+    (rx.to_degrees(), ry.to_degrees(), rz.to_degrees())
 }
