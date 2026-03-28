@@ -37,16 +37,16 @@ pub enum PaletteRef {
 }
 
 impl PaletteRef {
-    /// Create a PaletteRef from a parsed palette_id value.
+    /// Create a PaletteRef from parsed palette_id and clut_cast_lib values.
     ///
     /// - i < 0: builtin palette enum value (e.g., -1=SystemMac, -3=GrayScale)
-    /// - i > 0: custom palette member number (1-indexed, e.g., 1=member #1)
-    pub fn from(i: i16, cast_lib: u32) -> Self {
+    /// - i > 0: custom palette member number
+    /// - clut_cast_lib: the cast lib containing the palette (0 = search all cast libs)
+    pub fn from(i: i16, clut_cast_lib: i16, bitmap_cast_lib: u32) -> Self {
         if i < 0 {
             match BuiltInPalette::from_i16(i) {
                 Some(palette) => PaletteRef::BuiltIn(palette),
                 None => {
-                    // Unknown built-in palette ID, log and default to SystemWin
                     web_sys::console::warn_1(
                         &format!("Unknown built-in palette ID: {}, defaulting to SystemWin", i).into()
                     );
@@ -54,13 +54,17 @@ impl PaletteRef {
                 }
             }
         } else if i == 0 {
-            // i == 0 shouldn't happen with the new parsing logic, but handle it gracefully
-            // by using the system default palette
             PaletteRef::BuiltIn(get_system_default_palette())
         } else {
-            // Custom palette: i is already the 1-indexed member number
+            // clut_cast_lib >= 0: use as-is (0 = search all, >0 = explicit cast lib)
+            // clut_cast_lib < 0: not set, use bitmap's own cast lib (ScummVM: _cast->_castLibID)
+            let cast_lib = if clut_cast_lib >= 0 {
+                clut_cast_lib as i32
+            } else {
+                bitmap_cast_lib as i32
+            };
             PaletteRef::Member(CastMemberRef {
-                cast_lib: cast_lib as i32,
+                cast_lib,
                 cast_member: i as i32,
             })
         }
@@ -693,7 +697,7 @@ pub fn decompress_bitmap(
             info.height,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, palette_cast_lib),
+            PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
             &result,
         ),
         2 => decode_bitmap_2bit(
@@ -701,7 +705,7 @@ pub fn decompress_bitmap(
             info.height,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, palette_cast_lib),
+            PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
             &result,
         ),
         4 => decode_bitmap_4bit(
@@ -709,7 +713,7 @@ pub fn decompress_bitmap(
             info.height,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, palette_cast_lib),
+            PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
             &result,
         ),
         8 => decode_generic_bitmap(
@@ -719,7 +723,7 @@ pub fn decompress_bitmap(
             1,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, palette_cast_lib),
+            PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
             &result,
         ),
         16 => decode_bitmap_16bit(
@@ -727,7 +731,7 @@ pub fn decompress_bitmap(
             info.height,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, palette_cast_lib),
+            PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
             &result,
             data_was_uncompressed,
         ),
@@ -759,7 +763,7 @@ pub fn decompress_bitmap(
                     4,
                     scan_width,
                     scan_height,
-                    PaletteRef::from(info.palette_id, palette_cast_lib),
+                    PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
                     &result,
                 )?;
 
@@ -784,7 +788,7 @@ pub fn decompress_bitmap(
                     bit_depth: 32,
                     original_bit_depth: 32,
                     data: result_bitmap.data,
-                    palette_ref: PaletteRef::from(info.palette_id, palette_cast_lib),
+                    palette_ref: PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
                     matte: None,
                     use_alpha: info.use_alpha,
                     trim_white_space: info.trim_white_space,
@@ -830,7 +834,7 @@ pub fn decompress_bitmap(
                     bit_depth: 32,
                     original_bit_depth: 32,
                     data: final_data,
-                    palette_ref: PaletteRef::from(info.palette_id, palette_cast_lib),
+                    palette_ref: PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
                     matte: None,
                     use_alpha: info.use_alpha,
                     trim_white_space: info.trim_white_space,
@@ -960,11 +964,18 @@ pub fn resolve_color_ref(
                         .unwrap_or_else(|| color_fallback(idx))
                 }
                 PaletteRef::Member(member_ref) => {
-                    let slot_number = CastMemberRefHandlers::get_cast_slot_number(
-                        member_ref.cast_lib as u32,
-                        member_ref.cast_member as u32,
-                    );
-                    if let Some(member) = palettes.get(slot_number as usize) {
+                    // cast_lib 0 = search all cast libs by member number
+                    let palette_member = if member_ref.cast_lib == 0 {
+                        palettes.find_by_member(member_ref.cast_member as u32)
+                    } else {
+                        let slot_number = CastMemberRefHandlers::get_cast_slot_number(
+                            member_ref.cast_lib as u32,
+                            member_ref.cast_member as u32,
+                        );
+                        palettes.get(slot_number as usize)
+                            .or_else(|| palettes.find_by_member(member_ref.cast_member as u32))
+                    };
+                    if let Some(member) = palette_member {
                         member.colors.get(idx as usize).copied()
                             .unwrap_or_else(|| color_fallback(idx))
                     } else if let Some(member) = palettes.find_by_cast_lib(member_ref.cast_lib as u32) {
@@ -1071,14 +1082,6 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
     use image::ImageDecoder;
     use std::io::Cursor;
 
-    let palette_cast_lib = if info.clut_cast_lib > 0 {
-        info.clut_cast_lib as u32
-    } else if info.clut_cast_lib == 0 && info.palette_id > 0 {
-        0
-    } else {
-        cast_lib
-    };
-
     // Find the end of the JPEG stream (last FFD9 marker)
     let mut jpeg_end_pos = data.len();
     for i in (0..data.len().saturating_sub(1)).rev() {
@@ -1157,7 +1160,7 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
         bit_depth: 32,
         original_bit_depth: 32,
         data: rgba_data,
-        palette_ref: PaletteRef::from(info.palette_id, palette_cast_lib),
+        palette_ref: PaletteRef::from(info.palette_id, info.clut_cast_lib, cast_lib),
         matte: None,
         use_alpha: info.use_alpha,
         trim_white_space: info.trim_white_space,
