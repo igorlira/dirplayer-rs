@@ -1,0 +1,4 @@
+[submodule "ruffle"]
+	path = ruffle
+	url = https://github.com/chameleonxxl/ruffle.git
+	branch = dirplayer-integration

@@ -23,17 +23,14 @@ interface FlashInstance {
 const instances = new Map<string, FlashInstance>();
 
 // Intercept fetch to rewrite URLs based on fetchRewriteRules config.
-// On the server (empty rules), no rewriting happens — Apache handles /sf/ proxying.
-// Locally, rules rewrite /sf/ to the CORS proxy on port 3456.
+// On the server (empty rules), no rewriting happens — webserver should handle proxying.
 function getFetchRewriteRules(): Array<{pathPrefix: string, targetHost: string, targetPort: string, targetProtocol: string}> {
   const win = window as any;
   if (win.__dirplayerFlashConfig?.fetchRewriteRules) {
     return win.__dirplayerFlashConfig.fetchRewriteRules;
   }
   // Local dev fallback
-  return [
-    { pathPrefix: '/sf', targetHost: '127.0.0.1', targetPort: '3456', targetProtocol: 'http:' },
-  ];
+  return [];
 }
 
 function applyFetchRewrite(url: URL): boolean {
@@ -97,10 +94,7 @@ function getSocketProxyConfig(): Array<{host: string, port: number, proxyUrl: st
     return win.__dirplayerFlashConfig.socketProxy;
   }
   // Local dev fallback
-  return [
-    { host: 'localhost', port: 9000, proxyUrl: 'ws://127.0.0.1:9001' },
-    { host: '127.0.0.1', port: 9000, proxyUrl: 'ws://127.0.0.1:9001' },
-  ];
+  return [];
 }
 
 function instanceKey(castLib: number, castMember: number): string {
