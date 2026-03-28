@@ -52,7 +52,7 @@ pub fn get_basename_no_extension(path: &str) -> String {
 pub fn get_base_url(url: &Url) -> Url {
     let mut result = url.clone();
     result.set_fragment(None);
-    return result.join("./").unwrap();
+    return result.join("./").unwrap_or_else(|_| Url::parse("http://example.com/").unwrap());
 }
 
 pub const PATH_SEPARATOR: &str = "/";

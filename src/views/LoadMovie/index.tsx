@@ -13,10 +13,33 @@ type RecentMovie = {
   url: string;
   params: ExternalParam[];
   timestamp: number;
+  fileHandle?: BrowserFileHandle;
 };
 
-const RECENT_MOVIES_KEY = 'recentMovies';
+type BrowserFileHandle = {
+  kind: 'file';
+  name: string;
+  queryPermission?: (descriptor?: { mode?: 'read' | 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>;
+  requestPermission?: (descriptor?: { mode?: 'read' | 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>;
+  getFile: () => Promise<File>;
+};
+
+type ShowOpenFilePicker = (options?: {
+  multiple?: boolean;
+  excludeAcceptAllOption?: boolean;
+  types?: Array<{
+    description?: string;
+    accept: Record<string, string[]>;
+  }>;
+}) => Promise<BrowserFileHandle[]>;
+
+const RECENT_MOVIES_DB_NAME = 'dirplayer';
+const RECENT_MOVIES_STORE_NAME = 'recentMovies';
+const RECENT_MOVIES_DB_VERSION = 1;
+const RECENT_MOVIES_RECORD_ID = 'movies';
 const MAX_RECENT_MOVIES = 50;
+
+let recentMoviesDbPromise: Promise<IDBDatabase> | null = null;
 
 function paramsArrayToRecord(params: ExternalParam[]): Record<string, string> {
   const record: Record<string, string> = {};
@@ -28,30 +51,74 @@ function paramsArrayToRecord(params: ExternalParam[]): Record<string, string> {
   return record;
 }
 
-function loadRecentMovies(): RecentMovie[] {
+function openRecentMoviesDb(): Promise<IDBDatabase> {
+  if (recentMoviesDbPromise) {
+    return recentMoviesDbPromise;
+  }
+
+  recentMoviesDbPromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(RECENT_MOVIES_DB_NAME, RECENT_MOVIES_DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(RECENT_MOVIES_STORE_NAME)) {
+        db.createObjectStore(RECENT_MOVIES_STORE_NAME, { keyPath: 'id' });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error('Failed to open IndexedDB'));
+  });
+
+  return recentMoviesDbPromise;
+}
+
+async function loadRecentMoviesIndexedDb(): Promise<RecentMovie[]> {
   try {
-    const raw = window.localStorage.getItem(RECENT_MOVIES_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const db = await openRecentMoviesDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(RECENT_MOVIES_STORE_NAME, 'readonly');
+      const store = tx.objectStore(RECENT_MOVIES_STORE_NAME);
+      const request = store.get(RECENT_MOVIES_RECORD_ID);
+
+      request.onsuccess = () => {
+        const result = request.result as { id: string; movies: RecentMovie[] } | undefined;
+        resolve(result?.movies ?? []);
+      };
+      request.onerror = () => reject(request.error ?? new Error('Failed to read recent movies'));
+    });
   } catch {
     return [];
   }
 }
 
-function saveRecentMovie(url: string, params: ExternalParam[]): RecentMovie[] {
-  const existing = loadRecentMovies().filter(m => m.url !== url);
-  const updated = [{ url, params, timestamp: Date.now() }, ...existing].slice(0, MAX_RECENT_MOVIES);
-  window.localStorage.setItem(RECENT_MOVIES_KEY, JSON.stringify(updated));
+async function saveRecentMoviesIndexedDb(movies: RecentMovie[]): Promise<void> {
+  const db = await openRecentMoviesDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(RECENT_MOVIES_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(RECENT_MOVIES_STORE_NAME);
+    const request = store.put({ id: RECENT_MOVIES_RECORD_ID, movies });
+
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error ?? new Error('Failed to write recent movies'));
+  });
+}
+
+async function saveRecentMovieIndexedDb(url: string, params: ExternalParam[], fileHandle?: BrowserFileHandle): Promise<RecentMovie[]> {
+  const existing = (await loadRecentMoviesIndexedDb()).filter(m => m.url !== url);
+  const updated = [{ url, params, timestamp: Date.now(), fileHandle }, ...existing].slice(0, MAX_RECENT_MOVIES);
+  await saveRecentMoviesIndexedDb(updated);
   return updated;
 }
 
-function removeRecentMovie(url: string): RecentMovie[] {
-  const updated = loadRecentMovies().filter(m => m.url !== url);
-  window.localStorage.setItem(RECENT_MOVIES_KEY, JSON.stringify(updated));
+async function removeRecentMovieIndexedDb(url: string): Promise<RecentMovie[]> {
+  const updated = (await loadRecentMoviesIndexedDb()).filter(m => m.url !== url);
+  await saveRecentMoviesIndexedDb(updated);
   return updated;
 }
 
-function clearRecentMovies(): RecentMovie[] {
-  window.localStorage.removeItem(RECENT_MOVIES_KEY);
+async function clearRecentMoviesIndexedDb(): Promise<RecentMovie[]> {
+  await saveRecentMoviesIndexedDb([]);
   return [];
 }
 
@@ -62,9 +129,24 @@ export default function LoadMovie() {
   const [hasError, setHasError] = useState(false);
   const [autoPlay, setAutoPlay] = useState<boolean>(process.env.REACT_APP_MOVIE_AUTO_PLAY === 'true');
   const [externalParams, setExternalParams] = useState<ExternalParam[]>([]);
-  const [recentMovies, setRecentMovies] = useState<RecentMovie[]>(() => loadRecentMovies());
+  const [recentMovies, setRecentMovies] = useState<RecentMovie[]>([]);
+  const [selectedFileHandle, setSelectedFileHandle] = useState<BrowserFileHandle | undefined>(undefined);
   const [paramsExpanded, setParamsExpanded] = useState(false);
   const isInElectron = isElectron();
+  const showOpenFilePickerFn = (window as Window & { showOpenFilePicker?: ShowOpenFilePicker }).showOpenFilePicker;
+  const supportsWebBrowse = !isInElectron && typeof showOpenFilePickerFn === 'function';
+
+  const persistRecentMovie = useCallback(async (url: string, params: ExternalParam[], fileHandle?: BrowserFileHandle) => {
+    return saveRecentMovieIndexedDb(url, params, fileHandle);
+  }, []);
+
+  const removeRecentMoviePersisted = useCallback(async (url: string) => {
+    return removeRecentMovieIndexedDb(url);
+  }, []);
+
+  const clearRecentMoviesPersisted = useCallback(async () => {
+    return clearRecentMoviesIndexedDb();
+  }, []);
 
   const addParam = useCallback(() => {
     setExternalParams(prev => [...prev, { key: '', value: '' }]);
@@ -94,50 +176,100 @@ export default function LoadMovie() {
     }
   }, [autoPlay, externalParams]);
 
+  const loadMovieFromFileHandle = useCallback(async (fileHandle: BrowserFileHandle, params?: ExternalParam[]) => {
+    const currentPermission = await fileHandle.queryPermission?.({ mode: 'read' });
+    if (currentPermission !== 'granted') {
+      const requestedPermission = await fileHandle.requestPermission?.({ mode: 'read' });
+      if (requestedPermission !== 'granted') {
+        console.warn('[LoadMovie] Read permission was not granted for selected file handle');
+        return;
+      }
+    }
+
+    const file = await fileHandle.getFile();
+    const objectUrl = URL.createObjectURL(file);
+    const urlForUi = file.name;
+    const updated = await persistRecentMovie(urlForUi, params ?? externalParams, fileHandle);
+    setRecentMovies(updated);
+    await loadMovieFile(objectUrl, params);
+  }, [externalParams, loadMovieFile, persistRecentMovie]);
+
   const onLoadClick = useCallback(async () => {
+    if (!isInElectron && selectedFileHandle) {
+      await loadMovieFromFileHandle(selectedFileHandle, externalParams);
+      return;
+    }
+
     if (!movieUrl.trim()) { setHasError(true); return; }
-    const updated = saveRecentMovie(movieUrl, externalParams);
+    const updated = await persistRecentMovie(movieUrl, externalParams);
     setRecentMovies(updated);
     await loadMovieFile(movieUrl);
-  }, [movieUrl, externalParams, loadMovieFile]);
+  }, [externalParams, isInElectron, loadMovieFile, loadMovieFromFileHandle, movieUrl, persistRecentMovie, selectedFileHandle]);
 
   const onBrowseClick = useCallback(async () => {
-    if (!isInElectron) return;
     try {
-      const filePath = await openFileDialog();
-      if (filePath) {
-        setMovieUrl(`file://${filePath}`);
+      if (isInElectron) {
+        const filePath = await openFileDialog();
+        if (filePath) {
+          setSelectedFileHandle(undefined);
+          setMovieUrl(`file://${filePath}`);
+        }
+        return;
+      }
+
+      if (!showOpenFilePickerFn) {
+        return;
+      }
+
+      const [fileHandle] = await showOpenFilePickerFn({
+        multiple: false,
+      });
+
+      if (fileHandle) {
+        setSelectedFileHandle(fileHandle);
+        setMovieUrl(fileHandle.name);
       }
     } catch (e) {
       console.error('[LoadMovie] Failed to open file dialog', e);
     }
-  }, [isInElectron]);
+  }, [isInElectron, showOpenFilePickerFn]);
 
-  const onLoadRecent = useCallback((movie: RecentMovie) => {
+  const onLoadRecent = useCallback(async (movie: RecentMovie) => {
     setMovieUrl(movie.url);
     setExternalParams(movie.params);
-    const updated = saveRecentMovie(movie.url, movie.params);
+    if (!isInElectron && movie.fileHandle) {
+      setSelectedFileHandle(movie.fileHandle);
+      await loadMovieFromFileHandle(movie.fileHandle, movie.params);
+      return;
+    }
+
+    setSelectedFileHandle(undefined);
+    const updated = await persistRecentMovie(movie.url, movie.params, movie.fileHandle);
     setRecentMovies(updated);
-    loadMovieFile(movie.url, movie.params);
-  }, [loadMovieFile]);
+    await loadMovieFile(movie.url, movie.params);
+  }, [isInElectron, loadMovieFile, loadMovieFromFileHandle, persistRecentMovie]);
 
   const onEditRecent = useCallback((movie: RecentMovie) => {
     setMovieUrl(movie.url);
     setExternalParams(movie.params);
+    setSelectedFileHandle(movie.fileHandle);
     if (movie.params.length > 0) {
       setParamsExpanded(true);
     }
   }, []);
 
-  const onRemoveRecent = useCallback((url: string) => {
-    setRecentMovies(removeRecentMovie(url));
-  }, []);
+  const onRemoveRecent = useCallback(async (url: string) => {
+    setRecentMovies(await removeRecentMoviePersisted(url));
+  }, [removeRecentMoviePersisted]);
 
-  const onClearRecent = useCallback(() => {
-    setRecentMovies(clearRecentMovies());
-  }, []);
+  const onClearRecent = useCallback(async () => {
+    setRecentMovies(await clearRecentMoviesPersisted());
+  }, [clearRecentMoviesPersisted]);
 
   useMountEffect(async () => {
+    const initialRecentMovies = await loadRecentMoviesIndexedDb();
+    setRecentMovies(initialRecentMovies);
+
     if (movieUrl && process.env.REACT_APP_MOVIE_AUTO_LOAD === 'true' && !isDebugSession()) {
       await loadMovieFile(movieUrl);
     }
@@ -165,10 +297,16 @@ export default function LoadMovie() {
               className={`${styles.input} ${hasError ? styles.inputError : ''}`}
               placeholder={isInElectron ? '/path/to/movie.dcr' : 'https://example.com/movie.dcr'}
               value={movieUrl}
-              onChange={e => { setMovieUrl(e.currentTarget.value); setHasError(false); }}
+              onChange={e => {
+                setMovieUrl(e.currentTarget.value);
+                if (!isInElectron) {
+                  setSelectedFileHandle(undefined);
+                }
+                setHasError(false);
+              }}
               disabled={isLoading}
             />
-            {isInElectron && (
+            {(isInElectron || supportsWebBrowse) && (
               <button
                 className={styles.browseButton}
                 onClick={onBrowseClick}
