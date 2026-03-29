@@ -137,18 +137,19 @@ pub fn script_get_prop_opt(
 
     let script_instance = player.allocator.get_script_instance(&script_instance_ref);
 
-    // Handle special "ancestor" property
-    if prop_name == "ancestor" {
-        let script_instance = player.allocator.get_script_instance(&script_instance_ref);
-        if let Some(ancestor_id) = &script_instance.ancestor {
-            return Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())));
-        } else {
-            return Some(DatumRef::Void);
-        }
-    } else if prop_name == "script" {
-        let script_instance = player.allocator.get_script_instance(&script_instance_ref);
-        return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
-    }
+    match_ci!(prop_name, {
+         "ancestor" => {
+            if let Some(ancestor_id) = &script_instance.ancestor {
+                return Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())));
+            } else {
+                return Some(DatumRef::Void);
+            }
+        },
+        "script" | "class" => {
+            return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
+        },
+        _ => {}
+    });
 
     // Try to find the property on the current instance first
     if let Some(prop) = script_instance.properties.get(CiStr::new(prop_name)) {
@@ -161,12 +162,6 @@ pub fn script_get_prop_opt(
         if let Some(result) = script_get_prop_opt(player, &ancestor_ref, prop_name) {
             return Some(result);
         }
-    }
-
-    // Fall back to built-in "class" property if not found in instance or ancestors
-    if prop_name == "class" {
-        let script_instance = player.allocator.get_script_instance(&script_instance_ref);
-        return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
     }
 
     None
