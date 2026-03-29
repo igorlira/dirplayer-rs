@@ -439,7 +439,7 @@ function Globals() {
   );
 }
 
-export default function DebugInspector({}: DebugInspectorProps) {
+export default function DebugInspector(_props: DebugInspectorProps) {
   const [selectedScopeIndex, setSelectedScopeIndex] = useState<number>();
 
   const factory = (node: TabNode) => {
