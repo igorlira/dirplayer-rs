@@ -23,7 +23,7 @@ const IDENTITY_MATRIX: [f64; 16] = [
 pub struct Shockwave3dObjectDatumHandlers {}
 
 impl Shockwave3dObjectDatumHandlers {
-    pub fn get_prop(obj_ref: &DatumRef, prop_name: &String) -> Result<DatumRef, ScriptError> {
+    pub fn get_prop(obj_ref: &DatumRef, prop_name: &str) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let s3d_ref = match player.get_datum(obj_ref) {
                 Datum::Shockwave3dObjectRef(r) => r.clone(),
@@ -376,7 +376,7 @@ impl Shockwave3dObjectDatumHandlers {
         })
     }
 
-    pub fn set_prop(obj_ref: &DatumRef, prop_name: &String, value: &Datum) -> Result<(), ScriptError> {
+    pub fn set_prop(obj_ref: &DatumRef, prop_name: &str, value: &Datum) -> Result<(), ScriptError> {
         reserve_player_mut(|player| {
             let s3d_ref = match player.get_datum(obj_ref) {
                 Datum::Shockwave3dObjectRef(r) => {
@@ -396,7 +396,7 @@ impl Shockwave3dObjectDatumHandlers {
                 cast_member: s3d_ref.cast_member,
             };
 
-            match_ci!(prop_name.as_str(), {
+            match_ci!(prop_name, {
                 "transform" => {
                     if let Datum::Transform3d(m) = value {
                         let m32: [f32; 16] = m.map(|v| v as f32);
@@ -694,7 +694,7 @@ impl Shockwave3dObjectDatumHandlers {
                         // Update persistent textureList first (prevents sync from overwriting)
                         if let Some(list_ref) = list_ref {
                             let new_val = player.alloc_datum(Datum::String(tex_name.clone()));
-                            if let Datum::List(_, ref mut items, _) = player.get_datum_mut(&list_ref) {
+                            if let Datum::List(_, items, _) = player.get_datum_mut(&list_ref) {
                                 if !items.is_empty() {
                                     items[0] = new_val;
                                 }
@@ -759,7 +759,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                     scene.materials.last_mut().unwrap()
                                 };
-                                match_ci!(prop_name.as_str(), {
+                                match_ci!(prop_name, {
                                     "diffuse" => mat.diffuse = color,
                                     "ambient" => mat.ambient = color,
                                     "emissive" => mat.emissive = color,
@@ -870,7 +870,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let is_overlay = s3d_ref.object_type == "overlay";
 
                     // Pre-extract values that need player borrows (for Point datums)
-                    let (loc_vals, reg_vals) = match prop_name.as_str() {
+                    let (loc_vals, reg_vals) = match prop_name {
                         "loc" => {
                             if let Datum::Point(p) = value {
                                 let x = player.get_datum(&p[0]).to_float().unwrap_or(0.0);
@@ -893,7 +893,7 @@ impl Shockwave3dObjectDatumHandlers {
                             let map = if is_overlay { &mut w3d.runtime_state.camera_overlays } else { &mut w3d.runtime_state.camera_backdrops };
                             if let Some(list) = map.get_mut(&cam_name) {
                                 if let Some(ov) = list.get_mut(ov_idx) {
-                                    match_ci!(prop_name.as_str(), {
+                                    match_ci!(prop_name, {
                                         "source" => {
                                             ov.source_texture = match value {
                                                 Datum::Shockwave3dObjectRef(r) => r.name.clone(),
@@ -921,7 +921,7 @@ impl Shockwave3dObjectDatumHandlers {
                             let lod = w3d.runtime_state.lod_state
                                 .entry(s3d_ref.name.clone())
                                 .or_insert_with(crate::player::cast_member::LodState::default);
-                            match_ci!(prop_name.as_str(), {
+                            match_ci!(prop_name, {
                                 "level" => lod.level = value.int_value().unwrap_or(100),
                                 "auto" => lod.auto_mode = value.int_value().unwrap_or(1) != 0,
                                 "bias" => lod.bias = value.to_float().unwrap_or(100.0) as f32,
@@ -964,7 +964,7 @@ impl Shockwave3dObjectDatumHandlers {
                             let sds = w3d.runtime_state.sds_state
                                 .entry(s3d_ref.name.clone())
                                 .or_insert_with(crate::player::cast_member::SdsState::default);
-                            match_ci!(prop_name.as_str(), {
+                            match_ci!(prop_name, {
                                 "depth" => sds.depth = value.int_value().unwrap_or(1) as i32,
                                 "tension" => sds.tension = value.to_float().unwrap_or(0.0) as f32,
                                 "error" => sds.error = value.to_float().unwrap_or(0.0) as f32,
@@ -1035,7 +1035,7 @@ impl Shockwave3dObjectDatumHandlers {
                   } else if s3d_ref.object_type == "modelResource" {
                     // modelResource property set: vertexList, textureCoordinateList, colorList, normalList
                     use crate::player::cast_member::MeshBuildData;
-                    match_ci!(prop_name.as_str(), {
+                    match_ci!(prop_name, {
                         "vertexList" => {
                             let verts: Vec<[f32; 3]> = if let Datum::List(_, items, _) = value {
                                 items.iter().map(|r| {
@@ -1124,7 +1124,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 let em = w3d.runtime_state.emitters
                                     .entry(s3d_ref.name.clone())
                                     .or_insert_with(EmitterState::default);
-                                match_ci!(prop_name.as_str(), {
+                                match_ci!(prop_name, {
                                     "loop" => em.is_loop = value.int_value().unwrap_or(1) != 0,
                                     "mode" => em.mode = value.symbol_value().unwrap_or_else(|_| value.string_value().unwrap_or_default()),
                                     "numParticles" => em.num_particles = value.int_value().unwrap_or(100),
@@ -1252,7 +1252,7 @@ impl Shockwave3dObjectDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -1266,7 +1266,7 @@ impl Shockwave3dObjectDatumHandlers {
                 cast_member: s3d_ref.cast_member,
             };
 
-            match_ci!(handler_name.as_str(), {
+            match_ci!(handler_name, {
                 // ─── Node transform methods ───
                 "translate" => {
                     let (dx, dy, dz) = read_xyz_args(player, args);
@@ -2084,11 +2084,11 @@ impl Shockwave3dObjectDatumHandlers {
                                     new_items.push_back(player.alloc_datum(Datum::Void));
                                 }
                                 new_items.push_back(value_ref);
-                                if let Datum::List(_, ref mut items, _) = player.get_datum_mut(&list_ref) {
+                                if let Datum::List(_, items, _) = player.get_datum_mut(&list_ref) {
                                     items.extend(new_items);
                                 }
                             } else {
-                                if let Datum::List(_, ref mut items, _) = player.get_datum_mut(&list_ref) {
+                                if let Datum::List(_, items, _) = player.get_datum_mut(&list_ref) {
                                     items[idx] = value_ref;
                                 }
                             }

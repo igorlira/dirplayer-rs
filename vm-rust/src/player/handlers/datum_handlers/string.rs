@@ -74,7 +74,7 @@ impl StringDatumUtils {
             "char" => {
                 // String chunk type accessed as property — return the string itself
                 // so subsequent indexing (e.g., .char[1]) can work via character indexing
-                Ok(Datum::String(value.clone()))
+                Ok(Datum::String(value.to_owned()))
             }
             "marker" => {
                 // Quirky director behavior:

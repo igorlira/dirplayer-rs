@@ -192,7 +192,7 @@ impl VectorDatumHandlers {
         // Write back to parent transform if this vector came from transform.position/rotation
         if let Some((_, parent_ref, sub_prop)) = player.transform_sub_refs.iter()
             .find(|(vec_ref, _, _)| vec_ref == datum).cloned() {
-            if let Datum::Transform3d(ref mut m) = player.get_datum_mut(&parent_ref) {
+            if let Datum::Transform3d(m) = player.get_datum_mut(&parent_ref) {
                 match sub_prop.as_str() {
                     "position" => {
                         m[12] = vec[0]; m[13] = vec[1]; m[14] = vec[2];

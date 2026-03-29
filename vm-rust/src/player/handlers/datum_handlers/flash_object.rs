@@ -32,7 +32,7 @@ thread_local! {
 pub struct FlashObjectDatumHandlers {}
 
 impl FlashObjectDatumHandlers {
-    pub fn get_prop(obj_ref: &DatumRef, prop_name: &String) -> Result<DatumRef, ScriptError> {
+    pub fn get_prop(obj_ref: &DatumRef, prop_name: &str) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let obj_datum = player.get_datum(obj_ref);
 
@@ -73,7 +73,7 @@ impl FlashObjectDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -118,7 +118,7 @@ impl FlashObjectDatumHandlers {
 
     pub fn set_prop(
         datum: &DatumRef,
-        prop_name: &String,
+        prop_name: &str,
         value: &Datum,
     ) -> Result<(), ScriptError> {
         reserve_player_mut(|player| {

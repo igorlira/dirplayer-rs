@@ -529,7 +529,7 @@ impl Shockwave3dMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<Datum, ScriptError> {
         Self::ensure_text3d(player, cast_member_ref);
         // Clone info and scene data upfront to avoid borrow conflicts with player.alloc_datum
@@ -546,7 +546,7 @@ impl Shockwave3dMemberHandlers {
 
         use crate::director::chunks::w3d::types::W3dNodeType;
 
-        match prop.as_str() {
+        match prop {
             // ─── Member-level properties ───
             "directToStage" => Ok(Datum::Int(if info.direct_to_stage { 1 } else { 0 })),
             "preLoad" | "preload" => Ok(Datum::Int(if info.preload { 1 } else { 0 })),
@@ -691,10 +691,10 @@ impl Shockwave3dMemberHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &String,
+        prop: &str,
         value: &Datum,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop {
             "diffuseColor" | "diffusecolor" => {
                 if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
                     if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -721,7 +721,7 @@ impl Shockwave3dMemberHandlers {
                         let mut pending_depth_update: Option<(f32, f32)> = None;
                         let mut needs_rebuild = false;
                         if let Some(state) = w3d.text3d_state.as_mut() {
-                            match prop.as_str() {
+                            match prop {
                                 "smoothness" => {
                                     state.smoothness = value.int_value()? as u32;
                                     needs_rebuild = true;
@@ -786,7 +786,7 @@ impl Shockwave3dMemberHandlers {
     // (moved from cast_member_ref.rs to consolidate 3D code)
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         // Lazily init 3D world for text members before any 3D operation
@@ -799,7 +799,7 @@ impl Shockwave3dMemberHandlers {
             Ok(())
         })?;
 
-        match handler_name.as_str() {
+        match handler_name {
             "getPropRef" => {
                 // member("x").model[1] → getPropRef(#model, 1)
                 reserve_player_mut(|player| {
@@ -1205,7 +1205,7 @@ impl Shockwave3dMemberHandlers {
 
                     // newTexture/newShader/newModel/etc. — create and return a ref
                     if handler_name.starts_with("new") || handler_name.starts_with("delete") {
-                        let obj_type = match handler_name.as_str() {
+                        let obj_type = match handler_name {
                             "newTexture" | "deleteTexture" => "texture",
                             "newShader" | "deleteShader" => "shader",
                             "newModel" | "deleteModel" => "model",
@@ -1766,7 +1766,7 @@ impl Shockwave3dMemberHandlers {
                     // Name comparisons are case-insensitive (Director behavior).
                     use crate::director::chunks::w3d::types::W3dNodeType;
                     let obj_name_lower = obj_name.to_lowercase();
-                    let resolved_name: Option<String> = match handler_name.as_str() {
+                    let resolved_name: Option<String> = match handler_name {
                         "modelResource" => scene.model_resources.keys()
                             .find(|k| k.to_lowercase() == obj_name_lower).cloned(),
                         "model" => scene.nodes.iter()

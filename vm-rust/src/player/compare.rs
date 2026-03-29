@@ -87,10 +87,11 @@ pub fn datum_equals(
         }),
 
         (List(_, l, _), other) | (other, List(_, l, _)) => Ok({
+            let l_slice: Vec<_> = l.iter().cloned().collect();
             match other {
-                List(_, r, _) => seq_equals(l, r, allocator)?,
-                Point(point) => seq_equals(l, point, allocator)?, // Director treats 2-element lists and points interchangeably
-                Rect(rect) => seq_equals(l, rect, allocator)?, // Director treats 4-element lists and rects interchangeably
+                List(_, r, _) => { let r_slice: Vec<_> = r.iter().cloned().collect(); seq_equals(&l_slice, &r_slice, allocator)? },
+                Point(point) => seq_equals(&l_slice, point, allocator)?, // Director treats 2-element lists and points interchangeably
+                Rect(rect) => seq_equals(&l_slice, rect, allocator)?, // Director treats 4-element lists and rects interchangeably
                 _ => false
             }
         }),
@@ -164,7 +165,7 @@ pub fn datum_equals(
 
         (Point(a), o) | (o, Point(a)) => Ok(match o {
             Point(b) => seq_equals(a, b, allocator)?,
-            List(_, list, _) if list.len() == 2 => seq_equals(a, list, allocator)?, // Director treats 2-element lists and points interchangeably
+            List(_, list, _) if list.len() == 2 => { let list_slice: Vec<_> = list.iter().cloned().collect(); seq_equals(a, &list_slice, allocator)? }, // Director treats 2-element lists and points interchangeably
             _ => false
         }),
 
@@ -229,6 +230,8 @@ pub fn datum_equals(
 
         (MovieRef, o) | (o, MovieRef) => Ok(matches!(o, MovieRef)),
 
+        (MouseRef, o) | (o, MouseRef) => Ok(matches!(o, MouseRef)),
+
         (XmlRef(a), o) | (o, XmlRef(a)) => Ok(match o {
             XmlRef(b) => a == b,
             _ => false
@@ -259,14 +262,14 @@ pub fn datum_equals(
             _ => false
         }),
 
-        /*_ => {
+        _ => {
             warn!(
                 "datum_equals not supported for types: {} and {}",
                 left.type_str(),
                 right.type_str()
             );
             Ok(false)
-        }*/
+        }
     }
 }
 

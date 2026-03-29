@@ -140,12 +140,12 @@ impl FileIoXtraManager {
         self.instance_counter
     }
 
-    pub fn has_instance_async_handler(name: &String) -> bool {
+    pub fn has_instance_async_handler(name: &str) -> bool {
         matches!(name.to_lowercase().as_str(), "displayopen" | "displaysave" | "openfile")
     }
 
     pub async fn call_instance_async_handler(
-        handler_name: &String,
+        handler_name: &str,
         instance_id: u32,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
@@ -262,7 +262,7 @@ impl FileIoXtraManager {
     }
 
     pub fn call_instance_handler(
-        handler_name: &String,
+        handler_name: &str,
         instance_id: u32,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {

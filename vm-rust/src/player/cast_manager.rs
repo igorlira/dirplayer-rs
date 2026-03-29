@@ -390,10 +390,26 @@ impl CastManager {
             (Datum::Float(num), None) => self
                 .find_member_ref_by_number(*num as u32)
                 .map(|member_ref| Ok(Some(member_ref))),
-            _ => Some(Err(ScriptError::new(format!(
-                "Member number or name type invalid: {}",
-                member_name_or_num.type_str()
-            )))),
+            // Some expressions (e.g. "the number of castMembers") may produce
+            // a list or other type. Try to coerce to int for member lookup.
+            _ => {
+                if let Ok(num) = member_name_or_num.int_value() {
+                    if let Some(cast_lib) = cast_lib {
+                        Some(Ok(Some(CastMemberRef {
+                            cast_lib: cast_lib.number as i32,
+                            cast_member: num as i32,
+                        })))
+                    } else {
+                        self.find_member_ref_by_number(num as u32)
+                            .map(|member_ref| Ok(Some(member_ref)))
+                    }
+                } else {
+                    Some(Err(ScriptError::new(format!(
+                        "Member number or name type invalid: {}",
+                        member_name_or_num.type_str()
+                    ))))
+                }
+            },
         };
 
         match member_ref {

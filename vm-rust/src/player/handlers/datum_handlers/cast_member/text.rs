@@ -60,8 +60,8 @@ impl TextMemberHandlers {
                 } else {
                     start
                 };
-                let chunk_type = StringChunkType::try_from_str(&prop_name)
-                    .ok_or_else(|| ScriptError::new(format!("Invalid chunk type '{}' for text member getPropRef", prop_name)))?;
+                let chunk_type = std::panic::catch_unwind(|| StringChunkType::from(prop_name.as_str()))
+                    .map_err(|_| ScriptError::new(format!("Invalid chunk type '{}' for text member getPropRef", prop_name)))?;
                 let chunk_expr = StringChunkExpr {
                     chunk_type,
                     start,

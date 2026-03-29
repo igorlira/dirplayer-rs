@@ -77,7 +77,7 @@ impl TypeUtils {
             Datum::MathRef(..) => Ok(vec!["math"]),
             Datum::VarRef(..) => Ok(vec!["void"]), // VarRef should be dereferenced before checking ilk
             Datum::FlashObjectRef(..) => Ok(vec!["instance"]),
-            Datum::Shockwave3dObjectRef(ref r) => Ok(vec![&r.object_type]),
+            Datum::Shockwave3dObjectRef(r) => Ok(vec![&r.object_type]),
             Datum::Transform3d(..) => Ok(vec!["transform"]),
 
             _ => Err(ScriptError::new(format!(

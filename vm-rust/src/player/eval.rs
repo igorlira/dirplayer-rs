@@ -296,11 +296,16 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                         // If cast_lib was specified, create a ref with the specified values
                         // Otherwise return invalid ref
                         if let Some(cast_datum) = cast_lib_datum {
-                            let cast_lib_num = match cast_datum {
-                                Datum::Int(num) => num,
-                                Datum::CastLib(num) => num as i32,
+                            let cast_lib_num = match &cast_datum {
+                                Datum::Int(num) => *num,
+                                Datum::CastLib(num) => *num as i32,
+                                Datum::String(name) => {
+                                    player.movie.cast_manager.get_cast_by_name(name)
+                                        .map(|c| c.number as i32)
+                                        .unwrap_or(0)
+                                }
                                 _ => return Err(ScriptError::new(format!(
-                                    "Expected int or castLib, got {:?}",
+                                    "Expected int, string, or castLib, got {:?}",
                                     cast_datum.type_enum()
                                 ))),
                             };
@@ -1474,11 +1479,16 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                         // If cast_lib was specified, create a ref with member 0
                         // Otherwise return invalid ref
                         if let Some(cast_datum) = cast_lib_datum {
-                            let cast_lib_num = match cast_datum {
-                                Datum::Int(num) => num,
-                                Datum::CastLib(num) => num as i32,
+                            let cast_lib_num = match &cast_datum {
+                                Datum::Int(num) => *num,
+                                Datum::CastLib(num) => *num as i32,
+                                Datum::String(name) => {
+                                    player.movie.cast_manager.get_cast_by_name(name)
+                                        .map(|c| c.number as i32)
+                                        .unwrap_or(0)
+                                }
                                 _ => return Err(ScriptError::new(format!(
-                                    "Expected int or castLib, got {:?}",
+                                    "Expected int, string, or castLib, got {:?}",
                                     cast_datum.type_enum()
                                 ))),
                             };

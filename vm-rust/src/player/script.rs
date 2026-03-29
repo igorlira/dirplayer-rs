@@ -629,7 +629,7 @@ pub fn get_obj_prop(
             Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(&s, &prop_name)?))
         }
         Datum::StringChunk(ref source, ref chunk_expr, ref _str_val) => {
-            match prop_name.as_str() {
+            match prop_name {
                 "ref" => {
                     // .ref returns the chunk reference itself (a StringChunk datum)
                     Ok(obj_ref.clone())
@@ -640,8 +640,8 @@ pub fn get_obj_prop(
                     use crate::director::lingo::datum::StringChunkType;
 
                     let source_str = match source {
-                        crate::director::lingo::datum::StringChunkSource::Datum(ref d) => player.get_datum(d).string_value()?,
-                        crate::director::lingo::datum::StringChunkSource::Member(ref m) => {
+                        crate::director::lingo::datum::StringChunkSource::Datum(d) => player.get_datum(d).string_value()?,
+                        crate::director::lingo::datum::StringChunkSource::Member(m) => {
                             let member = player.movie.cast_manager.find_member_by_ref(m)
                                 .ok_or_else(|| ScriptError::new("Member not found for string chunk range".to_string()))?;
                             if let Some(field) = member.member_type.as_field() {
