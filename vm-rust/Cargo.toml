@@ -2,6 +2,9 @@
 name = "vm-rust"
 version = "0.1.0"
 authors = ["Igor Lira <lira@hey.com>"]
+description = "A web-compatible Shockwave Player emulator written in Rust"
+repository = "https://github.com/igorlira/dirplayer-rs"
+license-file = "../LICENSE"
 edition = "2024"
 
 [lib]
