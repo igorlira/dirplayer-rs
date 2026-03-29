@@ -1,5 +1,4 @@
 use crate::{
-    console_warn,
     director::lingo::datum::Datum,
     player::{
         reserve_player_mut, reserve_player_ref, timeout::Timeout, DatumRef, DirPlayer, ScriptError,

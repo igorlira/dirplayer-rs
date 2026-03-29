@@ -13,7 +13,7 @@ macro_rules! multiuser_log {
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        self, DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref
+        DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref
     },
 };
 

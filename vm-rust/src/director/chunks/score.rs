@@ -1,13 +1,12 @@
 use binary_reader::{BinaryReader, Endian};
 use log::{debug, error, warn};
 
-use crate::{io::reader::DirectorExt, utils::log_i};
+use crate::io::reader::DirectorExt;
 
 use crate::player::datum_ref::DatumRef;
 use crate::player::eval::eval_lingo_expr_static;
 
 use web_sys;
-use web_sys::console;
 
 #[allow(dead_code)]
 pub struct ScoreFrameDelta {

@@ -1,7 +1,6 @@
 use binary_reader::{BinaryReader, Endian};
 
 use log::debug;
-use web_sys::console;
 
 pub struct SordChunk {
     pub raw_data: Vec<u8>,

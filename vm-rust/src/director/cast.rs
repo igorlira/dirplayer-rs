@@ -4,10 +4,7 @@ use binary_reader::BinaryReader;
 use itertools::Itertools;
 use log::debug;
 
-use crate::{
-    director::{file::get_children_of_chunk, utils::fourcc_to_string},
-    utils::log_i,
-};
+use crate::director::{file::get_children_of_chunk, utils::fourcc_to_string};
 
 use super::{
     chunks::{

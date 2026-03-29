@@ -1,7 +1,7 @@
 use std::{collections::HashMap, iter::FromIterator};
 
 use itertools::Itertools;
-use js_sys::{Array, Object};
+use js_sys::Array;
 use log::debug;
 use wasm_bindgen::prelude::*;
 
@@ -22,7 +22,6 @@ use crate::{
         datum_formatting::{format_concrete_datum, format_datum, format_float_with_precision, format_numeric_value},
         datum_ref::{DatumId, DatumRef},
         handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
-        reserve_player_ref,
         score::get_channel_number_from_index,
         score::Score,
         script::ScriptInstanceId,

@@ -15,7 +15,6 @@ use crate::{director::{
 use super::{
     allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
     cast_lib::{CastLib, CastMemberRef},
-    datum_formatting::format_concrete_datum,
     datum_ref::DatumId,
     script::Script,
     DirPlayer,

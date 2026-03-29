@@ -1,13 +1,10 @@
 use log::warn;
 
-use crate::{console_warn, director::lingo::datum::{Datum, DatumType}};
+use crate::director::lingo::datum::Datum;
 use crate::director::lingo::datum;
-use crate::director::lingo::datum::Datum::{Null, Void};
-use crate::player::bitmap::bitmap;
 use crate::player::bitmap::manager::INVALID_BITMAP_REF;
 use super::{
     allocator::{DatumAllocator, DatumAllocatorTrait},
-    bitmap::bitmap::PaletteRef,
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
     DatumRef, ScriptError,
 };

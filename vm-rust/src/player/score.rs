@@ -16,16 +16,13 @@ use crate::{
     player::bitmap::bitmap::{PaletteRef, get_system_default_palette},
     player::bitmap::drawing::should_matte_sprite,
     player::bitmap::palette::SYSTEM_WIN_PALETTE,
-    player::events::{dispatch_event_endsprite, dispatch_event_endsprite_for_score},
-    player::font::measure_text,
+    player::events::dispatch_event_endsprite_for_score,
     player::score_keyframes::{
         ChannelKeyframes,
         build_all_keyframes_cache,
-        convert_blend_to_percentage,
         KeyframeTrack,
     },
     player::handlers::datum_handlers::player_call_datum_handler,
-    utils::log_i,
 };
 
 use super::{
@@ -36,8 +33,7 @@ use super::{
     geometry::{IntRect, IntRectTuple},
     handlers::datum_handlers::{
         cast_member_ref::CastMemberRefHandlers,
-        color::ColorDatumHandlers,
-        script::{self, ScriptDatumHandlers},
+        script::ScriptDatumHandlers,
         sound_channel::SoundStatus,
     },
     movie::Movie,

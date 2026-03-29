@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        datum_formatting::format_datum, reserve_player_mut, reserve_player_ref, DatumRef,
+        reserve_player_mut, reserve_player_ref, DatumRef,
         ScriptError, ScriptErrorCode,
     },
 };

@@ -7,11 +7,11 @@ use crate::{
     director::{
         cast::CastDef, enums::{ScriptType, BitmapInfo},
         file::{read_director_file_bytes, DirectorFile},
-        lingo::{datum::Datum, datum::DatumType, script::ScriptContext},
+        lingo::{datum::Datum, script::ScriptContext},
     },
-    js_api::{self, JsApi},
+    js_api::JsApi,
     utils::{get_base_url, get_basename_no_extension, log_i},
-    player::{cast_member::ScriptMember, ci_string::CiString, ColorRef},
+    player::{cast_member::ScriptMember, ci_string::CiString},
 };
 
 use super::{

@@ -16,7 +16,7 @@ use crate::{
         reserve_player_mut,
         score::{sprite_get_prop, sprite_set_prop},
         script::{
-            get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop,
+            get_current_handler_def, get_current_variable_multiplier, get_obj_prop,
             player_set_obj_prop, script_get_prop, script_get_static_prop, script_set_prop,
             script_set_static_prop,
         },

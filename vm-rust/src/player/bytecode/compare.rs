@@ -4,7 +4,7 @@ use crate::{
     director::lingo::datum::{datum_bool, Datum},
     player::{
         compare::{datum_equals, datum_greater_than, datum_less_than},
-        reserve_player_mut, HandlerExecutionResult, HandlerExecutionResultContext, ScriptError,
+        reserve_player_mut, HandlerExecutionResult, ScriptError,
     },
 };
 

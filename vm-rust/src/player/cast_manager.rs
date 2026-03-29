@@ -6,7 +6,7 @@ use std::{
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
-use log::{debug, log, warn};
+use log::{debug, warn};
 use url::Url;
 
 use crate::js_api::ascii_safe;

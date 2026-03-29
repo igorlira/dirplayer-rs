@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use async_std::{channel::Receiver, task::spawn_local};
+use async_std::channel::Receiver;
 use chrono::Local;
 use log::{warn, debug};
 use manual_future::ManualFuture;
@@ -9,9 +9,8 @@ use url::Url;
 use crate::{
     console_warn,
     director::lingo::datum::{Datum, TimeoutRef},
-    js_api::JsApi,
     player::PLAYER_OPT,
-    utils::{log_i, ToHexString},
+    utils::ToHexString,
 };
 
 use super::{
@@ -21,7 +20,7 @@ use super::{
     datum_ref::DatumRef,
     events::{
         player_dispatch_callback_event, player_dispatch_event_to_sprite,
-        player_dispatch_movie_callback, player_dispatch_targeted_event, player_wait_available,
+        player_dispatch_movie_callback, player_wait_available,
         player_dispatch_event_to_sprite_targeted, player_invoke_frame_and_movie_scripts,
     },
     font::player_load_system_font,
@@ -29,7 +28,6 @@ use super::{
     player_alloc_datum, player_call_script_handler, player_dispatch_global_event,
     player_is_playing, reserve_player_mut, reserve_player_ref,
     score::{concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at},
-    script_ref::ScriptInstanceRef,
     PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX,
 };
 

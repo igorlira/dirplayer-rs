@@ -6,7 +6,7 @@ use crate::{
     },
     player::{
         bitmap::{
-            bitmap::{Bitmap, BuiltInPalette, PaletteRef, get_system_default_palette},
+            bitmap::{Bitmap, PaletteRef, get_system_default_palette},
             drawing::CopyPixelsParams,
         },
         cast_lib::CastMemberRef,

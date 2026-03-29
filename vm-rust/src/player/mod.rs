@@ -59,7 +59,7 @@ use allocator::{
     DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptInstanceAllocatorTrait,
 };
 use async_std::{
-    channel::{self, Receiver, Sender},
+    channel::{self, Sender},
     future::{self, timeout},
     sync::Mutex,
     task::spawn_local,
@@ -72,7 +72,6 @@ use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
 use log::{debug, error, warn};
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use net_manager::NetManager;
-use profiling::{end_profiling, start_profiling};
 use scope::ScopeResult;
 use score::{get_score_sprite_mut, ScoreRef};
 use script::script_get_prop_opt;
@@ -82,7 +81,6 @@ use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
 
 use crate::{
-    console_warn,
     director::{
         chunks::handler::{Bytecode, HandlerDef},
         enums::ScriptType,
@@ -99,12 +97,12 @@ use crate::{
         geometry::IntRect,
         profiling::get_profiler_report,
         scope::Scope,
-        events::{player_invoke_event_to_instances, player_dispatch_event_beginsprite,
+        events::{player_dispatch_event_beginsprite,
         dispatch_event_to_all_behaviors, player_invoke_frame_and_movie_scripts, dispatch_system_event_to_timeouts,
         player_invoke_targeted_event},
     },
     rendering::with_renderer_mut,
-    utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks},
+    utils::{get_base_url, get_elapsed_ticks},
 };
 
 use self::{
@@ -115,10 +113,10 @@ use self::{
     commands::{run_command_loop, PlayerVMCommand},
     debug::{Breakpoint, BreakpointContext, BreakpointManager, StepMode},
     events::{
-        player_dispatch_global_event, player_invoke_global_event, player_unwrap_result,
+        player_dispatch_global_event, player_invoke_global_event,
         player_wait_available, run_event_loop, PlayerVMEvent,
     },
-    font::{player_load_system_font, BitmapFont, FontManager},
+    font::FontManager,
     handlers::manager::BuiltInHandlerManager,
     keyboard::KeyboardManager,
     movie::Movie,

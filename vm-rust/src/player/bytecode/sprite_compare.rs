@@ -15,7 +15,6 @@ use crate::{
     },
 };
 
-use wasm_bindgen::JsValue;
 
 use super::handler_manager::BytecodeHandlerContext;
 

@@ -1,6 +1,5 @@
 use binary_reader::BinaryReader;
 
-use crate::utils::log_i;
 
 #[derive(Clone)]
 pub struct KeyTableEntry {

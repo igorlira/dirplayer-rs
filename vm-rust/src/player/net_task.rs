@@ -9,7 +9,6 @@ use web_sys::Response;
 
 use percent_encoding::percent_decode_str;
 
-use crate::utils::log_i;
 
 pub type NetResult = Result<Vec<u8>, i32>;
 
