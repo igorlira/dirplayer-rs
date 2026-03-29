@@ -3,7 +3,6 @@ use log::{warn, debug};
 use std::collections::HashSet;
 
 use crate::{
-    console_warn,
     director::lingo::datum::{Datum, VarRef},
     player::{
         handlers::datum_handlers::player_call_datum_handler, player_is_playing, reserve_player_mut,
@@ -14,7 +13,7 @@ use crate::{
 use super::{
     allocator::ScriptInstanceAllocatorTrait,
     cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils,
-    player_call_script_handler, player_semaphone, reserve_player_ref, script::ScriptInstanceId,
+    player_call_script_handler, player_semaphone, reserve_player_ref,
     script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, ScriptReceiver,
     PLAYER_EVENT_TX, score::ScoreRef,
 };

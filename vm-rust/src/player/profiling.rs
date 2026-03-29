@@ -2,7 +2,7 @@ use fxhash::FxHashMap;
 use itertools::Itertools;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
 

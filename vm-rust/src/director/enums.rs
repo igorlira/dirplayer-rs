@@ -5,7 +5,7 @@ use num_derive::FromPrimitive;
 use std::convert::TryInto;
 use web_sys::console;
 
-use crate::{io::reader::DirectorExt, utils::log_i};
+use crate::io::reader::DirectorExt;
 
 #[derive(Copy, Clone, FromPrimitive, Debug)]
 pub enum MemberType {

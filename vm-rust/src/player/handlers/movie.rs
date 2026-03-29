@@ -9,8 +9,7 @@ use crate::{
         score::{get_sprite_at, concrete_sprite_hit_test}, handlers::datum_handlers::player_call_datum_handler,
         DatumRef, ScriptError, ScriptErrorCode, get_score_sprite_mut, MovieFrameTarget,
         events::{
-            player_invoke_event_to_instances, player_invoke_static_event,
-            player_invoke_global_event, player_wait_available, player_unwrap_result,
+            player_invoke_event_to_instances, player_invoke_static_event, player_wait_available,
             dispatch_event_to_all_behaviors, player_dispatch_event_beginsprite,
             dispatch_system_event_to_timeouts, player_invoke_targeted_event
         },

@@ -27,7 +27,6 @@ use js_sys::Reflect;
 use wasm_bindgen_futures::JsFuture;
 
 use std::cell::RefCell;
-use std::cell::RefMut;
 use std::rc::Rc;
 
 use js_sys::Uint8Array;
@@ -4026,7 +4025,7 @@ impl SoundChannel {
     // This is the static entry point called by the AudioBufferSourceNode's 'onended' event.
     // It needs to safely retrieve the DirPlayer and the specific SoundChannel.
     pub fn handle_end_of_sound(channel_index: i32) {
-        use web_sys::console;
+        
 
         let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
         if player_opt.is_none() {
@@ -4257,7 +4256,7 @@ impl SoundChannel {
     /// to create a new source node immediately, without going through the full
     /// decode/resample pipeline. Returns true if successful.
     fn replay_cached_buffer(&mut self) -> bool {
-        use web_sys::console;
+        
 
         let buffer = match self.current_audio_buffer {
             Some(ref buf) => buf.clone(),
@@ -4300,7 +4299,7 @@ impl SoundChannel {
     }
 
     fn spawn_playback_async(&self) {
-        use web_sys::console;
+        
         debug!("🚀 Spawning async playback task");
 
         // We need to get an Rc to self somehow

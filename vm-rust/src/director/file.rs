@@ -8,7 +8,6 @@ use crate::director::guid::*;
 use crate::director::rifx::RIFXReaderContext;
 use crate::director::utils::*;
 use crate::io::reader::DirectorExt;
-use crate::utils::log_i;
 use binary_reader::BinaryReader;
 use itertools::Itertools;
 use log::debug;

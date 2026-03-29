@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use nohash_hasher::IntMap;
 use rgb565::Rgb565;
 
 use crate::{
@@ -12,8 +11,7 @@ use crate::{
         font::{bitmap_font_copy_char, BitmapFont},
         geometry::IntRect,
         sprite::{ColorRef, is_skew_flip},
-        bitmap::bitmap::{get_system_default_palette, PaletteRef},
-        bitmap::palette::SYSTEM_WIN_PALETTE, Sprite, Score,
+        bitmap::bitmap::{get_system_default_palette, PaletteRef}, Sprite, Score,
         reserve_player_mut,
     },
 };

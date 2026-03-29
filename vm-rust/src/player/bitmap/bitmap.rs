@@ -8,7 +8,6 @@ use std::convert::TryInto;
 
 use crate::{
     director::enums::BitmapInfo,
-    io::reader::DirectorExt,
     player::{
         cast_lib::CastMemberRef, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
         sprite::ColorRef,

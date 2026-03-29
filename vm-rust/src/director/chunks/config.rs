@@ -1,7 +1,4 @@
-use crate::{
-    director::utils::{human_version, FOURCC},
-    utils::log_i,
-};
+use crate::director::utils::{human_version, FOURCC};
 use binary_reader::{BinaryReader, Endian};
 use log::debug;
 

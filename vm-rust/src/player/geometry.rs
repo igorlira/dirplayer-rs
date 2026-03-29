@@ -1,7 +1,6 @@
 use log::warn;
 
-use crate::console_warn;
-use crate::player::{reserve_player_mut, DatumRef};
+use crate::player::reserve_player_mut;
 use crate::director::lingo::datum::Datum;
 
 #[derive(Clone, Debug)]
