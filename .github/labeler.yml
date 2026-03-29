@@ -1,0 +1,95 @@
+app:
+  - changed-files:
+    - any-glob-to-any-file: ['src/**', 'public/**']
+
+electron:
+  - changed-files:
+    - any-glob-to-any-file: ['src/utils/electron.ts', 'scripts/electron*']
+
+extension:
+  - changed-files:
+    - any-glob-to-any-file: ['extension/**', 'polyfill/**']
+
+build:
+  - changed-files:
+    - any-glob-to-any-file: ['scripts/**', 'vite.config.*', 'vm-rust/Cargo.toml', 'package.json']
+
+player:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'vm-rust/src/player/mod.rs'
+      - 'vm-rust/src/player/movie.rs'
+      - 'vm-rust/src/player/allocator.rs'
+      - 'vm-rust/src/player/keyboard*.rs'
+      - 'vm-rust/src/player/geometry.rs'
+      - 'vm-rust/src/player/timeout.rs'
+      - 'vm-rust/src/player/console.rs'
+      - 'vm-rust/src/player/profiling.rs'
+      - 'vm-rust/src/player/ci_string.rs'
+      - 'vm-rust/src/player/debug/**'
+
+wasm:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'vm-rust/src/js_api.rs'
+      - 'vm-rust/src/lib.rs'
+      - 'dirplayer-js-api/**'
+
+lingo:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'vm-rust/src/player/bytecode/**'
+      - 'vm-rust/src/player/eval.rs'
+      - 'vm-rust/src/player/datum_*'
+      - 'vm-rust/src/player/compare.rs'
+      - 'vm-rust/src/player/commands.rs'
+      - 'vm-rust/src/player/script*.rs'
+      - 'vm-rust/src/player/scope.rs'
+      - 'vm-rust/src/player/context_vars.rs'
+      - 'vm-rust/src/player/virtual_scripts/**'
+      - 'vm-rust/src/player/handlers/manager.rs'
+      - 'vm-rust/src/player/handlers/types.rs'
+      - 'vm-rust/src/player/handlers/mod.rs'
+
+handlers:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'vm-rust/src/player/handlers/datum_handlers/**'
+      - 'vm-rust/src/player/handlers/movie.rs'
+      - 'vm-rust/src/player/handlers/string.rs'
+      - 'vm-rust/src/player/handlers/net.rs'
+      - 'vm-rust/src/player/handlers/cast.rs'
+
+parser:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'vm-rust/src/director/**'
+      - 'vm-rust/src/io/**'
+      - 'vm-rust/lingo.pest'
+
+renderer:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'vm-rust/src/rendering_gpu/**'
+      - 'vm-rust/src/rendering.rs'
+
+score:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'vm-rust/src/player/score*.rs'
+      - 'vm-rust/src/player/sprite.rs'
+      - 'vm-rust/src/player/stage.rs'
+      - 'vm-rust/src/player/events.rs'
+
+media:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'vm-rust/src/player/bitmap/**'
+      - 'vm-rust/src/player/font/**'
+      - 'vm-rust/src/player/cast_*.rs'
+
+net:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'vm-rust/src/player/net_*.rs'
+      - 'vm-rust/src/player/xtra/multiuser/**'
