@@ -86,6 +86,7 @@
     ]
   },
   "devDependencies": {
+    "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
     "@crxjs/vite-plugin": "^2.0.0-beta.25",
     "@types/pako": "^2.0.4",
     "@vitejs/plugin-react": "^2.1.0",
