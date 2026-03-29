@@ -76,7 +76,7 @@ function ChunkTreeNode({
   onSelect: (chunkId: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const children = childrenMap[chunkId] || [];
+  const children = useMemo(() => childrenMap[chunkId] || [], [childrenMap, chunkId]);
   const hasChildren = children.length > 0;
 
   // When filtering, auto-expand nodes that have matching descendants
