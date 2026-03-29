@@ -122,18 +122,16 @@ function ChunkTreeNode({
           </span>
         )}
         <span className={styles.chunkSize}>{formatSize(chunk.len)}</span>
-        <a
+        <button
           className={styles.chunkSave}
-          href="#"
           onClick={(e) => {
-            e.preventDefault();
             e.stopPropagation();
             onSave(chunkId, chunk.fourcc);
           }}
           title="Save chunk content to file"
         >
           (Save)
-        </a>
+        </button>
       </div>
       {isExpanded &&
         visibleChildren.map((childId) => {

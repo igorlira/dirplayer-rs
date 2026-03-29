@@ -133,6 +133,13 @@
   visibility: hidden;
   padding-right: 4px;
   flex-shrink: 0;
+  background: none;
+  border: none;
+  padding-left: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-family: inherit;
+  cursor: pointer;
 }
 
 .chunkSave:hover {
