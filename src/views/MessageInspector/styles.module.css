@@ -1,5 +1,5 @@
 .container {
-  text-align: start;
+  text-align: left;
   height: 100%;
   display: flex;
   flex-direction: column;

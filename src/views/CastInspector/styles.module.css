@@ -4,7 +4,7 @@
 
 .toggleButton {
   padding: 8px;
-  text-align: start;
+  text-align: left;
   background-color: #bbb;
   cursor: pointer;
 }
