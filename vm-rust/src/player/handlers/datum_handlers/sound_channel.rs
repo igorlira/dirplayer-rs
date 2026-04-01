@@ -414,16 +414,96 @@ impl SoundChannelDatumHandlers {
             ch.status = SoundStatus::Playing;
             ch.playback_start_context_time = ch.audio_context.current_time();
 
-            debug!("▶️ Starting async playlist playback");
+            debug!("▶️ Starting playlist playback");
 
-            // Drop the borrow before spawning
-            let channel_rc = channel.clone();
+            // Resolve all segments to PCM, build composite buffer, loop it
+            let segments: Vec<_> = ch.playlist_segments.iter().map(|s| s.member_ref.clone()).collect();
+            let audio_context = ch.audio_context.clone();
+            let channel_num = ch.channel_num;
+            let volume = ch.volume;
+            let pan = ch.pan;
             drop(ch);
 
-            // Spawn async task that doesn't block
-            spawn_local(async move {
-                SoundChannel::play_current_segment_async(channel_rc).await;
-            });
+            // Decode all segments to PCM
+            let mut all_samples: Vec<f32> = Vec::new();
+            let mut decoded_rate = 0u32;
+            let mut decoded_channels = 1u16;
+
+            for seg_ref in &segments {
+                let seg_datum = player.get_datum(seg_ref);
+                if let Some(sound_member) = SoundChannel::resolve_sound_member(player, &seg_datum) {
+                    let audio_data = SoundChannel::load_director_audio_data(
+                        &sound_member.sound.data(),
+                        sound_member.info.channels,
+                        sound_member.info.sample_rate,
+                        sound_member.info.sample_size,
+                        &sound_member.sound.codec(),
+                        Some(sound_member.info.sample_count),
+                        sound_member.sound.big_endian_data(),
+                    );
+                    if let Ok(audio) = audio_data {
+                        if !audio.samples.is_empty() {
+                            decoded_rate = audio.sample_rate;
+                            decoded_channels = audio.num_channels;
+                            all_samples.extend_from_slice(&audio.samples);
+                        }
+                    }
+                }
+            }
+
+            if !all_samples.is_empty() && decoded_rate > 0 {
+                let num_frames = all_samples.len() / decoded_channels as usize;
+
+                // Create composite AudioBuffer
+                let composite = audio_context.create_buffer(
+                    decoded_channels as u32,
+                    num_frames as u32,
+                    decoded_rate as f32,
+                ).map_err(|e| ScriptError::new(format!("Failed to create composite buffer: {:?}", e)))?;
+
+                for ch_idx in 0..decoded_channels {
+                    let mut channel_data = vec![0.0f32; num_frames];
+                    for frame in 0..num_frames {
+                        let idx = frame * decoded_channels as usize + ch_idx as usize;
+                        if idx < all_samples.len() {
+                            channel_data[frame] = all_samples[idx];
+                        }
+                    }
+                    let _ = composite.copy_to_channel(&channel_data, ch_idx as i32);
+                }
+
+                console::log_1(&format!(
+                    "🎵 Composite: {} segments → {} samples ({:.3}s) loop=true",
+                    segments.len(), num_frames, num_frames as f64 / decoded_rate as f64
+                ).into());
+
+                // Create source node with native looping
+                let source = audio_context.create_buffer_source()
+                    .map_err(|e| ScriptError::new(format!("Failed to create source: {:?}", e)))?;
+                source.set_buffer(Some(&composite));
+                source.set_loop(true);
+
+                // Create gain + pan nodes
+                let gain = audio_context.create_gain()
+                    .map_err(|e| ScriptError::new(format!("Failed to create gain: {:?}", e)))?;
+                gain.gain().set_value((volume / 255.0) as f32);
+
+                let pan_node = audio_context.create_stereo_panner()
+                    .map_err(|e| ScriptError::new(format!("Failed to create panner: {:?}", e)))?;
+                pan_node.pan().set_value((pan / 100.0) as f32);
+
+                let _ = source.connect_with_audio_node(&pan_node);
+                let _ = pan_node.connect_with_audio_node(&gain);
+                let _ = gain.connect_with_audio_node(&audio_context.destination());
+
+                let _ = source.start();
+
+                let mut ch = channel.borrow_mut();
+                ch.source_node = Some(Rc::new(source));
+                ch.gain_node = Some(Rc::new(gain));
+                ch.pan_node = Some(Rc::new(pan_node));
+                ch.current_audio_buffer = Some(Rc::new(composite));
+            }
         } else {
             warn!("⚠️ No playlist queued");
             ch.status = SoundStatus::Idle;
@@ -1546,6 +1626,97 @@ impl SoundChannel {
             .map_err(|e| JsValue::from_str(&format!("Failed to start source node: {:?}", e)))?;
 
         Ok(())
+    }
+
+    /// Decode MP3 data to PCM using symphonia at the native sample rate.
+    /// Skips the standard decoder warmup (1057 samples = 576 IMDCT + 481
+    /// polyphase) and takes exactly sample_count samples to match Director's output.
+    fn decode_mp3_symphonia(
+        mp3_data: &[u8],
+        expected_samples: Option<u32>,
+    ) -> Result<AudioData, String> {
+        use symphonia::core::audio::SampleBuffer;
+        use symphonia::core::codecs::DecoderOptions;
+        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        use symphonia::core::probe::Hint;
+
+        let cursor = std::io::Cursor::new(mp3_data.to_vec());
+        let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+
+        let mut hint = Hint::new();
+        hint.with_extension("mp3");
+
+        let format_opts = FormatOptions { enable_gapless: true, ..Default::default() };
+        let probed = symphonia::default::get_probe()
+            .format(&hint, mss, &format_opts, &MetadataOptions::default())
+            .map_err(|e| format!("symphonia probe failed: {}", e))?;
+
+        let mut format = probed.format;
+        let track = format.default_track()
+            .ok_or("No default track found")?;
+
+        let track_id = track.id;
+        let codec_params = track.codec_params.clone();
+        let decoded_rate = codec_params.sample_rate.unwrap_or(0);
+        let decoded_channels = codec_params.channels
+            .map(|c| c.count() as u16)
+            .unwrap_or(1);
+
+        let mut decoder = symphonia::default::get_codecs()
+            .make(&codec_params, &DecoderOptions::default())
+            .map_err(|e| format!("symphonia codec init failed: {}", e))?;
+
+        let mut pcm_samples: Vec<f32> = Vec::new();
+
+        loop {
+            let packet = match format.next_packet() {
+                Ok(p) => p,
+                Err(symphonia::core::errors::Error::IoError(ref e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(_) => break,
+            };
+
+            if packet.track_id() != track_id {
+                continue;
+            }
+
+            if let Ok(decoded) = decoder.decode(&packet) {
+                let spec = *decoded.spec();
+                let num_frames = decoded.frames();
+                let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
+                sample_buf.copy_interleaved_ref(decoded);
+                pcm_samples.extend_from_slice(sample_buf.samples());
+            }
+        }
+
+        let total_frames = pcm_samples.len() / decoded_channels as usize;
+        let expected = expected_samples.unwrap_or(0) as usize;
+
+        // Skip Director's decoder warmup (1057 samples) and take exactly
+        // sample_count samples to match Director's output.
+        if expected > 0 && total_frames > expected {
+            let decoder_delay = 1057usize;
+            let ch_count = decoded_channels as usize;
+            let skip = decoder_delay.min(total_frames - expected);
+            let start = skip * ch_count;
+            let end = start + expected * ch_count;
+            let end = end.min(pcm_samples.len());
+            pcm_samples = pcm_samples[start..end].to_vec();
+
+            console::log_1(&format!(
+                "🎵 symphonia: {} → {} frames (skip {} warmup) @ {} Hz",
+                total_frames, expected, skip, decoded_rate
+            ).into());
+        }
+
+        Ok(AudioData {
+            samples: pcm_samples,
+            num_channels: decoded_channels,
+            sample_rate: decoded_rate,
+            compressed_data: None,
+        })
     }
 
     fn resolve_sound_member(player: &DirPlayer, datum: &Datum) -> Option<SoundMember> {
@@ -3068,18 +3239,13 @@ impl SoundChannel {
         if let Some(mp3_start) = mp3_start {
             console::log_1(
                 &format!(
-                    "✅ Valid MP3 sequence found at offset {} (0x{:04X}) - using MP3 decoder (codec was '{}')",
+                    "✅ MP3 detected at offset {} (0x{:04X}), decoding with symphonia (codec was '{}')",
                     mp3_start, mp3_start, codec
                 )
                 .into(),
             );
-            let mp3_data = sound_bytes[mp3_start..].to_vec();
-            return Ok(AudioData {
-                samples: vec![],
-                num_channels: channels as u16,
-                sample_rate,
-                compressed_data: Some(mp3_data),
-            });
+            let mp3_data = &sound_bytes[mp3_start..];
+            return Self::decode_mp3_symphonia(mp3_data, expected_samples);
         }
         
         // No MP3 found - treat as PCM/ADPCM
