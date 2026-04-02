@@ -5,6 +5,8 @@ pub mod cast_list;
 pub mod cast_member;
 pub mod cast_member_info;
 pub mod config;
+pub mod cue_points;
+pub mod swa_file;
 pub mod effect;
 pub mod handler;
 pub mod imap;
@@ -75,6 +77,7 @@ pub enum Chunk {
     Sound(SoundChunk),
     SndHeader(SndHeaderChunk),
     SndSamples(Vec<u8>),
+    CuePoints(cue_points::CuePointsChunk),
     Media(MediaChunk),
     XMedia(XMediaChunk),
     CstInfo(CastInfoChunk),
@@ -249,6 +252,7 @@ pub fn make_chunk(
             log::debug!("sndS chunk: {} bytes of audio data", view.len());
             return Ok(Chunk::SndSamples(view.clone()));
         }
+        "cupt" => return Ok(Chunk::CuePoints(cue_points::CuePointsChunk::from_reader(&mut chunk_reader)?)),
         "STXT" => return Ok(Chunk::Text(TextChunk::read(&mut chunk_reader)?)),
         "BITD" => {
             return Ok(Chunk::Bitmap(BitmapChunk::read(
