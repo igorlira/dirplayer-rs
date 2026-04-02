@@ -43,6 +43,7 @@ log = "0.4.22"
 percent-encoding = "2"
 xml = "1.0"
 image = "0.25.8"
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
@@ -114,6 +115,8 @@ features = [
   'MessageChannel',
   'MessagePort',
   'Storage',
+  'ReadableStream',
+  'ReadableStreamDefaultReader',
 ]
 
 [dependencies.flate2]

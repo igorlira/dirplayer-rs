@@ -243,7 +243,7 @@ impl NetManager {
     }
 }
 
-fn normalize_task_url(url: &str, base_path: Option<&Url>) -> Url {
+pub fn normalize_task_url(url: &str, base_path: Option<&Url>) -> Url {
     let slash_norm = url.replace("\\", "/");
     let parsed_path = Path::new(slash_norm.as_str());
     let parsed_url = Url::parse(&slash_norm);

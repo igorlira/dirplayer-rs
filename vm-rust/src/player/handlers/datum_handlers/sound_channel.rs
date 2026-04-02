@@ -1,4 +1,5 @@
 use crate::{
+    director::enums::SwaState,
     director::lingo::datum::{Datum, DatumType},
     player::{DatumRef, DirPlayer, ScriptError},
 };
@@ -10,7 +11,8 @@ use web_sys::{
     OfflineAudioContext, StereoPannerNode, Url,
 };
 
-use crate::player::cast_member::CastMemberType;
+use crate::player::cast_lib::CastMemberRef;
+use crate::player::cast_member::{CastMember, CastMemberType};
 use std::convert::TryInto;
 
 use wasm_bindgen::prelude::*;
@@ -271,6 +273,17 @@ impl SoundChannelDatumHandlers {
             "sampleCount" => Ok(Datum::Int(channel.sample_count.try_into().unwrap())),
             "channelCount" => Ok(Datum::Int(channel.channel_count.into())),
             "status" => Ok(Datum::Int(channel.status.clone() as i32)),
+            "mostRecentCuePoint" => {
+                if channel.most_recent_cue_point_index >= 0 {
+                    if let Some(ref sm) = channel.sound_member {
+                        let idx = channel.most_recent_cue_point_index as usize;
+                        if let Some(name) = sm.info.cue_point_names.get(idx) {
+                            return Ok(Datum::String(name.clone()));
+                        }
+                    }
+                }
+                Ok(Datum::Int(0))
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get property {} for sound channel",
                 prop
@@ -796,7 +809,6 @@ pub struct AudioData {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
     pub num_channels: u16,
-    pub compressed_data: Option<Vec<u8>>, // for MP3 etc.
 }
 
 //#[wasm_bindgen]
@@ -949,7 +961,6 @@ impl AudioData {
             samples,
             sample_rate,
             num_channels: num_channels as u16,
-            compressed_data: None, // WAV = uncompressed
         })
     }
 }
@@ -1102,6 +1113,7 @@ pub struct SoundChannel {
     pub is_decoding: Rc<RefCell<bool>>,
     pub decode_generation: Rc<RefCell<u32>>, // Incremented each time a new decode starts
     pub playback_start_context_time: f64, // AudioContext.currentTime when playback started
+    pub most_recent_cue_point_index: i32,
 }
 
 impl SoundChannel {
@@ -1313,6 +1325,7 @@ impl SoundChannel {
             is_decoding: Rc::new(RefCell::new(false)),
             decode_generation: Rc::new(RefCell::new(0)),
             playback_start_context_time: 0.0,
+            most_recent_cue_point_index: -1,
         }
     }
 
@@ -1466,6 +1479,7 @@ impl SoundChannel {
         self.status = SoundStatus::Playing;
         self.playback_start_context_time = self.audio_context.current_time();
         self.elapsed_time = 0.0;
+        self.most_recent_cue_point_index = -1;
 
         Ok(())
     }
@@ -1711,6 +1725,72 @@ impl SoundChannel {
         let datum = player.get_datum(&member_ref);
 
         if let Some(sound_member) = Self::resolve_sound_member(player, &datum) {
+            // Check for linked external SWA file
+            if let Some(ref linked_path) = sound_member.info.linked_path {
+                if sound_member.sound.data().is_empty() {
+                    let linked_url = linked_path.clone();
+                    let preload_time = sound_member.info.preload_time;
+                    let self_rc_clone = self_rc.clone();
+                    let cast_member_ref = match &datum {
+                        Datum::CastMember(r) => Some(r.clone()),
+                        _ => player.movie.cast_manager.find_member_ref_by_name(
+                            &datum.string_value().unwrap_or_default()
+                        ),
+                    };
+
+                    // Resolve URL against base path
+                    let resolved_url = crate::player::net_manager::normalize_task_url(
+                        &linked_url,
+                        player.net_manager.base_path.as_ref(),
+                    ).to_string();
+
+                    {
+                        let mut ch = self_rc_clone.borrow_mut();
+                        ch.status = SoundStatus::Loading;
+                    }
+
+                    // Update member state to buffering
+                    if let Some(ref cmr) = cast_member_ref {
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cmr) {
+                            if let CastMemberType::Sound(ref mut sm) = member.member_type {
+                                sm.info.swa_state = SwaState::Preloading; // buffering
+                                sm.info.percent_streamed = 0;
+                            }
+                        }
+                    }
+
+                    console::log_1(&format!(
+                        "🌐 Streaming SWA: {} (preLoadTime={}s)", linked_url, preload_time
+                    ).into());
+
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if let Err(e) = Self::stream_swa_file(
+                            self_rc_clone.clone(),
+                            &resolved_url,
+                            preload_time,
+                            cast_member_ref.clone(),
+                        ).await {
+                            error!("❌ SWA streaming failed: {:?}", e);
+                            let mut ch = self_rc_clone.borrow_mut();
+                            ch.status = SoundStatus::Idle;
+
+                            // Update member state to error/stopped
+                            let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
+                            if let Some(player) = player_opt {
+                                if let Some(ref cmr) = cast_member_ref {
+                                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cmr) {
+                                        if let CastMemberType::Sound(ref mut sm) = member.member_type {
+                                            sm.info.swa_state = SwaState::Stopped; // stopped
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    return;
+                }
+            }
+
             // Update expected sample rate
             {
                 let mut this = self_rc.borrow_mut();
@@ -1739,36 +1819,7 @@ impl SoundChannel {
                 }
             };
 
-            // Check if this is MP3 data
-            if let Some(mp3_bytes) = &audio_data.compressed_data {
-                debug!("🎵 MP3 detected! {} bytes", mp3_bytes.len());
-
-                let self_rc_clone = self_rc.clone();
-                let mp3_data = mp3_bytes.clone();
-
-                debug!("🚀 About to spawn MP3 decode task (start_sound)");
-                wasm_bindgen_futures::spawn_local(async move {
-                    {
-                        let mut ch = self_rc_clone.borrow_mut();
-                        ch.status = SoundStatus::Loading;
-                    }
-
-                    if let Err(e) = Self::start_sound_mp3_async(self_rc_clone.clone(), mp3_data.clone()).await {
-                        error!("❌ MP3 playback failed: {:?}", e);
-                        debug!("📊 MP3 data size: {} bytes, first bytes: {:02X?}", 
-                            mp3_data.len(), &mp3_data[0..32.min(mp3_data.len())]);
-                        {
-                            let mut ch = self_rc_clone.borrow_mut();
-                            ch.status = SoundStatus::Idle;
-                        }
-                        Self::start_sound_pcm_fallback(self_rc_clone, member_ref);
-                    }
-                });
-                debug!("🚀 Spawned MP3 decode task (start_sound)");
-                return;
-            }
-
-            // PCM/ADPCM path - USE BROWSER RESAMPLING
+            // All audio (including MP3) is now decoded to PCM by load_director_audio_data
             if audio_data.samples.is_empty() {
                 error!("❌ Audio data has no samples");
                 let mut this = self_rc.borrow_mut();
@@ -1912,6 +1963,7 @@ impl SoundChannel {
                 ch.status = SoundStatus::Playing;
                 ch.playback_start_context_time = ch.audio_context.current_time();
                 ch.elapsed_time = 0.0;
+                ch.most_recent_cue_point_index = -1;
                 *ch.is_decoding.borrow_mut() = false;
 
                 drop(ch);
@@ -2022,557 +2074,261 @@ impl SoundChannel {
         Ok(resampled)
     }
 
-    /// Updated MP3 async playback with better validation
-    async fn start_sound_mp3_async(
+    /// Progressively stream and play an external SWA file.
+    /// Fetches using ReadableStream, parses the SWA header from initial bytes,
+    /// updates percent_streamed as data arrives, and starts playback once
+    /// preload_time seconds of audio are buffered (or immediately if preload_time is 0).
+    ///
+    /// Limitation: Symphonia decodes all available MP3 data at playback start into a
+    /// fixed AudioBuffer. Bytes that arrive after playback starts are not appended to
+    /// the playing audio. The full file is cached on the member after download completes
+    /// for subsequent plays.
+    async fn stream_swa_file(
         self_rc: Rc<RefCell<SoundChannel>>,
-        mp3_bytes: Vec<u8>,
+        url: &str,
+        preload_time: u32,
+        cast_member_ref: Option<CastMemberRef>,
     ) -> Result<(), JsValue> {
-        use web_sys::console;
+        use web_sys::{ReadableStreamDefaultReader};
 
-        // Guard: prevent re-entrant decode/play
-        {
-            let ch = self_rc.borrow();
-            if *ch.is_decoding.borrow() {
-                warn!("⚠️ Channel {} already decoding – skipping", ch.channel_num);
-                return Ok(());
+        let window = web_sys::window().unwrap();
+        let request = web_sys::Request::new_with_str(url)?;
+        let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+        let resp: web_sys::Response = resp_value.dyn_into()?;
+
+        if resp.status() != 200 {
+            return Err(JsValue::from_str(&format!("HTTP {} fetching SWA", resp.status())));
+        }
+
+        // Get content length for progress tracking
+        let content_length: Option<usize> = resp.headers()
+            .get("content-length").ok().flatten()
+            .and_then(|s| s.parse().ok());
+
+        let body = resp.body().ok_or_else(|| JsValue::from_str("No response body"))?;
+        let reader: ReadableStreamDefaultReader = body.get_reader().dyn_into()?;
+
+        let mut all_bytes: Vec<u8> = Vec::new();
+        let mut header_parsed = false;
+        let mut swa_header_size: usize = 0;
+        let mut swa_sample_rate: u32 = 0;
+        let mut swa_channels: u16 = 0;
+        let mut swa_bit_rate: u32 = 0;
+        let mut playback_started = false;
+
+        loop {
+            let result = JsFuture::from(reader.read()).await?;
+            let done = js_sys::Reflect::get(&result, &"done".into())?
+                .as_bool().unwrap_or(true);
+
+            if !done {
+                let value = js_sys::Reflect::get(&result, &"value".into())?;
+                let chunk = js_sys::Uint8Array::new(&value);
+                let mut chunk_bytes = vec![0u8; chunk.length() as usize];
+                chunk.copy_to(&mut chunk_bytes);
+                all_bytes.extend_from_slice(&chunk_bytes);
+            }
+
+            // Parse SWA header once we have enough bytes
+            if !header_parsed && all_bytes.len() >= 0x38 {
+                swa_header_size = u32::from_be_bytes([
+                    all_bytes[0], all_bytes[1], all_bytes[2], all_bytes[3]
+                ]) as usize;
+                let version = u32::from_be_bytes([
+                    all_bytes[4], all_bytes[5], all_bytes[6], all_bytes[7]
+                ]);
+                if version != 3 {
+                    return Err(JsValue::from_str(&format!(
+                        "SWA version {} not yet supported", version
+                    )));
+                }
+                swa_sample_rate = u32::from_be_bytes([
+                    all_bytes[8], all_bytes[9], all_bytes[10], all_bytes[11]
+                ]);
+                swa_channels = u16::from_be_bytes([all_bytes[0x20], all_bytes[0x21]]);
+                header_parsed = true;
+
+                // Update channel properties
+                {
+                    let mut ch = self_rc.borrow_mut();
+                    ch.sample_rate = swa_sample_rate;
+                    ch.channel_count = swa_channels;
+                }
+
+                console::log_1(&format!(
+                    "📋 SWA header: size={}, rate={}, channels={}",
+                    swa_header_size, swa_sample_rate, swa_channels
+                ).into());
+            }
+
+            // Update percent_streamed
+            if let Some(total) = content_length {
+                let percent = ((all_bytes.len() as f64 / total as f64) * 100.0).min(100.0) as u32;
+                let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
+                if let Some(player) = player_opt {
+                    if let Some(ref cmr) = cast_member_ref {
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cmr) {
+                            if let CastMemberType::Sound(ref mut sm) = member.member_type {
+                                sm.info.percent_streamed = percent;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if we should start playback
+            if header_parsed && !playback_started && all_bytes.len() > swa_header_size + 4 {
+                let mp3_offset = swa_header_size + 4;
+                let mp3_bytes_available = all_bytes.len() - mp3_offset;
+
+                // Extract bitrate from first MP3 frame for preload calculation
+                if swa_bit_rate == 0 {
+                    if let Some(br) = CastMember::extract_mp3_bitrate(&all_bytes[mp3_offset..]) {
+                        swa_bit_rate = br;
+                    }
+                }
+
+                // Calculate how many bytes we need for preload_time
+                let bytes_needed = if preload_time > 0 && swa_bit_rate > 0 {
+                    (swa_bit_rate as usize * 1000 / 8) * preload_time as usize
+                } else {
+                    0 // No preload requirement — play immediately
+                };
+
+                let should_play = done || mp3_bytes_available >= bytes_needed;
+
+                if should_play {
+                    playback_started = true;
+
+                    // Find MP3 sync in available data
+                    let mp3_data = if let Some(sync) = Self::find_mp3_start(&all_bytes[mp3_offset..]) {
+                        all_bytes[mp3_offset + sync..].to_vec()
+                    } else {
+                        all_bytes[mp3_offset..].to_vec()
+                    };
+
+                    console::log_1(&format!(
+                        "▶️ Starting SWA playback: {} MP3 bytes (preload={}s, bitrate={}kbps)",
+                        mp3_data.len(), preload_time, swa_bit_rate
+                    ).into());
+
+                    // Update member state to playing and apply SWA volume
+                    let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
+                    if let Some(player) = player_opt {
+                        if let Some(ref cmr) = cast_member_ref {
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cmr) {
+                                if let CastMemberType::Sound(ref mut sm) = member.member_type {
+                                    sm.info.swa_state = SwaState::Playing;
+                                    sm.info.bit_rate = Some(swa_bit_rate);
+                                }
+                            }
+                        }
+                    }
+
+                    // Decode available MP3 data with Symphonia and play
+                    match Self::decode_mp3_symphonia(&mp3_data, None) {
+                        Ok(audio_data) if !audio_data.samples.is_empty() => {
+                            let num_channels = audio_data.num_channels;
+                            let num_frames = audio_data.samples.len() / num_channels as usize;
+                            let source_rate = audio_data.sample_rate as f32;
+
+                            let ch = self_rc.borrow();
+                            let ctx = ch.audio_context.clone();
+                            let volume = ch.volume;
+                            let pan_value = ch.pan;
+                            drop(ch);
+
+                            if let Ok(buffer) = ctx.create_buffer(
+                                num_channels as u32, num_frames as u32, source_rate
+                            ) {
+                                for ch_idx in 0..num_channels {
+                                    let mut channel_data = vec![0.0f32; num_frames];
+                                    for frame in 0..num_frames {
+                                        let idx = frame * num_channels as usize + ch_idx as usize;
+                                        if idx < audio_data.samples.len() {
+                                            channel_data[frame] = audio_data.samples[idx];
+                                        }
+                                    }
+                                    let _ = buffer.copy_to_channel(&channel_data, ch_idx as i32);
+                                }
+
+                                if let Ok(source) = ctx.create_buffer_source() {
+                                    source.set_buffer(Some(&buffer));
+
+                                    let gain = ctx.create_gain().unwrap();
+                                    gain.gain().set_value((volume / 255.0) as f32);
+
+                                    if let Ok(pan) = ctx.create_stereo_panner() {
+                                        pan.pan().set_value((pan_value / 100.0) as f32);
+                                        let _ = source.connect_with_audio_node(&pan);
+                                        let _ = pan.connect_with_audio_node(&gain);
+                                    } else {
+                                        let _ = source.connect_with_audio_node(&gain);
+                                    }
+                                    let _ = gain.connect_with_audio_node(&ctx.destination());
+                                    let _ = source.start();
+
+                                    let mut ch = self_rc.borrow_mut();
+                                    ch.source_node = Some(Rc::new(source));
+                                    ch.gain_node = Some(Rc::new(gain));
+                                    ch.status = SoundStatus::Playing;
+                                    ch.playback_start_context_time = ctx.current_time();
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            warn!("Symphonia decoded 0 samples from SWA stream");
+                        }
+                        Err(e) => {
+                            error!("❌ Symphonia SWA decode failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if done {
+                break;
             }
         }
 
-        // Set decoding flag and increment generation
-        let my_generation = {
-            let mut ch = self_rc.borrow_mut();
-            *ch.is_decoding.borrow_mut() = true;
-            *ch.decode_generation.borrow_mut() += 1;
-            let gen_ = *ch.decode_generation.borrow();
-            gen_  // Return the copied value
-        };
-        
-        debug!("🔢 Starting decode generation {}", my_generation);
+        // Download complete — cache full data on member
+        console::log_1(&format!(
+            "✅ SWA download complete: {} total bytes", all_bytes.len()
+        ).into());
 
-        // Ensure flag is cleared on exit
-        let clear_flag = || {
-            let mut ch = self_rc.borrow_mut();
-            *ch.is_decoding.borrow_mut() = false;
-        };
-
-        // Extract valid MP3 frames
-        let clean_mp3 = match Self::extract_valid_mp3_frames(&mp3_bytes) {
-            Some(data) => data,
-            None => {
-                error!("❌ No valid MP3 frames found – treating as PCM");
-                clear_flag();
-                return Err(JsValue::from_str("No valid MP3 data"));
-            }
-        };
-
-        // NEW: Log detailed MP3 info
-        if clean_mp3.len() >= 4 {
-            let header =
-                u32::from_be_bytes([clean_mp3[0], clean_mp3[1], clean_mp3[2], clean_mp3[3]]);
-            let version = (header >> 19) & 0x3;
-            let layer = (header >> 17) & 0x3;
-            let bitrate_index = (header >> 12) & 0xF;
-            let sample_rate_index = (header >> 10) & 0x3;
-
-            console::log_1(
-                &format!(
-                    "🎵 MP3 Header Analysis: version={}, layer={}, bitrate_idx={}, sr_idx={}",
-                    version, layer, bitrate_index, sample_rate_index
-                )
-                .into(),
-            );
-
-            // Check for issues
-            if clean_mp3.len() < 100 {
-                warn!("⚠️ MP3 data suspiciously small: {} bytes", clean_mp3.len());
+        let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
+        if let Some(player) = player_opt {
+            if let Some(ref cmr) = cast_member_ref {
+                match crate::director::chunks::swa_file::SwaFile::from_bytes(&all_bytes) {
+                    Ok(swa) => {
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cmr) {
+                            if let CastMemberType::Sound(ref mut sm) = member.member_type {
+                                sm.sound.set_data(swa.mp3_data, "mp3");
+                                sm.sound.set_metadata(swa.sample_rate, swa.channels, 16);
+                                sm.info.sample_rate = swa.sample_rate;
+                                sm.info.channels = swa.channels;
+                                sm.info.percent_streamed = 100;
+                                sm.info.swa_state = SwaState::Stopped; // stopped (download done)
+                                sm.info.copyright_info = if swa.copyright_info.is_empty() {
+                                    None
+                                } else {
+                                    Some(swa.copyright_info)
+                                };
+                                if !swa.cue_point_names.is_empty() {
+                                    sm.info.cue_point_names = swa.cue_point_names;
+                                    sm.info.cue_point_times = swa.cue_point_times;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse completed SWA for caching: {}", e);
+                    }
+                }
             }
         }
-
-        // Create ArrayBuffer from cleaned MP3 data
-        let arr = Uint8Array::from(&clean_mp3[..]);
-        let buf = arr.buffer();
-
-        // Get AudioContext
-        let (ctx, channel_num) = {
-            let ch = self_rc.borrow();
-            (ch.audio_context.clone(), ch.channel_num)
-        };
-
-        console::log_1(
-            &format!(
-                "🔄 Starting MP3 decode for channel {} ({} bytes)",
-                channel_num,
-                clean_mp3.len()
-            )
-            .into(),
-        );
-
-        // Decode audio data
-        let decode_promise = ctx.decode_audio_data(&buf)?;
-        let decoded_js = match wasm_bindgen_futures::JsFuture::from(decode_promise).await {
-            Ok(v) => v,
-            Err(e) => {
-                // NEW: Better error reporting
-                error!("❌ MP3 decoding failed: {:?}", e);
-                console::log_1(
-                    &format!(
-                        "📊 Data size: {} bytes, First 16 bytes: {:02X?}",
-                        clean_mp3.len(),
-                        &clean_mp3[0..16.min(clean_mp3.len())]
-                    )
-                    .into(),
-                );
-                console::log_1(
-                    &"ℹ️ This might be Director-specific encoding. Falling back to PCM.".into(),
-                );
-                clear_flag();
-                return Err(e);
-            }
-        };
-
-        let audio_buffer: AudioBuffer = AudioBuffer::from(decoded_js);
-        console::log_1(
-            &format!(
-                "✅ MP3 decoded: {} channels, {} samples, {} Hz",
-                audio_buffer.number_of_channels(),
-                audio_buffer.length(),
-                audio_buffer.sample_rate()
-            )
-            .into(),
-        );
-
-        let final_buffer = audio_buffer;
-
-        // // Handle sample rate if needed
-        // let expected_rate_opt = {
-        //     let ch = self_rc.borrow();
-        //     ch.expected_sample_rate
-        // };
-
-        // console::log_1(
-        //     &format!(
-        //         "✅ Using browser-decoded MP3 at {} Hz (no resampling needed)",
-        //         audio_buffer.sample_rate()
-        //     )
-        //     .into(),
-        // );
-
-        // let final_buffer = if let Some(expected_rate) = expected_rate_opt {
-        //     let expected_rate_f = expected_rate as f32;
-        //     if (audio_buffer.sample_rate() as f32 - expected_rate_f).abs() > 1.0 {
-        //         console::log_1(
-        //             &format!(
-        //                 "🔄 Resampling {} -> {} Hz",
-        //                 audio_buffer.sample_rate(),
-        //                 expected_rate_f
-        //             )
-        //             .into(),
-        //         );
-
-        //         match Self::resample_audio_buffer(&audio_buffer, expected_rate_f).await {
-        //             Ok(rbuf) => {
-        //                 console::log_1(
-        //                     &format!("✅ Resampled buffer: {} samples", rbuf.length()).into(),
-        //                 );
-        //                 rbuf
-        //             }
-        //             Err(e) => {
-        //                 console::log_1(
-        //                     &format!("⚠️ Resample failed: {:?}, using original", e).into(),
-        //                 );
-        //                 audio_buffer
-        //             }
-        //         }
-        //     } else {
-        //         audio_buffer
-        //     }
-        // } else {
-        //     audio_buffer
-        // };
-
-        // Create source node
-        let source = ctx.create_buffer_source()?;
-
-        // Create gain node
-        let gain = ctx.create_gain()?;
-        let volume = {
-            let ch = self_rc.borrow();
-            ch.volume
-        };
-        gain.gain().set_value((volume / 255.0) as f32);
-        debug!("🔊 Setting gain to {} (volume: {})", volume / 255.0, volume);
-
-        // Create pan node if available
-        if let Ok(pan_node) = ctx.create_stereo_panner() {
-            let pan_value = {
-                let ch = self_rc.borrow();
-                ch.pan
-            };
-            pan_node.pan().set_value((pan_value / 100.0) as f32);
-            let _ = source.connect_with_audio_node(&pan_node);
-            let _ = pan_node.connect_with_audio_node(&gain);
-        } else {
-            let _ = source.connect_with_audio_node(&gain);
-        }
-
-        let _ = gain.connect_with_audio_node(&ctx.destination());
-
-        source.set_buffer(Some(&final_buffer));
-
-        // CRITICAL: Check if decoding was cancelled before we start playback
-        {
-            let ch = self_rc.borrow();
-            let current_gen = *ch.decode_generation.borrow();
-            if current_gen != my_generation {
-                warn!("⚠️ Channel {} decode was cancelled (gen {} != {}), not starting playback", channel_num, my_generation, current_gen);
-                return Ok(());
-            }
-        }
-
-        // Set up ended callback with proper lifetime management
-        let self_rc_clone = self_rc.clone();
-
-        let loop_count = {
-            let ch = self_rc_clone.borrow();
-            ch.loop_count
-        };
-
-        if loop_count == 0 {
-            source.set_loop(true);
-            debug!("🔁 Enabled native WebAudio looping (loop_count=0)");
-        } else {
-            source.set_loop(false);
-        }
-
-        let closure = Closure::<dyn FnMut()>::new(move || {
-            debug!("🔚 Channel {} MP3 ended", channel_num);
-            
-            let mut ch = self_rc_clone.borrow_mut();
-            debug!("Setting status from {:?} to Idle", ch.status);
-            
-            // Only proceed if we were actually playing (not stopped early)
-            if ch.status != SoundStatus::Playing {
-                warn!("⚠️ Channel {} was already stopped, ignoring ended event", channel_num);
-                return;
-            }
-            
-            ch.status = SoundStatus::Idle;
-            ch.source_node = None;  // Clear the source node
-            ch.start_next_segment();
-        });
-
-        let _ = source.add_event_listener_with_callback("ended", closure.as_ref().unchecked_ref());
-        closure.forget();
-
-        // Start playback
-        source.start()?;
-        debug!("▶️ MP3 source.start() called");
-
-        // Store nodes in channel state AFTER starting (only once!)
-        {
-            let mut ch = self_rc.borrow_mut();
-            ch.source_node = Some(Rc::new(source));
-            ch.gain_node = Some(Rc::new(gain));
-            ch.status = SoundStatus::Playing;
-            ch.playback_start_context_time = ch.audio_context.current_time();
-            ch.elapsed_time = 0.0;
-            *ch.is_decoding.borrow_mut() = false;
-        }
-
-        debug!("✅ Channel {} MP3 playback started", channel_num);
 
         Ok(())
-    }
-
-    /// PCM fallback when MP3 decoding fails
-    fn start_sound_pcm_fallback(self_rc: Rc<RefCell<Self>>, member_ref: DatumRef) {
-        debug!("🔄 Starting PCM fallback playback");
-
-        let mut this = self_rc.borrow_mut();
-
-        // Get global player
-        let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
-        let player = match player_opt {
-            Some(p) => p,
-            None => {
-                error!("❌ No global player found");
-                return;
-            }
-        };
-
-        // Retrieve datum
-        let datum = player.get_datum(&member_ref);
-
-        if let Some(sound_member) = Self::resolve_sound_member(player, &datum) {
-            let audio_context = this.audio_context.clone();
-
-            // CRITICAL FIX: Don't check for MP3 patterns here!
-            // If MP3 decoding failed and we're in fallback, just try PCM.
-            // The false positive MP3 detection was preventing any sound playback.
-
-            debug!("🔧 Forcing PCM decoding (ignoring any MP3-like patterns)");
-
-            // Force PCM decoding by treating as raw PCM (NOT MP3)
-            let pcm_wav = match Self::load_director_sound_from_bytes(
-                &sound_member.sound.data(),
-                sound_member.info.channels,
-                sound_member.info.sample_rate,
-                sound_member.info.sample_size,
-                "raw_pcm", // ← Force raw_pcm codec to avoid MP3 detection
-                Some(sound_member.info.sample_count),
-                sound_member.sound.big_endian_data(),
-            ) {
-                Ok(wav) => wav,
-                Err(e) => {
-                    error!("❌ PCM fallback failed: {}", e);
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            // Decode WAV to AudioData
-            let audio_data = match AudioData::from_wav_bytes(&pcm_wav) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("❌ WAV decode failed: {}", e);
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            console::log_1(
-                &format!(
-                    "✅ PCM fallback: {} samples, {} Hz, {} channels",
-                    audio_data.samples.len(),
-                    audio_data.sample_rate,
-                    audio_data.num_channels
-                )
-                .into(),
-            );
-
-            // Handle empty samples
-            if audio_data.samples.is_empty() {
-                error!("❌ Audio data has no samples");
-                this.status = SoundStatus::Idle;
-                return;
-            }
-
-            let num_frames = audio_data.samples.len() / audio_data.num_channels as usize;
-            let target_sample_rate = audio_context.sample_rate();
-            let source_sample_rate = audio_data.sample_rate as f32;
-
-            // Calculate resampling
-            let resample_ratio = target_sample_rate / source_sample_rate;
-            let resampled_frames = (num_frames as f32 * resample_ratio).round() as usize;
-
-            console::log_1(
-                &format!(
-                    "🔄 Resampling {} frames -> {} frames (ratio: {:.3})",
-                    num_frames, resampled_frames, resample_ratio
-                )
-                .into(),
-            );
-
-            // Create buffer at target sample rate
-            let buffer = match audio_context.create_buffer(
-                audio_data.num_channels as u32,
-                resampled_frames as u32,
-                target_sample_rate as f32,
-            ) {
-                Ok(buf) => buf,
-                Err(_) => {
-                    error!("❌ Failed to create AudioBuffer");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            // Resample and copy data
-            for ch in 0..audio_data.num_channels {
-                let mut channel_data = vec![0.0f32; resampled_frames];
-
-                for frame in 0..resampled_frames {
-                    let source_pos = frame as f32 / resample_ratio;
-                    let source_frame = source_pos.floor() as usize;
-                    let frac = source_pos - source_frame as f32;
-
-                    let idx1 = (source_frame * audio_data.num_channels as usize + ch as usize)
-                        .min(audio_data.samples.len() - 1);
-                    let idx2 = ((source_frame + 1) * audio_data.num_channels as usize
-                        + ch as usize)
-                        .min(audio_data.samples.len() - 1);
-
-                    let sample1 = audio_data.samples[idx1] as f32;
-                    let sample2 = audio_data.samples[idx2] as f32;
-                    channel_data[frame] = sample1 + (sample2 - sample1) * frac;
-                }
-
-                let _ = buffer.copy_to_channel(&channel_data, ch as i32);
-            }
-
-            // CRITICAL FIX: Wrap in Rc::new() for Rc<AudioBuffer>
-            this.current_audio_buffer = Some(Rc::new(buffer.clone()));
-
-            // Create and connect source node
-            let source = match audio_context.create_buffer_source() {
-                Ok(s) => s,
-                Err(_) => {
-                    error!("❌ Failed to create buffer source");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            source.set_buffer(Some(&buffer));
-            
-            // Set up looping if needed
-            let loop_count = this.loop_count;
-            if loop_count == 0 {
-                source.set_loop(true);
-            } else {
-                source.set_loop(false);
-            }
-
-            // Create gain node
-            let gain = match audio_context.create_gain() {
-                Ok(g) => g,
-                Err(_) => {
-                    error!("❌ Failed to create gain node");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            let volume = this.volume;
-            gain.gain().set_value((volume / 255.0) as f32);
-
-            // Create pan node
-            let pan = match audio_context.create_stereo_panner() {
-                Ok(p) => p,
-                Err(_) => {
-                    error!("❌ Failed to create pan node");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            let pan_value = this.pan;
-            pan.pan().set_value(pan_value as f32);
-
-            // Connect the audio graph
-            let _ = source.connect_with_audio_node(&gain);
-            let _ = gain.connect_with_audio_node(&pan);
-            let _ = pan.connect_with_audio_node(&audio_context.destination());
-
-            // Set up the onended callback before starting
-            let channel_index = this.channel_num;
-            let closure = Closure::<dyn FnMut()>::new(move || {
-                SoundChannel::handle_end_of_sound(channel_index);
-            });
-            source.add_event_listener_with_callback("ended", closure.as_ref().unchecked_ref())
-                .unwrap_or_else(|e| {
-                    warn!("⚠️ Failed to add ended listener: {:?}", e);
-                });
-            closure.forget();
-
-            // Start playback
-            let _ = source.start();
-
-            debug!("✅ PCM fallback playback started successfully");
-
-            // CRITICAL FIX: Wrap all nodes in Rc::new()
-            this.source_node = Some(Rc::new(source));
-            this.gain_node = Some(Rc::new(gain));
-            this.pan_node = Some(Rc::new(pan));
-            this.status = SoundStatus::Playing;
-            this.playback_start_context_time = this.audio_context.current_time();
-        } else {
-            error!("❌ Could not resolve sound member");
-            this.status = SoundStatus::Idle;
-        }
-    }
-
-    /// Validates MP3 frame headers and calculates frame size
-    fn get_mp3_frame_info(header: &[u8; 4]) -> Option<(usize, u32)> {
-        if header[0] != 0xFF || (header[1] & 0xE0) != 0xE0 {
-            return None;
-        }
-
-        let version = (header[1] >> 3) & 0x03;
-        let layer = (header[1] >> 1) & 0x03;
-        let bitrate_index = (header[2] >> 4) & 0x0F;
-        let sample_rate_index = (header[2] >> 2) & 0x03;
-        let padding = (header[2] >> 1) & 0x01;
-
-        // Bitrate table for MPEG1 Layer III
-        const BITRATES: [[u32; 16]; 2] = [
-            // MPEG1 Layer III
-            [
-                0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
-            ],
-            // MPEG2/2.5 Layer III
-            [
-                0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
-            ],
-        ];
-
-        const SAMPLE_RATES: [[u32; 4]; 2] = [
-            [44100, 48000, 32000, 0], // MPEG1
-            [22050, 24000, 16000, 0], // MPEG2/2.5
-        ];
-
-        let version_index = if version == 3 { 0 } else { 1 };
-        let bitrate = BITRATES[version_index][bitrate_index as usize];
-        let sample_rate = SAMPLE_RATES[version_index][sample_rate_index as usize];
-
-        if bitrate == 0 || sample_rate == 0 {
-            return None;
-        }
-
-        // Calculate frame size
-        let samples_per_frame = if version == 3 { 1152 } else { 576 };
-        let frame_size =
-            ((samples_per_frame / 8 * bitrate * 1000 / sample_rate) + padding as u32) as usize;
-
-        Some((frame_size, sample_rate))
-    }
-
-    /// Extract only valid MP3 frames, skipping any garbage
-    fn extract_valid_mp3_frames(data: &[u8]) -> Option<Vec<u8>> {
-        // First, find where MP3 data starts
-        let mp3_start = Self::find_mp3_start(data)?;
-
-        console::log_1(
-            &format!(
-                "📍 MP3 data starts at offset {} (0x{:04X})",
-                mp3_start, mp3_start
-            )
-            .into(),
-        );
-
-        // From the MP3 start position, extract all remaining data
-        // Most Director MP3s are complete streams after the header
-        let mp3_data = &data[mp3_start..];
-
-        debug!("✅ Extracted {} bytes of MP3 data", mp3_data.len());
-
-        // Validate first frame
-        if mp3_data.len() >= 4 {
-            let header = [mp3_data[0], mp3_data[1], mp3_data[2], mp3_data[3]];
-            if let Some((frame_size, sample_rate)) = Self::get_mp3_frame_info(&header) {
-                console::log_1(
-                    &format!(
-                        "✅ First MP3 frame validated: size={}, rate={}Hz",
-                        frame_size, sample_rate
-                    )
-                    .into(),
-                );
-                return Some(mp3_data.to_vec());
-            }
-        }
-
-        error!("❌ MP3 validation failed");
-        None
     }
 
     pub fn play_next(&mut self) {
@@ -3035,6 +2791,92 @@ impl SoundChannel {
         Ok(pcm_samples)
     }
 
+    /// Decode MP3 data to PCM using Symphonia at the native sample rate.
+    /// Skips the standard decoder warmup (1057 samples = 576 IMDCT + 481
+    /// polyphase) and takes exactly expected_samples samples when provided,
+    /// matching Director's decoder pipeline delay.
+    pub fn decode_mp3_symphonia(
+        mp3_data: &[u8],
+        expected_samples: Option<u32>,
+    ) -> Result<AudioData, String> {
+        use symphonia::core::audio::SampleBuffer;
+        use symphonia::core::codecs::DecoderOptions;
+        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        use symphonia::core::probe::Hint;
+
+        let cursor = std::io::Cursor::new(mp3_data.to_vec());
+        let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+
+        let mut hint = Hint::new();
+        hint.with_extension("mp3");
+
+        let format_opts = FormatOptions { enable_gapless: true, ..Default::default() };
+        let probed = symphonia::default::get_probe()
+            .format(&hint, mss, &format_opts, &MetadataOptions::default())
+            .map_err(|e| format!("symphonia probe failed: {}", e))?;
+
+        let mut format = probed.format;
+        let track = format.default_track()
+            .ok_or("No default track found")?;
+
+        let track_id = track.id;
+        let codec_params = track.codec_params.clone();
+        let decoded_rate = codec_params.sample_rate.unwrap_or(0);
+        let decoded_channels = codec_params.channels
+            .map(|c| c.count() as u16)
+            .unwrap_or(1);
+
+        let mut decoder = symphonia::default::get_codecs()
+            .make(&codec_params, &DecoderOptions::default())
+            .map_err(|e| format!("symphonia codec init failed: {}", e))?;
+
+        let mut pcm_samples: Vec<f32> = Vec::new();
+
+        loop {
+            let packet = match format.next_packet() {
+                Ok(p) => p,
+                Err(symphonia::core::errors::Error::IoError(ref e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(_) => break,
+            };
+
+            if packet.track_id() != track_id {
+                continue;
+            }
+
+            if let Ok(decoded) = decoder.decode(&packet) {
+                let spec = *decoded.spec();
+                let num_frames = decoded.frames();
+                let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
+                sample_buf.copy_interleaved_ref(decoded);
+                pcm_samples.extend_from_slice(sample_buf.samples());
+            }
+        }
+
+        let total_frames = pcm_samples.len() / decoded_channels as usize;
+        let expected = expected_samples.unwrap_or(0) as usize;
+
+        // Skip Director's decoder warmup (1057 samples) and take exactly
+        // sample_count samples to match Director's output.
+        if expected > 0 && total_frames > expected {
+            let decoder_delay = 1057usize;
+            let ch_count = decoded_channels as usize;
+            let skip = decoder_delay.min(total_frames - expected);
+            let start = skip * ch_count;
+            let end = start + expected * ch_count;
+            let end = end.min(pcm_samples.len());
+            pcm_samples = pcm_samples[start..end].to_vec();
+        }
+
+        Ok(AudioData {
+            samples: pcm_samples,
+            num_channels: decoded_channels,
+            sample_rate: decoded_rate,
+        })
+    }
+
     pub fn load_director_audio_data(
         sound_bytes: &[u8],
         channels: u16,
@@ -3068,18 +2910,13 @@ impl SoundChannel {
         if let Some(mp3_start) = mp3_start {
             console::log_1(
                 &format!(
-                    "✅ Valid MP3 sequence found at offset {} (0x{:04X}) - using MP3 decoder (codec was '{}')",
+                    "✅ MP3 detected at offset {} (0x{:04X}), decoding with symphonia (codec was '{}')",
                     mp3_start, mp3_start, codec
                 )
                 .into(),
             );
-            let mp3_data = sound_bytes[mp3_start..].to_vec();
-            return Ok(AudioData {
-                samples: vec![],
-                num_channels: channels as u16,
-                sample_rate,
-                compressed_data: Some(mp3_data),
-            });
+            let mp3_data = &sound_bytes[mp3_start..];
+            return Self::decode_mp3_symphonia(mp3_data, expected_samples);
         }
         
         // No MP3 found - treat as PCM/ADPCM
@@ -3096,172 +2933,7 @@ impl SoundChannel {
         AudioData::from_wav_bytes(&wav_bytes)
     }
 
-    /// Play MP3 data using HtmlAudioElement (browser handles decoding)
-    pub async fn play_mp3_data(mp3_bytes: &[u8]) -> Result<(), JsValue> {
-        console::log_1(
-            &format!(
-                "🎵 Creating Blob from {} bytes of MP3 data",
-                mp3_bytes.len()
-            )
-            .into(),
-        );
 
-        // Create a Uint8Array from the MP3 bytes
-        let uint8_array = js_sys::Uint8Array::from(mp3_bytes);
-
-        // Create a Blob with the MP3 data
-        let mut blob_parts = js_sys::Array::new();
-        blob_parts.push(&uint8_array);
-
-        let blob = Blob::new_with_u8_array_sequence_and_options(
-            &blob_parts,
-            web_sys::BlobPropertyBag::new().type_("audio/mpeg"),
-        )?;
-
-        debug!("✅ Blob created: {} bytes", blob.size());
-
-        // Create an object URL for the Blob
-        let url = Url::create_object_url_with_blob(&blob).map_err(|e| {
-            console::error_1(&format!("Failed to create object URL: {:?}", e).into());
-            e
-        })?;
-
-        debug!("🔗 Object URL created: {}", url);
-
-        // Create an audio element and play it
-        let audio = HtmlAudioElement::new().map_err(|e| {
-            console::error_1(&"Failed to create audio element".into());
-            e
-        })?;
-
-        audio.set_src(&url);
-
-        // Play the audio
-        audio.play().map_err(|e| {
-            console::error_1(&format!("Failed to play audio: {:?}", e).into());
-            e
-        })?;
-
-        debug!("▶️ MP3 playback started");
-
-        Ok(())
-    }
-
-    /// Alternative: Decode MP3 to WAV using Web Audio API (for audio context integration)
-    pub async fn decode_mp3_to_wav(
-        audio_context: &AudioContext,
-        mp3_bytes: &[u8],
-    ) -> Result<AudioBuffer, JsValue> {
-        debug!("🔄 Decoding MP3 data via Web Audio API");
-
-        // Create a Uint8Array from MP3 bytes
-        let uint8_array = js_sys::Uint8Array::from(mp3_bytes);
-
-        // Create an ArrayBuffer from the Uint8Array
-        let array_buffer = uint8_array.buffer();
-
-        // Use Web Audio's decodeAudioData to decode the MP3
-        // This returns a Promise, so we need to handle it asynchronously
-        let decode_promise = audio_context
-            .decode_audio_data(&array_buffer)
-            .map_err(|e| {
-                console::error_1(&format!("Failed to start decoding: {:?}", e).into());
-                e
-            })?;
-
-        // Await the promise
-        let audio_buffer = wasm_bindgen_futures::JsFuture::from(decode_promise)
-            .await
-            .map_err(|e| {
-                console::error_1(&format!("MP3 decode failed: {:?}", e).into());
-                e
-            })?;
-
-        // The result should be an AudioBuffer
-        let buffer = audio_buffer.dyn_into::<AudioBuffer>().map_err(|e| {
-            console::error_1(&"Decode result is not an AudioBuffer".into());
-            e
-        })?;
-
-        console::log_1(
-            &format!(
-                "✅ MP3 decoded successfully: {} channels, {} samples, {} Hz",
-                buffer.number_of_channels(),
-                buffer.length(),
-                buffer.sample_rate()
-            )
-            .into(),
-        );
-
-        Ok(buffer)
-    }
-
-    /// Integrated MP3 playback in your sound channel
-    pub async fn play_mp3_via_web_audio(&mut self, mp3_bytes: &[u8]) -> Result<(), JsValue> {
-        debug!("🎵 Starting MP3 playback via Web Audio");
-
-        // Step 1: Decode MP3 to AudioBuffer
-        let audio_buffer = Self::decode_mp3_to_wav(&self.audio_context, mp3_bytes).await?;
-
-        // Step 3: Stop any existing playback
-        if let Some(ref source) = self.source_node {
-            let _ = source.stop_with_when(0.0);
-            let _ = source.disconnect();
-        }
-        self.source_node = None;
-
-        // Step 4: Create new source node
-        let source = self.audio_context.create_buffer_source()?;
-        source.set_buffer(Some(&audio_buffer));
- 
-        // Create FRESH gain and pan nodes
-        let gain = match self.audio_context.create_gain() {
-            Ok(g) => g,
-            Err(_) => {
-                error!("❌ Failed to create GainNode");
-                return Ok(());
-            }
-        };
-
-        let volume = self.volume;
-        gain.gain().set_value((volume / 255.0) as f32);
-        debug!("🔊 Setting gain to {} (volume: {})", volume / 255.0, volume);
-
-        let pan = match self.audio_context.create_stereo_panner() {
-            Ok(p) => p,
-            Err(_) => {
-                error!("❌ Failed to create StereoPannerNode");
-                return Ok(());
-            }
-        };
-
-        let pan_value = self.pan;
-        pan.pan().set_value((pan_value / 100.0) as f32);
-
-        let _ = source.connect_with_audio_node(&pan);
-        let _ = pan.connect_with_audio_node(&gain);
-        let _ = gain.connect_with_audio_node(&self.audio_context.destination());
-
-        // Step 6: Set up on-ended callback
-        let channel_index = self.channel_num;
-        let closure = Closure::<dyn FnMut()>::new(move || {
-            SoundChannel::handle_end_of_sound(channel_index);
-        });
-
-        let _ = source.add_event_listener_with_callback("ended", closure.as_ref().unchecked_ref());
-        closure.forget();
-
-        // Step 7: Start playback
-        source.start()?;
-        debug!("called source.start()");
-        self.source_node = Some(Rc::new(source));
-        self.status = SoundStatus::Playing;
-        self.playback_start_context_time = self.audio_context.current_time();
-
-        debug!("✅ MP3 playback started on channel {}", self.channel_num);
-
-        Ok(())
-    }
 
     pub fn load_director_sound(data: &[u8]) -> Result<AudioData, String> {
         console::log_1(
@@ -3402,7 +3074,6 @@ impl SoundChannel {
             samples,
             sample_rate,
             num_channels: num_channels.into(),
-            compressed_data: None, // WAV = uncompressed
         })
     }
 
@@ -3412,7 +3083,6 @@ impl SoundChannel {
             samples: Vec::new(), // keep as Vec<f64>, not Float32Array
             sample_rate: 44100,
             num_channels: 2,
-            compressed_data: None, // WAV = uncompressed
         })
     }
 
@@ -3430,7 +3100,6 @@ impl SoundChannel {
             samples,
             sample_rate: 22050,
             num_channels: 1,
-            compressed_data: None, // WAV = uncompressed
         })
     }
 
@@ -3631,6 +3300,35 @@ impl SoundChannel {
         }
 
         self.elapsed_time += delta_time;
+
+        // Fire cue point events as elapsed time crosses cue point times
+        if let Some(ref sm) = self.sound_member {
+            let elapsed_ms = (self.elapsed_time * 1000.0) as u32;
+            let cue_times = &sm.info.cue_point_times;
+            let cue_names = &sm.info.cue_point_names;
+            let start_idx = (self.most_recent_cue_point_index + 1) as usize;
+            for i in start_idx..cue_times.len() {
+                if cue_times[i] > elapsed_ms {
+                    break;
+                }
+                self.most_recent_cue_point_index = i as i32;
+                let channel_num = self.channel_num;
+                let cue_name = cue_names.get(i).cloned().unwrap_or_default();
+                debug!("🎯 Cue point {} ('{}') at {}ms on channel {}",
+                    i, cue_name, cue_times[i], channel_num);
+                // cuePassed(channelID, cuePointNumber, cuePointName)
+                // channelID is a symbol like #Sound1
+                let channel_symbol = player.alloc_datum(
+                    Datum::Symbol(format!("Sound{}", channel_num))
+                );
+                let cue_number = player.alloc_datum(Datum::Int((i + 1) as i32));
+                let cue_name_datum = player.alloc_datum(Datum::String(cue_name));
+                crate::player::events::player_dispatch_global_event(
+                    "cuePassed",
+                    &vec![channel_symbol, cue_number, cue_name_datum],
+                );
+            }
+        }
 
         // Safety net: if elapsed time exceeds the sound duration, force status
         // to Idle. The onended callback should handle this, but it can fire late
@@ -3948,37 +3646,6 @@ impl SoundChannel {
         debug!("✅ Audio scheduled for channel {}", self.channel_num);
 
         Ok(())
-    }
-
-    pub async fn play_sound(&mut self, audio_data: &AudioData) -> Result<(), JsValue> {
-        use web_sys::{Blob, HtmlAudioElement, Url};
-
-        debug!("🎵 play_sound() called");
-
-        let context = &*self.audio_context;
-
-        // 🔊 If MP3 → decode & play via <audio>
-        if let Some(ref compressed) = audio_data.compressed_data {
-            debug!("MP3 stream detected → playing via Blob URL");
-
-            let array = js_sys::Uint8Array::from(&compressed[..]);
-            let blob = Blob::new_with_u8_array_sequence(&js_sys::Array::of1(&array))
-                .map_err(|e| JsValue::from_str(&format!("Failed to create blob: {:?}", e)))?;
-            let url = Url::create_object_url_with_blob(&blob)
-                .map_err(|e| JsValue::from_str(&format!("Failed to create object URL: {:?}", e)))?;
-
-            let audio = HtmlAudioElement::new_with_src(&url)?;
-            audio.play()?;
-            return Ok(());
-        }
-
-        // 🎧 Otherwise normal PCM playback through WebAudio
-        self.play_castmember(
-            &audio_data.samples,
-            audio_data.num_channels as u32,
-            audio_data.sample_rate as f64,
-        )
-        .await
     }
 
     pub fn stop_sound(&mut self) {
