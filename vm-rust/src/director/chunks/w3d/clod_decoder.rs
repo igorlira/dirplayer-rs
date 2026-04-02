@@ -238,7 +238,12 @@ impl ClodMeshDecoder {
         self.meshes[mesh_idx].pending_face_record_surplus +=
             num_patch_records as i32 - num_face_corner_updates as i32;
 
-        // Apply this update's patch records
+        // v11.X-style: snapshot AFTER loops but BEFORE batch.
+        // Predictions and split corners read from face_basis_snapshot (patches 0..N-2).
+        // Confirmed correct by Director 12 Lingo queries on both MA and MB models.
+        self.meshes[mesh_idx].face_basis_snapshot = self.meshes[mesh_idx].faces.clone();
+
+        // Apply this update's patch records (batch, after snapshot)
         let mesh = &mut self.meshes[mesh_idx];
         let patch_end = mesh.patch_records.len();
         let patch_start = patch_end - num_patch_records as usize;
@@ -268,8 +273,14 @@ impl ClodMeshDecoder {
             let mesh = &self.meshes[mesh_idx];
             if pred_idx < mesh.sorted_faces.len() {
                 let face_idx = mesh.sorted_faces[pred_idx] as usize;
-                if face_idx < mesh.faces.len() && (pred_mode as usize) < 3 {
-                    let corner_vert = mesh.faces[face_idx][pred_mode as usize] as usize;
+                // Use face_basis_snapshot (pre-batch, patches 0..N-2) for predictions.
+                let face_source = if face_idx < mesh.face_basis_snapshot.len() {
+                    &mesh.face_basis_snapshot
+                } else {
+                    &mesh.faces
+                };
+                if face_idx < face_source.len() && (pred_mode as usize) < 3 {
+                    let corner_vert = face_source[face_idx][pred_mode as usize] as usize;
                     if corner_vert < mesh.positions.len() {
                         let p = mesh.positions[corner_vert];
                         pred_x = p[0];
@@ -304,8 +315,13 @@ impl ClodMeshDecoder {
             let mesh = &self.meshes[mesh_idx];
             if norm_pred_idx < mesh.sorted_faces.len() {
                 let face_idx = mesh.sorted_faces[norm_pred_idx] as usize;
-                if face_idx < mesh.faces.len() && (norm_pred_mode as usize) < 3 {
-                    let corner_vert = mesh.faces[face_idx][norm_pred_mode as usize] as usize;
+                let face_source = if face_idx < mesh.face_basis_snapshot.len() {
+                    &mesh.face_basis_snapshot
+                } else {
+                    &mesh.faces
+                };
+                if face_idx < face_source.len() && (norm_pred_mode as usize) < 3 {
+                    let corner_vert = face_source[face_idx][norm_pred_mode as usize] as usize;
                     if corner_vert < mesh.normals.len() {
                         let n = mesh.normals[corner_vert];
                         pred_nx = n[0];
@@ -392,8 +408,13 @@ impl ClodMeshDecoder {
                 let mesh = &self.meshes[mesh_idx];
                 if tc_pred_idx < mesh.sorted_faces.len() {
                     let face_idx = mesh.sorted_faces[tc_pred_idx] as usize;
-                    if face_idx < mesh.faces.len() && (tc_pred_mode as usize) < 3 {
-                        let corner_vert = mesh.faces[face_idx][tc_pred_mode as usize] as usize;
+                    let face_source = if face_idx < mesh.face_basis_snapshot.len() {
+                        &mesh.face_basis_snapshot
+                    } else {
+                        &mesh.faces
+                    };
+                    if face_idx < face_source.len() && (tc_pred_mode as usize) < 3 {
+                        let corner_vert = face_source[face_idx][tc_pred_mode as usize] as usize;
                         if layer < mesh.tex_coords.len() && corner_vert < mesh.tex_coords[layer].len() {
                             let tc = mesh.tex_coords[layer][corner_vert];
                             pred_u = tc[0];
@@ -521,8 +542,14 @@ impl ClodMeshDecoder {
                     if split_idx < mesh.sorted_faces.len() {
                         let face_idx = mesh.sorted_faces[split_idx] as usize;
                         let corner = (corner_type - 2) as usize;
-                        if face_idx < mesh.faces.len() && corner < 3 {
-                            let base_vertex = mesh.faces[face_idx][corner];
+                        // Use face_basis_snapshot for split corners (patches 0..N-2).
+                        let face_source = if face_idx < mesh.face_basis_snapshot.len() {
+                            &mesh.face_basis_snapshot
+                        } else {
+                            &mesh.faces
+                        };
+                        if face_idx < face_source.len() && corner < 3 {
+                            let base_vertex = face_source[face_idx][corner];
                             corners[c] = offset + base_vertex;
                         }
                     }
@@ -698,6 +725,9 @@ impl ClodMeshDecoder {
 
                 // Truncate to target face count
                 faces.truncate(face_count);
+                // Remove faces that reference out-of-bounds vertices
+                let vc = vert_count as u32;
+                faces.retain(|f| f[0] < vc && f[1] < vc && f[2] < vc);
 
                 let tc = mesh.tex_coords.iter().map(|layer| {
                     layer[..vert_count.min(layer.len())].to_vec()

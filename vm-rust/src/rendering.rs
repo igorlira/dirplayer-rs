@@ -2719,8 +2719,8 @@ impl PlayerCanvasRenderer {
     }
 
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
-        // Sync persistent 3D state to scene data for the renderer
-        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
+        // Note: persistent transform sync removed — set_node_transform() handles it.
+        // sync_persistent_transforms overwrites worldPosition/pointAt updates.
         crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
 
         // let time = chrono::Local::now().timestamp_millis() as i64;

@@ -1943,6 +1943,10 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::Transform3d(_) => {
             map.str_set("type", &safe_js_string("transform"));
         }
+        Datum::HavokObjectRef(hk_ref) => {
+            map.str_set("type", &safe_js_string("havokObject"));
+            map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", hk_ref.object_type, hk_ref.name)));
+        }
     }
     return map.to_js_object();
 }

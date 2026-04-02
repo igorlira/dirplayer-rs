@@ -70,6 +70,11 @@ pub struct MeshState {
     pub step_records: Vec<StepRecord>,
     pub patch_records: Vec<PatchRecord>,
 
+    // v11.X-style face snapshot: captures mesh.faces AFTER loops but BEFORE batch.
+    // Predictions and split corners read from this snapshot (patches 0..N-2 at step N).
+    // Confirmed correct by Director 12 Lingo queries.
+    pub face_basis_snapshot: Vec<[u32; 3]>,
+
     // Sorted faces for current update
     pub sorted_faces: Vec<u32>,
 }
@@ -108,6 +113,7 @@ impl MeshState {
             neighbor_faces: Vec::new(),
             step_records: Vec::with_capacity(max_updates as usize),
             patch_records: Vec::with_capacity(update_data_count as usize),
+            face_basis_snapshot: Vec::new(),
             sorted_faces: Vec::new(),
         }
     }

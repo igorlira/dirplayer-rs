@@ -335,8 +335,7 @@ impl WebGL2Renderer {
         // Increment sprite debug frame counter
         let df = SPRITE_DEBUG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Sync persistent 3D state to scene data for the renderer
-        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
+        // Note: persistent transform sync removed — set_node_transform() handles it.
         crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
 
         // Check if palettes changed and clear texture cache if so
@@ -1004,6 +1003,12 @@ impl WebGL2Renderer {
 
             let w3d_cam = sprite.w3d_camera.clone();
             let w3d_extra_cams = sprite.w3d_cameras.clone();
+            if w3d_cam.is_some() || !w3d_extra_cams.is_empty() {
+                web_sys::console::log_1(&format!(
+                    "[W3D-RENDER] sprite {} camera={:?} extras={:?}",
+                    channel_num, w3d_cam, w3d_extra_cams
+                ).into());
+            }
             let rect = get_concrete_sprite_rect(player, sprite);
             (
                 member_ref,
@@ -1271,44 +1276,10 @@ impl WebGL2Renderer {
             }
         }
 
-        // Sync persistent Transform3d datums back to node_transforms so the
-        // renderer sees in-place mutations made by Lingo scripts (identity, translate, rotate, etc.)
-        {
-            let datum_pairs: Vec<(String, DatumRef)> = {
-                player.movie.cast_manager.find_member_by_ref(&member_ref)
-                    .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| w3d.runtime_state.node_transform_datums.iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect())
-                    .unwrap_or_default()
-            };
-            let updates: Vec<(String, [f32; 16])> = datum_pairs.iter()
-                .filter_map(|(name, datum_ref)| {
-                    match player.get_datum(datum_ref) {
-                        Datum::Transform3d(m) => Some((name.clone(), m.map(|v| v as f32))),
-                        _ => None,
-                    }
-                })
-                .collect();
-            if !updates.is_empty() {
-                static SYNC_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                if !SYNC_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    for (name, t) in &updates {
-                        web_sys::console::log_1(&format!(
-                            "[3D-SYNC] '{}' pos=({:.1},{:.1},{:.1}) rot_col0=({:.3},{:.3},{:.3})",
-                            name, t[12], t[13], t[14], t[0], t[1], t[2]
-                        ).into());
-                    }
-                }
-                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                        for (name, transform) in updates {
-                            w3d.runtime_state.node_transforms.insert(name, transform);
-                        }
-                    }
-                }
-            }
-        }
+        // Note: persistent Transform3d datum → node_transforms sync is handled by
+        // set_node_transform() when properties are set. We do NOT sync here because
+        // worldPosition/pointAt update node_transforms directly, and overwriting from
+        // a stale persistent datum would undo those updates.
 
         let texture_source = {
             let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
@@ -2551,6 +2522,13 @@ impl WebGL2Renderer {
                 for cam_name in &extra_cameras {
                     let should_clear = runtime_state.camera_clear_at_render
                         .get(cam_name).copied().unwrap_or(true);
+                    static CAM_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !CAM_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        web_sys::console::log_1(&format!(
+                            "[W3D-MULTICAM] extra cam='{}' should_clear={} clear_map={:?}",
+                            cam_name, should_clear, runtime_state.camera_clear_at_render
+                        ).into());
+                    }
                     self.scene3d.active_camera = Some(cam_name.clone());
                     let _ = self.scene3d.render_scene_with_state_ex(
                         &self.context, member_key, &scene, width, height,
