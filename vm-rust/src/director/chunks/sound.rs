@@ -131,6 +131,8 @@ pub struct SoundChunk {
     /// Whether the audio data is stored in big-endian byte order.
     /// Mac "snd " resources are always big-endian; sndH/sndS follows the file's byte order.
     big_endian_data: bool,
+    /// True if this sound uses SWA (Shockwave Audio) compression (MP3 with Director header).
+    is_swa: bool,
 }
 
 impl SoundChunk {
@@ -144,6 +146,7 @@ impl SoundChunk {
             data,
             version: 0,
             big_endian_data: true,
+            is_swa: false,
         }
     }
 
@@ -175,6 +178,10 @@ impl SoundChunk {
         self.big_endian_data
     }
 
+    pub fn is_swa(&self) -> bool {
+        self.is_swa
+    }
+
     pub fn set_metadata(&mut self, sample_rate: u32, channels: u16, bits_per_sample: u16) {
         self.sample_rate = sample_rate;
         self.channels = channels;
@@ -188,6 +195,12 @@ impl SoundChunk {
             )
             .into(),
         );
+    }
+
+    /// Replace the audio data and codec.
+    pub fn set_data(&mut self, data: Vec<u8>, codec: &str) {
+        self.data = data;
+        self.codec = codec.to_string();
     }
 
     pub fn debug_get_samples(&self) -> Result<Float32Array, JsValue> {
@@ -239,6 +252,7 @@ impl Default for SoundChunk {
             data: Vec::new(),
             version: 0,
             big_endian_data: true,
+            is_swa: false,
         }
     }
 }
@@ -298,6 +312,7 @@ impl SoundChunk {
                     data: all_bytes,
                     version,
                     big_endian_data: true,
+                    is_swa: false,
                 });
             }
         }
@@ -434,6 +449,7 @@ impl SoundChunk {
             data: audio_data,
             version,
             big_endian_data: true, // Mac snd resources are always big-endian
+            is_swa: false,
         })
     }
 
@@ -482,6 +498,7 @@ impl SoundChunk {
 
     pub fn from_media(media: &MediaChunk) -> SoundChunk {
         let codec = media.get_codec_name();
+        let is_swa = media.is_swa();
 
         // For IMA ADPCM, the data_size_field contains the uncompressed size
         // Calculate sample_count from uncompressed size, not compressed data
@@ -516,6 +533,7 @@ impl SoundChunk {
             data: media.audio_data.clone(),
             version: 0,
             big_endian_data: true, // Director media chunks are big-endian
+            is_swa,
         }
     }
 
@@ -535,20 +553,23 @@ impl SoundChunk {
         };
 
         // Determine codec from compression_type GUID
-        let codec = {
+        let (codec, is_swa) = {
             // Check for null/empty compression type (= raw PCM)
             let is_null = header.compression_type.iter().all(|&b| b == 0);
             if is_null {
-                "raw_pcm".to_string()
+                ("raw_pcm".to_string(), false)
             } else {
                 // Check known GUIDs
-                // IMA ADPCM: 5A08CD40-535B-11D0-...
+                // IMA ADPCM: 5A08CD40-535B-11D0-A8BB-00A0C9008A48
                 if header.compression_type[0..4] == [0x5A, 0x08, 0xCD, 0x40] {
-                    "ima_adpcm".to_string()
+                    ("ima_adpcm".to_string(), false)
+                // MPEG Layer-3: 00000055-0000-0010-8000-00AA00389B71 (big-endian)
+                } else if header.compression_type[0..4] == [0x00, 0x00, 0x00, 0x55] {
+                    ("mp3".to_string(), true)
                 } else {
                     let type_str = String::from_utf8_lossy(&header.compression_type);
                     debug!("Unknown compression type: {:02X?} ('{}')", header.compression_type, type_str.trim_end_matches('\0'));
-                    "raw_pcm".to_string()
+                    ("raw_pcm".to_string(), false)
                 }
             }
         };
@@ -582,6 +603,7 @@ impl SoundChunk {
             data: samples.to_vec(),
             version: 0,
             big_endian_data: header.file_endian_is_big, // sndS data follows file byte order
+            is_swa,
         }
     }
 }

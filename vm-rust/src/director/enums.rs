@@ -548,15 +548,62 @@ impl From<&[u8]> for FilmLoopInfo {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SoundInfo {
     pub sample_rate: u32,
     pub sample_size: u16,
     pub channels: u16,
     pub sample_count: u32,
     pub duration: u32,
-    pub loop_enabled: bool, 
-    //pub compression_type: u16,
+    pub loop_enabled: bool,
+    pub is_swa: bool,
+    pub bit_rate: Option<u32>,
+    pub cue_point_names: Vec<String>,
+    pub cue_point_times: Vec<u32>,
+    pub linked_path: Option<String>,
+    pub copyright_info: Option<String>,
+    pub preload_time: u32,
+    pub percent_streamed: u32,
+    pub swa_state: SwaState,
+    pub swa_volume: u8,
+    pub swa_sound_channel: i32,
+}
+
+impl Default for SoundInfo {
+    fn default() -> Self {
+        Self {
+            sample_rate: 0,
+            sample_size: 0,
+            channels: 0,
+            sample_count: 0,
+            duration: 0,
+            loop_enabled: false,
+            is_swa: false,
+            bit_rate: None,
+            cue_point_names: Vec::new(),
+            cue_point_times: Vec::new(),
+            linked_path: None,
+            copyright_info: None,
+            preload_time: 0,
+            percent_streamed: 0,
+            swa_state: SwaState::Stopped,
+            swa_volume: 255,
+            swa_sound_channel: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SwaState {
+    #[default]
+    Stopped = 0,
+    Preloading = 1,
+    PreloadDone = 2,
+    Playing = 3,
+    Paused = 4,
+    Done = 5,
+    Error = 9,
+    InsufficientCPU = 10,
 }
 
 #[derive(Clone, Debug)]
