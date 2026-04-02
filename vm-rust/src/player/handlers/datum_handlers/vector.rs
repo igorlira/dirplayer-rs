@@ -148,7 +148,7 @@ impl VectorDatumHandlers {
             "x" => Ok(Datum::Float(x)),
             "y" => Ok(Datum::Float(y)),
             "z" => Ok(Datum::Float(z)),
-            "magnitude" => Ok(Datum::Float((x * x + y * y + z * z).sqrt())),
+            "magnitude" | "length" => Ok(Datum::Float((x * x + y * y + z * z).sqrt())),
             "ilk" => Ok(Datum::Symbol("vector".to_string())),
             _ => Err(ScriptError::new(format!(
                 "Cannot get vector property {}",

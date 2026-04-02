@@ -220,21 +220,25 @@ impl SpriteDatumHandlers {
                         }
                     } else { String::new() };
                     let index = if args.len() >= 2 {
-                        player.get_datum(&args[1]).int_value().unwrap_or(1) as usize
-                    } else { 1 };
+                        Some(player.get_datum(&args[1]).int_value().unwrap_or(1) as usize)
+                    } else { None };
                     if !cam_name.is_empty() {
                         let sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
-                        if index <= 1 {
-                            // Index 1: set as primary camera
-                            sprite.w3d_camera = Some(cam_name);
-                        } else {
-                            // Index 2+: add to extra cameras list
-                            let extra_idx = index.saturating_sub(2);
-                            if extra_idx >= sprite.w3d_cameras.len() {
-                                sprite.w3d_cameras.push(cam_name);
+                        if let Some(index) = index {
+                            // addCamera(cam, index) — insert at specific position
+                            if index <= 1 {
+                                sprite.w3d_camera = Some(cam_name);
                             } else {
-                                sprite.w3d_cameras.insert(extra_idx, cam_name);
+                                let extra_idx = index.saturating_sub(2);
+                                if extra_idx >= sprite.w3d_cameras.len() {
+                                    sprite.w3d_cameras.push(cam_name);
+                                } else {
+                                    sprite.w3d_cameras.insert(extra_idx, cam_name);
+                                }
                             }
+                        } else {
+                            // addCamera(cam) — append to camera list
+                            sprite.w3d_cameras.push(cam_name);
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))

@@ -273,6 +273,21 @@ impl SoundChannelDatumHandlers {
             "sampleCount" => Ok(Datum::Int(channel.sample_count.try_into().unwrap())),
             "channelCount" => Ok(Datum::Int(channel.channel_count.into())),
             "status" => Ok(Datum::Int(channel.status.clone() as i32)),
+            "member" => {
+                match &channel.member {
+                    Some(member_ref) => Ok(player.get_datum(member_ref).clone()),
+                    None => Ok(Datum::Void),
+                }
+            }
+            "currentTime" => {
+                let ct = if channel.status == SoundStatus::Playing {
+                    let elapsed = channel.audio_context.current_time() - channel.playback_start_context_time;
+                    (channel.start_time + elapsed * 1000.0).min(channel.get_duration() as f64)
+                } else {
+                    channel.elapsed_time
+                };
+                Ok(Datum::Float(ct))
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get property {} for sound channel",
                 prop

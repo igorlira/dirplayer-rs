@@ -37,6 +37,17 @@ impl Transform3dDatumHandlers {
             "xAxis" => Ok(Datum::Vector([m[0], m[1], m[2]])),
             "yAxis" => Ok(Datum::Vector([m[4], m[5], m[6]])),
             "zAxis" => Ok(Datum::Vector([m[8], m[9], m[10]])),
+            "axisAngle" => {
+                // Extract axis-angle from the rotation part of the matrix
+                let (axis, angle) = matrix_to_axis_angle(&m);
+                let axis_ref = player.alloc_datum(Datum::Vector(axis));
+                let angle_ref = player.alloc_datum(Datum::Float(angle));
+                Ok(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    std::collections::VecDeque::from([axis_ref, angle_ref]),
+                    false,
+                ))
+            }
             _ => Err(ScriptError::new(format!("Unknown transform property '{}'", prop))),
         }
     }
@@ -94,6 +105,40 @@ impl Transform3dDatumHandlers {
                 }
                 Ok(())
             }
+            "axisAngle" | "axisangle" => {
+                // axisAngle = [vector(axis), angle_degrees]
+                // Extract values before getting mutable borrow on transform
+                let (axis, angle_deg) = if let Datum::List(_, items, _) = &val {
+                    if items.len() >= 2 {
+                        let axis = match player.get_datum(&items[0]) {
+                            Datum::Vector(v) => *v,
+                            _ => return Err(ScriptError::new("axisAngle: expected vector for axis".into())),
+                        };
+                        let angle_deg = player.get_datum(&items[1]).to_float()?;
+                        (Some(axis), angle_deg)
+                    } else { (None, 0.0) }
+                } else { (None, 0.0) };
+
+                if let Some(axis) = axis {
+                    let m = match player.get_datum_mut(datum) {
+                        Datum::Transform3d(m) => m,
+                        _ => return Err(ScriptError::new("Expected Transform3d".into())),
+                    };
+                    let pos = [m[12], m[13], m[14]];
+                    let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
+                    let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
+                    let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
+                    let sx = if sx.is_finite() && sx > 1e-10 { sx } else { 1.0 };
+                    let sy = if sy.is_finite() && sy > 1e-10 { sy } else { 1.0 };
+                    let sz = if sz.is_finite() && sz > 1e-10 { sz } else { 1.0 };
+                    let rot = axis_angle_to_matrix(&axis, angle_deg);
+                    m[0] = rot[0]*sx;  m[1] = rot[1]*sx;  m[2] = rot[2]*sx;  m[3] = 0.0;
+                    m[4] = rot[4]*sy;  m[5] = rot[5]*sy;  m[6] = rot[6]*sy;  m[7] = 0.0;
+                    m[8] = rot[8]*sz;  m[9] = rot[9]*sz;  m[10] = rot[10]*sz; m[11] = 0.0;
+                    m[12] = pos[0]; m[13] = pos[1]; m[14] = pos[2]; m[15] = 1.0;
+                }
+                Ok(())
+            }
             _ => Err(ScriptError::new(format!("Cannot set transform property '{}'", prop))),
         }
     }
@@ -114,6 +159,52 @@ impl Transform3dDatumHandlers {
             "interpolateTo" => Self::interpolate_to(datum, args),
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
+            "getProp" | "getPropRef" => {
+                // transform.rotation[3] → getProp(#rotation, 3)
+                reserve_player_mut(|player| {
+                    let prop_name = player.get_datum(&args[0]).string_value()?;
+                    let prop_datum = Self::get_prop(player, datum, &prop_name)?;
+                    if args.len() > 1 {
+                        let index = player.get_datum(&args[1]).int_value()?;
+                        let prop_ref = player.alloc_datum(prop_datum);
+                        let prop_val = player.get_datum(&prop_ref).clone();
+                        match prop_val {
+                            Datum::Vector(v) => {
+                                let idx = (index as usize).saturating_sub(1);
+                                if idx < 3 {
+                                    Ok(player.alloc_datum(Datum::Float(v[idx])))
+                                } else {
+                                    Ok(player.alloc_datum(Datum::Float(0.0)))
+                                }
+                            }
+                            Datum::List(_, items, _) => {
+                                let idx = (index as usize).saturating_sub(1);
+                                if idx < items.len() {
+                                    Ok(items[idx].clone())
+                                } else {
+                                    Ok(DatumRef::Void)
+                                }
+                            }
+                            other => Ok(player.alloc_datum(other)),
+                        }
+                    } else {
+                        Ok(player.alloc_datum(prop_datum))
+                    }
+                })
+            }
+            "count" => {
+                // transform.rotation.count → 3
+                reserve_player_mut(|player| {
+                    let prop_name = player.get_datum(&args[0]).string_value()?;
+                    let prop_datum = Self::get_prop(player, datum, &prop_name)?;
+                    let count = match &prop_datum {
+                        Datum::Vector(_) => 3,
+                        Datum::List(_, items, _) => items.len() as i32,
+                        _ => 1,
+                    };
+                    Ok(player.alloc_datum(Datum::Int(count)))
+                })
+            }
             _ => Err(ScriptError::new(format!("No handler '{}' for transform", handler_name))),
         }
     }
@@ -391,4 +482,69 @@ fn matrix_to_euler(m: &[f64; 16]) -> (f64, f64, f64) {
     }
 
     (rx.to_degrees(), ry.to_degrees(), rz.to_degrees())
+}
+
+/// Extract axis-angle representation from the rotation part of a 4x4 matrix.
+/// Returns (axis [f64; 3], angle_degrees f64).
+fn matrix_to_axis_angle(m: &[f64; 16]) -> ([f64; 3], f64) {
+    // Normalize rotation columns to remove scale
+    let s0 = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt().max(1e-10);
+    let s1 = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt().max(1e-10);
+    let s2 = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt().max(1e-10);
+    let r00 = m[0]/s0; let r01 = m[1]/s0; let r02 = m[2]/s0;
+    let r10 = m[4]/s1; let r11 = m[5]/s1; let r12 = m[6]/s1;
+    let r20 = m[8]/s2; let r21 = m[9]/s2; let r22 = m[10]/s2;
+
+    // trace = 1 + 2*cos(angle)
+    let trace = r00 + r11 + r22;
+    let cos_a = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0);
+    let angle = cos_a.acos(); // radians
+
+    if angle.abs() < 1e-10 {
+        // No rotation
+        return ([1.0, 0.0, 0.0], 0.0);
+    }
+
+    let sin_a = angle.sin();
+    if sin_a.abs() > 1e-10 {
+        let k = 1.0 / (2.0 * sin_a);
+        let axis = [
+            (r21 - r12) * k,
+            (r02 - r20) * k,
+            (r10 - r01) * k,
+        ];
+        (axis, angle.to_degrees())
+    } else {
+        // angle ≈ 180°, need to extract axis from the matrix diagonal
+        let (ax, ay, az) = if r00 >= r11 && r00 >= r22 {
+            let x = ((r00 + 1.0) / 2.0).sqrt();
+            (x, r01 / (2.0 * x), r02 / (2.0 * x))
+        } else if r11 >= r22 {
+            let y = ((r11 + 1.0) / 2.0).sqrt();
+            (r01 / (2.0 * y), y, r12 / (2.0 * y))
+        } else {
+            let z = ((r22 + 1.0) / 2.0).sqrt();
+            (r02 / (2.0 * z), r12 / (2.0 * z), z)
+        };
+        ([ax, ay, az], angle.to_degrees())
+    }
+}
+
+/// Build a 4x4 rotation matrix from axis-angle (angle in degrees).
+fn axis_angle_to_matrix(axis: &[f64; 3], angle_deg: f64) -> [f64; 16] {
+    let len = (axis[0]*axis[0] + axis[1]*axis[1] + axis[2]*axis[2]).sqrt();
+    if len < 1e-10 {
+        return [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
+    }
+    let (x, y, z) = (axis[0]/len, axis[1]/len, axis[2]/len);
+    let a = angle_deg.to_radians();
+    let c = a.cos();
+    let s = a.sin();
+    let t = 1.0 - c;
+    [
+        t*x*x + c,    t*x*y + s*z,  t*x*z - s*y,  0.0,
+        t*x*y - s*z,  t*y*y + c,    t*y*z + s*x,  0.0,
+        t*x*z + s*y,  t*y*z - s*x,  t*z*z + c,    0.0,
+        0.0,          0.0,          0.0,           1.0,
+    ]
 }
