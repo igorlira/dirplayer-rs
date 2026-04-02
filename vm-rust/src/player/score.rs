@@ -2901,8 +2901,9 @@ pub fn sprite_get_prop(
         )),
         "camera" => {
             // Shockwave3D sprite camera — returns the active camera as a Shockwave3dObjectRef
-            let cam_name = sprite.and_then(|s| s.w3d_camera.as_ref()).cloned().unwrap_or_else(|| "DefaultView".to_string());
             let member_ref = sprite.and_then(|s| s.member.as_ref()).cloned().unwrap_or(NULL_CAST_MEMBER_REF);
+            let cam_name = sprite.and_then(|s| s.w3d_camera.as_ref()).cloned()
+                .unwrap_or_else(|| "DefaultView".to_string());
             Ok(Datum::Shockwave3dObjectRef(crate::director::lingo::datum::Shockwave3dObjectRef {
                 cast_lib: member_ref.cast_lib,
                 cast_member: member_ref.cast_member,

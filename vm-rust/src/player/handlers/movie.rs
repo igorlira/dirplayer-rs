@@ -85,6 +85,29 @@ impl MovieHandlers {
             )?;
             if let Some(member) = member {
                 Ok(player.alloc_datum(Datum::CastMember(member.to_owned())))
+            } else if let Some(cast_datum) = cast_name_or_num {
+                // Director returns a valid ref for member(N, castLib) even if the
+                // member slot is empty (used by getDynamicSlot pattern).
+                // Only for positive member numbers — negative/zero are invalid refs.
+                let cast_num = match cast_datum {
+                    Datum::String(s) => player.movie.cast_manager.get_cast_by_name(s)
+                        .map(|c| c.number as i32),
+                    Datum::Int(n) => Some(*n),
+                    Datum::CastLib(n) => Some(*n as i32),
+                    _ => None,
+                };
+                if let (Some(cast_num), Ok(member_num)) = (cast_num, member_name_or_num.int_value()) {
+                    if member_num > 0 {
+                        Ok(player.alloc_datum(Datum::CastMember(CastMemberRef {
+                            cast_lib: cast_num,
+                            cast_member: member_num,
+                        })))
+                    } else {
+                        Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF)))
+                    }
+                } else {
+                    Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF)))
+                }
             } else {
                 Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF)))
             }

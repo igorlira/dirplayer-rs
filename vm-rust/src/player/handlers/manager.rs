@@ -1169,7 +1169,11 @@ impl BuiltInHandlerManager {
                     Datum::Int(i) => Ok(player.alloc_datum(Datum::Int(*i))),
                     Datum::Float(f) => Ok(player.alloc_datum(Datum::Float(*f))),
                     Datum::Symbol(s) => Ok(player.alloc_datum(Datum::Symbol(s.clone()))),
-                    _ => Err(ScriptError::new("duplicate() on non list not implemented".to_string())),
+                    Datum::ColorRef(c) => Ok(player.alloc_datum(Datum::ColorRef(c.clone()))),
+                    Datum::Vector(v) => Ok(player.alloc_datum(Datum::Vector(*v))),
+                    Datum::Transform3d(t) => Ok(player.alloc_datum(Datum::Transform3d(*t))),
+                    Datum::CastMember(r) => Ok(player.alloc_datum(Datum::CastMember(r.clone()))),
+                    _ => Err(ScriptError::new(format!("duplicate() not implemented for type {}", player.get_datum(item).type_str()))),
                 })
             }
             "getprop" => {
