@@ -270,6 +270,46 @@ impl GetSetBytecodeHandler {
                     player.set_movie_prop(&prop_name, value)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
+                0x0a => {
+                    // Cast member property with chunk expression (e.g. set the foreColor of char X of member Y)
+                    let cast_lib_datum = if player.movie.dir_version >= 500 {
+                        let r = {
+                            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                            scope.stack.pop().unwrap()
+                        };
+                        Some(player.get_datum(&r).clone())
+                    } else {
+                        None
+                    };
+                    let member_id_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let member_id_datum = player.get_datum(&member_id_ref).clone();
+                    // Pop 8 chunk ref values
+                    {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        for _ in 0..8 {
+                            scope.stack.pop().unwrap();
+                        }
+                    }
+                    let prop_name = get_cast_member_prop_name(property_id as u16).to_string();
+                    let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
+                        &member_id_datum,
+                        cast_lib_datum.as_ref(),
+                        &player.allocator,
+                    )?;
+                    match member_ref {
+                        Some(member_ref) => {
+                            CastMemberRefHandlers::set_prop(&member_ref, &prop_name, value)?;
+                            Ok(HandlerExecutionResult::Advance)
+                        }
+                        None => {
+                            warn!("set cast member chunk prop '{}': member not found", prop_name);
+                            Ok(HandlerExecutionResult::Advance)
+                        }
+                    }
+                }
                 0x0b => {
                     // Sound channel property (the volume of sound X)
                     let prop_name = get_sound_prop_name(property_id as u16);
@@ -820,6 +860,46 @@ impl GetSetBytecodeHandler {
                     }
                     None => {
                         warn!("get cast member prop '{}': member not found", prop_name);
+                        Ok(player.alloc_datum(Datum::Void))
+                    }
+                }
+            } else if prop_type == 0x0a {
+                // Cast member property with chunk expression (e.g. the foreColor of char X of member Y)
+                let cast_lib_datum = if player.movie.dir_version >= 500 {
+                    let r = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    Some(player.get_datum(&r).clone())
+                } else {
+                    None
+                };
+                let member_id_ref = {
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    scope.stack.pop().unwrap()
+                };
+                let member_id_datum = player.get_datum(&member_id_ref).clone();
+                // Pop 8 chunk ref values (first_char, last_char, first_word, last_word,
+                // first_item, last_item, first_line, last_line)
+                {
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    for _ in 0..8 {
+                        scope.stack.pop().unwrap();
+                    }
+                }
+                let prop_name = get_cast_member_prop_name(prop_id as u16).to_string();
+                let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
+                    &member_id_datum,
+                    cast_lib_datum.as_ref(),
+                    &player.allocator,
+                )?;
+                match member_ref {
+                    Some(member_ref) => {
+                        let result = CastMemberRefHandlers::get_prop(player, &member_ref, &prop_name)?;
+                        Ok(player.alloc_datum(result))
+                    }
+                    None => {
+                        warn!("get cast member chunk prop '{}': member not found", prop_name);
                         Ok(player.alloc_datum(Datum::Void))
                     }
                 }
