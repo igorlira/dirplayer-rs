@@ -944,8 +944,14 @@ impl Shockwave3dRuntimeState {
                 cx*sy*cz + sx*sz,   cx*sy*sz - sx*cz,   cx*cy,  0.0,
                 px,                 py,                 pz,      1.0,
             ];
-            state.node_transforms.insert("DefaultView".to_string(), m);
-            state.node_transforms.insert("defaultview".to_string(), m);
+            // Insert only under the scene node name (case-insensitive lookups handle the rest)
+            let cam_key = scene.map(|s| {
+                s.nodes.iter()
+                    .find(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::View
+                        && n.name.eq_ignore_ascii_case("defaultview"))
+                    .map(|n| n.name.clone())
+            }).flatten().unwrap_or_else(|| "DefaultView".to_string());
+            state.node_transforms.insert(cam_key, m);
         }
         if let Some(bg) = info.bg_color {
             state.background_color = Some(bg);
@@ -1082,6 +1088,370 @@ pub struct FontMember {
     pub pfr_data: Option<Vec<u8>>,
 }
 
+// ---- Havok Physics Member ----
+
+use std::collections::HashMap as StdHashMap;
+
+/// Wrapper for rapier3d physics world state.
+/// This is NOT Clone because rapier types don't implement Clone.
+/// When HavokPhysicsState is cloned the rapier world is set to None
+/// and gets recreated on the next initialize().
+///
+/// NOTE: rapier3d-f64 v0.32 uses glam types (DVec3 for Vector, DQuat for Rotation).
+/// QueryPipeline is a borrow obtained from BroadPhaseBvh, not stored here.
+pub struct RapierWorld {
+    pub pipeline: rapier3d_f64::prelude::PhysicsPipeline,
+    pub gravity: rapier3d_f64::prelude::Vector,
+    pub integration_parameters: rapier3d_f64::prelude::IntegrationParameters,
+    pub island_manager: rapier3d_f64::prelude::IslandManager,
+    pub broad_phase: rapier3d_f64::prelude::DefaultBroadPhase,
+    pub narrow_phase: rapier3d_f64::prelude::NarrowPhase,
+    pub rigid_body_set: rapier3d_f64::prelude::RigidBodySet,
+    pub collider_set: rapier3d_f64::prelude::ColliderSet,
+    pub impulse_joint_set: rapier3d_f64::prelude::ImpulseJointSet,
+    pub multibody_joint_set: rapier3d_f64::prelude::MultibodyJointSet,
+    pub ccd_solver: rapier3d_f64::prelude::CCDSolver,
+    /// Map from Havok rigid body name to rapier RigidBodyHandle
+    pub body_handles: StdHashMap<String, rapier3d_f64::prelude::RigidBodyHandle>,
+    /// Map from Havok rigid body name to rapier ColliderHandle
+    pub collider_handles: StdHashMap<String, rapier3d_f64::prelude::ColliderHandle>,
+}
+
+impl RapierWorld {
+    pub fn new(gravity: [f64; 3]) -> Self {
+        use rapier3d_f64::prelude::*;
+        Self {
+            pipeline: PhysicsPipeline::new(),
+            gravity: Vector::new(gravity[0], gravity[1], gravity[2]),
+            integration_parameters: IntegrationParameters::default(),
+            island_manager: IslandManager::new(),
+            broad_phase: DefaultBroadPhase::new(),
+            narrow_phase: NarrowPhase::new(),
+            rigid_body_set: RigidBodySet::new(),
+            collider_set: ColliderSet::new(),
+            impulse_joint_set: ImpulseJointSet::new(),
+            multibody_joint_set: MultibodyJointSet::new(),
+            ccd_solver: CCDSolver::new(),
+            body_handles: StdHashMap::new(),
+            collider_handles: StdHashMap::new(),
+        }
+    }
+
+    pub fn step(&mut self) {
+        self.pipeline.step(
+            self.gravity,
+            &self.integration_parameters,
+            &mut self.island_manager,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.rigid_body_set,
+            &mut self.collider_set,
+            &mut self.impulse_joint_set,
+            &mut self.multibody_joint_set,
+            &mut self.ccd_solver,
+            &(),
+            &(),
+        );
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HavokCorrector {
+    pub enabled: bool,
+    pub threshold: f64,
+    pub multiplier: f64,
+    pub level: i32,
+    pub max_tries: i32,
+    pub max_distance: f64,
+}
+
+impl Default for HavokCorrector {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: 0.1,
+            multiplier: 5.0,
+            level: 2,
+            max_tries: 10,
+            max_distance: 100.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HavokRigidBody {
+    pub name: String,
+    pub position: [f64; 3],
+    pub rotation_axis: [f64; 3],
+    pub rotation_angle: f64,
+    pub mass: f64,
+    pub restitution: f64,
+    pub friction: f64,
+    pub active: bool,
+    pub pinned: bool,
+    pub linear_velocity: [f64; 3],
+    pub angular_velocity: [f64; 3],
+    pub linear_momentum: [f64; 3],
+    pub angular_momentum: [f64; 3],
+    pub force: [f64; 3],
+    pub torque: [f64; 3],
+    pub center_of_mass: [f64; 3],
+    pub corrector: HavokCorrector,
+    pub is_fixed: bool,
+    pub is_convex: bool,
+}
+
+impl HavokRigidBody {
+    pub fn new_movable(name: &str, mass: f64, is_convex: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            position: [0.0; 3],
+            rotation_axis: [0.0, 1.0, 0.0],
+            rotation_angle: 0.0,
+            mass,
+            restitution: 0.3,
+            friction: 0.5,
+            active: true,
+            pinned: false,
+            linear_velocity: [0.0; 3],
+            angular_velocity: [0.0; 3],
+            linear_momentum: [0.0; 3],
+            angular_momentum: [0.0; 3],
+            force: [0.0; 3],
+            torque: [0.0; 3],
+            center_of_mass: [0.0; 3],
+            corrector: HavokCorrector::default(),
+            is_fixed: false,
+            is_convex,
+        }
+    }
+
+    pub fn new_fixed(name: &str, is_convex: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            position: [0.0; 3],
+            rotation_axis: [0.0, 1.0, 0.0],
+            rotation_angle: 0.0,
+            mass: 0.0,
+            restitution: 0.3,
+            friction: 0.5,
+            active: false,
+            pinned: true,
+            linear_velocity: [0.0; 3],
+            angular_velocity: [0.0; 3],
+            linear_momentum: [0.0; 3],
+            angular_momentum: [0.0; 3],
+            force: [0.0; 3],
+            torque: [0.0; 3],
+            center_of_mass: [0.0; 3],
+            corrector: HavokCorrector::default(),
+            is_fixed: true,
+            is_convex,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HavokSpring {
+    pub name: String,
+    pub rigid_body_a: Option<String>,
+    pub rigid_body_b: Option<String>,
+    pub point_a: [f64; 3],
+    pub point_b: [f64; 3],
+    pub rest_length: f64,
+    pub elasticity: f64,
+    pub damping: f64,
+    pub on_compression: bool,
+    pub on_extension: bool,
+}
+
+impl HavokSpring {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            rigid_body_a: None,
+            rigid_body_b: None,
+            point_a: [0.0; 3],
+            point_b: [0.0; 3],
+            rest_length: 0.0,
+            elasticity: 0.5,
+            damping: 0.1,
+            on_compression: true,
+            on_extension: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HavokLinearDashpot {
+    pub name: String,
+    pub rigid_body_a: Option<String>,
+    pub rigid_body_b: Option<String>,
+    pub point_a: [f64; 3],
+    pub point_b: [f64; 3],
+    pub strength: f64,
+    pub damping: f64,
+}
+
+impl HavokLinearDashpot {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            rigid_body_a: None,
+            rigid_body_b: None,
+            point_a: [0.0; 3],
+            point_b: [0.0; 3],
+            strength: 0.5,
+            damping: 0.1,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HavokAngularDashpot {
+    pub name: String,
+    pub rigid_body_a: Option<String>,
+    pub rigid_body_b: Option<String>,
+    pub rotation_axis: [f64; 3],
+    pub rotation_angle: f64,
+    pub strength: f64,
+    pub damping: f64,
+}
+
+impl HavokAngularDashpot {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            rigid_body_a: None,
+            rigid_body_b: None,
+            rotation_axis: [0.0, 1.0, 0.0],
+            rotation_angle: 0.0,
+            strength: 0.5,
+            damping: 0.1,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HavokCollisionInterest {
+    pub rb_name1: String,
+    pub rb_name2: String,  // or "#all"
+    pub frequency: f64,
+    pub threshold: f64,
+    pub handler_name: Option<String>,
+    pub script_instance: Option<crate::player::DatumRef>,
+}
+
+pub struct HavokPhysicsState {
+    pub initialized: bool,
+    pub w3d_cast_lib: i32,
+    pub w3d_cast_member: i32,
+    pub tolerance: f64,
+    pub scale: f64,
+    pub gravity: [f64; 3],
+    pub sim_time: f64,
+    pub time_step: f64,
+    pub sub_steps: i32,
+    pub deactivation_params: [f64; 2],
+    pub drag_params: [f64; 2],
+    pub rigid_bodies: Vec<HavokRigidBody>,
+    pub springs: Vec<HavokSpring>,
+    pub linear_dashpots: Vec<HavokLinearDashpot>,
+    pub angular_dashpots: Vec<HavokAngularDashpot>,
+    pub collision_interests: Vec<HavokCollisionInterest>,
+    pub step_callbacks: Vec<(String, crate::player::DatumRef)>,  // (handler_name, script_instance)
+    pub disabled_collision_pairs: Vec<(String, String)>,
+    pub hke_data: Vec<u8>,
+    /// Rapier3d physics world. Not Clone -- set to None on clone, recreated on initialize().
+    pub rapier: Option<Box<RapierWorld>>,
+}
+
+impl Clone for HavokPhysicsState {
+    fn clone(&self) -> Self {
+        Self {
+            initialized: self.initialized,
+            w3d_cast_lib: self.w3d_cast_lib,
+            w3d_cast_member: self.w3d_cast_member,
+            tolerance: self.tolerance,
+            scale: self.scale,
+            gravity: self.gravity,
+            sim_time: self.sim_time,
+            time_step: self.time_step,
+            sub_steps: self.sub_steps,
+            deactivation_params: self.deactivation_params,
+            drag_params: self.drag_params,
+            rigid_bodies: self.rigid_bodies.clone(),
+            springs: self.springs.clone(),
+            linear_dashpots: self.linear_dashpots.clone(),
+            angular_dashpots: self.angular_dashpots.clone(),
+            collision_interests: self.collision_interests.clone(),
+            step_callbacks: self.step_callbacks.clone(),
+            disabled_collision_pairs: self.disabled_collision_pairs.clone(),
+            hke_data: self.hke_data.clone(),
+            rapier: None,  // Physics world is not cloned -- gets recreated on initialize()
+        }
+    }
+}
+
+impl fmt::Debug for HavokPhysicsState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HavokPhysicsState")
+            .field("initialized", &self.initialized)
+            .field("rigid_bodies", &self.rigid_bodies.len())
+            .field("rapier", &self.rapier.is_some())
+            .finish()
+    }
+}
+
+impl Default for HavokPhysicsState {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            w3d_cast_lib: 0,
+            w3d_cast_member: 0,
+            tolerance: 0.1,
+            scale: 0.0254,
+            gravity: [0.0, 0.0, -386.22],
+            sim_time: 0.0,
+            time_step: 1.0 / 60.0,
+            sub_steps: 4,
+            deactivation_params: [2.0, 0.1],
+            drag_params: [0.0, 0.0],
+            rigid_bodies: Vec::new(),
+            springs: Vec::new(),
+            linear_dashpots: Vec::new(),
+            angular_dashpots: Vec::new(),
+            collision_interests: Vec::new(),
+            step_callbacks: Vec::new(),
+            disabled_collision_pairs: Vec::new(),
+            hke_data: Vec::new(),
+            rapier: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct HavokPhysicsMember {
+    pub state: HavokPhysicsState,
+}
+
+impl fmt::Debug for HavokPhysicsMember {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "HavokPhysicsMember(initialized={}, bodies={}, springs={})",
+            self.state.initialized,
+            self.state.rigid_bodies.len(),
+            self.state.springs.len())
+    }
+}
+
+impl HavokPhysicsMember {
+    pub fn new(hke_data: Vec<u8>) -> Self {
+        let mut state = HavokPhysicsState::default();
+        state.hke_data = hke_data;
+        Self { state }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum CastMemberType {
@@ -1098,6 +1468,7 @@ pub enum CastMemberType {
     Font(FontMember),
     Flash(FlashMember),
     Shockwave3d(Shockwave3dMember),
+    HavokPhysics(HavokPhysicsMember),
     Unknown,
 }
 
@@ -1116,6 +1487,7 @@ pub enum CastMemberTypeId {
     Font,
     Flash,
     Shockwave3d,
+    HavokPhysics,
     Unknown,
 }
 
@@ -1161,6 +1533,9 @@ impl fmt::Debug for CastMemberType {
             Self::Shockwave3d(_) => {
                 write!(f, "Shockwave3d")
             }
+            Self::HavokPhysics(_) => {
+                write!(f, "HavokPhysics")
+            }
             Self::Unknown => {
                 write!(f, "Unknown")
             }
@@ -1184,6 +1559,7 @@ impl CastMemberTypeId {
             Self::Font => Ok("font"),
             Self::Flash => Ok("flash"),
             Self::Shockwave3d => Ok("shockwave3d"),
+            Self::HavokPhysics => Ok("havok"),
             Self::Unknown => Ok("unknown"),
         };
     }
@@ -1205,6 +1581,7 @@ impl CastMemberType {
             Self::Font(_) => CastMemberTypeId::Font,
             Self::Flash(_) => CastMemberTypeId::Flash,
             Self::Shockwave3d(_) => CastMemberTypeId::Shockwave3d,
+            Self::HavokPhysics(_) => CastMemberTypeId::HavokPhysics,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -1224,6 +1601,7 @@ impl CastMemberType {
             Self::Font(_) => "font",
             Self::Flash(_) => "flash",
             Self::Shockwave3d(w3d) => if w3d.converted_from_text { "text" } else { "shockwave3d" },
+            Self::HavokPhysics(_) => "havok",
             _ => "unknown",
         };
     }
@@ -2021,6 +2399,30 @@ impl CastMember {
         std::str::from_utf8(&raw[4..4 + str_len]).ok() == Some("swa")
     }
 
+    fn is_havok_ole(raw: &[u8]) -> bool {
+        if raw.len() < 8 { return false; }
+        let str_len = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
+        if str_len == 0 || str_len > 256 || raw.len() < 4 + str_len { return false; }
+        let type_str = std::str::from_utf8(&raw[4..4 + str_len]).ok().unwrap_or("");
+        type_str.eq_ignore_ascii_case("havok")
+    }
+
+    /// Check if this OLE member is a Havok member by examining both the specific_data_raw
+    /// type string and the member info name/file_name fields.
+    fn is_havok_member_any(raw: &[u8], member_info: &Option<crate::director::chunks::cast_member_info::CastMemberInfoChunk>) -> bool {
+        // Check OLE type string first
+        if Self::is_havok_ole(raw) {
+            return true;
+        }
+        // Fall back to checking member_info file_name or exact name "havok"
+        if let Some(info) = member_info {
+            if info.file_name.to_lowercase().contains("havok") || info.name.eq_ignore_ascii_case("havok") {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Try to parse OLE specific_data_raw as a vectorShape member.
     /// Format: 4-byte BE string length + "vectorShape" + 4-byte FLSH size + "FLSH" fourCC + 4-byte size + payload
     fn try_parse_vector_shape(raw: &[u8], number: u32, chunk: &CastMemberChunk) -> Option<CastMember> {
@@ -2334,6 +2736,24 @@ impl CastMember {
             if let Some(cm) = Self::try_parse_swf(xm.raw_data.to_vec(), number, chunk) {
                 debug!("Detected as SWF");
                 return Some(cm);
+            }
+
+            // 1.5) Check for Havok Physics BEFORE text detection
+            // (HKE binary data can be mis-parsed as styled text)
+            if Self::is_havok_member_any(&chunk.specific_data_raw, &chunk.member_info) {
+                let hke_data = xm.raw_data.clone();
+                web_sys::console::log_1(&format!(
+                    "Havok Physics member #{} detected in scan_children_for_ole (early), HKE data={} bytes",
+                    number, hke_data.len()
+                ).into());
+                return Some(CastMember {
+                    number,
+                    name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                    comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
+                    member_type: CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data)),
+                    color: ColorRef::PaletteIndex(255),
+                    bg_color: ColorRef::PaletteIndex(0),
+                });
             }
 
             // 2) Check if styled text (XMED format)
@@ -3187,6 +3607,30 @@ impl CastMember {
                     };
                 }
 
+                // Check if this OLE member is a Havok Physics member
+                if Self::is_havok_member_any(&chunk.specific_data_raw, &chunk.member_info) {
+                    let hke_data = member_def.children.iter()
+                        .filter_map(|c| c.as_ref())
+                        .find_map(|c| match c {
+                            Chunk::XMedia(xm) => Some(xm.raw_data.clone()),
+                            Chunk::Raw(raw) if raw.len() > 4 => Some(raw.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    web_sys::console::log_1(&format!(
+                        "Havok Physics member #{} detected, HKE data={} bytes",
+                        number, hke_data.len()
+                    ).into());
+                    return CastMember {
+                        number,
+                        name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                        comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
+                        member_type: CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data)),
+                        color: ColorRef::PaletteIndex(255),
+                        bg_color: ColorRef::PaletteIndex(0),
+                    };
+                }
+
                 // Check if this OLE member is a vectorShape by examining specific_data_raw.
                 // Format: 4-byte string length + "vectorShape" + FLSH data block
                 if let Some(cm) = Self::try_parse_vector_shape(&chunk.specific_data_raw, number, chunk) {
@@ -3676,9 +4120,55 @@ impl CastMember {
                     }
                 }
 
-                CastMemberType::Unknown
+                // Check if this unknown member is Havok by name or file_name
+                if Self::is_havok_member_any(&chunk.specific_data_raw, &chunk.member_info) {
+                    let hke_data = member_def.children.iter()
+                        .filter_map(|c| c.as_ref())
+                        .find_map(|c| match c {
+                            Chunk::XMedia(xm) => Some(xm.raw_data.clone()),
+                            Chunk::Raw(raw) if raw.len() > 4 => Some(raw.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| chunk.specific_data_raw.clone());
+                    web_sys::console::log_1(&format!(
+                        "Havok Physics member #{} detected in default branch (type={:?}), HKE data={} bytes",
+                        number, chunk.member_type, hke_data.len()
+                    ).into());
+                    CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data))
+                } else {
+                    CastMemberType::Unknown
+                }
             }
         };
+
+        // Post-processing: if the member wasn't detected as Havok by type-specific paths,
+        // but its name IS exactly "havok" (or file_name contains "havok"), override it.
+        // Only override non-Script members to avoid catching scripts like "havokManager".
+        let member_type = if !matches!(member_type, CastMemberType::HavokPhysics(_) | CastMemberType::Script(_)) {
+            let name_is_havok = chunk.member_info.as_ref()
+                .map(|i| i.name.eq_ignore_ascii_case("havok") || i.file_name.to_lowercase().contains("havok"))
+                .unwrap_or(false);
+            if name_is_havok {
+                let hke_data = member_def.children.iter()
+                    .filter_map(|c| c.as_ref())
+                    .find_map(|c| match c {
+                        Chunk::XMedia(xm) => Some(xm.raw_data.clone()),
+                        Chunk::Raw(raw) if raw.len() > 4 => Some(raw.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| chunk.specific_data_raw.clone());
+                web_sys::console::log_1(&format!(
+                    "Havok Physics member #{} detected by name override (was {:?}), HKE={} bytes",
+                    number, member_type, hke_data.len()
+                ).into());
+                CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data))
+            } else {
+                member_type
+            }
+        } else {
+            member_type
+        };
+
         CastMember {
             number,
             name: chunk

@@ -261,6 +261,10 @@ impl Shockwave3dObjectDatumHandlers {
                         if let Some(datum_ref) = existing_ref {
                             Ok(datum_ref)
                         } else {
+                            web_sys::console::info_1(&format!(
+                                "[W3D-TEXLAYER] persistent ref NOT found for model='{}' mesh_idx={} member=({},{})",
+                                model_name, mesh_idx, member_ref_owned.cast_lib, member_ref_owned.cast_member
+                            ).into());
                             // Create a new empty list and store the DatumRef
                             let list_ref = player.alloc_datum(Datum::List(
                                 crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
@@ -400,6 +404,12 @@ impl Shockwave3dObjectDatumHandlers {
                 "transform" => {
                     if let Datum::Transform3d(m) = value {
                         let m32: [f32; 16] = m.map(|v| v as f32);
+                        if s3d_ref.name.eq_ignore_ascii_case("defaultview") {
+                            web_sys::console::warn_1(&format!(
+                                "[W3D] setting defaultview.transform directly! pos=({:.1},{:.1},{:.1}) obj_type={}",
+                                m32[12], m32[13], m32[14], s3d_ref.object_type
+                            ).into());
+                        }
                         set_node_transform(player, &member_ref, &s3d_ref.name, m32);
                     }
                     Ok(())
@@ -456,11 +466,14 @@ impl Shockwave3dObjectDatumHandlers {
                 },
                 "worldPosition" => {
                     if let Datum::Vector(v) = value {
-                        let mut m = get_or_init_node_transform(player, &member_ref, &s3d_ref.name);
-                        m[12] = v[0] as f32;
-                        m[13] = v[1] as f32;
-                        m[14] = v[2] as f32;
-                        set_node_transform(player, &member_ref, &s3d_ref.name, m);
+                        // Guard against NaN - skip update if any component is NaN
+                        if v[0].is_finite() && v[1].is_finite() && v[2].is_finite() {
+                            let mut m = get_or_init_node_transform(player, &member_ref, &s3d_ref.name);
+                            m[12] = v[0] as f32;
+                            m[13] = v[1] as f32;
+                            m[14] = v[2] as f32;
+                            set_node_transform(player, &member_ref, &s3d_ref.name, m);
+                        }
                     }
                     Ok(())
                 },
@@ -1301,24 +1314,37 @@ impl Shockwave3dObjectDatumHandlers {
                 },
                 "getWorldTransform" => {
                     // Return world-relative transform (accumulated through parent chain)
+                    // Uses case-insensitive lookups throughout (Director is case-insensitive)
                     let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                     let world_t = if let Some(m) = member {
                         if let Some(w3d) = m.member_type.as_shockwave3d() {
                             if let Some(ref scene) = w3d.parsed_scene {
-                                if let Some(node) = scene.nodes.iter().find(|n| n.name == s3d_ref.name) {
+                                if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name)) {
                                     // Get local transform (runtime override or static)
-                                    let local = w3d.runtime_state.node_transforms.get(&s3d_ref.name)
-                                        .copied().unwrap_or(node.transform);
+                                    let local = get_node_transform(player, &member_ref, &node.name);
                                     // Walk parent chain
                                     let mut result = local;
-                                    let mut current_parent = &node.parent_name;
+                                    let mut current_parent = node.parent_name.clone();
+                                    let mut depth = 0u32;
                                     for _ in 0..20 {
-                                        if current_parent.is_empty() || current_parent == "World" { break; }
-                                        if let Some(pn) = scene.nodes.iter().find(|n| n.name == *current_parent) {
-                                            let pt = w3d.runtime_state.node_transforms.get(&pn.name)
-                                                .copied().unwrap_or(pn.transform);
+                                        if current_parent.is_empty() || current_parent.eq_ignore_ascii_case("World") { break; }
+                                        if let Some(pn) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&current_parent)) {
+                                            let pt = get_node_transform(player, &member_ref, &pn.name);
+                                            // Debug: log first getWorldTransform parent chain
+                                            {
+                                                static GWT_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                                                let n = GWT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                if n < 10 {
+                                                    web_sys::console::log_1(&format!(
+                                                        "[GWT] '{}' parent[{}]='{}' pt_zAxis=({:.2},{:.2},{:.2}) pt_pos=({:.1},{:.1},{:.1})",
+                                                        s3d_ref.name, depth, pn.name,
+                                                        pt[8], pt[9], pt[10], pt[12], pt[13], pt[14]
+                                                    ).into());
+                                                }
+                                            }
                                             result = mat4_mul_f32(&pt, &result);
-                                            current_parent = &pn.parent_name;
+                                            current_parent = pn.parent_name.clone();
+                                            depth += 1;
                                         } else { break; }
                                     }
                                     result
@@ -1334,6 +1360,26 @@ impl Shockwave3dObjectDatumHandlers {
                     } else {
                         get_node_transform(player, &member_ref, &s3d_ref.name)
                     };
+                    // Debug: log returned zAxis for wheel models
+                    if s3d_ref.name.contains("wheel") {
+                        static GWT_RET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        let n = GWT_RET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n < 5 {
+                            let found_node = {
+                                let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                                member.and_then(|m| m.member_type.as_shockwave3d())
+                                    .and_then(|w3d| w3d.parsed_scene.as_ref())
+                                    .and_then(|s| s.nodes.iter().find(|nd| nd.name.eq_ignore_ascii_case(&s3d_ref.name)))
+                                    .map(|nd| format!("parent='{}'", nd.parent_name))
+                                    .unwrap_or("NOT FOUND".to_string())
+                            };
+                            web_sys::console::log_1(&format!(
+                                "[GWT-RET] '{}' zAxis=({:.2},{:.2},{:.2}) pos=({:.1},{:.1},{:.1}) node={}",
+                                s3d_ref.name, world_t[8], world_t[9], world_t[10],
+                                world_t[12], world_t[13], world_t[14], found_node
+                            ).into());
+                        }
+                    }
                     Ok(player.alloc_datum(Datum::Transform3d(world_t.map(|v| v as f64))))
                 },
                 // ─── Bones player / animation methods ───
@@ -2900,6 +2946,24 @@ impl Shockwave3dObjectDatumHandlers {
                             "child" => {
                                 scene.nodes.iter().filter(|n| n.parent_name == s3d_ref.name).count()
                             }
+                            "textureLayer" => {
+                                // meshDeformMesh.count(#textureLayer) — read from persistent list
+                                let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
+                                let mdl_name = parts.get(0).unwrap_or(&"").to_string();
+                                let m_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                                let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                                member.and_then(|m| m.member_type.as_shockwave3d())
+                                    .and_then(|w3d| w3d.runtime_state.mesh_deform.get(&mdl_name))
+                                    .and_then(|md| md.meshes.get(m_idx))
+                                    .and_then(|mesh| mesh.texture_layer_datum_ref.as_ref())
+                                    .map(|list_ref| {
+                                        match player.get_datum(list_ref) {
+                                            Datum::List(_, items, _) => items.len(),
+                                            _ => 0,
+                                        }
+                                    })
+                                    .unwrap_or(0)
+                            }
                             _ => 0,
                         };
                         Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -3964,15 +4028,10 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(player.alloc_datum(Datum::Float(v as f64)))
             },
             "worldPosition" => {
-                if let Some(n) = node {
-                    Ok(player.alloc_datum(Datum::Vector([
-                        n.transform[12] as f64,
-                        n.transform[13] as f64,
-                        n.transform[14] as f64,
-                    ])))
-                } else {
-                    Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 500.0])))
-                }
+                let m = get_node_transform(player, member_ref, camera_name);
+                Ok(player.alloc_datum(Datum::Vector([
+                    m[12] as f64, m[13] as f64, m[14] as f64,
+                ])))
             },
             "projectionType" => Ok(player.alloc_datum(Datum::Symbol("perspective".to_string()))),
             "visible" => Ok(player.alloc_datum(Datum::Int(1))),
@@ -4424,13 +4483,19 @@ fn get_node_transform(
 ) -> [f32; 16] {
     if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d() {
-            // Check runtime override first
+            // Check runtime override first (exact match, then case-insensitive fallback)
             if let Some(m) = w3d.runtime_state.node_transforms.get(node_name) {
                 return *m;
             }
-            // Fall back to parsed scene
+            // Case-insensitive fallback for runtime transforms (Director is case-insensitive)
+            for (key, val) in &w3d.runtime_state.node_transforms {
+                if key.eq_ignore_ascii_case(node_name) {
+                    return *val;
+                }
+            }
+            // Fall back to parsed scene (case-insensitive)
             if let Some(scene) = &w3d.parsed_scene {
-                if let Some(node) = scene.nodes.iter().find(|n| n.name == node_name) {
+                if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(node_name)) {
                     return node.transform;
                 }
             }
@@ -4439,38 +4504,48 @@ fn get_node_transform(
     IDENTITY
 }
 
+/// Find the canonical key for a node name in the node_transforms HashMap.
+/// Returns the existing key if a case-insensitive match exists, otherwise the input name.
+fn canonical_node_key(
+    player: &crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    node_name: &str,
+) -> String {
+    if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+        if let Some(w3d) = member.member_type.as_shockwave3d() {
+            // Check exact match first
+            if w3d.runtime_state.node_transforms.contains_key(node_name) {
+                return node_name.to_string();
+            }
+            // Case-insensitive fallback: use the existing key
+            for key in w3d.runtime_state.node_transforms.keys() {
+                if key.eq_ignore_ascii_case(node_name) {
+                    return key.clone();
+                }
+            }
+            // Also check persistent transform datums
+            for key in w3d.runtime_state.node_transform_datums.keys() {
+                if key.eq_ignore_ascii_case(node_name) {
+                    return key.clone();
+                }
+            }
+        }
+    }
+    node_name.to_string()
+}
+
 fn get_or_init_node_transform(
     player: &mut crate::player::DirPlayer,
     member_ref: &crate::player::cast_lib::CastMemberRef,
     node_name: &str,
 ) -> [f32; 16] {
-    // Check persistent datum first (may have been modified in-place via .position = etc.)
-    let from_persistent = {
-        let member = player.movie.cast_manager.find_member_by_ref(member_ref);
-        member.and_then(|m| m.member_type.as_shockwave3d())
-            .and_then(|w3d| w3d.runtime_state.node_transform_datums.get(node_name))
-            .cloned()
-    };
-    if let Some(datum_ref) = from_persistent {
-        if let Datum::Transform3d(m64) = player.get_datum(&datum_ref) {
-            let m32: [f32; 16] = m64.map(|v| v as f32);
-            // Ensure node_transforms is up to date
-            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
-                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                    w3d.runtime_state.node_transforms.insert(node_name.to_string(), m32);
-                }
-            }
-            return m32;
-        }
-    }
-
-    // Fall back to node_transforms or scene
-    let current = get_node_transform(player, member_ref, node_name);
+    let key = canonical_node_key(player, member_ref, node_name);
+    let current = get_node_transform(player, member_ref, &key);
 
     // Ensure it's in the runtime overrides
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-            w3d.runtime_state.node_transforms.entry(node_name.to_string()).or_insert(current);
+            w3d.runtime_state.node_transforms.entry(key).or_insert(current);
         }
     }
     current
@@ -4482,16 +4557,39 @@ fn set_node_transform(
     node_name: &str,
     m: [f32; 16],
 ) {
+    // Reject transforms containing NaN - they corrupt the scene
+    if m.iter().any(|v| !v.is_finite()) {
+        return;
+    }
+
+    // Normalize key to prevent duplicate entries with different case
+    let key = canonical_node_key(player, member_ref, node_name);
+
+    // Get the persistent datum ref (case-insensitive lookup)
+    let persistent_ref = {
+        let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+        member.and_then(|m| m.member_type.as_shockwave3d())
+            .and_then(|w3d| {
+                w3d.runtime_state.node_transform_datums.get(&key)
+                    .or_else(|| {
+                        w3d.runtime_state.node_transform_datums.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                            .map(|(_, v)| v)
+                    })
+            })
+            .cloned()
+    };
+
+    // Update the persistent datum if it exists
+    if let Some(datum_ref) = &persistent_ref {
+        let m64: [f64; 16] = m.map(|v| v as f64);
+        *player.get_datum_mut(datum_ref) = Datum::Transform3d(m64);
+    }
+
+    // Update node_transforms using canonical key
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-            w3d.runtime_state.node_transforms.insert(node_name.to_string(), m);
-            // Also update persistent datum if it exists
-            if let Some(datum_ref) = w3d.runtime_state.node_transform_datums.get(node_name) {
-                let m64: [f64; 16] = m.map(|v| v as f64);
-                let datum_ref = datum_ref.clone();
-                *player.get_datum_mut(&datum_ref) = Datum::Transform3d(m64);
-                return; // member_ref borrow released above via clone
-            }
+            w3d.runtime_state.node_transforms.insert(key, m);
         }
     }
 }
@@ -4503,11 +4601,20 @@ fn get_persistent_node_transform(
     member_ref: &crate::player::cast_lib::CastMemberRef,
     node_name: &str,
 ) -> DatumRef {
-    // Check if persistent datum already exists
+    let key = canonical_node_key(player, member_ref, node_name);
+
+    // Check if persistent datum already exists (case-insensitive)
     let existing = {
         let member = player.movie.cast_manager.find_member_by_ref(member_ref);
         member.and_then(|m| m.member_type.as_shockwave3d())
-            .and_then(|w3d| w3d.runtime_state.node_transform_datums.get(node_name))
+            .and_then(|w3d| {
+                w3d.runtime_state.node_transform_datums.get(&key)
+                    .or_else(|| {
+                        w3d.runtime_state.node_transform_datums.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                            .map(|(_, v)| v)
+                    })
+            })
             .cloned()
     };
     if let Some(datum_ref) = existing {
@@ -4515,15 +4622,14 @@ fn get_persistent_node_transform(
     }
 
     // Create new persistent datum from current transform
-    let m = get_node_transform(player, member_ref, node_name);
+    let m = get_node_transform(player, member_ref, &key);
     let m64: [f64; 16] = m.map(|v| v as f64);
     let datum_ref = player.alloc_datum(Datum::Transform3d(m64));
 
-    // Store in runtime state
-    let node_key = node_name.to_string();
+    // Store in runtime state using canonical key
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-            w3d.runtime_state.node_transform_datums.insert(node_key, datum_ref.clone());
+            w3d.runtime_state.node_transform_datums.insert(key, datum_ref.clone());
         }
     }
     datum_ref
@@ -4609,10 +4715,10 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
                         let non_empty: Vec<String> = tex_names.iter().filter(|n| !n.is_empty()).cloned().collect();
                         if non_empty.len() > 1 {
                             let blend_funcs: Vec<u8> = shader.texture_layers.iter().map(|l| l.blend_func).collect();
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "[W3D-SYNC] shader=\"{}\" layers={} (was {}) textures={:?} blend_funcs={:?}",
                                 shader_name, shader.texture_layers.len(), prev_len, non_empty, blend_funcs
-                            ).into());
+                            );
                         }
                     }
                 }

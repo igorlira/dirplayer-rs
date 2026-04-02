@@ -566,6 +566,38 @@ impl StringChunkHandlers {
             "font" | "fontStyle" | "color" => {
                 // TODO
             }
+            "fontSize" => {
+                let new_val = player.get_datum(value_ref).int_value()?;
+                let datum = player.get_datum(datum_ref).clone();
+                if let Datum::StringChunk(source, _, _) = datum {
+                    let mut current_source = source;
+                    loop {
+                        match current_source {
+                            StringChunkSource::Member(member_ref) => {
+                                if let Some(member) = player.movie.cast_manager.find_member_by_ref_mut(&member_ref) {
+                                    if let CastMemberType::Text(ref mut text) = member.member_type {
+                                        text.font_size = new_val as u16;
+                                        for span in text.html_styled_spans.iter_mut() {
+                                            span.style.font_size = Some(new_val);
+                                        }
+                                    } else if let CastMemberType::Field(ref mut field) = member.member_type {
+                                        field.font_size = new_val as u16;
+                                    }
+                                }
+                                break;
+                            }
+                            StringChunkSource::Datum(ref source_datum_ref) => {
+                                let source_datum = player.get_datum(source_datum_ref).clone();
+                                if let Datum::StringChunk(inner_source, _, _) = source_datum {
+                                    current_source = inner_source;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             "charSpacing" => {
                 // Update the source member's char_spacing
                 // Walk the source chain to find the originating member

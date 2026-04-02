@@ -1497,6 +1497,21 @@ void main() {
                     if n.name.starts_with("SB_") && n.parent_name.contains("SkyBox") { 0 } else { 1 }
                 });
 
+                // One-time log: how many models this camera pass will render
+                {
+                    static PASS_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let n = PASS_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n < 10 {
+                        let visible_count = sorted_model_nodes.iter().filter(|n| {
+                            runtime_state.and_then(|rs| rs.node_visibility.get(&n.name))
+                                .copied().unwrap_or(1) != 0
+                        }).count();
+                        web_sys::console::log_1(&format!(
+                            "[W3D-PASS] camera={:?} root_filter={:?} total_models={} visible={} clear={}",
+                            self.active_camera, root_node_filter, sorted_model_nodes.len(), visible_count, clear_fbo
+                        ).into());
+                    }
+                }
                 // PASS 1: Render opaque geometry (skybox first, then scene)
                 for model_node in &sorted_model_nodes {
                     if let Some(rs) = runtime_state {
@@ -1806,14 +1821,12 @@ void main() {
                 mat4_multiply_col_major(motion_t, &node.transform)
             } else {
                 runtime_state
-                    .and_then(|rs| rs.node_transforms.get(&node.name))
-                    .copied()
+                    .and_then(|rs| get_runtime_transform(rs, &node.name))
                     .unwrap_or(node.transform)
             }
         } else {
             runtime_state
-                .and_then(|rs| rs.node_transforms.get(&node.name))
-                .copied()
+                .and_then(|rs| get_runtime_transform(rs, &node.name))
                 .unwrap_or(node.transform)
         };
 
@@ -1824,8 +1837,7 @@ void main() {
         while !current_parent.is_empty() && current_parent != "<world>" {
             if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
                 let parent_t = runtime_state
-                    .and_then(|rs| rs.node_transforms.get(&parent_node.name))
-                    .copied()
+                    .and_then(|rs| get_runtime_transform(rs, &parent_node.name))
                     .unwrap_or(parent_node.transform);
                 chain.push(parent_t);
                 current_parent = &parent_node.parent_name;
@@ -3506,23 +3518,23 @@ void main() {
         let default_cam = "DefaultView".to_string();
         let cam_name = self.active_camera.as_ref().unwrap_or(&default_cam);
 
-        // 2. Find the camera node and accumulate its full world transform (including parent chain)
-        if let Some(node) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name == *cam_name) {
+        // 2. Find the camera node (case-insensitive), fall back to first view node
+        let view_node = scene.nodes.iter()
+            .find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case(cam_name))
+            .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View));
+
+        if let Some(node) = view_node {
             let world_t = self.accumulate_transform_with_state(scene, node, runtime_state);
             let cam_pos = [world_t[12], world_t[13], world_t[14]];
             return (invert_transform(&world_t), cam_pos);
         }
-        // Fallback: prefer a DefaultView-like camera (case-insensitive), then any view node
-        let view_node = scene.nodes.iter()
-            .find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case("DefaultView"))
-            .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View));
         let cam_name = view_node.map(|n| n.name.as_str()).unwrap_or("DefaultView");
 
-        // 3. Check runtime transform for this camera
+        // 3. Check runtime transform for this camera (case-insensitive)
         if let Some(rs) = runtime_state {
-            if let Some(cam_t) = rs.node_transforms.get(cam_name) {
+            if let Some(cam_t) = get_runtime_transform(rs, cam_name) {
                 let cam_pos = [cam_t[12], cam_t[13], cam_t[14]];
-                return (invert_transform(cam_t), cam_pos);
+                return (invert_transform(&cam_t), cam_pos);
             }
         }
 
@@ -3554,7 +3566,7 @@ void main() {
     ) -> [f32; 16] {
         let default_cam = "DefaultView".to_string();
         let cam_name = self.active_camera.as_ref().unwrap_or(&default_cam);
-        // Match by active camera name first (case-insensitive), fall back to any view node
+        // Find camera node (case-insensitive), fall back to first view node
         let view_node = scene.nodes.iter()
             .find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case(cam_name))
             .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View));
@@ -3569,23 +3581,8 @@ void main() {
             } else {
                 _fbo_aspect
             };
-            // For non-DefaultView cameras, inherit FOV/near/far from the DefaultView camera
-            // since extra cameras (e.g. "spining") often share the same projection settings
-            let (fov, n, f) = if !node.name.eq_ignore_ascii_case("DefaultView") {
-                if let Some(dv) = scene.nodes.iter().find(|n2|
-                    n2.node_type == W3dNodeType::View && n2.name.eq_ignore_ascii_case("DefaultView"))
-                {
-                    let mut df = dv.far_plane;
-                    if df > 100000.0 || df <= 0.0 { df = 10000.0; }
-                    let mut dn = dv.near_plane;
-                    if dn <= 0.0 { dn = 1.0; }
-                    (dv.fov, dn, df)
-                } else {
-                    (node.fov, n, f)
-                }
-            } else {
-                (node.fov, n, f)
-            };
+            // Each camera uses its own FOV/near/far settings
+            let (fov, n, f) = (node.fov, n, f);
             (fov.to_radians(), n, f, cam_aspect)
         } else {
             (34.516f32.to_radians(), 1.0, 10000.0, _fbo_aspect)
@@ -4032,6 +4029,19 @@ fn keyframe_to_column_major_matrix(kf: &crate::director::chunks::w3d::types::W3d
         (xz + wy) * sz,           (yz - wx) * sz,           (1.0 - (xx + yy)) * sz,  0.0,  // col 2
         kf.pos_x,                 kf.pos_y,                 kf.pos_z,                 1.0,  // col 3
     ]
+}
+
+/// Case-insensitive lookup in node_transforms (Director is case-insensitive for node names).
+fn get_runtime_transform(rs: &crate::player::cast_member::Shockwave3dRuntimeState, name: &str) -> Option<[f32; 16]> {
+    if let Some(m) = rs.node_transforms.get(name) {
+        return Some(*m);
+    }
+    for (key, val) in &rs.node_transforms {
+        if key.eq_ignore_ascii_case(name) {
+            return Some(*val);
+        }
+    }
+    None
 }
 
 fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
