@@ -1516,29 +1516,14 @@ impl TypeHandlers {
             let mut instance_datum_refs = vec![];
             for instance_ref in instance_list {
                 let original_me_ref = player.get_datum(&instance_ref).to_script_instance_ref()?;
-                original_me_list.push(original_me_ref.clone());
-                instance_datum_refs.push(instance_ref.clone());
 
                 // Determine which instance's ancestor to use:
-                //
-                // The key insight: we need to find the instance in the ancestor chain
-                // whose SCRIPT matches the current scope's script_ref. That tells us
-                // "which level" of the ancestor chain we're currently executing in.
-                // Then we get THAT instance's ancestor.
-                //
-                // Example: A (script=A) -> B (script=B) -> C (script=C)
-                // When A::start calls callAncestor(#start, me, ...):
-                //   - current_script_ref = A's script
-                //   - We find A in chain, get A's ancestor = B
-                // When B::start calls callAncestor(#start, me, ...):
-                //   - current_script_ref = B's script (because that's what we're executing)
-                //   - We find B in chain, get B's ancestor = C
+                // Walk the ancestor chain to find which instance's script matches
+                // the current scope's script_ref (i.e. "which level" we're at).
                 let ancestor_source = if let Some(ref script_ref) = current_script_ref {
-                    // Walk the ancestor chain to find which instance has the script
-                    // we're currently executing
                     let mut walk_ref = original_me_ref.clone();
                     let mut found = false;
-                    for _ in 0..100 { // Safety limit
+                    for _ in 0..100 {
                         let walk_instance = player.allocator.get_script_instance(&walk_ref);
                         if walk_instance.script == *script_ref {
                             found = true;
@@ -1550,22 +1535,23 @@ impl TypeHandlers {
                             break;
                         }
                     }
-                    if found {
-                        walk_ref
-                    } else {
-                        // Fallback: use original_me
-                        original_me_ref.clone()
-                    }
+                    if found { walk_ref } else { original_me_ref.clone() }
                 } else {
-                    // No script_ref, use original_me
                     original_me_ref.clone()
                 };
 
                 let instance = player.allocator.get_script_instance(&ancestor_source);
-                let ancestor = instance.ancestor.as_ref().ok_or_else(|| {
-                    ScriptError::new("Instance has no ancestor".to_string())
-                })?;
-                ancestor_list.push(ancestor.clone());
+                match instance.ancestor.as_ref() {
+                    Some(ancestor) => {
+                        ancestor_list.push(ancestor.clone());
+                        original_me_list.push(original_me_ref.clone());
+                        instance_datum_refs.push(instance_ref.clone());
+                    }
+                    None => {
+                        // No ancestor — callAncestor is a no-op in Director, return immediately
+                        return Ok((vec![], vec![], vec![], handler_name, vec![]));
+                    }
+                }
             }
             // Get extra arguments beyond the instance list (args[2..])
             // The instance itself will be prepended in each iteration

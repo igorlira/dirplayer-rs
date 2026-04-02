@@ -829,6 +829,23 @@ pub fn multiply_datums(
             Datum::List(DatumType::List, VecDeque::from(result.to_vec()), false)
         }
 
+        // Transform3d * Vector = apply transform to point
+        (Datum::Transform3d(m), Datum::Vector(v)) => {
+            let x = m[0]*v[0] + m[4]*v[1] + m[8]*v[2]  + m[12];
+            let y = m[1]*v[0] + m[5]*v[1] + m[9]*v[2]  + m[13];
+            let z = m[2]*v[0] + m[6]*v[1] + m[10]*v[2] + m[14];
+            Datum::Vector([x, y, z])
+        }
+        // Transform3d * Transform3d = matrix multiply
+        (Datum::Transform3d(a), Datum::Transform3d(b)) => {
+            let mut r = [0.0f64; 16];
+            for row in 0..4 {
+                for col in 0..4 {
+                    r[row * 4 + col] = a[row*4]*b[col] + a[row*4+1]*b[4+col] + a[row*4+2]*b[8+col] + a[row*4+3]*b[12+col];
+                }
+            }
+            Datum::Transform3d(r)
+        }
         _ => {
             return Err(ScriptError::new(format!(
                 "Mul operator only works with ints and floats. Given: {}, {}",

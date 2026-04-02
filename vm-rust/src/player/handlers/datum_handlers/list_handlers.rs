@@ -40,11 +40,19 @@ impl ListDatumUtils {
 
     pub fn get_prop(
         list_vec: &VecDeque<DatumRef>,
-        prop_name: &String,
+        prop_name: &str,
         _datums: &DatumAllocator,
     ) -> Result<Datum, ScriptError> {
-        match prop_name.as_str() {
-            "count" => Ok(Datum::Int(list_vec.len() as i32)),
+        match prop_name {
+            "count" => {
+                let c = list_vec.len() as i32;
+                if c > 100 {
+                    web_sys::console::warn_1(&format!(
+                        "[LIST-COUNT] very large list count={}", c
+                    ).into());
+                }
+                Ok(Datum::Int(c))
+            }
             "length" => Ok(Datum::Int(list_vec.len() as i32)),
             "ilk" => Ok(Datum::Symbol("list".to_string())),
             _ => Err(ScriptError::new(format!(
@@ -58,7 +66,7 @@ impl ListDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
-        prop_name: &String,
+        prop_name: &str,
     ) -> Result<DatumRef, ScriptError> {
         let list_vec = player.get_datum(datum_ref).to_list()?;
         let result = ListDatumUtils::get_prop(&list_vec, prop_name, &player.allocator)?;
@@ -118,10 +126,10 @@ impl ListDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "count" => Self::count(datum, args),
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
