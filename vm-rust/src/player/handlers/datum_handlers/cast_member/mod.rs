@@ -7,3 +7,5 @@ pub mod shockwave3d;
 pub mod sound;
 pub mod text;
 pub mod palette;
+pub mod havok;
+pub mod hke_parser;

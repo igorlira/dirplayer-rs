@@ -43,6 +43,7 @@ log = "0.4.22"
 percent-encoding = "2"
 xml = "1.0"
 image = "0.25.8"
+rapier3d-f64 = { version = "0.32", default-features = false, features = ["dim3", "f64"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

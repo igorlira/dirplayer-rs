@@ -26,6 +26,7 @@ pub mod flash_object;
 pub mod float;
 pub mod shockwave3d_object;
 pub mod transform3d;
+pub mod havok_object;
 
 use player::PlayerDatumHandlers;
 use self::flash_object::FlashObjectDatumHandlers;
@@ -234,6 +235,7 @@ pub async fn player_call_datum_handler(
         DatumType::FlashObjectRef => FlashObjectDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Shockwave3dObjectRef => shockwave3d_object::Shockwave3dObjectDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Transform3d => transform3d::Transform3dDatumHandlers::call(obj_ref, handler_name, args),
+        DatumType::HavokObjectRef => havok_object::HavokObjectDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Void => {
             // Try VoidDatumHandlers first for specific methods that should return VOID gracefully
             match VoidDatumHandlers::call(obj_ref.clone(), handler_name, args) {
