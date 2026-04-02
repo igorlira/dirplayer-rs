@@ -1183,7 +1183,8 @@ impl TypeHandlers {
             let datum_ref = &args[0];
             match player.get_datum(datum_ref) {
                 Datum::PropList(_, _) => PropListDatumHandlers::sort(datum_ref, &vec![]),
-                _ => ListDatumHandlers::sort(datum_ref, &vec![]),
+                Datum::List(_, _, _) => ListDatumHandlers::sort(datum_ref, &vec![]),
+                _ => Ok(DatumRef::Void),
             }
         })
     }
