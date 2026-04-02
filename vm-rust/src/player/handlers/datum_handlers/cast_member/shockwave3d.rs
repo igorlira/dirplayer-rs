@@ -584,7 +584,18 @@ impl Shockwave3dMemberHandlers {
                         "shader" => scene.shaders.iter().map(|s| s.name.clone()).collect(),
                         "texture" => scene.texture_images.keys().cloned().collect(),
                         "light" => scene.lights.iter().map(|l| l.name.clone()).collect(),
-                        "camera" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::View).map(|n| n.name.clone()).collect(),
+                        "camera" => {
+                            let mut cams = Vec::new();
+                            if let Some(dv) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case("defaultview")) {
+                                cams.push(dv.name.clone());
+                            }
+                            for n in &scene.nodes {
+                                if n.node_type == W3dNodeType::View && !n.name.eq_ignore_ascii_case("defaultview") {
+                                    cams.push(n.name.clone());
+                                }
+                            }
+                            cams
+                        }
                         "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).map(|n| n.name.clone()).collect(),
                         "motion" => scene.motions.iter().map(|m| m.name.clone()).collect(),
                         _ => vec![],
@@ -952,12 +963,12 @@ impl Shockwave3dMemberHandlers {
 
                         // Look up source model's shader/transform/resource from source member's scene
                         let identity = [1.0f32,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
-                        let (source_shader_name, source_transform, source_resource_name, source_model_resource_name, src_motion_tracks) = if let Some(ref src_ref) = source_member_ref {
+                        let (source_shader_name, source_transform, source_resource_name, source_model_resource_name, src_motion_tracks, src_child_nodes) = if let Some(ref src_ref) = source_member_ref {
                             let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
                             if let Some(sm) = src_member {
                                 if let Some(sw3d) = sm.member_type.as_shockwave3d() {
                                     if let Some(ref scene) = sw3d.parsed_scene {
-                                        let node = scene.nodes.iter().find(|n| n.name == source_model_name);
+                                        let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&source_model_name));
                                         let (sn, st, sr, smr) = if let Some(n) = node {
                                             (n.shader_name.clone(), n.transform, n.resource_name.clone(), n.model_resource_name.clone())
                                         } else {
@@ -967,12 +978,27 @@ impl Shockwave3dMemberHandlers {
                                             .max_by_key(|m| m.tracks.len())
                                             .map(|m| m.tracks.clone())
                                             .unwrap_or_default();
-                                        (sn, st, sr, smr, motion_tracks)
-                                    } else { (String::new(), identity, String::new(), String::new(), vec![]) }
-                                } else { (String::new(), identity, String::new(), String::new(), vec![]) }
-                            } else { (String::new(), identity, String::new(), String::new(), vec![]) }
+                                        // Collect all descendant nodes of the source model recursively
+                                        // Use case-insensitive matching (Director is case-insensitive)
+                                        let child_nodes = {
+                                            let mut descendants = Vec::new();
+                                            let mut stack = vec![source_model_name.to_string()];
+                                            while let Some(parent) = stack.pop() {
+                                                for n in &scene.nodes {
+                                                    if n.parent_name.eq_ignore_ascii_case(&parent) {
+                                                        descendants.push(n.clone());
+                                                        stack.push(n.name.clone());
+                                                    }
+                                                }
+                                            }
+                                            descendants
+                                        };
+                                        (sn, st, sr, smr, motion_tracks, child_nodes)
+                                    } else { (String::new(), identity, String::new(), String::new(), vec![], vec![]) }
+                                } else { (String::new(), identity, String::new(), String::new(), vec![], vec![]) }
+                            } else { (String::new(), identity, String::new(), String::new(), vec![], vec![]) }
                         } else {
-                            (String::new(), identity, String::new(), String::new(), vec![])
+                            (String::new(), identity, String::new(), String::new(), vec![], vec![])
                         };
 
                         // Track shader name remapping for -clone suffix creation
@@ -1185,6 +1211,19 @@ impl Shockwave3dMemberHandlers {
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
                                         });
+                                        // Clone child nodes from source scene, re-parenting
+                                        // the direct children of source_model to obj_name
+                                        for child in &src_child_nodes {
+                                            let mut cloned = child.clone();
+                                            // Re-parent: if child's parent was the source model, change to new name
+                                            if cloned.parent_name.eq_ignore_ascii_case(&source_model_name) {
+                                                cloned.parent_name = obj_name.clone();
+                                            }
+                                            // Check if node with same name already exists
+                                            if !scene.nodes.iter().any(|n| n.name == cloned.name) {
+                                                scene.nodes.push(cloned);
+                                            }
+                                        }
                                     } else if obj_type == "motion" {
                                         scene.motions.push(W3dMotion {
                                             name: obj_name.clone(),
@@ -1867,6 +1906,25 @@ impl Shockwave3dMemberHandlers {
                         }
                     };
 
+                    // Debug: log raycast info for 3d2 member
+                    {
+                        static RAY_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        let n = RAY_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n < 3 {
+                            let member_name = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                                .map(|m| m.name.clone()).unwrap_or_default();
+                            let model_count = scene.as_ref().map(|s| s.nodes.len()).unwrap_or(0);
+                            let mesh_count = scene.as_ref().map(|s| s.clod_meshes.len() + s.raw_meshes.len()).unwrap_or(0);
+                            web_sys::console::log_1(&format!(
+                                "[RAY] modelsUnderRay on '{}' (lib={},mem={}): origin=({:.1},{:.1},{:.1}) dir=({:.2},{:.2},{:.2}) scene_nodes={} meshes={} transforms={}",
+                                member_name, member_ref.cast_lib, member_ref.cast_member,
+                                origin[0], origin[1], origin[2], direction[0], direction[1], direction[2],
+                                model_count, mesh_count,
+                                node_transforms.as_ref().map(|t| t.len()).unwrap_or(0),
+                            ).into());
+                        }
+                    }
+
                     let mut results = Vec::new();
                     if let Some(scene) = scene {
                         use crate::director::chunks::w3d::raycast::{Ray, raycast_scene_multi};
@@ -1880,6 +1938,19 @@ impl Shockwave3dMemberHandlers {
                             node_transforms.as_ref(),
                             excluded_ref,
                         );
+                        // Log first few hit details
+                        {
+                            static HITD_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                            let n = HITD_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if n < 10 && !hits.is_empty() {
+                                let h = &hits[0];
+                                web_sys::console::log_1(&format!(
+                                    "[RAY-HIT] dist={:.1} pos=({:.1},{:.1},{:.1}) model='{}' origin_z={:.1}",
+                                    h.distance, h.position[0], h.position[1], h.position[2],
+                                    h.model_name, origin[2]
+                                ).into());
+                            }
+                        }
                         for hit in &hits {
                             if detailed {
                                 let model_key = player.alloc_datum(Datum::Symbol("model".to_string()));
@@ -1941,6 +2012,17 @@ impl Shockwave3dMemberHandlers {
                             }
                         }
                     }
+                    // Debug: log hit count
+                    {
+                        static HIT_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        let n = HIT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n < 5 {
+                            web_sys::console::log_1(&format!(
+                                "[RAY] → {} hits", results.len()
+                            ).into());
+                        }
+                    }
+
                     Ok(player.alloc_datum(Datum::List(
                         crate::director::lingo::datum::DatumType::List, VecDeque::from(results), false,
                     )))
@@ -1988,7 +2070,21 @@ impl Shockwave3dMemberHandlers {
             "shader" => scene.shaders.get(idx).map(|s| s.name.clone()),
             "texture" => scene.texture_images.keys().nth(idx).cloned(),
             "light" => scene.lights.get(idx).map(|l| l.name.clone()),
-            "camera" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::View).nth(idx).map(|n| n.name.clone()),
+            "camera" => {
+                // Director puts DefaultView as camera[1], then other cameras in scene order
+                let mut cams: Vec<&str> = Vec::new();
+                // DefaultView first
+                if let Some(dv) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case("defaultview")) {
+                    cams.push(&dv.name);
+                }
+                // Then other cameras in scene order
+                for n in &scene.nodes {
+                    if n.node_type == W3dNodeType::View && !n.name.eq_ignore_ascii_case("defaultview") {
+                        cams.push(&n.name);
+                    }
+                }
+                cams.get(idx).map(|s| s.to_string())
+            }
             "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).nth(idx).map(|n| n.name.clone()),
             "motion" => scene.motions.get(idx).map(|m| m.name.clone()),
             _ => None,

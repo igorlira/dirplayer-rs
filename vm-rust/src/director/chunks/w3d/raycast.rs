@@ -140,12 +140,51 @@ pub fn raycast_scene_multi(
             &node.resource_name
         };
 
-        // Get model transform (for transforming ray to local space)
-        let world_transform = if let Some(nt) = node_transforms {
-            nt.get(&node.name).cloned().unwrap_or(node.transform)
-        } else {
-            node.transform
+        // Get model WORLD transform by accumulating parent chain
+        let world_transform = {
+            let local = if let Some(nt) = node_transforms {
+                nt.get(&node.name).cloned()
+                    .or_else(|| {
+                        // Case-insensitive fallback
+                        nt.iter().find(|(k, _)| k.eq_ignore_ascii_case(&node.name)).map(|(_, v)| *v)
+                    })
+                    .unwrap_or(node.transform)
+            } else {
+                node.transform
+            };
+            // Walk parent chain to accumulate world transform
+            let mut result = local;
+            let mut current_parent = &node.parent_name;
+            for _ in 0..20 {
+                if current_parent.is_empty() || current_parent.eq_ignore_ascii_case("World") { break; }
+                if let Some(pn) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(current_parent)) {
+                    let pt = if let Some(nt) = node_transforms {
+                        nt.get(&pn.name).cloned()
+                            .or_else(|| nt.iter().find(|(k, _)| k.eq_ignore_ascii_case(&pn.name)).map(|(_, v)| *v))
+                            .unwrap_or(pn.transform)
+                    } else {
+                        pn.transform
+                    };
+                    result = multiply_4x4(&pt, &result);
+                    current_parent = &pn.parent_name;
+                } else { break; }
+            }
+            result
         };
+        // Debug: log MainA transform
+        if node.name == "MainA" {
+            static MA_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if MA_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 {
+                web_sys::console::log_1(&format!(
+                    "[RAYCAST] MainA xform: pos=({:.1},{:.1},{:.1}) X=({:.4},{:.4},{:.4}) Y=({:.4},{:.4},{:.4}) Z=({:.4},{:.4},{:.4}) parent='{}'",
+                    world_transform[12], world_transform[13], world_transform[14],
+                    world_transform[0], world_transform[1], world_transform[2],
+                    world_transform[4], world_transform[5], world_transform[6],
+                    world_transform[8], world_transform[9], world_transform[10],
+                    node.parent_name
+                ).into());
+            }
+        }
         let inv_transform = invert_4x4(&world_transform);
         let local_ray = Ray {
             origin: transform_point_4x4(&inv_transform, ray.origin[0], ray.origin[1], ray.origin[2]),
@@ -546,6 +585,21 @@ fn transform_point_4x4(m: &[f32; 16], x: f32, y: f32, z: f32) -> [f32; 3] {
 }
 
 /// General 4x4 matrix inverse (column-major)
+/// Column-major 4x4 matrix multiply: C = A * B
+fn multiply_4x4(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut r = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            r[col * 4 + row] =
+                a[0 * 4 + row] * b[col * 4 + 0] +
+                a[1 * 4 + row] * b[col * 4 + 1] +
+                a[2 * 4 + row] * b[col * 4 + 2] +
+                a[3 * 4 + row] * b[col * 4 + 3];
+        }
+    }
+    r
+}
+
 fn invert_4x4(m: &[f32; 16]) -> [f32; 16] {
     let mut inv = [0.0f32; 16];
 
