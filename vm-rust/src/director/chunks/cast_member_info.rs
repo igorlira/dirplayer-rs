@@ -17,6 +17,8 @@ pub struct CastMemberInfoChunk {
     pub header: CastMemberInfoChunkHeader,
     pub script_src_text: String,
     pub name: String,
+    pub directory: String,
+    pub file_name: String,
 }
 
 impl CastMemberInfoChunk {
@@ -33,12 +35,15 @@ impl CastMemberInfoChunk {
 
         let script_src_text = read_string(&item_bufs, 0);
         let name = read_pascal_string(&item_bufs, 1, reader.endian);
-        // TODO Workaround: Increase table len to have at least one entry for decompilation results
+        let directory = read_pascal_string(&item_bufs, 2, reader.endian);
+        let file_name = read_pascal_string(&item_bufs, 3, reader.endian);
 
         return Ok(CastMemberInfoChunk {
             header,
-            script_src_text: script_src_text,
-            name: name,
+            script_src_text,
+            name,
+            directory,
+            file_name,
         });
     }
 
