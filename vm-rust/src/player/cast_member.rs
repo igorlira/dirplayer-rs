@@ -646,6 +646,7 @@ impl CastMember {
             Chunk::Sound(_) => "Sound",
             Chunk::SndHeader(_) => "SndHeader",
             Chunk::SndSamples(_) => "SndSamples",
+            Chunk::CuePoints(_) => "CuePoints",
             Chunk::Media(_) => "Media",
             Chunk::XMedia(_) => "XMedia",
             Chunk::CstInfo(_) => "Cinf",
@@ -653,6 +654,42 @@ impl CastMember {
             Chunk::Thum(_) => "Thum",
             Chunk::Raw(_) => "Raw",
         }
+    }
+
+    /// Extract MP3 bitrate (in kbps) from the first valid MP3 frame header in data.
+    pub fn extract_mp3_bitrate(data: &[u8]) -> Option<u32> {
+        // Scan for MP3 sync word
+        for i in 0..data.len().saturating_sub(4) {
+            if data[i] == 0xFF && (data[i + 1] & 0xE0) == 0xE0 {
+                let hdr = u32::from_be_bytes([data[i], data[i+1], data[i+2], data[i+3]]);
+                let version = (hdr >> 19) & 3;
+                let layer = (hdr >> 17) & 3;
+                let bitrate_idx = ((hdr >> 12) & 0xF) as usize;
+                let sr_idx = (hdr >> 10) & 3;
+
+                // Validate: version != reserved(1), layer != reserved(0),
+                // bitrate != free(0) or bad(15), sample rate != reserved(3)
+                if version == 1 || layer == 0 || bitrate_idx == 0 || bitrate_idx == 15 || sr_idx == 3 {
+                    continue;
+                }
+
+                // MPEG1 Layer III bitrates (kbps)
+                const V1_L3: [u32; 16] = [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0];
+                // MPEG2/2.5 Layer III bitrates (kbps)
+                const V2_L3: [u32; 16] = [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0];
+
+                let bitrate = match version {
+                    3 => V1_L3[bitrate_idx],      // MPEG1
+                    2 | 0 => V2_L3[bitrate_idx],   // MPEG2 / MPEG2.5
+                    _ => continue,
+                };
+
+                if bitrate > 0 {
+                    return Some(bitrate);
+                }
+            }
+        }
+        None
     }
 
     /// Recursively searches children of a CastMemberDef for a sound chunk
@@ -2320,8 +2357,24 @@ impl CastMember {
                     found_sound
                 );
 
+                // Load cue points from cupt child chunk
+                let (cue_point_names, cue_point_times) = member_def.children.iter()
+                    .filter_map(|c| c.as_ref())
+                    .find_map(|c| match c {
+                        Chunk::CuePoints(cp) => Some((cp.names.clone(), cp.times.clone())),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
                 // Construct SoundMember
                 if let Some(sound_chunk) = sound_chunk_opt {
+                    let is_swa = sound_chunk.is_swa();
+                    let bit_rate = if is_swa {
+                        Self::extract_mp3_bitrate(&sound_chunk.data())
+                    } else {
+                        None
+                    };
+
                     let info = SoundInfo {
                         sample_rate: sound_chunk.sample_rate(),
                         sample_size: sound_chunk.bits_per_sample(),
@@ -2338,17 +2391,29 @@ impl CastMember {
                             .member_info
                             .as_ref()
                             .map_or(false, |info| (info.header.flags & 0x10) == 0),
+                        is_swa,
+                        bit_rate,
+                        cue_point_names,
+                        cue_point_times,
+                        linked_path: None,
+                        copyright_info: None,
+                        preload_time: 0,
+                        percent_streamed: 100,
+                        swa_state: Default::default(),
+                        swa_volume: 255,
+                        swa_sound_channel: 0,
                     };
 
                     debug!(
-                        "SoundMember created â†’ name: {}, version: {}, sample_rate: {}, sample_size: {}, channels: {}, sample_count: {}, duration: {:.3}ms",
+                        "SoundMember created â†’ name: {}, version: {}, sample_rate: {}, sample_size: {}, channels: {}, sample_count: {}, duration: {:.3}ms, is_swa: {}",
                         chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                         sound_chunk.version,
                         info.sample_rate,
                         info.sample_size,
                         info.channels,
                         info.sample_count,
-                        info.duration
+                        info.duration,
+                        info.is_swa
                     );
 
                     CastMemberType::Sound(SoundMember {
@@ -2356,9 +2421,37 @@ impl CastMember {
                         sound: sound_chunk,
                     })
                 } else {
-                    warn!("No sound chunk found for member {}", number);
+                    // No embedded sound data — check for linked external file
+                    let linked_path = chunk.member_info.as_ref().and_then(|info| {
+                        if info.file_name.is_empty() {
+                            None
+                        } else {
+                            let mut path = info.directory.clone();
+                            if !path.is_empty() && !path.ends_with('/') && !path.ends_with('\\') {
+                                path.push('/');
+                            }
+                            path.push_str(&info.file_name);
+                            // Normalize backslashes to forward slashes
+                            Some(path.replace('\\', "/"))
+                        }
+                    });
+
+                    if let Some(ref path) = linked_path {
+                        debug!("Sound member {} linked to external file: {}", number, path);
+                    } else {
+                        warn!("No sound chunk found for member {}", number);
+                    }
+
+                    let mut info = SoundInfo::default();
+                    info.is_swa = linked_path.is_some();
+                    // Linked sound files always have looping disabled (matches Director behavior)
+                    info.loop_enabled = false;
+                    info.linked_path = linked_path;
+                    info.cue_point_names = cue_point_names;
+                    info.cue_point_times = cue_point_times;
+
                     CastMemberType::Sound(SoundMember {
-                        info: SoundInfo::default(),
+                        info,
                         sound: SoundChunk::default(),
                     })
                 }

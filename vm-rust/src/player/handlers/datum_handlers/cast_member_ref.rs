@@ -533,6 +533,7 @@ impl CastMemberRefHandlers {
                 FontMemberHandlers::set_prop(player, member_ref, prop, value)
             }),
             CastMemberTypeId::Bitmap => BitmapMemberHandlers::set_prop(member_ref, prop, value),
+            CastMemberTypeId::Sound => SoundMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Palette => reserve_player_mut(|player| {
                 PaletteMemberHandlers::set_prop(player, member_ref, prop, value)
             }),
@@ -620,7 +621,13 @@ impl CastMemberRefHandlers {
                     Ok(Datum::Int(member_num as i32))
                 }
             }
-            "type" => Ok(Datum::Symbol(member_type.symbol_string()?.to_string())),
+            "type" => {
+                // SWA sound members report #swa instead of #sound
+                match Self::get_member_type_prop(player, cast_member_ref, &member_type, "type") {
+                    Ok(result) => Ok(result),
+                    Err(_) => Ok(Datum::Symbol(member_type.symbol_string()?.to_string())),
+                }
+            }
             "castLibNum" => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
             "color" => Ok(Datum::ColorRef(color)),
             "bgColor" => Ok(Datum::ColorRef(bg_color)),
