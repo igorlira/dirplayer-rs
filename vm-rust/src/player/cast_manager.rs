@@ -390,6 +390,7 @@ impl CastManager {
             (Datum::Float(num), None) => self
                 .find_member_ref_by_number(*num as u32)
                 .map(|member_ref| Ok(Some(member_ref))),
+            (Datum::CastMember(member_ref), _) => Some(Ok(Some(member_ref.clone()))),
             _ => Some(Err(ScriptError::new(format!(
                 "Member number or name type invalid: {}",
                 member_name_or_num.type_str()
