@@ -152,13 +152,17 @@ impl MediaChunk {
     pub fn get_codec_name(&self) -> &str {
         if let Some(guid) = self.guid {
             // Check against known DirectSound/Windows Media GUIDs
-            // 5A08CD40-535B-11D0-A8BB-00A0C9008A48 is IMA ADPCM
+            // IMA ADPCM: 5A08CD40-535B-11D0-A8BB-00A0C9008A48
             if &guid[0..8] == &[0x5A, 0x08, 0xCD, 0x40, 0x53, 0x5B, 0x11, 0xD0] {
                 return "ima_adpcm";
             }
+            // MPEG Layer-3: 00000055-0000-0010-8000-00AA00389B71 (big-endian)
+            if guid[0..4] == [0x00, 0x00, 0x00, 0x55] {
+                return "mp3";
+            }
         }
 
-        // Check for MP3
+        // Check for MP3 sync word at start of audio data
         if self.audio_data.len() >= 2
             && self.audio_data[0] == 0xFF
             && (self.audio_data[1] & 0xE0) == 0xE0
@@ -178,6 +182,19 @@ impl MediaChunk {
         } else {
             "raw_pcm"
         }
+    }
+
+    /// Returns true if this MediaChunk has the MPEG Layer-3 GUID,
+    /// indicating SWA (Shockwave Audio) compression.
+    /// Note: MP3 data detected by sync word alone (no GUID) is not
+    /// considered SWA — it may be a regular MP3-compressed sound.
+    pub fn is_swa(&self) -> bool {
+        if let Some(guid) = self.guid {
+            if guid[0..4] == [0x00, 0x00, 0x00, 0x55] {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn is_sound(&self) -> bool {
