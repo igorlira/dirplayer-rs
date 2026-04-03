@@ -191,9 +191,85 @@ pub fn raycast_scene_multi(
             direction: transform_dir_4x4(&inv_transform, ray.direction[0], ray.direction[1], ray.direction[2]),
         };
 
+        // Debug: log MainA sub-mesh info and check floor face on first call
+        if node.name == "MainA" {
+            static MA_MESH_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if MA_MESH_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 {
+                if let Some(meshes) = scene.clod_meshes.get(resource.as_str()) {
+                    for (mi, m) in meshes.iter().enumerate() {
+                        let v0z = if !m.positions.is_empty() { m.positions[0][2] } else { -999.0 };
+                        web_sys::console::log_1(&format!(
+                            "[RAYCAST-MESH] MainA sub[{}]: {} verts, {} faces, v0z={:.1}",
+                            mi, m.positions.len(), m.faces.len(), v0z
+                        ).into());
+                    }
+                    // Check sub[4] face 35 specifically (should be the floor)
+                    if meshes.len() > 4 && meshes[4].faces.len() > 35 {
+                        let f = &meshes[4].faces[35];
+                        let m = &meshes[4];
+                        web_sys::console::log_1(&format!(
+                            "[FLOOR-FACE] sub[4] face35=[{},{},{}] v{}=({:.1},{:.1},{:.1}) v{}=({:.1},{:.1},{:.1}) v{}=({:.1},{:.1},{:.1})",
+                            f[0], f[1], f[2],
+                            f[0], m.positions.get(f[0] as usize).map(|p| p[0]).unwrap_or(-1.0),
+                                  m.positions.get(f[0] as usize).map(|p| p[1]).unwrap_or(-1.0),
+                                  m.positions.get(f[0] as usize).map(|p| p[2]).unwrap_or(-1.0),
+                            f[1], m.positions.get(f[1] as usize).map(|p| p[0]).unwrap_or(-1.0),
+                                  m.positions.get(f[1] as usize).map(|p| p[1]).unwrap_or(-1.0),
+                                  m.positions.get(f[1] as usize).map(|p| p[2]).unwrap_or(-1.0),
+                            f[2], m.positions.get(f[2] as usize).map(|p| p[0]).unwrap_or(-1.0),
+                                  m.positions.get(f[2] as usize).map(|p| p[1]).unwrap_or(-1.0),
+                                  m.positions.get(f[2] as usize).map(|p| p[2]).unwrap_or(-1.0),
+                        ).into());
+                        // Test ray intersection manually
+                        let lo = [3428.0f32, -5878.0, 219.0]; // local ray origin
+                        let ld = [0.0f32, 0.0, -1.0]; // local ray dir
+                        let p0 = m.positions[f[0] as usize];
+                        let p1 = m.positions[f[1] as usize];
+                        let p2 = m.positions[f[2] as usize];
+                        if let Some((t, _, _)) = ray_triangle_intersect(
+                            &Ray { origin: lo, direction: ld }, &p0, &p1, &p2
+                        ) {
+                            web_sys::console::log_1(&format!("[FLOOR-FACE] ray hit! t={:.2}", t).into());
+                        } else {
+                            web_sys::console::log_1(&"[FLOOR-FACE] ray MISS!".into());
+                        }
+                    }
+                }
+            }
+        }
+
         // Test CLOD meshes
         if let Some(meshes) = scene.clod_meshes.get(resource.as_str()) {
+            // Log local ray for MainA sub[4] on first downward ray
+            if node.name == "MainA" && ray.direction[2] < -0.9 && ray.direction[0].abs() < 0.1 && ray.origin[2] > 300.0 {
+                static LR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                if LR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 2 {
+                    web_sys::console::log_1(&format!(
+                        "[LOCAL-RAY] MainA: world_orig=({:.1},{:.1},{:.1}) local_orig=({:.1},{:.1},{:.1}) local_dir=({:.4},{:.4},{:.4})",
+                        ray.origin[0], ray.origin[1], ray.origin[2],
+                        local_ray.origin[0], local_ray.origin[1], local_ray.origin[2],
+                        local_ray.direction[0], local_ray.direction[1], local_ray.direction[2],
+                    ).into());
+                }
+            }
             for (mi, mesh) in meshes.iter().enumerate() {
+                // Debug: for MainA sub[4], manually test face 35 inside the real raycast flow
+                if node.name == "MainA" && mi == 4 && ray.direction[2] < -0.9 && ray.direction[0].abs() < 0.1 && ray.origin[2] > 300.0 {
+                    static F35_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    if F35_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                        let f = &mesh.faces[35];
+                        let p0 = mesh.positions[f[0] as usize];
+                        let p1 = mesh.positions[f[1] as usize];
+                        let p2 = mesh.positions[f[2] as usize];
+                        let result = ray_triangle_intersect(&local_ray, &p0, &p1, &p2);
+                        web_sys::console::log_1(&format!(
+                            "[SUB4-F35] local_orig=({:.1},{:.1},{:.1}) dir=({:.4},{:.4},{:.4}) face=[{},{},{}] hit={:?} nfaces={}",
+                            local_ray.origin[0], local_ray.origin[1], local_ray.origin[2],
+                            local_ray.direction[0], local_ray.direction[1], local_ray.direction[2],
+                            f[0], f[1], f[2], result, mesh.faces.len()
+                        ).into());
+                    }
+                }
                 let tc = mesh.tex_coords.first().map(|v| v.as_slice());
                 if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, &node.name, (mi + 1) as u32, max_dist) {
                     // Transform hit position and vertices back to world space
@@ -277,11 +353,10 @@ fn raycast_mesh(
         let i2 = face[2] as usize;
         if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() { continue; }
         if let Some((t, u, v)) = ray_triangle_intersect(ray, &positions[i0], &positions[i1], &positions[i2]) {
-            // Backface culling: skip triangles facing away from the ray
+            // No backface culling - Director's modelsUnderRay tests both sides
             let edge1 = sub(positions[i1], positions[i0]);
             let edge2 = sub(positions[i2], positions[i0]);
             let normal = normalize(cross(edge1, edge2));
-            if dot(normal, ray.direction) > 0.0 { continue; }
 
             if t > 0.0 && t < max_dist {
                 if closest.as_ref().map_or(true, |c| t < c.distance) {

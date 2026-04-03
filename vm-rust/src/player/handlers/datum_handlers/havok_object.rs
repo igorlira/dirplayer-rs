@@ -345,6 +345,17 @@ impl HavokObjectDatumHandlers {
             }
             "applyForceAtPoint" | "applyforceatpoint" => {
                 let force = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                {
+                    static FAP_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let n = FAP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n < 5 || (n % 300 == 0) {
+                        let mag = (force[0]*force[0] + force[1]*force[1] + force[2]*force[2]).sqrt();
+                        web_sys::console::log_1(&format!(
+                            "[HAVOK-FAP] applyForceAtPoint on '{}': ({:.1},{:.1},{:.1}) mag={:.1}",
+                            rb_name, force[0], force[1], force[2], mag
+                        ).into());
+                    }
+                }
                 let point = match player.get_datum(&args[1]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;

@@ -701,8 +701,8 @@ impl HavokPhysicsMemberHandlers {
             true
         };
 
-        // Try to read the model's initial transform from the W3D scene
-        let initial_position = {
+        // Read model's initial transform + mesh bounding box from W3D scene
+        let (initial_position, mesh_half_extents) = {
             let member = player
                 .movie
                 .cast_manager
@@ -719,15 +719,37 @@ impl HavokPhysicsMemberHandlers {
             let w3d_member = player.movie.cast_manager.find_member_by_ref(&w3d_ref);
             if let Some(m) = w3d_member {
                 if let Some(w3d) = m.member_type.as_shockwave3d() {
-                    w3d.runtime_state.node_transforms
+                    let pos = w3d.runtime_state.node_transforms
                         .get(&model_name)
                         .map(|t| [t[12] as f64, t[13] as f64, t[14] as f64])
-                        .unwrap_or([0.0; 3])
+                        .unwrap_or([0.0; 3]);
+
+                    // Compute bounding box from CLOD mesh data for the model's resource
+                    let node = w3d.parsed_scene.as_ref()
+                        .and_then(|s| s.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&model_name)));
+                    let res_name = node.map(|n| {
+                        if !n.model_resource_name.is_empty() { &n.model_resource_name }
+                        else { &n.resource_name }
+                    });
+                    let half_ext = res_name
+                        .and_then(|rn| w3d.parsed_scene.as_ref().and_then(|s| s.clod_meshes.get(rn.as_str())))
+                        .map(|meshes| {
+                            let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+                            for mesh in meshes {
+                                for p in &mesh.positions {
+                                    for i in 0..3 { mn[i] = mn[i].min(p[i]); mx[i] = mx[i].max(p[i]); }
+                                }
+                            }
+                            [(mx[0]-mn[0]) as f64 / 2.0, (mx[1]-mn[1]) as f64 / 2.0, (mx[2]-mn[2]) as f64 / 2.0]
+                        })
+                        .unwrap_or([10.0, 10.0, 10.0]);
+
+                    (pos, half_ext)
                 } else {
-                    [0.0; 3]
+                    ([0.0; 3], [10.0, 10.0, 10.0])
                 }
             } else {
-                [0.0; 3]
+                ([0.0; 3], [10.0, 10.0, 10.0])
             }
         };
 
@@ -753,10 +775,16 @@ impl HavokPhysicsMemberHandlers {
             let handle = rapier.rigid_body_set.insert(rapier_rb);
 
             // Use a box approximation for dynamic bodies (can be refined later with actual mesh geometry)
-            let collider = ColliderBuilder::cuboid(10.0, 10.0, 10.0)
+            // Use bounding box from W3D mesh for collider size
+            web_sys::console::log_1(&format!(
+                "Havok makeMovableRigidBody '{}': half_extents=({:.1},{:.1},{:.1})",
+                model_name, mesh_half_extents[0], mesh_half_extents[1], mesh_half_extents[2]
+            ).into());
+            let collider = ColliderBuilder::cuboid(
+                    mesh_half_extents[0], mesh_half_extents[1], mesh_half_extents[2])
                 .mass(mass as Real)
-                .restitution(0.3)
-                .friction(0.5)
+                .restitution(0.1)
+                .friction(0.8)
                 .build();
             let col_handle = rapier.collider_set.insert_with_parent(collider, handle, &mut rapier.rigid_body_set);
             rapier.body_handles.insert(model_name.clone(), handle);
