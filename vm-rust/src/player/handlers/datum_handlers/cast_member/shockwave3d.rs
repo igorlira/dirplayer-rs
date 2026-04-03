@@ -1066,6 +1066,26 @@ impl Shockwave3dMemberHandlers {
                                         if !source_shader_name.is_empty() {
                                             used_shader_names.insert(source_shader_name.clone());
                                         }
+                                        // Also collect shaders from CHILD model resources
+                                        for child in &src_child_nodes {
+                                            let child_res = if !child.model_resource_name.is_empty() {
+                                                child.model_resource_name.as_str()
+                                            } else {
+                                                child.resource_name.as_str()
+                                            };
+                                            for (rname, rinfo) in &src_model_resources {
+                                                if rname == child_res {
+                                                    for binding in &rinfo.shader_bindings {
+                                                        for shader_name in &binding.mesh_bindings {
+                                                            used_shader_names.insert(shader_name.clone());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if !child.shader_name.is_empty() {
+                                                used_shader_names.insert(child.shader_name.clone());
+                                            }
+                                        }
 
                                         // Collect texture names used by the used shaders
                                         let mut used_texture_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1110,6 +1130,16 @@ impl Shockwave3dMemberHandlers {
                                             } else {
                                                 scene.shaders.push(shader.clone());
                                             }
+                                        }
+                                        // Log cloned shaders with texture info
+                                        {
+                                            let car_shaders: Vec<String> = scene.shaders.iter()
+                                                .filter(|s| s.name.contains("Tire") || s.name.contains("Wheel") || s.name.contains("Car"))
+                                                .map(|s| format!("{}(layers={})", s.name, s.texture_layers.len()))
+                                                .collect();
+                                            web_sys::console::log_1(&format!(
+                                                "[CLONE-SHADERS] after copy: {:?}", car_shaders
+                                            ).into());
                                         }
                                         // Model resources: namespace to prevent collisions
                                         for (res_name, res_info) in &src_model_resources {
@@ -1225,6 +1255,10 @@ impl Shockwave3dMemberHandlers {
                                             }
                                             if !cloned.model_resource_name.is_empty() {
                                                 cloned.model_resource_name = format!("{}{}", ns, cloned.model_resource_name);
+                                            }
+                                            // Remap shader name if it was renamed during clone
+                                            if let Some(new_shader) = shader_name_map.get(&cloned.shader_name) {
+                                                cloned.shader_name = new_shader.clone();
                                             }
                                             // Check if node with same name already exists
                                             if !scene.nodes.iter().any(|n| n.name == cloned.name) {
