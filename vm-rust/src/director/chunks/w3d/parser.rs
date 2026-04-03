@@ -284,7 +284,7 @@ impl W3dFileParser {
         if (attrs & 0x40) != 0 { let _ = r.read_f32()?; } // reserved
         if (attrs & 0x80) != 0 { mat.shininess = r.read_f32()?; }
 
-        log(&format!("  Material: \"{}\" diffuse=({:.2},{:.2},{:.2}) opacity={:.2} reflectivity={:.4} shininess={:.4} attrs=0x{:02X}", name, mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.opacity, mat.reflectivity, mat.shininess, attrs));
+        log(&format!("  Material: \"{}\" diffuse=({:.2},{:.2},{:.2}) emissive=({:.2},{:.2},{:.2}) opacity={:.2} reflectivity={:.4} shininess={:.4} attrs=0x{:02X}", name, mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.opacity, mat.reflectivity, mat.shininess, attrs));
         self.scene.materials.push(mat);
         Ok(())
     }
@@ -707,9 +707,15 @@ impl W3dFileParser {
             normals.push([x, y, z]);
         }
 
-        // Skip vertex colors
-        if num_vertex_colors > 0 {
-            r.skip((num_vertex_colors * 16) as usize); // 4 floats per color
+        // Read vertex colors (RGBA, 4 floats per color)
+        let mut vertex_colors = Vec::with_capacity(num_vertex_colors as usize);
+        for _ in 0..num_vertex_colors {
+            if r.remaining() < 16 { break; }
+            let cr = r.read_f32()?;
+            let cg = r.read_f32()?;
+            let cb = r.read_f32()?;
+            let ca = r.read_f32()?;
+            vertex_colors.push([cr, cg, cb, ca]);
         }
 
         // Read texcoords
@@ -727,7 +733,7 @@ impl W3dFileParser {
             positions,
             normals,
             tex_coords,
-            vertex_colors: Vec::new(),
+            vertex_colors,
             faces,
         });
         Ok(())

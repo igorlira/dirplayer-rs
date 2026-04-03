@@ -1132,14 +1132,25 @@ impl Shockwave3dMemberHandlers {
                                                 scene.shaders.push(shader.clone());
                                             }
                                         }
-                                        // Copy materials referenced by copied shaders
+                                        // Copy materials referenced by copied shaders.
+                                        // Check both shader.material_name and shader.name as material key,
+                                        // since the renderer falls back to finding materials by shader name.
                                         for shader in &src_shaders {
                                             if !used_shader_names.contains(&shader.name) { continue; }
-                                            if shader.material_name.is_empty() { continue; }
                                             for mat in &src_materials {
-                                                if mat.name == shader.material_name {
-                                                    if !scene.materials.iter().any(|m| m.name == mat.name) {
-                                                        scene.materials.push(mat.clone());
+                                                if (!shader.material_name.is_empty() && mat.name == shader.material_name)
+                                                    || mat.name == shader.name
+                                                {
+                                                    let target_name = shader_name_map.get(&shader.name)
+                                                        .map(|mapped| {
+                                                            // If shader was renamed (conflict), rename material too
+                                                            let mut m = mat.clone();
+                                                            m.name = mapped.clone();
+                                                            m
+                                                        });
+                                                    let mat_to_push = target_name.unwrap_or_else(|| mat.clone());
+                                                    if !scene.materials.iter().any(|m| m.name == mat_to_push.name) {
+                                                        scene.materials.push(mat_to_push);
                                                     }
                                                 }
                                             }
@@ -1231,9 +1242,16 @@ impl Shockwave3dMemberHandlers {
                             format!("{}{}", ns, source_model_resource_name)
                         } else { source_model_resource_name.clone() };
 
-                        let effective_shader_name = shader_name_map.get(&source_shader_name)
-                            .cloned()
-                            .unwrap_or(source_shader_name);
+                        // Don't propagate "DefaultShader" as the node-level shader —
+                        // it overrides the model resource's per-mesh shader bindings
+                        // (which have the correct materials with proper colors).
+                        let effective_shader_name = if source_shader_name == "DefaultShader" || source_shader_name.is_empty() {
+                            String::new()
+                        } else {
+                            shader_name_map.get(&source_shader_name)
+                                .cloned()
+                                .unwrap_or(source_shader_name)
+                        };
 
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {

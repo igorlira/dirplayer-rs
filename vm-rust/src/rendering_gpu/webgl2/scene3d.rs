@@ -3283,7 +3283,10 @@ void main() {
                 })
                 .or_else(|| w3d_shader.and_then(|s| Self::find_material_ci(&scene.materials, &s.name)));
 
-            if best_material.is_none() {
+            // Skip DefaultShader as best_material when there are more specific candidates.
+            // DefaultShader often has white default material that overrides model-specific
+            // materials (e.g., cloned models with yellow emissive from their source member).
+            if best_material.is_none() && !(candidate.eq_ignore_ascii_case("DefaultShader") && candidate_names.len() > 1) {
                 best_material = mat;
                 best_blend_func = w3d_shader
                     .and_then(|s| s.texture_layers.first())
@@ -3765,6 +3768,18 @@ void main() {
                 if let Some(node) = light_node {
                     if node.parent_name.is_empty() {
                         continue;
+                    }
+                }
+                // When camera has rootNode, only use lights in that subtree.
+                // E.g., arrowcam with rootNode=pointarrow has no child lights,
+                // so its pass uses only emissive (no scene lighting wash-out).
+                if let Some(ref cam) = self.active_camera {
+                    if let Some(rs) = runtime_state {
+                        if let Some(root) = rs.camera_root_nodes.get(cam) {
+                            if !self.is_child_of(scene, &light.name, root) {
+                                continue;
+                            }
+                        }
                     }
                 }
 
