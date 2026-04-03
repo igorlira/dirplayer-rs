@@ -1729,6 +1729,28 @@ impl Shockwave3dMemberHandlers {
                                                 rgba[idx + 3] = a;
                                             }
                                         }
+                                        // Post-process: when bitmap has use_alpha, trailing rows of fully
+                                        // opaque white (255,255,255,255) are unfilled padding from power-of-2
+                                        // texture sizing. Make them transparent so 3D overlays don't show
+                                        // white blocks below the actual content.
+                                        if bmp.use_alpha {
+                                            let w_usize = w as usize;
+                                            let h_usize = h as usize;
+                                            // Scan from bottom row upward: stop at first row that isn't all white-opaque
+                                            for y in (0..h_usize).rev() {
+                                                let row_start = y * w_usize * 4;
+                                                let row_all_white_opaque = (0..w_usize).all(|x| {
+                                                    let i = row_start + x * 4;
+                                                    rgba[i] == 255 && rgba[i+1] == 255 && rgba[i+2] == 255 && rgba[i+3] == 255
+                                                });
+                                                if !row_all_white_opaque { break; }
+                                                // Make this row transparent
+                                                for x in 0..w_usize {
+                                                    let i = row_start + x * 4;
+                                                    rgba[i + 3] = 0;
+                                                }
+                                            }
+                                        }
                                         Some((w, h, rgba))
                                     } else {
                                         None
@@ -1745,9 +1767,16 @@ impl Shockwave3dMemberHandlers {
                                                     tex_data.extend_from_slice(&rgba);
                                                     scene.texture_images.insert(obj_name.clone(), tex_data);
                                                     scene.texture_content_version += 1;
+                                                    // Log pixel stats
+                                                    let total = rgba.len() / 4;
+                                                    let alpha_lt255 = rgba.chunks(4).filter(|p| p[3] < 255).count();
+                                                    let alpha_eq0 = rgba.chunks(4).filter(|p| p[3] == 0).count();
+                                                    let first_lt255 = rgba.chunks(4).enumerate().find(|(_, p)| p[3] < 255)
+                                                        .map(|(i, p)| format!("px{}=({},{},{},{})", i, p[0], p[1], p[2], p[3]))
+                                                        .unwrap_or("none".to_string());
                                                     web_sys::console::log_1(&format!(
-                                                        "[W3D] newTexture(\"{}\", #fromImageObject): stored {}x{} RGBA",
-                                                        obj_name, w, h
+                                                        "[W3D] newTexture(\"{}\", #fromImageObject): {}x{} alpha<255={}/{} alpha=0={} first_partial={}",
+                                                        obj_name, w, h, alpha_lt255, total, alpha_eq0, first_lt255
                                                     ).into());
                                                 }
                                             }

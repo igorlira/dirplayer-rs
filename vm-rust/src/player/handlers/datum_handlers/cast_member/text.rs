@@ -22,7 +22,7 @@ use crate::{
 };
 
 pub struct TextMemberHandlers {}
-const DEBUG_TEXT_IMAGE: bool = false;
+const DEBUG_TEXT_IMAGE: bool = true;
 
 impl TextMemberHandlers {
     pub fn call(
@@ -221,25 +221,61 @@ impl TextMemberHandlers {
                 } else {
                     player.font_manager.get_system_font().unwrap()
                 };
-                let (width, measured_height) = measure_text(
-                    &text_data.text,
-                    &font,
-                    None,
-                    text_data.fixed_line_space,
-                    text_data.top_spacing,
-                    text_data.bottom_spacing,
-                );
-                // For #adjust, always use measured height. For #fixed/#scroll, use stored height if set.
-                let height = if text_data.box_type != "adjust" && text_data.height > 0 {
-                    text_data.height
+                let is_pfr = font.char_widths.is_some();
+                let (width, measured_height) = if !is_pfr {
+                    // For non-PFR (system/browser) fonts, use Canvas2D measurement
+                    // to match the Canvas2D rendering used by .image
+                    let font_name = if !text_data.font.is_empty() {
+                        text_data.font.as_str()
+                    } else {
+                        "Arial"
+                    };
+                    let font_size = if text_data.font_size > 0 { text_data.font_size } else { 12 };
+                    FontMemberHandlers::measure_text_native(
+                        &text_data.text,
+                        font_name,
+                        font_size,
+                        text_data.word_wrap,
+                        if text_data.width > 0 { text_data.width as i32 } else { 0 },
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
+                        text_data.fixed_line_space,
+                    )
                 } else {
-                    measured_height
+                    measure_text(
+                        &text_data.text,
+                        &font,
+                        None,
+                        text_data.fixed_line_space,
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
+                    )
                 };
+                // Use member's explicit width/height when available (matches .image box dimensions).
+                // This is important for center/right-aligned text where visible pixels
+                // are offset from the left edge within the member's full width.
+                let mut box_width = width;
+                if text_data.width > 0 {
+                    box_width = text_data.width;
+                } else if let Some(ref info) = text_data.info {
+                    if info.width > 0 { box_width = info.width as u16; }
+                }
+                let mut box_height = measured_height;
+                if text_data.box_type != "adjust" {
+                    if text_data.height > 0 {
+                        box_height = box_height.max(text_data.height);
+                    }
+                    if let Some(ref info) = text_data.info {
+                        if info.height > 0 {
+                            box_height = box_height.max(info.height as u16);
+                        }
+                    }
+                }
                 Ok(Datum::Rect([
                     player.alloc_datum(Datum::Int(0)),
                     player.alloc_datum(Datum::Int(0)),
-                    player.alloc_datum(Datum::Int(width as i32)),
-                    player.alloc_datum(Datum::Int(height as i32))
+                    player.alloc_datum(Datum::Int(box_width as i32)),
+                    player.alloc_datum(Datum::Int(box_height as i32))
                 ]))
             }
             "height" => {
@@ -262,14 +298,22 @@ impl TextMemberHandlers {
                     } else {
                         player.font_manager.get_system_font().unwrap()
                     };
-                    let (_, height) = measure_text(
-                        &text_data.text,
-                        &font,
-                        None,
-                        text_data.fixed_line_space,
-                        text_data.top_spacing,
-                        text_data.bottom_spacing,
-                    );
+                    let is_pfr = font.char_widths.is_some();
+                    let (_, height) = if !is_pfr {
+                        let font_name = if !text_data.font.is_empty() { text_data.font.as_str() } else { "Arial" };
+                        let font_size = if text_data.font_size > 0 { text_data.font_size } else { 12 };
+                        FontMemberHandlers::measure_text_native(
+                            &text_data.text, font_name, font_size,
+                            text_data.word_wrap,
+                            if text_data.width > 0 { text_data.width as i32 } else { 0 },
+                            text_data.top_spacing, text_data.bottom_spacing, text_data.fixed_line_space,
+                        )
+                    } else {
+                        measure_text(
+                            &text_data.text, &font, None,
+                            text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
+                        )
+                    };
                     Ok(Datum::Int(height as i32))
                 }
             }
@@ -530,15 +574,22 @@ impl TextMemberHandlers {
                 // Get dimensions - use styled spans if available for accurate measurement
                 let mut preferred_font_name: Option<String> = None;
                 let mut preferred_font_size: Option<u16> = None;
-                let (mut width, mut height) = if !text_data.html_styled_spans.is_empty() {
-                    // Measure based on styled spans
+                // Determine font name and size
+                {
+                    let span_color = text_data.html_styled_spans.first()
+                        .and_then(|s| s.style.color);
+                    web_sys::console::log_1(&format!(
+                        "[text.image] member={}:{} member.color={:?} span_color={:?} spans={}",
+                        cast_member_ref.cast_lib, cast_member_ref.cast_member,
+                        member.color, span_color, text_data.html_styled_spans.len(),
+                    ).into());
+                }
+                if !text_data.html_styled_spans.is_empty() {
                     let first_style = &text_data.html_styled_spans[0].style;
-                    // Filter out 0 font sizes and empty font names
                     let font_size = first_style.font_size
                         .filter(|&s| s > 0)
                         .or_else(|| if text_data.font_size > 0 { Some(text_data.font_size as i32) } else { None })
                         .unwrap_or(12) as u16;
-                    // Always prefer text_data.font (may have been changed at runtime via Lingo)
                     let font_name = if !text_data.font.is_empty() {
                         text_data.font.clone()
                     } else {
@@ -546,58 +597,75 @@ impl TextMemberHandlers {
                             .filter(|f| !f.is_empty())
                             .unwrap_or_else(|| "Arial".to_string())
                     };
-                    preferred_font_name = Some(font_name.clone());
+                    preferred_font_name = Some(font_name);
                     preferred_font_size = Some(font_size);
-                    if DEBUG_TEXT_IMAGE {
-                        debug!(
-                            "[text.image] styled first span font='{}' size={}",
-                            font_name, font_size
-                        );
-                    }
-
-                    // Get font for measurement
-                    let font = player.font_manager.get_font_with_cast_and_bitmap(
-                        &font_name,
-                        &player.movie.cast_manager,
-                        &mut player.bitmap_manager,
-                        Some(font_size),
-                        None,
-                    ).or_else(|| player.font_manager.get_system_font());
-
-                    if let Some(font) = font {
-                        measure_text(
-                            &text_data.text,
-                            &font,
-                            None,
-                            text_data.fixed_line_space,
-                            text_data.top_spacing,
-                            text_data.bottom_spacing,
-                        )
-                    } else {
-                        (100, 20) // Fallback dimensions
-                    }
                 } else {
                     if !text_data.font.is_empty() {
                         preferred_font_name = Some(text_data.font.clone());
-                        if text_data.font_size > 0 {
-                            preferred_font_size = Some(text_data.font_size);
+                    }
+                    if text_data.font_size > 0 {
+                        preferred_font_size = Some(text_data.font_size);
+                    }
+                }
+                if DEBUG_TEXT_IMAGE {
+                    debug!(
+                        "[text.image] font='{}' size={}",
+                        preferred_font_name.as_deref().unwrap_or("(none)"),
+                        preferred_font_size.unwrap_or(0)
+                    );
+                }
+
+                // Load font to determine if it's PFR
+                let font = {
+                    let font_name = preferred_font_name.as_deref()
+                        .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None });
+                    let font_size = preferred_font_size
+                        .or(if text_data.font_size > 0 { Some(text_data.font_size) } else { None });
+                    let mut loaded = if let Some(name) = font_name {
+                        player.font_manager.get_font_with_cast_and_bitmap(
+                            name,
+                            &player.movie.cast_manager,
+                            &mut player.bitmap_manager,
+                            font_size,
+                            None,
+                        )
+                    } else {
+                        None
+                    };
+                    if loaded.is_none() {
+                        if let Some(name) = font_name {
+                            let name_lower = name.to_lowercase();
+                            for (key, font) in player.font_manager.font_cache.iter() {
+                                if key.to_lowercase() == name_lower
+                                    || key.to_lowercase().starts_with(&format!("{}_", name_lower))
+                                {
+                                    loaded = Some(font.clone());
+                                    break;
+                                }
+                            }
                         }
                     }
-                    let font = if let Some(ref name) = preferred_font_name {
-                        player
-                            .font_manager
-                            .get_font_with_cast_and_bitmap(
-                                name,
-                                &player.movie.cast_manager,
-                                &mut player.bitmap_manager,
-                                preferred_font_size,
-                                None,
-                            )
-                            .or_else(|| player.font_manager.get_system_font())
-                            .unwrap()
-                    } else {
-                        player.font_manager.get_system_font().unwrap()
-                    };
+                    loaded.or_else(|| player.font_manager.get_system_font())
+                        .ok_or_else(|| ScriptError::new("No font available for text rendering".to_string()))?
+                };
+                let is_pfr_font = font.char_widths.is_some();
+
+                // Measure text dimensions
+                let (mut width, mut height) = if !is_pfr_font {
+                    // Use Canvas2D measurement for non-PFR fonts
+                    let font_name = preferred_font_name.as_deref().unwrap_or("Arial");
+                    let font_size = preferred_font_size.unwrap_or(12);
+                    FontMemberHandlers::measure_text_native(
+                        &text_data.text,
+                        font_name,
+                        font_size,
+                        text_data.word_wrap,
+                        if text_data.width > 0 { text_data.width as i32 } else { 0 },
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
+                        text_data.fixed_line_space,
+                    )
+                } else {
                     measure_text(
                         &text_data.text,
                         &font,
@@ -632,17 +700,21 @@ impl TextMemberHandlers {
                     }
                 }
 
-                // Create 32-bit RGBA bitmap for proper color and transparency support
+                // Create 32-bit bitmap with TRANSPARENT background for .image.
+                // Director's text member .image produces foreColor text with alpha=255
+                // on a transparent (alpha=0) background. This supports two common patterns:
+                //   1. copyPixels to grayscale for alpha mask: black bg → low alpha, text → high alpha
+                //   2. extractAlpha(): returns alpha channel where bg=0, text=255
                 let mut bitmap = Bitmap::new(
                     box_width.max(1),
                     box_height.max(1),
                     32,
                     32,
-                    8, // alpha_depth for transparency
+                    8, // alpha depth
                     PaletteRef::BuiltIn(get_system_default_palette()),
                 );
                 bitmap.use_alpha = true;
-                // Clear to transparent
+                // Start fully transparent (RGBA = 0,0,0,0)
                 bitmap.data.fill(0);
 
                 // Determine alignment
@@ -654,53 +726,17 @@ impl TextMemberHandlers {
                 };
 
                 let glyph_pref = get_glyph_preference();
-                let is_pfr_font;
-
-                // Load font from font_manager (PFR rasterizer), fall back to system font.
-                let font = {
-                    let font_name = preferred_font_name.as_deref()
-                        .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None });
-                    let font_size = preferred_font_size
-                        .or(if text_data.font_size > 0 { Some(text_data.font_size) } else { None });
-                    // Mirror the WebGL2 renderer's font lookup chain:
-                    // 1. Name-based lookup
-                    let mut loaded = if let Some(name) = font_name {
-                        player.font_manager.get_font_with_cast_and_bitmap(
-                            name,
-                            &player.movie.cast_manager,
-                            &mut player.bitmap_manager,
-                            font_size,
-                            None,
-                        )
-                    } else {
-                        None
-                    };
-                    // 2. Case-insensitive match in font cache
-                    if loaded.is_none() {
-                        if let Some(name) = font_name {
-                            let name_lower = name.to_lowercase();
-                            for (key, font) in player.font_manager.font_cache.iter() {
-                                if key.to_lowercase() == name_lower
-                                    || key.to_lowercase().starts_with(&format!("{}_", name_lower))
-                                {
-                                    loaded = Some(font.clone());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    loaded.or_else(|| player.font_manager.get_system_font())
-                        .ok_or_else(|| ScriptError::new("No font available for text rendering".to_string()))?
-                };
-                is_pfr_font = font.char_widths.is_some();
+                // font and is_pfr_font already loaded above for measurement
 
                 let use_native = if !text_data.tab_stops.is_empty() {
                     true // Force native rendering for tab stop support
+                } else if !is_pfr_font {
+                    true // Always use Canvas2D for non-PFR fonts (system/browser fonts)
                 } else {
                     match glyph_pref {
                         GlyphPreference::Native => true,
                         GlyphPreference::Bitmap | GlyphPreference::Outline => false,
-                        GlyphPreference::Auto => false, // Default: bitmap for image property
+                        GlyphPreference::Auto => false, // PFR bitmap glyph rendering
                     }
                 };
 
@@ -708,6 +744,8 @@ impl TextMemberHandlers {
                     // Native Canvas2D rendering for standard fonts
                     let font_name_str = preferred_font_name.as_deref().unwrap_or("Arial");
                     let font_size_val = preferred_font_size.unwrap_or(12);
+                    // Use the member's actual foreColor for .image rendering.
+                    // Director renders text members with their foreColor on their bgColor.
                     let (r, g, b) = {
                         use crate::player::bitmap::bitmap::resolve_color_ref;
                         let palettes = player.movie.cast_manager.palettes();
@@ -936,6 +974,39 @@ impl TextMemberHandlers {
                     }
 
                 } // end bitmap glyph else branch
+
+                // Debug: count non-transparent pixels in the rendered text image
+                {
+                    let total = (bitmap.width as usize * bitmap.height as usize) as usize;
+                    let mut opaque = 0usize;
+                    let mut any_nonblack = 0usize;
+                    for i in 0..total {
+                        let idx = i * 4;
+                        if idx + 3 < bitmap.data.len() {
+                            let a = bitmap.data[idx + 3];
+                            if a > 0 {
+                                opaque += 1;
+                                let r = bitmap.data[idx];
+                                let g = bitmap.data[idx + 1];
+                                let b = bitmap.data[idx + 2];
+                                if r > 0 || g > 0 || b > 0 {
+                                    any_nonblack += 1;
+                                }
+                            }
+                        }
+                    }
+                    web_sys::console::log_1(&format!(
+                        "[text.image] RESULT member={}:{} text='{}' size={}x{} box={}x{} opaque_px={}/{} nonblack={} use_native={} is_pfr={} font='{}' fontSize={}",
+                        cast_member_ref.cast_lib, cast_member_ref.cast_member,
+                        &text_data.text[..text_data.text.len().min(20)],
+                        bitmap.width, bitmap.height,
+                        box_width, box_height,
+                        opaque, total, any_nonblack,
+                        use_native, is_pfr_font,
+                        preferred_font_name.as_deref().unwrap_or("(none)"),
+                        preferred_font_size.unwrap_or(0),
+                    ).into());
+                }
 
                 let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
                 Ok(Datum::BitmapRef(bitmap_ref))

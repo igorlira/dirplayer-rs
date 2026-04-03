@@ -429,19 +429,31 @@ impl Bitmap {
                 }
             }
             8 => {
-                let mut result_index: u8 = 0;
-                let mut result_distance = i32::MAX;
-                for (idx, &(pr, pg, pb)) in palette_cache.iter().enumerate() {
-                    let distance = (r as i32 - pr as i32).abs()
-                        + (g as i32 - pg as i32).abs()
-                        + (b as i32 - pb as i32).abs();
-                    if distance < result_distance {
-                        result_index = idx as u8;
-                        result_distance = distance;
+                // For grayscale palettes (white at index 0 → black at index 255),
+                // use luminance-based direct mapping instead of nearest-color search.
+                // This correctly maps colored pixels (e.g. yellow) to appropriate gray levels.
+                if palette_cache.len() == 256
+                    && palette_cache[0] == (255, 255, 255)
+                    && palette_cache[255] == (0, 0, 0)
+                {
+                    let luminance = ((r as u16 + g as u16 + b as u16) / 3) as u8;
+                    let index = y * self.width as usize + x;
+                    self.data[index] = 255 - luminance;
+                } else {
+                    let mut result_index: u8 = 0;
+                    let mut result_distance = i32::MAX;
+                    for (idx, &(pr, pg, pb)) in palette_cache.iter().enumerate() {
+                        let distance = (r as i32 - pr as i32).abs()
+                            + (g as i32 - pg as i32).abs()
+                            + (b as i32 - pb as i32).abs();
+                        if distance < result_distance {
+                            result_index = idx as u8;
+                            result_distance = distance;
+                        }
                     }
+                    let index = y * self.width as usize + x;
+                    self.data[index] = result_index;
                 }
-                let index = y * self.width as usize + x;
-                self.data[index] = result_index;
             }
             16 => {
                 let r = r as f32 * 31.0 / 255.0;
@@ -2262,8 +2274,13 @@ impl Bitmap {
                 };
 
                 // Skip fully transparent pixels from RGBA bitmaps (e.g., filmloop compositing)
-                // This ensures transparent areas don't overwrite destination with black
-                if src.original_bit_depth == 32 && src.use_alpha && sa == 0 {
+                // This ensures transparent areas don't overwrite destination with black.
+                // Exception: when copying to 8-bit grayscale (alpha mask generation),
+                // we DO want to copy transparent pixels so their black RGB (0,0,0) maps
+                // to dark grayscale values → low alpha in the setAlpha pipeline.
+                if src.original_bit_depth == 32 && src.use_alpha && sa == 0
+                    && self.bit_depth >= 16
+                {
                     continue;
                 }
 
@@ -2344,7 +2361,10 @@ impl Bitmap {
                 if src.original_bit_depth == 32 && ink == 0 && !params.is_text_rendering {
                     if !src.use_alpha {
                         sa = 255;
-                    } else if sa == 0 {
+                    } else if sa == 0 && self.bit_depth >= 16 {
+                        // Skip transparent pixels only for 16/32-bit destinations.
+                        // For 8-bit (grayscale alpha mask), copy the black RGB so it
+                        // maps to dark grayscale → low alpha in setAlpha.
                         continue;
                     }
                 }
@@ -2448,7 +2468,15 @@ impl Bitmap {
                 // ----------------------------------------------------------
                 // 4. NON-TEXT normal rendering
                 // ----------------------------------------------------------
-                let src_alpha = sa as f32 / 255.0;
+                // For 8-bit grayscale destinations: force full alpha so the source RGB
+                // is written at full strength. The grayscale palette mapping uses RGB,
+                // not alpha, so transparent source pixels should write their black (0,0,0)
+                // RGB to produce dark grayscale values (for alpha mask generation via setAlpha).
+                let src_alpha = if self.bit_depth <= 8 && src.use_alpha {
+                    1.0
+                } else {
+                    sa as f32 / 255.0
+                };
                 let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                 let blended = blend_pixel(

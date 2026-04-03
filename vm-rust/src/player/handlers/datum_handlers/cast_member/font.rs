@@ -420,6 +420,110 @@ impl FontMemberHandlers {
         )
     }
 
+    /// Measure text dimensions using Canvas2D metrics.
+    /// This gives accurate measurements for browser-rendered fonts.
+    pub fn measure_text_native(
+        text: &str,
+        font_name: &str,
+        font_size: u16,
+        word_wrap: bool,
+        max_width: i32,
+        top_spacing: i16,
+        bottom_spacing: i16,
+        fixed_line_space: u16,
+    ) -> (u16, u16) {
+        use wasm_bindgen::JsCast;
+
+        let document = match web_sys::window().and_then(|w| w.document()) {
+            Some(d) => d,
+            None => return (100, font_size.max(12)),
+        };
+        let canvas: web_sys::HtmlCanvasElement = match document.create_element("canvas") {
+            Ok(el) => match el.dyn_into() {
+                Ok(c) => c,
+                Err(_) => return (100, font_size.max(12)),
+            },
+            Err(_) => return (100, font_size.max(12)),
+        };
+        canvas.set_width(1);
+        canvas.set_height(1);
+        let ctx: web_sys::CanvasRenderingContext2d = match canvas
+            .get_context("2d")
+            .ok()
+            .flatten()
+        {
+            Some(c) => match c.dyn_into() {
+                Ok(ctx) => ctx,
+                Err(_) => return (100, font_size.max(12)),
+            },
+            None => return (100, font_size.max(12)),
+        };
+
+        let font_str = format!("{}px {}", font_size, font_name);
+        ctx.set_font(&font_str);
+        ctx.set_text_baseline("top");
+
+        let wrap_width = if word_wrap && max_width > 0 {
+            max_width as f64
+        } else {
+            f64::MAX
+        };
+
+        let line_height = if fixed_line_space > 0 {
+            fixed_line_space as f64
+        } else {
+            font_size as f64
+        };
+        let line_step = line_height + bottom_spacing as f64 + top_spacing as f64;
+
+        let mut total_width: f64 = 0.0;
+        let mut y = top_spacing.max(0) as f64;
+
+        let raw_lines: Vec<&str> = text.split(|c: char| c == '\r' || c == '\n').collect();
+        let mut line_count = 0usize;
+
+        for raw in &raw_lines {
+            if word_wrap && max_width > 0 && !raw.is_empty() {
+                let words: Vec<&str> = raw.split_whitespace().collect();
+                let mut current = String::new();
+                for word in words {
+                    let candidate = if current.is_empty() {
+                        word.to_string()
+                    } else {
+                        format!("{} {}", current, word)
+                    };
+                    let w = ctx.measure_text(&candidate).map(|m| m.width()).unwrap_or(0.0);
+                    if w > wrap_width && !current.is_empty() {
+                        let line_w = ctx.measure_text(&current).map(|m| m.width()).unwrap_or(0.0);
+                        total_width = total_width.max(line_w);
+                        line_count += 1;
+                        current = word.to_string();
+                    } else {
+                        current = candidate;
+                    }
+                }
+                if !current.is_empty() {
+                    let line_w = ctx.measure_text(&current).map(|m| m.width()).unwrap_or(0.0);
+                    total_width = total_width.max(line_w);
+                    line_count += 1;
+                }
+            } else {
+                let line_w = ctx.measure_text(raw).map(|m| m.width()).unwrap_or(0.0);
+                total_width = total_width.max(line_w);
+                line_count += 1;
+            }
+        }
+
+        // Calculate total height
+        let total_height = if line_count <= 1 {
+            top_spacing.max(0) as f64 + line_height
+        } else {
+            top_spacing.max(0) as f64 + line_height + (line_count as f64 - 1.0) * line_step
+        };
+
+        (total_width.ceil().max(1.0) as u16, total_height.ceil().max(1.0) as u16)
+    }
+
     /// Render styled text using browser's native Canvas2D fillText() for smooth, anti-aliased text
     /// This produces much better quality than bitmap font scaling
     /// Returns the rendered text as RGBA pixel data that can be composited onto the destination
@@ -452,8 +556,11 @@ impl FontMemberHandlers {
             .dyn_into()
             .map_err(|_| ScriptError::new("Failed to cast canvas".to_string()))?;
 
-        let canvas_width = render_width.max(1) as u32;
-        let canvas_height = render_height.max(1) as u32;
+        // Render at 2x scale for sharper text (Canvas2D anti-aliasing at 1x
+        // produces low coverage for small characters like ':'), then downscale.
+        let scale_factor = 2u32;
+        let canvas_width = render_width.max(1) as u32 * scale_factor;
+        let canvas_height = render_height.max(1) as u32 * scale_factor;
         canvas.set_width(canvas_width);
         canvas.set_height(canvas_height);
 
@@ -464,9 +571,14 @@ impl FontMemberHandlers {
             .dyn_into()
             .map_err(|_| ScriptError::new("Failed to cast context".to_string()))?;
 
-        // Clear canvas to transparent (don't fill with white)
-        // The browser's fillText will render with proper alpha for anti-aliasing
-        ctx.clear_rect(0.0, 0.0, canvas_width as f64, canvas_height as f64);
+        // Scale the context so text renders at 2x resolution
+        let _ = ctx.scale(scale_factor as f64, scale_factor as f64);
+
+        // Render WHITE text on BLACK background to measure pure coverage.
+        // This avoids color-dependent anti-aliasing artifacts from Canvas2D.
+        // Coverage is then mapped to the bitmap as: black text on white background.
+        ctx.set_fill_style_str("rgb(0,0,0)");
+        ctx.fill_rect(0.0, 0.0, render_width.max(1) as f64, render_height.max(1) as f64);
 
         // Set text baseline to top for consistent positioning
         ctx.set_text_baseline("top");
@@ -740,9 +852,9 @@ impl FontMemberHandlers {
                     continue;
                 }
 
-                let (r, g, b) = segment.style.color;
                 ctx.set_font(&segment.style.font);
-                ctx.set_fill_style_str(&format!("rgb({},{},{})", r, g, b));
+                // Always render in WHITE on the black canvas for coverage measurement
+                ctx.set_fill_style_str("rgb(255,255,255)");
                 let _ = ctx.fill_text(&segment.text, x, y);
 
                 if segment.style.underline {
@@ -750,7 +862,7 @@ impl FontMemberHandlers {
                     ctx.begin_path();
                     ctx.move_to(x, underline_y);
                     ctx.line_to(x + segment.width, underline_y);
-                    ctx.set_stroke_style_str(&format!("rgb({},{},{})", r, g, b));
+                    ctx.set_stroke_style_str("rgb(255,255,255)");
                     ctx.stroke();
                 }
 
@@ -778,54 +890,87 @@ impl FontMemberHandlers {
 
         let pixels = image_data.data();
 
-        // Copy pixels to bitmap, converting white to transparent
-        // This allows proper compositing with background
-        for cy in 0..canvas_height as i32 {
-            let dest_y = start_y + cy;
+        // Debug: check raw canvas pixels for non-black (text) content
+        {
+            let total_px = (canvas_width * canvas_height) as usize;
+            let mut nonblack = 0usize;
+            let mut first_nb = String::new();
+            for i in 0..total_px {
+                let idx = i * 4;
+                if idx + 2 < pixels.len() {
+                    let r = pixels[idx];
+                    let g = pixels[idx + 1];
+                    let b = pixels[idx + 2];
+                    if r > 0 || g > 0 || b > 0 {
+                        nonblack += 1;
+                        if first_nb.is_empty() {
+                            let x = i % canvas_width as usize;
+                            let y = i / canvas_width as usize;
+                            first_nb = format!("({},{})=({},{},{})", x, y, r, g, b);
+                        }
+                    }
+                }
+            }
+            let text_preview = spans.first().map(|s| &s.text[..s.text.len().min(5)]).unwrap_or("?");
+            web_sys::console::log_1(&format!(
+                "[canvas-debug] text='{}' canvas={}x{} nonblack={}/{} first={}",
+                text_preview, canvas_width, canvas_height, nonblack, total_px,
+                if first_nb.is_empty() { "NONE".to_string() } else { first_nb }
+            ).into());
+        }
+
+        // Downscale 2x canvas (white-on-black) to 1x bitmap (black-on-white).
+        // Coverage = average luminance of sf×sf block. Then invert: output = 255 - coverage.
+        // This gives black text body on white background with proper anti-aliasing.
+        let out_w = render_width.max(1) as usize;
+        let out_h = render_height.max(1) as usize;
+        let sf = scale_factor as usize;
+
+        for cy in 0..out_h {
+            let dest_y = start_y + cy as i32;
             if dest_y < 0 || dest_y >= bitmap.height as i32 {
                 continue;
             }
 
-            for cx in 0..canvas_width as i32 {
-                let dest_x = start_x + cx;
+            for cx in 0..out_w {
+                let dest_x = start_x + cx as i32;
                 if dest_x < 0 || dest_x >= bitmap.width as i32 {
                     continue;
                 }
 
-                let src_idx = ((cy as usize * canvas_width as usize) + cx as usize) * 4;
-                let dest_idx = ((dest_y as usize * bitmap.width as usize) + dest_x as usize) * 4;
-
-                if src_idx + 3 >= pixels.len() || dest_idx + 3 >= bitmap.data.len() {
-                    continue;
-                }
-
-                let r = pixels[src_idx];
-                let g = pixels[src_idx + 1];
-                let b = pixels[src_idx + 2];
-                let a = pixels[src_idx + 3];
-
-                // Only copy pixels that have content (alpha > 0).
-                // This preserves any background color already in the bitmap.
-                if a > 0 {
-                    if a == 255 || bitmap.data[dest_idx + 3] == 0 {
-                        // Fully opaque text pixel or no existing background: direct copy
-                        bitmap.data[dest_idx] = r;
-                        bitmap.data[dest_idx + 1] = g;
-                        bitmap.data[dest_idx + 2] = b;
-                        bitmap.data[dest_idx + 3] = a;
-                    } else {
-                        // Semi-transparent (anti-aliased) text over existing background:
-                        // blend text color with background color
-                        let alpha = a as u32;
-                        let inv_alpha = 255 - alpha;
-                        let bg_r = bitmap.data[dest_idx] as u32;
-                        let bg_g = bitmap.data[dest_idx + 1] as u32;
-                        let bg_b = bitmap.data[dest_idx + 2] as u32;
-                        bitmap.data[dest_idx]     = ((r as u32 * alpha + bg_r * inv_alpha) / 255) as u8;
-                        bitmap.data[dest_idx + 1] = ((g as u32 * alpha + bg_g * inv_alpha) / 255) as u8;
-                        bitmap.data[dest_idx + 2] = ((b as u32 * alpha + bg_b * inv_alpha) / 255) as u8;
-                        bitmap.data[dest_idx + 3] = 255;
+                // Average luminance of the sf×sf pixel block (white text on black bg)
+                let mut lum_sum = 0u32;
+                let count = (sf * sf) as u32;
+                for sy in 0..sf {
+                    for sx in 0..sf {
+                        let px = cx * sf + sx;
+                        let py = cy * sf + sy;
+                        let src_idx = (py * canvas_width as usize + px) * 4;
+                        if src_idx + 2 < pixels.len() {
+                            // Use green channel as luminance proxy (most significant for perception)
+                            lum_sum += pixels[src_idx + 1] as u32;
+                        }
                     }
+                }
+                let coverage = (lum_sum / count) as u8; // 0=background, 255=text body
+
+                // Only write pixels where text was actually rendered (coverage > 0).
+                // Background pixels stay at the bitmap's pre-fill (transparent for text.image).
+                if coverage == 0 { continue; }
+
+                // Write foreColor with coverage-based alpha.
+                // This produces: text pixels = foreColor at full/partial alpha,
+                // background = transparent (preserved from bitmap pre-fill).
+                let dest_idx = (dest_y as usize * bitmap.width as usize + dest_x as usize) * 4;
+                if dest_idx + 3 < bitmap.data.len() {
+                    let fg_r = spans.first().and_then(|s| s.style.color).map(|c| ((c >> 16) & 0xFF) as u8).unwrap_or(0);
+                    let fg_g = spans.first().and_then(|s| s.style.color).map(|c| ((c >> 8) & 0xFF) as u8).unwrap_or(0);
+                    let fg_b = spans.first().and_then(|s| s.style.color).map(|c| (c & 0xFF) as u8).unwrap_or(0);
+                    bitmap.data[dest_idx] = fg_r;
+                    bitmap.data[dest_idx + 1] = fg_g;
+                    bitmap.data[dest_idx + 2] = fg_b;
+                    // Coverage maps to alpha: text body=255, anti-aliased edges=partial
+                    bitmap.data[dest_idx + 3] = coverage.min(255);
                 }
             }
         }
