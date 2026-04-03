@@ -1402,7 +1402,7 @@ impl Shockwave3dMemberHandlers {
                                                 shader_name: String::new(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
-                                                transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0],
+                                                transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
                                             });
                                         }
                                         "light" => {
@@ -1817,6 +1817,7 @@ impl Shockwave3dMemberHandlers {
                             name: "DefaultShader".to_string(),
                             ..Default::default()
                         });
+                        // Built-in "defaultmodel" plane resource (used by overlay scripts)
                         let member_mut = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d_mut) = member_mut.member_type.as_shockwave3d_mut() {

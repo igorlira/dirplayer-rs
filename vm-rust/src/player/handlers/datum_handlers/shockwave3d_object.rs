@@ -4032,7 +4032,7 @@ impl Shockwave3dObjectDatumHandlers {
                     m[12] as f64, m[13] as f64, m[14] as f64,
                 ])))
             },
-            "projectionType" => Ok(player.alloc_datum(Datum::Symbol("perspective".to_string()))),
+            "projection" => Ok(player.alloc_datum(Datum::Symbol("perspective".to_string()))),
             "visible" => Ok(player.alloc_datum(Datum::Int(1))),
             "rect" => {
                 // Camera viewport rect (normalized: 0,0,1,1 = full viewport)
