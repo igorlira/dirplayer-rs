@@ -640,8 +640,8 @@ impl GetSetBytecodeHandler {
                         // Track sub-property refs for Transform3D compound assignment
                         // (e.g., transform.position.z = value needs to write back to transform)
                         let is_transform = matches!(obj_type, crate::director::lingo::datum::DatumType::Transform3d);
-                        let is_pos_rot = matches!(prop_name.as_str(), "position" | "rotation" | "x" | "y" | "z");
-                        if is_transform && is_pos_rot {
+                        let is_sub_prop = matches!(prop_name.as_str(), "position" | "rotation" | "scale" | "x" | "y" | "z");
+                        if is_transform && is_sub_prop {
                             let result_type = player.get_datum(&result).type_enum();
                             if matches!(result_type, crate::director::lingo::datum::DatumType::Vector) {
                                 if player.transform_sub_refs.len() > 32 {
@@ -735,7 +735,7 @@ impl GetSetBytecodeHandler {
                     // Track sub-property refs for Transform3D compound assignment
                     // (e.g., transform.position.z = value needs to write back to transform)
                     if matches!(obj_type, crate::director::lingo::datum::DatumType::Transform3d) {
-                        if matches!(prop_name.as_str(), "position" | "rotation") {
+                        if matches!(prop_name.as_str(), "position" | "rotation" | "scale") {
                             let result_type = player.get_datum(&result).type_enum();
                             if matches!(result_type, crate::director::lingo::datum::DatumType::Vector) {
                                 if player.transform_sub_refs.len() > 32 {

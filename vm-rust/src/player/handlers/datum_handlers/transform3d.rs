@@ -1,6 +1,23 @@
 //! Lingo Transform object handler.
 //! A Transform is a mutable 4x4 row-major matrix used for 3D position/rotation/scale.
 
+use std::collections::HashSet;
+use std::cell::RefCell;
+
+thread_local! {
+    /// Track which Transform3d datum IDs were mutated in-place (dirty).
+    /// sync_persistent_transforms only writes dirty datums to node_transforms.
+    pub static DIRTY_TRANSFORM_IDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+pub fn mark_transform_dirty(datum_ref: &crate::player::DatumRef) {
+    DIRTY_TRANSFORM_IDS.with(|d| d.borrow_mut().insert(datum_ref.unwrap()));
+}
+
+pub fn take_dirty_ids() -> HashSet<usize> {
+    DIRTY_TRANSFORM_IDS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
 use crate::{
     director::lingo::datum::Datum,
     player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
@@ -53,6 +70,7 @@ impl Transform3dDatumHandlers {
     }
 
     pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &str, value: &DatumRef) -> Result<(), ScriptError> {
+        mark_transform_dirty(datum);
         let val = player.get_datum(value).clone();
         let m = match player.get_datum_mut(datum) {
             Datum::Transform3d(m) => m,
@@ -66,6 +84,16 @@ impl Transform3dDatumHandlers {
                     if v[0].is_finite() { m[12] = v[0]; }
                     if v[1].is_finite() { m[13] = v[1]; }
                     if v[2].is_finite() { m[14] = v[2]; }
+                    // Debug: log position sets with large Z (overlay models at Z≈-500)
+                    if v[2].abs() > 400.0 {
+                        static T3D_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        if T3D_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                            web_sys::console::log_1(&format!(
+                                "[T3D-POS] transform.position = ({:.1},{:.1},{:.1}) datum_id={:?}",
+                                v[0], v[1], v[2], datum
+                            ).into());
+                        }
+                    }
                 }
                 Ok(())
             }

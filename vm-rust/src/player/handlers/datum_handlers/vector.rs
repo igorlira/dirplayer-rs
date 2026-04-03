@@ -208,6 +208,18 @@ impl VectorDatumHandlers {
                         m[8] = rot[8]*sz;  m[9] = rot[9]*sz;  m[10] = rot[10]*sz;
                         m[12] = pos[0]; m[13] = pos[1]; m[14] = pos[2];
                     }
+                    "scale" => {
+                        // Set column lengths to new scale while preserving rotation direction
+                        let old_sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt().max(1e-10);
+                        let old_sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt().max(1e-10);
+                        let old_sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt().max(1e-10);
+                        let fx = vec[0] / old_sx;
+                        let fy = vec[1] / old_sy;
+                        let fz = vec[2] / old_sz;
+                        m[0] *= fx; m[1] *= fx; m[2] *= fx;
+                        m[4] *= fy; m[5] *= fy; m[6] *= fy;
+                        m[8] *= fz; m[9] *= fz; m[10] *= fz;
+                    }
                     _ => {}
                 }
             }

@@ -136,6 +136,40 @@ impl W3dFileParser {
             });
         }
 
+        // Director built-in "defaultmodel" plane resource (used by overlay/HUD scripts)
+        if !self.scene.clod_meshes.contains_key("defaultmodel") {
+            use super::types::ClodDecodedMesh;
+            // Single back-face mesh with U-mirrored UVs.
+            // Director's insceneoverlay/3d_textsprite rotate the model 180° around Y,
+            // which flips X and makes the back face visible. The U-mirrored UVs compensate
+            // for the X-flip, producing correctly oriented text.
+            // Using only one mesh avoids Z-fighting between front/back faces.
+            // UVs in IFX [-0.5, 0.5] range for CLOD remap: u_out = u_in + 0.5, v_out = 0.5 - v_in
+            let plane = ClodDecodedMesh {
+                name: "defaultmodel".to_string(),
+                positions: vec![[-0.5,-0.5,0.0],[0.5,-0.5,0.0],[0.5,0.5,0.0],[-0.5,0.5,0.0]],
+                normals: vec![[0.0,0.0,-1.0]; 4],
+                tex_coords: vec![vec![[0.5,-0.5],[-0.5,-0.5],[-0.5,0.5],[0.5,0.5]]],
+                faces: vec![[0,2,1],[0,3,2]],
+                diffuse_colors: vec![], specular_colors: vec![],
+                bone_indices: vec![], bone_weights: vec![],
+            };
+            self.scene.clod_meshes.insert("defaultmodel".to_string(), vec![plane]);
+            // Also register in model_resources so modelResource("defaultmodel") lookups work
+            if !self.scene.model_resources.contains_key("defaultmodel") {
+                self.scene.model_resources.insert("defaultmodel".to_string(), ModelResourceInfo {
+                    name: "defaultmodel".to_string(),
+                    mesh_infos: vec![],
+                    max_resolution: 0,
+                    shading_count: 1,
+                    shader_bindings: vec![],
+                    pos_iq: 1.0, norm_iq: 1.0, normal_crease: 1.0, tc_iq: 1.0, diff_iq: 1.0, spec_iq: 1.0,
+                    has_distal_edge_merge: false, has_neighbor_mesh: false,
+                    uv_gen_mode: None, sync_table: None, distal_edge_merges: None,
+                });
+            }
+        }
+
         // Director always creates a "UIAmbient" light (black ambient, no visual contribution)
         // so Lingo scripts can reference it by name.
         if !self.scene.lights.iter().any(|l| l.name == "UIAmbient") {
