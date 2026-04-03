@@ -1006,11 +1006,12 @@ impl Shockwave3dMemberHandlers {
 
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
-                            let (src_shaders, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons) = {
+                            let (src_shaders, src_materials, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons) = {
                                 let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
                                 let scene = src_member.and_then(|sm| sm.member_type.as_shockwave3d())
                                     .and_then(|sw3d| sw3d.parsed_scene.as_ref());
                                 let shaders: Vec<_> = scene.map(|s| s.shaders.clone()).unwrap_or_default();
+                                let materials: Vec<_> = scene.map(|s| s.materials.clone()).unwrap_or_default();
                                 let resources: Vec<_> = scene.map(|s| s.model_resources.iter()
                                     .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
                                 let meshes: Vec<_> = scene.map(|s| s.clod_meshes.iter()
@@ -1023,7 +1024,7 @@ impl Shockwave3dMemberHandlers {
                                     .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Light)
                                     .cloned().collect()).unwrap_or_default();
                                 let skeletons: Vec<_> = scene.map(|s| s.skeletons.clone()).unwrap_or_default();
-                                (shaders, resources, meshes, raw, textures, lights, light_nodes, skeletons)
+                                (shaders, materials, resources, meshes, raw, textures, lights, light_nodes, skeletons)
                             };
 
                             debug!(
@@ -1131,16 +1132,24 @@ impl Shockwave3dMemberHandlers {
                                                 scene.shaders.push(shader.clone());
                                             }
                                         }
-                                        // Log cloned shaders with texture info
-                                        {
-                                            let car_shaders: Vec<String> = scene.shaders.iter()
-                                                .filter(|s| s.name.contains("Tire") || s.name.contains("Wheel") || s.name.contains("Car"))
-                                                .map(|s| format!("{}(layers={})", s.name, s.texture_layers.len()))
-                                                .collect();
-                                            web_sys::console::log_1(&format!(
-                                                "[CLONE-SHADERS] after copy: {:?}", car_shaders
-                                            ).into());
+                                        // Copy materials referenced by copied shaders
+                                        for shader in &src_shaders {
+                                            if !used_shader_names.contains(&shader.name) { continue; }
+                                            if shader.material_name.is_empty() { continue; }
+                                            for mat in &src_materials {
+                                                if mat.name == shader.material_name {
+                                                    if !scene.materials.iter().any(|m| m.name == mat.name) {
+                                                        scene.materials.push(mat.clone());
+                                                    }
+                                                }
+                                            }
                                         }
+
+                                        // Log ALL shaders that were just copied
+                                        web_sys::console::log_1(&format!(
+                                            "[CLONE-SHADERS] '{}' used_shaders={:?} used_textures={:?} shader_map={:?}",
+                                            obj_name, used_shader_names, used_texture_names, shader_name_map
+                                        ).into());
                                         // Model resources: namespace to prevent collisions
                                         for (res_name, res_info) in &src_model_resources {
                                             let new_name = format!("{}{}", ns, res_name);
