@@ -452,6 +452,30 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
+                "pointAtOrientation" | "pointatorientation" => {
+                    // pointAtOrientation = [vector(front), vector(up)]
+                    // Defines which local axes map to "toward target" and "up" for pointAt()
+                    if let Datum::List(_, items, _) = value {
+                        if items.len() >= 2 {
+                            let front = match player.get_datum(&items[0]) {
+                                Datum::Vector(v) => [v[0] as f32, v[1] as f32, v[2] as f32],
+                                _ => [0.0, 0.0, 1.0],
+                            };
+                            let up = match player.get_datum(&items[1]) {
+                                Datum::Vector(v) => [v[0] as f32, v[1] as f32, v[2] as f32],
+                                _ => [0.0, 1.0, 0.0],
+                            };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.point_at_orientations.insert(
+                                        s3d_ref.name.clone(), (front, up)
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
                 "shader" => {
                     let shader_name = value.string_value().unwrap_or_default();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
@@ -3377,6 +3401,19 @@ impl Shockwave3dObjectDatumHandlers {
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(model_name.to_string()))),
             "visible" | "visibility" => Ok(player.alloc_datum(Datum::Int(1))),
+            "pointAtOrientation" | "pointatorientation" => {
+                let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                let orientation = member.and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.runtime_state.point_at_orientations.get(model_name))
+                    .copied();
+                let (front, up) = orientation.unwrap_or(([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]));
+                let v1 = player.alloc_datum(Datum::Vector([front[0] as f64, front[1] as f64, front[2] as f64]));
+                let v2 = player.alloc_datum(Datum::Vector([up[0] as f64, up[1] as f64, up[2] as f64]));
+                let items = std::collections::VecDeque::from(vec![v1, v2]);
+                Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List, items, false,
+                )))
+            },
             "transform" => {
                 Ok(get_persistent_node_transform(player, member_ref, model_name))
             },
@@ -4873,19 +4910,29 @@ fn apply_point_at(
     tx: f32, ty: f32, tz: f32,
     up_x: f32, up_y: f32, up_z: f32,
 ) {
+    // Look up custom pointAtOrientation for this node (if explicitly set)
+    let custom_orientation = {
+        let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+        member.and_then(|m| m.member_type.as_shockwave3d())
+            .and_then(|w3d| w3d.runtime_state.point_at_orientations.get(node_name))
+            .copied()
+    };
+
     let m = get_or_init_node_transform(player, member_ref, node_name);
-    // Guard: if position is NaN (corrupted matrix), use origin
-    let pos = [
+    // Use WORLD position for direction computation (target is in world coordinates)
+    let world_pos = get_world_position(player, member_ref, node_name);
+    let pos_w = [world_pos[0] as f32, world_pos[1] as f32, world_pos[2] as f32];
+    // Local position preserved for the output matrix
+    let local_pos = [
         if m[12].is_finite() { m[12] } else { 0.0 },
         if m[13].is_finite() { m[13] } else { 0.0 },
         if m[14].is_finite() { m[14] } else { 0.0 },
     ];
 
-    // Guard: if target is NaN, skip
     if !tx.is_finite() || !ty.is_finite() || !tz.is_finite() { return; }
 
-    // Forward = toward target
-    let mut fwd = [tx - pos[0], ty - pos[1], tz - pos[2]];
+    // Forward = toward target in world space
+    let mut fwd = [tx - pos_w[0], ty - pos_w[1], tz - pos_w[2]];
     let len = (fwd[0]*fwd[0] + fwd[1]*fwd[1] + fwd[2]*fwd[2]).sqrt();
     if len > 1e-6 {
         fwd[0] /= len; fwd[1] /= len; fwd[2] /= len;
@@ -4893,42 +4940,78 @@ fn apply_point_at(
         return;
     }
 
-    // Z axis = -forward (away from target, Director/standard look-at convention)
-    let neg_fwd = [-fwd[0], -fwd[1], -fwd[2]];
-
-    // Use provided up hint; fall back to world X if forward is parallel to up
-    let mut up = [up_x, up_y, up_z];
-    let dot_up_fwd = up[0]*fwd[0] + up[1]*fwd[1] + up[2]*fwd[2];
-    if dot_up_fwd.abs() > 0.999 {
-        up = [1.0, 0.0, 0.0];
+    // Up hint from argument; fall back to world X if forward is parallel
+    let mut up_hint = [up_x, up_y, up_z];
+    let dot = up_hint[0]*fwd[0] + up_hint[1]*fwd[1] + up_hint[2]*fwd[2];
+    if dot.abs() > 0.999 {
+        up_hint = [1.0, 0.0, 0.0];
     }
 
-    // right = cross(up, negFwd)
-    let mut right = [
-        up[1]*neg_fwd[2] - up[2]*neg_fwd[1],
-        up[2]*neg_fwd[0] - up[0]*neg_fwd[2],
-        up[0]*neg_fwd[1] - up[1]*neg_fwd[0],
-    ];
-    let rlen = (right[0]*right[0] + right[1]*right[1] + right[2]*right[2]).sqrt();
-    if rlen > 1e-6 {
-        right[0] /= rlen; right[1] /= rlen; right[2] /= rlen;
+    let cross = |a: [f32;3], b: [f32;3]| -> [f32;3] {
+        [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+    };
+    let normalize = |v: [f32;3]| -> [f32;3] {
+        let l = (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt();
+        if l > 1e-6 { [v[0]/l, v[1]/l, v[2]/l] } else { v }
+    };
+
+    if let Some((front_axis, up_axis)) = custom_orientation {
+        // Custom pointAtOrientation: map the specified local axes to world directions.
+        // front_axis defines which local axis points toward the target.
+        // up_axis defines which local axis points up.
+        let right_world = normalize(cross(up_hint, fwd));
+        let up_world = normalize(cross(fwd, right_world));
+
+        // Determine which column (0=X, 1=Y, 2=Z) each orientation axis represents
+        let dominant = |v: [f32;3]| -> (usize, f32) {
+            let ax = v[0].abs(); let ay = v[1].abs(); let az = v[2].abs();
+            if ax >= ay && ax >= az { (0, v[0].signum()) }
+            else if ay >= ax && ay >= az { (1, v[1].signum()) }
+            else { (2, v[2].signum()) }
+        };
+
+        let (front_col, front_sign) = dominant(front_axis);
+        let (up_col, up_sign) = dominant(up_axis);
+        let right_col = 3 - front_col - up_col;
+        // Determine right sign to maintain right-handed coordinate system.
+        // The world basis has fwd × right_world = up_world (by construction).
+        // The permutation (front_col, right_col, up_col) must be even for
+        // a right-handed matrix (col0 × col1 = col2).
+        // Even permutations of (0,1,2): (0,1,2), (1,2,0), (2,0,1).
+        let is_even_perm = (front_col + 1) % 3 == right_col;
+        let right_sign = if is_even_perm {
+            front_sign * up_sign
+        } else {
+            -front_sign * up_sign
+        };
+
+        let mut result = [0.0f32; 16];
+        result[front_col * 4 + 0] = fwd[0] * front_sign;
+        result[front_col * 4 + 1] = fwd[1] * front_sign;
+        result[front_col * 4 + 2] = fwd[2] * front_sign;
+        result[up_col * 4 + 0] = up_world[0] * up_sign;
+        result[up_col * 4 + 1] = up_world[1] * up_sign;
+        result[up_col * 4 + 2] = up_world[2] * up_sign;
+        result[right_col * 4 + 0] = right_world[0] * right_sign;
+        result[right_col * 4 + 1] = right_world[1] * right_sign;
+        result[right_col * 4 + 2] = right_world[2] * right_sign;
+        result[12] = local_pos[0]; result[13] = local_pos[1]; result[14] = local_pos[2]; result[15] = 1.0;
+        set_node_transform(player, member_ref, node_name, result);
+    } else {
+        // Default orientation: -Z toward target, Y up (standard look-at convention).
+        // This matches the working camera behavior where cameras look along -Z.
+        let neg_fwd = [-fwd[0], -fwd[1], -fwd[2]];
+        let right = normalize(cross(up_hint, neg_fwd));
+        let up2 = normalize(cross(neg_fwd, right));
+
+        let result = [
+            right[0],   right[1],   right[2],   0.0,
+            up2[0],     up2[1],     up2[2],     0.0,
+            neg_fwd[0], neg_fwd[1], neg_fwd[2], 0.0,
+            local_pos[0], local_pos[1], local_pos[2], 1.0,
+        ];
+        set_node_transform(player, member_ref, node_name, result);
     }
-
-    // Recomputed up = cross(negFwd, right)
-    let up2 = [
-        neg_fwd[1]*right[2] - neg_fwd[2]*right[1],
-        neg_fwd[2]*right[0] - neg_fwd[0]*right[2],
-        neg_fwd[0]*right[1] - neg_fwd[1]*right[0],
-    ];
-
-    // Column-major: X=right, Y=up, Z=-forward (away from target), W=position
-    let result = [
-        right[0],   right[1],   right[2],   0.0,
-        up2[0],     up2[1],     up2[2],     0.0,
-        neg_fwd[0], neg_fwd[1], neg_fwd[2], 0.0,
-        pos[0],     pos[1],     pos[2],     1.0,
-    ];
-    set_node_transform(player, member_ref, node_name, result);
 }
 
 /// Column-major 4x4 matrix multiply: C = A * B

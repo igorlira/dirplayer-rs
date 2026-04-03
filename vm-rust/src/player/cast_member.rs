@@ -736,6 +736,11 @@ pub struct Shockwave3dRuntimeState {
     // ─── Detached nodes (parent set to VOID) ───
     pub detached_nodes: std::collections::HashSet<String>,
 
+    // ─── pointAtOrientation per node ───
+    /// Per-node pointAtOrientation: node_name -> (front_axis, up_axis)
+    /// Default: ([0,0,1], [0,1,0]) — +Z front, +Y up
+    pub point_at_orientations: std::collections::HashMap<String, ([f32; 3], [f32; 3])>,
+
     // ─── Camera properties ───
     /// Per-camera rootNode: camera_name -> node_name (limits which subtree to render)
     pub camera_root_nodes: std::collections::HashMap<String, String>,
