@@ -38,6 +38,8 @@ struct MemberGpuData {
     texture_versions: HashMap<String, u64>,
     /// Scene's texture_content_version at last check
     texture_content_version: u64,
+    /// Texture names (lowercase) that contain alpha < 250 (need alpha blending)
+    alpha_textures: std::collections::HashSet<String>,
 }
 
 /// 3D shader program with uniform locations
@@ -1029,10 +1031,15 @@ void main() {
         // Store with lowercase keys for case-insensitive lookup
         let mut textures = HashMap::new();
         let mut texture_sizes: HashMap<String, (u32, u32)> = HashMap::new();
+        let mut alpha_textures = std::collections::HashSet::new();
         for (tex_name, image_data) in &scene.texture_images {
-            if let Some((tex, w, h)) = self.decode_and_upload_texture(context, image_data) {
-                texture_sizes.insert(tex_name.to_lowercase(), (w, h));
-                textures.insert(tex_name.to_lowercase(), tex);
+            if let Some((tex, w, h, has_alpha)) = self.decode_and_upload_texture(context, image_data) {
+                let lower = tex_name.to_lowercase();
+                texture_sizes.insert(lower.clone(), (w, h));
+                if has_alpha {
+                    alpha_textures.insert(lower.clone());
+                }
+                textures.insert(lower, tex);
             }
         }
 
@@ -1056,12 +1063,13 @@ void main() {
             mesh_content_version: scene.mesh_content_version,
             texture_versions,
             texture_content_version: scene.texture_content_version,
+            alpha_textures,
         });
         Ok(())
     }
 
     /// Decode JPEG/PNG image data and upload as WebGL texture (delegates to free function)
-    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32)> {
+    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32, bool)> {
         decode_and_upload_texture_impl(context, data)
     }
 
@@ -1077,8 +1085,13 @@ void main() {
                 Some(&old_len) => old_len != data_len,
             };
             if needs_upload {
-                if let Some((tex, w, h)) = decode_and_upload_texture_impl(context, image_data) {
+                if let Some((tex, w, h, has_alpha)) = decode_and_upload_texture_impl(context, image_data) {
                     gpu_data.texture_sizes.insert(lower.clone(), (w, h));
+                    if has_alpha {
+                        gpu_data.alpha_textures.insert(lower.clone());
+                    } else {
+                        gpu_data.alpha_textures.remove(&lower);
+                    }
                     gpu_data.textures.insert(lower.clone(), tex);
                     gpu_data.texture_versions.insert(lower, data_len);
                 }
@@ -1090,6 +1103,7 @@ void main() {
             .map(|k| k.to_lowercase()).collect();
         gpu_data.textures.retain(|k, _| scene_keys.contains(k));
         gpu_data.texture_sizes.retain(|k, _| scene_keys.contains(k));
+        gpu_data.alpha_textures.retain(|k| scene_keys.contains(k));
         gpu_data.texture_versions.retain(|k, _| scene_keys.contains(k));
 
         gpu_data.texture_content_version = scene.texture_content_version;
@@ -1390,8 +1404,11 @@ void main() {
                         // Camera has rootNode: only render nodes in that subtree
                         self.is_child_of(scene, &n.name, root)
                     } else {
-                        // No rootNode: render all non-detached models
-                        true
+                        // No rootNode: render world-visible models only.
+                        // Skip models whose parent (or ancestor) is detached — they belong
+                        // to a different camera's rootNode subtree (e.g., overlay HUD models
+                        // parented to a detached "overlays" camera).
+                        !self.has_detached_ancestor(scene, &n.parent_name, &detached_nodes)
                     }
                 })
                 .collect();
@@ -1547,7 +1564,8 @@ void main() {
                             }
                         }
                     }
-                    if opacity < 0.999 {
+                    let has_alpha_tex = self.model_has_alpha_texture(scene, model_node, &member_key, runtime_state);
+                    if opacity < 0.999 || has_alpha_tex {
                         // Defer to transparent pass — compute distance for sorting
                         let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
                         let dx = world_matrix[12] - camera_pos[0];
@@ -1557,7 +1575,7 @@ void main() {
                         continue;
                     }
 
-                    self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state);
+                    self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, false);
                 }
 
                 // PASS 2: Render transparent geometry (back-to-front, no depth writes)
@@ -1568,7 +1586,7 @@ void main() {
                     gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
 
                     for (model_node, _dist) in &transparent_nodes {
-                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state);
+                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, true);
                     }
 
                     gl.depth_mask(true);
@@ -1872,6 +1890,7 @@ void main() {
         model_node: &W3dNode,
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        force_blend: bool,
     ) {
         let resource = if !model_node.model_resource_name.is_empty() {
             &model_node.model_resource_name
@@ -1962,10 +1981,10 @@ void main() {
                 for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
                     let bound = self.bind_material_for_mesh(
                         gl, shader, scene, model_node,
-                        res_info, mesh_idx, member_key, runtime_state,
+                        res_info, mesh_idx, member_key, runtime_state, force_blend,
                     );
                     if !bound {
-                        self.bind_material(gl, shader, scene, model_node, member_key, runtime_state);
+                        self.bind_material(gl, shader, scene, model_node, member_key, runtime_state, force_blend);
                         // Log models that fall back to bind_material (no per-mesh shader binding)
                         {
                             use std::sync::Mutex;
@@ -2150,6 +2169,61 @@ void main() {
             }
         }
         1.0 // Default opaque
+    }
+
+    /// Check if a model's shader references any texture that has alpha data.
+    /// Used to route such models to the transparent rendering pass.
+    fn model_has_alpha_texture(
+        &self,
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        member_key: &(i32, i32),
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> bool {
+        let gpu_data = match self.member_data.get(member_key) {
+            Some(d) => d,
+            None => return false,
+        };
+        if gpu_data.alpha_textures.is_empty() { return false; }
+
+        // Collect all shader names that affect this model
+        let mut shader_names: Vec<String> = Vec::new();
+
+        // 1. Per-node shader override
+        if let Some(rs) = runtime_state {
+            if let Some(shader_map) = rs.node_shaders.get(&model_node.name) {
+                shader_names.extend(shader_map.values().cloned());
+            }
+        }
+        // 2. Node-level shader
+        if !model_node.shader_name.is_empty() {
+            shader_names.push(model_node.shader_name.clone());
+        }
+        // 3. Model resource shader bindings
+        let resource = if !model_node.model_resource_name.is_empty() {
+            &model_node.model_resource_name
+        } else {
+            &model_node.resource_name
+        };
+        if let Some(res_info) = scene.model_resources.get(resource) {
+            for binding in &res_info.shader_bindings {
+                for mesh_shader in &binding.mesh_bindings {
+                    shader_names.push(mesh_shader.clone());
+                }
+            }
+        }
+
+        // Check if any shader's texture layers reference an alpha texture
+        for shader_name in &shader_names {
+            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, shader_name) {
+                for layer in &w3d_shader.texture_layers {
+                    if gpu_data.alpha_textures.contains(&layer.name.to_lowercase()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Compile post-processing shader for bloom (lazy init)
@@ -2939,6 +3013,7 @@ void main() {
         model_node: &W3dNode,
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        force_blend: bool,
     ) {
         // Resolve shader → material chain:
         // 1. Check runtime shader override (node_shaders)
@@ -3032,7 +3107,7 @@ void main() {
             .and_then(|s| Self::find_material_ci(&scene.materials, &s.material_name))
             .map(|m| m.opacity)
             .unwrap_or(1.0);
-        Self::apply_blend_mode(gl, opacity, first_blend_func);
+        Self::apply_blend_mode(gl, opacity, first_blend_func, force_blend);
     }
 
     /// Get the first texture layer's blend_func for a model node
@@ -3058,6 +3133,7 @@ void main() {
         mesh_idx: usize,
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        force_blend: bool,
     ) -> bool {
         // One-time skybox material diagnostic
         if model_node.name.starts_with("SB_") {
@@ -3113,7 +3189,6 @@ void main() {
                 if let Some(m) = mat {
                     self.set_material_uniforms(gl, shader, m);
                 } else {
-                    // No material found — set default opaque white so model is visible
                     gl.uniform4f(shader.u_diffuse_color.as_ref(), 0.8, 0.8, 0.8, 1.0);
                     gl.uniform4f(shader.u_ambient_color.as_ref(), 0.2, 0.2, 0.2, 1.0);
                     gl.uniform4f(shader.u_specular_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
@@ -3131,7 +3206,7 @@ void main() {
                 }
                 let first_bf = w3d_shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
-                Self::apply_blend_mode(gl, opacity, first_bf);
+                Self::apply_blend_mode(gl, opacity, first_bf, force_blend);
                 return true;
             }
         }
@@ -3286,7 +3361,7 @@ void main() {
                     .map(|l| l.blend_func)
                     .unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
-                Self::apply_blend_mode(gl, opacity, first_bf);
+                Self::apply_blend_mode(gl, opacity, first_bf, force_blend);
                 return true;
             }
         }
@@ -3313,7 +3388,7 @@ void main() {
         if let Some(mat) = best_material {
             self.set_material_uniforms(gl, shader, mat);
             gl.uniform1i(shader.u_has_texture.as_ref(), 0);
-            Self::apply_blend_mode(gl, mat.opacity, best_blend_func);
+            Self::apply_blend_mode(gl, mat.opacity, best_blend_func, force_blend);
             return true;
         }
 
@@ -3331,9 +3406,10 @@ void main() {
         gl.uniform1f(shader.u_opacity.as_ref(), mat.opacity);
     }
 
-    /// Set GL blend mode based on material opacity and shader blend function
-    fn apply_blend_mode(gl: &WebGl2RenderingContext, opacity: f32, first_layer_blend_func: u8) {
-        if opacity < 1.0 || first_layer_blend_func == 1 {
+    /// Set GL blend mode based on material opacity and shader blend function.
+    /// `force_blend` = true when drawing in the transparent pass (models with alpha textures).
+    fn apply_blend_mode(gl: &WebGl2RenderingContext, opacity: f32, first_layer_blend_func: u8, force_blend: bool) {
+        if opacity < 1.0 || first_layer_blend_func == 1 || force_blend {
             gl.enable(WebGl2RenderingContext::BLEND);
             if first_layer_blend_func == 1 {
                 // #add — additive blending (for glow/lightbox effects)
@@ -3781,7 +3857,7 @@ void main() {
 
 /// Decode image data (raw RGBA, DXT, JPEG/PNG) and upload as a WebGL2 texture.
 /// Free function to avoid borrow conflicts when called during incremental updates.
-fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32)> {
+fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32, bool)> {
     if data.len() < 4 { return None; }
 
     // Detection priority: JPEG/PNG magic → DXT header → raw RGBA (our own format)
@@ -3878,7 +3954,9 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Optio
     }
     gl.generate_mipmap(WebGl2RenderingContext::TEXTURE_2D);
     gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
-    Some((texture, width, height))
+    // Detect if texture has meaningful alpha (any pixel alpha < 250)
+    let has_alpha = rgba_data.chunks(4).any(|p| p[3] < 250);
+    Some((texture, width, height, has_alpha))
 }
 
 // ─── DXT texture decompression ───

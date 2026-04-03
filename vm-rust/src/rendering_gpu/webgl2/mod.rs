@@ -335,7 +335,9 @@ impl WebGL2Renderer {
         // Increment sprite debug frame counter
         let df = SPRITE_DEBUG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Note: persistent transform sync removed — set_node_transform() handles it.
+        // Sync persistent Transform3d datums → node_transforms for in-place mutations
+        // (e.g. model.transform.position = vector(...) used by overlay/HUD scripts)
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
         crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
 
         // Check if palettes changed and clear texture cache if so
