@@ -1363,6 +1363,15 @@ void main() {
             let detached_nodes: std::collections::HashSet<&str> = runtime_state
                 .map(|rs| rs.detached_nodes.iter().map(|s| s.as_str()).collect())
                 .unwrap_or_default();
+            // Debug: log detached nodes once
+            {
+                static DET_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                if DET_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 && !detached_nodes.is_empty() {
+                    web_sys::console::log_1(&format!(
+                        "[DETACHED] {} nodes: {:?}", detached_nodes.len(), detached_nodes
+                    ).into());
+                }
+            }
 
             // Check if active camera has a rootNode filter
             let root_node_filter: Option<String> = runtime_state.and_then(|rs| {

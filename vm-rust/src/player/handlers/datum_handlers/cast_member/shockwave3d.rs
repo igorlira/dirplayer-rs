@@ -1219,6 +1219,13 @@ impl Shockwave3dMemberHandlers {
                                             if cloned.parent_name.eq_ignore_ascii_case(&source_model_name) {
                                                 cloned.parent_name = obj_name.clone();
                                             }
+                                            // Namespace child resource names to match cloned mesh data
+                                            if !cloned.resource_name.is_empty() {
+                                                cloned.resource_name = format!("{}{}", ns, cloned.resource_name);
+                                            }
+                                            if !cloned.model_resource_name.is_empty() {
+                                                cloned.model_resource_name = format!("{}{}", ns, cloned.model_resource_name);
+                                            }
                                             // Check if node with same name already exists
                                             if !scene.nodes.iter().any(|n| n.name == cloned.name) {
                                                 scene.nodes.push(cloned);

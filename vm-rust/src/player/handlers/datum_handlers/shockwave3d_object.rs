@@ -606,14 +606,15 @@ impl Shockwave3dObjectDatumHandlers {
                     };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            // Track detached nodes for renderer filtering
+                            // Track detached nodes for renderer filtering (case-insensitive)
                             if is_detach {
                                 w3d.runtime_state.detached_nodes.insert(s3d_ref.name.clone());
                             } else {
-                                w3d.runtime_state.detached_nodes.remove(&s3d_ref.name);
+                                // Remove by case-insensitive match
+                                w3d.runtime_state.detached_nodes.retain(|n| !n.eq_ignore_ascii_case(&s3d_ref.name));
                             }
                             if let Some(scene) = w3d.scene_mut() {
-                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name == s3d_ref.name) {
+                                if let Some(node) = scene.nodes.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name)) {
                                     node.parent_name = parent_name;
                                 }
                             }
@@ -2747,7 +2748,7 @@ impl Shockwave3dObjectDatumHandlers {
                             // node.child[n] — return the n-th child node as a ref
                             "child" => {
                                 let children: Vec<&crate::director::chunks::w3d::types::W3dNode> = scene.nodes.iter()
-                                    .filter(|n| n.parent_name == s3d_ref.name)
+                                    .filter(|n| n.parent_name.eq_ignore_ascii_case(&s3d_ref.name))
                                     .collect();
                                 if idx < children.len() {
                                     let child = &children[idx];
@@ -2944,7 +2945,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 count
                             }
                             "child" => {
-                                scene.nodes.iter().filter(|n| n.parent_name == s3d_ref.name).count()
+                                scene.nodes.iter().filter(|n| n.parent_name.eq_ignore_ascii_case(&s3d_ref.name)).count()
                             }
                             "textureLayer" => {
                                 // meshDeformMesh.count(#textureLayer) — read from persistent list
@@ -3337,10 +3338,8 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(get_persistent_node_transform(player, member_ref, model_name))
             },
             "worldPosition" => {
-                let m = get_node_transform(player, member_ref, model_name);
-                Ok(player.alloc_datum(Datum::Vector([
-                    m[12] as f64, m[13] as f64, m[14] as f64,
-                ])))
+                let wp = get_world_position(player, member_ref, model_name);
+                Ok(player.alloc_datum(Datum::Vector(wp)))
             },
             "resource" => {
                 if let Some(n) = node {
@@ -4180,10 +4179,8 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(get_persistent_node_transform(player, member_ref, node_name))
             },
             "worldPosition" => {
-                let m = get_node_transform(player, member_ref, node_name);
-                Ok(player.alloc_datum(Datum::Vector([
-                    m[12] as f64, m[13] as f64, m[14] as f64,
-                ])))
+                let wp = get_world_position(player, member_ref, node_name);
+                Ok(player.alloc_datum(Datum::Vector(wp)))
             },
             _ => {
                 web_sys::console::log_1(&format!("[W3D] group(\"{}\").{} (stub)", node_name, prop).into());
@@ -4502,6 +4499,37 @@ fn get_node_transform(
         }
     }
     IDENTITY
+}
+
+/// Get the accumulated WORLD position for a node by walking the parent chain.
+/// This matches Director's `model.worldPosition` / `group.worldPosition` behavior.
+fn get_world_position(
+    player: &crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    node_name: &str,
+) -> [f64; 3] {
+    if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+        if let Some(w3d) = member.member_type.as_shockwave3d() {
+            if let Some(ref scene) = w3d.parsed_scene {
+                if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(node_name)) {
+                    let local = get_node_transform(player, member_ref, &node.name);
+                    let mut result = local;
+                    let mut current_parent = node.parent_name.clone();
+                    for _ in 0..20 {
+                        if current_parent.is_empty() || current_parent.eq_ignore_ascii_case("World") { break; }
+                        if let Some(pn) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&current_parent)) {
+                            let pt = get_node_transform(player, member_ref, &pn.name);
+                            result = mat4_mul_f32(&pt, &result);
+                            current_parent = pn.parent_name.clone();
+                        } else { break; }
+                    }
+                    return [result[12] as f64, result[13] as f64, result[14] as f64];
+                }
+            }
+        }
+    }
+    let m = get_node_transform(player, member_ref, node_name);
+    [m[12] as f64, m[13] as f64, m[14] as f64]
 }
 
 /// Find the canonical key for a node name in the node_transforms HashMap.
