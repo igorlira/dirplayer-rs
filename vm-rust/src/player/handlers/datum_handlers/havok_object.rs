@@ -346,13 +346,15 @@ impl HavokObjectDatumHandlers {
             "applyForceAtPoint" | "applyforceatpoint" => {
                 let force = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
                 {
+                    let has_horizontal = force[0].abs() > 0.1 || force[1].abs() > 0.1;
                     static FAP_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                     let n = FAP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if n < 5 || (n % 300 == 0) {
+                    if n < 5 || (n % 300 == 0) || has_horizontal {
                         let mag = (force[0]*force[0] + force[1]*force[1] + force[2]*force[2]).sqrt();
                         web_sys::console::log_1(&format!(
-                            "[HAVOK-FAP] applyForceAtPoint on '{}': ({:.1},{:.1},{:.1}) mag={:.1}",
-                            rb_name, force[0], force[1], force[2], mag
+                            "[HAVOK-FAP] applyForceAtPoint on '{}': ({:.1},{:.1},{:.1}) mag={:.1}{}",
+                            rb_name, force[0], force[1], force[2], mag,
+                            if has_horizontal { " *** DRIVE ***" } else { "" }
                         ).into());
                     }
                 }
@@ -380,6 +382,8 @@ impl HavokObjectDatumHandlers {
                     rb.torque[1] += r[2]*force[0] - r[0]*force[2];
                     rb.torque[2] += r[0]*force[1] - r[1]*force[0];
                 }
+                // Forces stay in Havok state only - Euler integration in step() handles movement.
+                // Rapier handles gravity + collision (vertical) only.
                 Ok(DatumRef::Void)
             }
             "applyImpulse" | "applyimpulse" => {

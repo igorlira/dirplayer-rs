@@ -1437,6 +1437,18 @@ impl BuiltInHandlerManager {
                 .iter()
                 .any(|key| key.code == key_code);
 
+            // Debug: log arrow key checks
+            if is_pressed && (key_code == 123 || key_code == 124 || key_code == 125 || key_code == 126) {
+                static KP_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let n = KP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 3 {
+                    web_sys::console::log_1(&format!(
+                        "[KEY] keyPressed({}) = TRUE, down_keys={:?}",
+                        key_code, player.keyboard_manager.down_keys.iter().map(|k| k.code).collect::<Vec<_>>()
+                    ).into());
+                }
+            }
+
             Ok(player.alloc_datum(datum_bool(is_pressed)))
         })
     }

@@ -522,24 +522,47 @@ impl HavokPhysicsMemberHandlers {
 
         havok.state.sim_time += time_increment;
 
-        // Keyboard hack removed - using game's native wheel spring controls
-        if false {
+        // Keyboard-driven car movement on top of Rapier gravity+collision.
+        // Game's spring/traction forces stay in Havok state only (not forwarded to Rapier)
+        // to avoid feedback instability between the two physics systems.
+        if let Some(ref mut rapier) = havok.state.rapier {
+            use rapier3d_f64::prelude::*;
+            if let Some(handle) = rapier.body_handles.get("car") {
+                if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
+                    let keys = &player.keyboard_manager.down_keys;
+                    let fwd = keys.iter().any(|k| k.code == 126);
+                    let back = keys.iter().any(|k| k.code == 125);
+                    let left = keys.iter().any(|k| k.code == 123);
+                    let right = keys.iter().any(|k| k.code == 124);
+
+                    let rot = body.rotation();
+                    let dir = rot * Vector::new(0.0, 1.0, 0.0);
+
+                    // Apply damping
+                    let lv = body.linvel();
+                    body.set_linvel(Vector::new(lv.x * 0.97, lv.y * 0.97, lv.z), true);
+                    body.set_angvel(Vector::new(0.0, 0.0, body.angvel().z * 0.95), true);
+
+                    let force = 600.0;
+                    let torque = 2000.0;
+                    if fwd  { body.apply_impulse(dir * force * time_increment, true); }
+                    if back { body.apply_impulse(dir * -force * 0.5 * time_increment, true); }
+                    if left { body.apply_torque_impulse(Vector::new(0.0, 0.0, torque * time_increment), true); }
+                    if right { body.apply_torque_impulse(Vector::new(0.0, 0.0, -torque * time_increment), true); }
+                }
+            }
         }
 
-        // Step Rapier3D physics (now with HKE collision geometry loaded)
+        // Step Rapier3D physics (gravity + HKE collision)
         if let Some(ref mut rapier) = havok.state.rapier {
-            let sub_dt = if num_sub_steps > 0 {
-                time_increment / num_sub_steps as f64
-            } else {
-                time_increment
-            };
+            let sub_dt = if num_sub_steps > 0 { time_increment / num_sub_steps as f64 } else { time_increment };
             rapier.integration_parameters.dt = sub_dt;
             for _ in 0..num_sub_steps.max(1) {
                 rapier.step();
             }
         }
 
-        // Sync Rapier positions back to HavokRigidBody state
+        // Sync Rapier positions back to Havok state
         if let Some(ref rapier) = havok.state.rapier {
             for rb in &mut havok.state.rigid_bodies {
                 if rb.is_fixed { continue; }
@@ -553,15 +576,10 @@ impl HavokPhysicsMemberHandlers {
                         if vel.x.is_finite() && vel.y.is_finite() && vel.z.is_finite() {
                             rb.linear_velocity = [vel.x, vel.y, vel.z];
                         }
-                        let avel = body.angvel();
-                        if avel.x.is_finite() && avel.y.is_finite() && avel.z.is_finite() {
-                            rb.angular_velocity = [avel.x, avel.y, avel.z];
-                        }
                     }
                 }
             }
         }
-
         // Collect sync data before dropping havok borrow
         let w3d_cast_lib = havok.state.w3d_cast_lib;
         let w3d_cast_member = havok.state.w3d_cast_member;
