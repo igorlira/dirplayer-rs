@@ -522,41 +522,8 @@ impl HavokPhysicsMemberHandlers {
 
         havok.state.sim_time += time_increment;
 
-        // Apply keyboard forces directly to the car rigid body (workaround:
-        // the game's wheel spring system relies on modelsUnderRay which uses W3D meshes
-        // that have incorrect positions from CLOD decoder bugs).
-        if let Some(ref mut rapier) = havok.state.rapier {
-            use rapier3d_f64::prelude::*;
-            // Find the "car" body and apply keyboard-driven forces
-            if let Some(handle) = rapier.body_handles.get("car") {
-                if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                    let keys = &player.keyboard_manager.down_keys;
-                    let fwd_pressed = keys.iter().any(|k| k.code == 126); // up arrow
-                    let back_pressed = keys.iter().any(|k| k.code == 125); // down arrow
-                    let left_pressed = keys.iter().any(|k| k.code == 123); // left arrow
-                    let right_pressed = keys.iter().any(|k| k.code == 124); // right arrow
-
-                    let drive_force = 8000.0;
-                    let steer_torque = 40000.0;
-
-                    // Get car's forward direction from current rotation (Y axis in Director)
-                    let rot = body.rotation();
-                    let fwd = rot * Vector::new(0.0, 1.0, 0.0);
-
-                    if fwd_pressed {
-                        body.apply_impulse(fwd * drive_force * time_increment, true);
-                    }
-                    if back_pressed {
-                        body.apply_impulse(fwd * -drive_force * 0.5 * time_increment, true);
-                    }
-                    if left_pressed {
-                        body.apply_torque_impulse(Vector::new(0.0, 0.0, steer_torque * time_increment), true);
-                    }
-                    if right_pressed {
-                        body.apply_torque_impulse(Vector::new(0.0, 0.0, -steer_torque * time_increment), true);
-                    }
-                }
-            }
+        // Keyboard hack removed - using game's native wheel spring controls
+        if false {
         }
 
         // Step Rapier3D physics (now with HKE collision geometry loaded)

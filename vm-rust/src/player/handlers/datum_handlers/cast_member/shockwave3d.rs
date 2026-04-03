@@ -1938,16 +1938,16 @@ impl Shockwave3dMemberHandlers {
                             node_transforms.as_ref(),
                             excluded_ref,
                         );
-                        // Log first few hit details
-                        {
+                        // Log hits for downward rays only (wheel rays, not camera)
+                        if direction[2] < -0.9 && origin[2] > 300.0 {
                             static HITD_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                             let n = HITD_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if n < 10 && !hits.is_empty() {
                                 let h = &hits[0];
                                 web_sys::console::log_1(&format!(
-                                    "[RAY-HIT] dist={:.1} pos=({:.1},{:.1},{:.1}) model='{}' origin_z={:.1}",
+                                    "[WHEEL-RAY] dist={:.1} pos=({:.1},{:.1},{:.1}) model='{}' origin=({:.1},{:.1},{:.1})",
                                     h.distance, h.position[0], h.position[1], h.position[2],
-                                    h.model_name, origin[2]
+                                    h.model_name, origin[0], origin[1], origin[2]
                                 ).into());
                             }
                         }

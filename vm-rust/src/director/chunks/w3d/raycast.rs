@@ -261,12 +261,13 @@ fn raycast_mesh(
     mesh_id: u32,
     max_dist: f32,
 ) -> Option<RayHit> {
-    // Use BVH for meshes with enough faces to benefit
-    if faces.len() > 32 {
-        let mut indices: Vec<usize> = (0..faces.len()).collect();
-        let bvh = build_bvh(positions, faces, &mut indices);
-        return raycast_bvh(ray, &bvh, positions, faces, tex_coords, model_name, mesh_id, max_dist);
-    }
+    // BVH disabled temporarily - use brute force for all meshes to match C# reference
+    // TODO: debug BVH to find why it misses floor faces
+    // if faces.len() > 32 {
+    //     let mut indices: Vec<usize> = (0..faces.len()).collect();
+    //     let bvh = build_bvh(positions, faces, &mut indices);
+    //     return raycast_bvh(ray, &bvh, positions, faces, tex_coords, model_name, mesh_id, max_dist);
+    // }
 
     // Brute-force for small meshes
     let mut closest: Option<RayHit> = None;
