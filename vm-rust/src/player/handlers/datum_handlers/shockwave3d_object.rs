@@ -776,7 +776,18 @@ impl Shockwave3dObjectDatumHandlers {
                                 match_ci!(prop_name, {
                                     "diffuse" => mat.diffuse = color,
                                     "ambient" => mat.ambient = color,
-                                    "emissive" => mat.emissive = color,
+                                    "emissive" => {
+                                        mat.emissive = color;
+                                        if s3d_ref.name.contains("overlay") {
+                                            static EM_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                                            if EM_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                                                web_sys::console::log_1(&format!(
+                                                    "[EMISSIVE] shader='{}' mat='{}' emissive=({:.2},{:.2},{:.2})",
+                                                    s3d_ref.name, mat.name, color[0], color[1], color[2]
+                                                ).into());
+                                            }
+                                        }
+                                    },
                                     "specular" => mat.specular = color,
                                     _ => {},
                                 })
@@ -2243,6 +2254,28 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                 }
                             }
+                        } else if prop_name == "textureRepeatList" {
+                            // Set texture repeat mode for a texture layer (0=clamp, 1=repeat)
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            let repeat_val = match &value {
+                                Datum::Int(i) => *i as u8,
+                                Datum::Float(f) => *f as u8,
+                                _ => 1,
+                            };
+                            let idx = (index as usize).saturating_sub(1);
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                            while shader.texture_layers.len() <= idx {
+                                                shader.texture_layers.push(crate::director::chunks::w3d::types::W3dTextureLayer::default());
+                                            }
+                                            shader.texture_layers[idx].repeat_s = repeat_val;
+                                            shader.texture_layers[idx].repeat_t = repeat_val;
+                                        }
+                                    }
+                                }
+                            }
                         } else if prop_name == "textureList" {
                             // Update the persistent textureList at the given index
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
@@ -2580,8 +2613,18 @@ impl Shockwave3dObjectDatumHandlers {
                                     Some(player.alloc_datum(Datum::Symbol("multiply".to_string())))
                                 }
                             }
-                            "textureModeList" | "textureRepeatList" => {
+                            "textureModeList" => {
                                 Some(player.alloc_datum(Datum::Void))
+                            }
+                            "textureRepeatList" => {
+                                let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                                let val = member.and_then(|m| m.member_type.as_shockwave3d())
+                                    .and_then(|w3d| w3d.parsed_scene.as_ref())
+                                    .and_then(|scene| scene.shaders.iter().find(|s| s.name == s3d_ref.name))
+                                    .and_then(|shader| shader.texture_layers.get(idx))
+                                    .map(|layer| layer.repeat_s as i32)
+                                    .unwrap_or(1);
+                                Some(player.alloc_datum(Datum::Int(val)))
                             }
                             "blendSourceList" => {
                                 // Return blend source for texture layer at index (default #constant)
@@ -4629,6 +4672,12 @@ fn get_persistent_node_transform(
     member_ref: &crate::player::cast_lib::CastMemberRef,
     node_name: &str,
 ) -> DatumRef {
+    if node_name.contains("overlay") {
+        static PNT_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if PNT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+            web_sys::console::log_1(&format!("[PNT] get_persistent_node_transform('{}')", node_name).into());
+        }
+    }
     let key = canonical_node_key(player, member_ref, node_name);
 
     // Check if persistent datum already exists (case-insensitive)
@@ -4666,7 +4715,11 @@ fn get_persistent_node_transform(
 /// Sync all persistent transform datums back to node_transforms for the renderer.
 /// Call this before each render frame.
 pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
-    // Collect all (cast_lib, cast_member, node_name, datum_ref) tuples
+    // Only sync Transform3d datums that were mutated in-place (dirty)
+    let dirty_ids = super::transform3d::take_dirty_ids();
+    if dirty_ids.is_empty() { return; }
+
+    // Collect entries for dirty datums only
     let mut entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
     for cast in &player.movie.cast_manager.casts {
         for (member_num, member) in &cast.members {
@@ -4679,8 +4732,10 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
     }
 
     for (cast_lib, cast_member, node_name, datum_ref) in entries {
+        if !dirty_ids.contains(&datum_ref.unwrap()) { continue; } // Only sync dirty datums
         if let Datum::Transform3d(m64) = player.get_datum(&datum_ref) {
             let m32: [f32; 16] = m64.map(|v| v as f32);
+            if m32.iter().any(|v| !v.is_finite()) { continue; }
             let member_ref = CastMemberRef { cast_lib, cast_member: cast_member as i32 };
             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -4719,6 +4774,17 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
         } else {
             continue;
         };
+
+        // Debug: log overlay shader texture sync
+        if shader_name.contains("overlay") {
+            static TEX_SYNC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if TEX_SYNC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                web_sys::console::log_1(&format!(
+                    "[TEX-SYNC] shader='{}' textures={:?}",
+                    shader_name, tex_names
+                ).into());
+            }
+        }
 
         // Update shader.texture_layers in the parsed scene
         let member_ref = CastMemberRef { cast_lib, cast_member: cast_member as i32 };
