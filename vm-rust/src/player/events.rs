@@ -908,9 +908,7 @@ pub async fn dispatch_system_event_to_timeouts(
             // This is normal Director behavior - just silently skip.
             if err.code != ScriptErrorCode::HandlerNotFound {
                 // Log actual errors but continue with other timeouts
-                web_sys::console::error_1(
-                    &format!("⚠ Timeout system event {} error: {}", handler_name, err.message
-                ).into());
+                log::warn!("Timeout system event {} error: {}", handler_name, err.message);
             }
         }
     }

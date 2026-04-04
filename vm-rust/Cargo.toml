@@ -46,6 +46,8 @@ log = "0.4.22"
 percent-encoding = "2"
 xml = "1.0"
 image = "0.25.8"
+rand = { version = "0.9", features = ["small_rng"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
