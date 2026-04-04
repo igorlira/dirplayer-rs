@@ -12,8 +12,10 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 use crate::player::{
     bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
     cast_lib::CastMemberRef,
+    commands::{run_player_command, PlayerVMCommand},
     datum_ref::DatumRef,
     eval::eval_lingo_command,
+    events::run_event_loop,
     reserve_player_mut, reserve_player_ref, run_movie_init_sequence, run_single_frame,
     DirPlayer, PlayerVMExecutionItem, ScriptError, PLAYER_OPT,
 };
@@ -41,12 +43,23 @@ impl TestPlayer {
         let lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let (tx, _rx) = channel::unbounded();
+        let (event_tx, event_rx) = channel::unbounded();
 
         // Set up global player state
         unsafe {
             crate::player::PLAYER_TX = Some(tx.clone());
+            crate::player::PLAYER_EVENT_TX = Some(event_tx.clone());
+            crate::player::xtra::multiuser::MULTIUSER_XTRA_MANAGER_OPT =
+                Some(crate::player::xtra::multiuser::MultiuserXtraManager::new());
+            crate::player::xtra::xmlparser::XMLPARSER_XTRA_MANAGER_OPT =
+                Some(crate::player::xtra::xmlparser::XmlParserXtraManager::new());
             PLAYER_OPT = Some(DirPlayer::new(tx.clone()));
         }
+
+        // Spawn the event loop so callback events (from behaviors, etc.) are processed
+        async_std::task::spawn_local(async move {
+            run_event_loop(event_rx).await;
+        });
 
         TestPlayer { _tx: tx, _lock: lock }
     }
@@ -194,6 +207,24 @@ impl TestPlayer {
         })
     }
 
+    /// Find a sprite whose member name starts with the given prefix (case-insensitive).
+    pub fn find_sprite_by_member_prefix(&self, prefix: &str) -> Option<usize> {
+        let prefix_lower = prefix.to_ascii_lowercase();
+        reserve_player_ref(|player| {
+            for channel in &player.movie.score.channels {
+                let sprite = &channel.sprite;
+                if let Some(member_ref) = &sprite.member {
+                    if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                        if member.name.to_ascii_lowercase().starts_with(&prefix_lower) {
+                            return Some(sprite.number);
+                        }
+                    }
+                }
+            }
+            None::<usize>
+        })
+    }
+
     /// Check what fraction of a sprite's rect is within the stage bounds (0.0 to 1.0).
     pub async fn sprite_visibility(&self, sprite_num: usize) -> f64 {
         let (stage_w, stage_h) = reserve_player_ref(|player| {
@@ -258,6 +289,95 @@ impl TestPlayer {
         reserve_player_ref(|player| player.is_playing)
     }
 
+    // --- Input simulation ---
+
+    /// Simulate a mouse click at (x, y): mouse down, step one frame, mouse up.
+    pub async fn click(&mut self, x: i32, y: i32) {
+        let _ = run_player_command(PlayerVMCommand::MouseDown((x, y))).await;
+        self.step_frame().await;
+        let _ = run_player_command(PlayerVMCommand::MouseUp((x, y))).await;
+    }
+
+    /// Simulate a mouse down at (x, y).
+    pub async fn mouse_down(&mut self, x: i32, y: i32) {
+        reserve_player_mut(|player| {
+            player.mouse_loc = (x, y);
+            player.movie.mouse_down = true;
+        });
+        let _ = run_player_command(PlayerVMCommand::MouseDown((x, y))).await;
+    }
+
+    /// Simulate a mouse up at (x, y).
+    pub async fn mouse_up(&mut self, x: i32, y: i32) {
+        reserve_player_mut(|player| {
+            player.mouse_loc = (x, y);
+            player.movie.mouse_down = false;
+        });
+        let _ = run_player_command(PlayerVMCommand::MouseUp((x, y))).await;
+    }
+
+    /// Simulate mouse movement to (x, y).
+    pub async fn mouse_move(&mut self, x: i32, y: i32) {
+        reserve_player_mut(|player| {
+            player.mouse_loc = (x, y);
+        });
+        let _ = run_player_command(PlayerVMCommand::MouseMove((x, y))).await;
+    }
+
+    /// Simulate a key press: key down, step one frame, key up.
+    pub async fn key_press(&mut self, key: &str, code: u16) {
+        self.key_down(key, code).await;
+        self.step_frame().await;
+        self.key_up(key, code).await;
+    }
+
+    /// Simulate a key down event.
+    pub async fn key_down(&mut self, key: &str, code: u16) {
+        reserve_player_mut(|player| {
+            player.keyboard_manager.key_down(key.to_string(), code);
+        });
+        let _ = run_player_command(PlayerVMCommand::KeyDown(key.to_string(), code)).await;
+    }
+
+    /// Simulate a key up event.
+    pub async fn key_up(&mut self, key: &str, code: u16) {
+        reserve_player_mut(|player| {
+            player.keyboard_manager.key_up(key, code);
+        });
+        let _ = run_player_command(PlayerVMCommand::KeyUp(key.to_string(), code)).await;
+    }
+
+    /// Type a string by pressing each character in sequence.
+    pub async fn type_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.key_press(&ch.to_string(), ch as u16).await;
+        }
+    }
+
+    /// Click on a sprite by its number (clicks the sprite's center).
+    pub async fn click_sprite(&mut self, sprite_num: usize) {
+        let rect = self.eval_datum(&format!("sprite({}).rect", sprite_num)).await;
+        match rect {
+            StaticDatum::IntRect(l, t, r, b) => {
+                self.click((l + r) / 2, (t + b) / 2).await;
+            }
+            _ => panic!("sprite({}).rect returned {:?}, expected IntRect", sprite_num, rect),
+        }
+    }
+
+    /// Click on the first sprite whose member has the given name.
+    pub async fn click_member(&mut self, member_name: &str) {
+        let sprite_num = self.find_sprite_by_member_name(member_name)
+            .unwrap_or_else(|| panic!("No sprite with member '{}' found", member_name));
+        self.click_sprite(sprite_num).await;
+    }
+
+    /// Click on the first sprite whose member name starts with the given prefix.
+    pub async fn click_member_prefix(&mut self, prefix: &str) {
+        let sprite_num = self.find_sprite_by_member_prefix(prefix)
+            .unwrap_or_else(|| panic!("No sprite with member starting with '{}' found", prefix));
+        self.click_sprite(sprite_num).await;
+    }
 
     /// Render the current stage to an in-memory RGBA bitmap.
     /// Returns (width, height, rgba_data).
@@ -452,6 +572,7 @@ impl Drop for TestPlayer {
                 std::mem::forget(player);
             }
             crate::player::PLAYER_TX = None;
+            crate::player::PLAYER_EVENT_TX = None;
         }
     }
 }
