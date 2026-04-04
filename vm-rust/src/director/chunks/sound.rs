@@ -181,12 +181,9 @@ impl SoundChunk {
         self.bits_per_sample = bits_per_sample;
         self.sample_count =
             (self.data.len() / (channels as usize * (bits_per_sample / 8) as usize)) as u32;
-        console::log_1(
-            &format!(
-                "Updated metadata: channels={}, sample_rate={}, bits={}",
-                self.channels, self.sample_rate, self.bits_per_sample
-            )
-            .into(),
+        log::debug!(
+            "Updated metadata: channels={}, sample_rate={}, bits={}",
+            self.channels, self.sample_rate, self.bits_per_sample
         );
     }
 

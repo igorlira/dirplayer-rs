@@ -1606,7 +1606,7 @@ impl TypeHandlers {
             let sample_rate = channel.sample_rate;
             let sample_count = channel.sample_count;
             let elapsed_time = channel.elapsed_time;
-            let ctx_time = channel.audio_context.current_time();
+            let ctx_time = channel.context_time();
             let start_time = channel.playback_start_context_time;
             let loop_count = channel.loop_count;
 
