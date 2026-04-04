@@ -58,7 +58,6 @@ impl XMediaChunk {
         // Check for "FFFF" magic (styled text XMED format)
         if &self.raw_data[0..4] == b"FFFF" {
             debug!("Found FFFF styled text header");
-            debug!("Found FFFF styled text header");
             return true;
         }
 

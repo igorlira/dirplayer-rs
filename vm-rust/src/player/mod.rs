@@ -46,6 +46,8 @@ pub mod score_keyframes;
 pub mod stream_status;
 pub mod virtual_scripts;
 pub mod console;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod testing;
 
 use std::{
     collections::HashMap,
@@ -437,7 +439,7 @@ impl DirPlayer {
         self.load_movie_from_dir(movie_file).await;
     }
 
-    async fn load_movie_from_dir(&mut self, dir: DirectorFile) {
+    pub(crate) async fn load_movie_from_dir(&mut self, dir: DirectorFile) {
         self.movie
             .load_from_file(
                 dir,
@@ -3222,7 +3224,7 @@ pub async fn player_is_playing() -> bool {
     unsafe { PLAYER_OPT.as_ref().unwrap().is_playing }
 }
 
-static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
+pub(crate) static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
 static mut PLAYER_EVENT_TX: Option<Sender<PlayerVMEvent>> = None;
 pub static mut PLAYER_OPT: Option<DirPlayer> = None;
 

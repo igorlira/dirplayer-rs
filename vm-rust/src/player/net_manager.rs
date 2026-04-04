@@ -190,18 +190,35 @@ impl NetManager {
 
         // For file:// URLs, don't execute the fetch task - wait for JS to provide data
         if is_file_url {
-            // Emit event to request file data from Electron
-            let window = web_sys::window().unwrap();
-            let event_init = web_sys::CustomEventInit::new();
-            let detail = js_sys::Object::new();
-            js_sys::Reflect::set(&detail, &"taskId".into(), &task_id.into()).unwrap();
-            js_sys::Reflect::set(&detail, &"url".into(), &resolved_url_str.into()).unwrap();
-            event_init.set_detail(&detail);
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Emit event to request file data from Electron
+                let window = web_sys::window().unwrap();
+                let event_init = web_sys::CustomEventInit::new();
+                let detail = js_sys::Object::new();
+                js_sys::Reflect::set(&detail, &"taskId".into(), &task_id.into()).unwrap();
+                js_sys::Reflect::set(&detail, &"url".into(), &resolved_url_str.into()).unwrap();
+                event_init.set_detail(&detail);
 
-            let event =
-                web_sys::CustomEvent::new_with_event_init_dict("dirplayer:netRequest", &event_init)
-                    .unwrap();
-            window.dispatch_event(&event).unwrap();
+                let event =
+                    web_sys::CustomEvent::new_with_event_init_dict("dirplayer:netRequest", &event_init)
+                        .unwrap();
+                window.dispatch_event(&event).unwrap();
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                // In native (test) mode, read the file directly from disk
+                let file_path = resolved_url_str.strip_prefix("file://").unwrap_or(&resolved_url_str);
+                let result: super::net_task::NetResult = match std::fs::read(file_path) {
+                    Ok(bytes) => Ok(bytes),
+                    Err(_) => Err(-1),
+                };
+                let shared_state_arc = Arc::clone(&self.shared_state);
+                async_std::task::spawn_local(async move {
+                    let mut shared_state = shared_state_arc.lock().await;
+                    shared_state.fulfill_task(task_id, result).await;
+                });
+            }
         } else {
             // Execute normal HTTP fetch
             let shared_state_arc = Arc::clone(&self.shared_state);

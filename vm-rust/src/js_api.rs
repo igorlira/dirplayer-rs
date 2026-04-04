@@ -226,6 +226,7 @@ extern "C" {
 
 pub struct JsApi {}
 
+#[cfg(target_arch = "wasm32")]
 impl JsApi {
     pub fn dispatch_datum_snapshot(datum_ref: &DatumRef, player: &DirPlayer) {
         let snapshot = datum_to_js_bridge(datum_ref, player, 0);
@@ -1542,6 +1543,50 @@ impl JsApi {
     pub fn dispatch_external_event(event: &str) {
         onExternalEvent(event);
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl JsApi {
+    pub fn dispatch_datum_snapshot(_: &DatumRef, _: &DirPlayer) {}
+    pub fn dispatch_script_instance_snapshot(_: Option<ScriptInstanceRef>, _: &DirPlayer) {}
+    pub fn dispatch_schedule_timeout(_: &str, _: u32) {}
+    pub fn dispatch_clear_timeout(_: &str) {}
+    #[allow(dead_code)]
+    pub fn dispatch_clear_timeouts() {}
+    pub fn dispatch_movie_loaded(_: &DirectorFile) {}
+    pub fn dispatch_cast_name_changed(_: u32) {}
+    pub fn dispatch_cast_list_changed() {}
+    pub fn dispatch_cast_member_list_changed(_: u32) {}
+    pub fn dispatch_cast_member_changed(_: CastMemberRef) {}
+    pub fn on_cast_member_name_changed(_: u32) {}
+    pub fn on_sprite_member_changed(_: i16) {}
+    pub fn dispatch_score_changed() {}
+    pub fn dispatch_channel_changed(_: i16) {}
+    pub fn dispatch_frame_changed(_: u32) {}
+    pub fn dispatch_debug_message(_: &str) {}
+    pub fn dispatch_debug_content(_: js_sys::Object) {}
+    pub fn dispatch_debug_bitmap(_: u32, _: u32, _: &[u8]) {}
+    pub fn dispatch_debug_datum(_: &DatumRef, _: &DirPlayer) {}
+    pub fn dispatch_channel_name_changed(_: i16) {}
+    pub fn dispatch_scope_list(_: &DirPlayer) {}
+    pub fn dispatch_global_list(_: &DirPlayer) {}
+    pub fn dispatch_debug_update(_: &DirPlayer) {}
+    pub fn dispatch_script_error(_: &DirPlayer, _: &ScriptError) {}
+    pub fn dispatch_breakpoint_list_changed() {}
+    pub fn dispatch_script_error_cleared() {}
+    pub fn dispatch_external_event(_: &str) {}
+    pub fn get_cast_chunk_list_for(_: &DirPlayer, _: u32) -> js_sys::Object { unimplemented!() }
+    pub fn get_movie_top_level_chunks(_: &DirPlayer) -> js_sys::Object { unimplemented!() }
+    pub fn get_chunk_bytes(_: &DirPlayer, _: u32, _: u32) -> Option<Vec<u8>> { unimplemented!() }
+    pub fn get_parsed_chunk(_: &DirPlayer, _: u32, _: u32) -> js_sys::Object { unimplemented!() }
+    pub fn get_mini_member_snapshot(_: &CastMember) -> js_sys::Map { unimplemented!() }
+    pub fn get_member_snapshot(_: &CastMember, _: u32, _: Option<&ScriptContext>, _: &DirPlayer) -> js_sys::Map { unimplemented!() }
+    pub fn get_score_snapshot(_: &DirPlayer, _: &Score) -> js_sys::Map { unimplemented!() }
+    pub fn get_channel_snapshot(_: &DirPlayer, _: &i16) -> js_sys::Map { unimplemented!() }
+    fn get_channel_display_name(_: &i16, _: &DirPlayer) -> Option<String> { unimplemented!() }
+    pub fn get_script_snapshot(_: &ScriptMember, _: &ScriptChunk, _: &ScriptContext, _: bool, _: u16) -> js_sys::Map { unimplemented!() }
+    fn collect_cast_descendants(_: u32, _: &HashMap<u32, Vec<u32>>) -> std::collections::HashSet<u32> { unimplemented!() }
+    fn build_children_map(_: &DirectorFile) -> HashMap<u32, Vec<u32>> { unimplemented!() }
 }
 
 pub trait JsSerializable {
