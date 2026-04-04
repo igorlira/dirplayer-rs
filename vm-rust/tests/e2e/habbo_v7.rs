@@ -1,46 +1,7 @@
-use vm_rust::player::testing::{run_test, TestPlayer};
+use vm_rust::player::testing::{run_test, TestPlayer, StaticDatum};
 
 #[test]
-fn test_load_movie() {
-    run_test(async {
-        let mut player = TestPlayer::new();
-        player
-            .load_movie("public/dcr_woodpecker/habbo.dcr")
-            .await;
-
-        assert_eq!(player.current_frame(), 1);
-        assert!(player.is_playing());
-    });
-}
-
-#[test]
-fn test_initial_stage() {
-    run_test(async {
-        let mut player = TestPlayer::new();
-        player
-            .load_movie("public/dcr_woodpecker/habbo.dcr")
-            .await;
-
-        player.snapshot_stage().assert_snapshot("habbo_v7__initial_stage", 0.0);
-    });
-}
-
-#[test]
-fn test_after_init() {
-    run_test(async {
-        let mut player = TestPlayer::new();
-        player
-            .load_movie("public/dcr_woodpecker/habbo.dcr")
-            .await;
-        player.init_movie().await;
-
-        player.snapshot_stage().assert_snapshot("habbo_v7__after_init", 0.0);
-    });
-}
-
-
-#[test]
-fn test_after_5_frames() {
+fn test_loading() {
     run_test(async {
         let mut player = TestPlayer::new();
         player
@@ -49,35 +10,35 @@ fn test_after_5_frames() {
         player.init_movie().await;
         player.step_frames(5).await;
 
-        player.snapshot_stage().assert_snapshot("habbo_v7__after_5_frames", 0.0);
-    });
-}
+        // By frame 5, the boot sequence should be underway
+        assert_eq!(
+            player.eval_datum("sprite(1).member.name").await,
+            StaticDatum::String("Logo".into())
+        );
+        assert!(player.get_global_ref("gCore").is_some(), "gCore global should exist");
+        assert_eq!(
+            player.eval_datum("ilk(gCore.get(#castload_manager))").await,
+            StaticDatum::Symbol("instance".into())
+        );
+        assert_eq!(
+            player.eval_datum("getStreamStatus(\"external_variables.txt\").state").await,
+            StaticDatum::String("Complete".into())
+        );
 
-#[test]
-fn test_after_30_frames() {
-    run_test(async {
-        let mut player = TestPlayer::new();
-        player
-            .load_movie("public/dcr_woodpecker/habbo.dcr")
-            .await;
-        player.init_movie().await;
-        player.step_frames(30).await;
+        player.snapshot_stage().assert_snapshot("preload", 0.0);
 
-        player.snapshot_stage().assert_snapshot("habbo_v7__after_30_frames", 0.0);
-    });
-}
+        // Wait until the loading screen is fully drawn
+        // Wait until the loading screen is fully drawn
+        player.step_until_sprite_visible(100, "corner_element", 1.0).await;
 
-#[test]
-fn test_after_100_frames() {
-    run_test(async {
-        let mut player = TestPlayer::new();
-        player
-            .load_movie("public/dcr_woodpecker/habbo.dcr")
-            .await;
-        player.init_movie().await;
-        player.step_frames(100).await;
+        assert_eq!(
+            player.eval_datum("getStreamStatus(\"external_texts.txt\").state").await,
+            StaticDatum::String("Complete".into())
+        );
+        let loaded_count = player.eval_datum("gCore.get(#castload_manager).pLoadedCasts.count").await
+            .as_integer().expect("pLoadedCasts.count should be an integer");
+        assert!(loaded_count > 2, "Should have loaded more than 2 casts, got {}", loaded_count);
 
-        // Allow small tolerance — loading animation timing varies between runs
-        player.snapshot_stage().assert_snapshot("habbo_v7__after_100_frames", 0.005);
+        player.snapshot_stage().assert_snapshot("loaded_state", 0.005);
     });
 }

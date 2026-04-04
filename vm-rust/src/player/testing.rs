@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use async_std::channel;
 
 use crate::director::file::read_director_file_bytes;
+pub use crate::director::static_datum::StaticDatum;
 
 /// Global lock to ensure only one TestPlayer runs at a time.
 /// The player uses global mutable statics, so tests must be serialized.
@@ -119,9 +120,117 @@ impl TestPlayer {
         }
     }
 
-    /// Evaluate a Lingo expression and return the result.
+    /// Step frames until a Lingo expression evaluates to the expected value.
+    pub async fn step_until_datum(
+        &mut self,
+        max_frames: usize,
+        expr: &str,
+        expected: &StaticDatum,
+    ) {
+        let description = format!("{} == {:?}", expr, expected);
+        for _ in 0..max_frames {
+            if self.eval_datum(expr).await == *expected {
+                return;
+            }
+            if !self.step_frame().await {
+                panic!("Movie stopped playing while waiting for: {}", description);
+            }
+        }
+        let actual = self.eval_datum(expr).await;
+        panic!(
+            "Condition not met after {} frames: {}\n  actual: {:?}",
+            max_frames, description, actual
+        );
+    }
+
+    /// Step frames until a sprite with the given member name is at least
+    /// `min_visibility` (0.0–1.0) visible on the stage.
+    pub async fn step_until_sprite_visible(
+        &mut self,
+        max_frames: usize,
+        member_name: &str,
+        min_visibility: f64,
+    ) {
+        let description = format!("sprite with member '{}' >= {:.0}% visible", member_name, min_visibility * 100.0);
+        for _ in 0..max_frames {
+            if let Some(sprite_num) = self.find_sprite_by_member_name(member_name) {
+                if self.sprite_visibility(sprite_num).await >= min_visibility {
+                    return;
+                }
+            }
+            if !self.step_frame().await {
+                panic!("Movie stopped playing while waiting for: {}", description);
+            }
+        }
+        if let Some(sprite_num) = self.find_sprite_by_member_name(member_name) {
+            let vis = self.sprite_visibility(sprite_num).await;
+            panic!(
+                "Timed out after {} frames: {} (sprite {} found at {:.1}% visibility)",
+                max_frames, description, sprite_num, vis * 100.0
+            );
+        } else {
+            panic!(
+                "Timed out after {} frames: {} (no sprite with that member found)",
+                max_frames, description
+            );
+        }
+    }
+
+    /// Find a sprite whose member has the given name.
+    /// Returns the sprite number, or None if not found.
+    pub fn find_sprite_by_member_name(&self, name: &str) -> Option<usize> {
+        reserve_player_ref(|player| {
+            for channel in &player.movie.score.channels {
+                let sprite = &channel.sprite;
+                if let Some(member_ref) = &sprite.member {
+                    if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                        if member.name.eq_ignore_ascii_case(name) {
+                            return Some(sprite.number);
+                        }
+                    }
+                }
+            }
+            None::<usize>
+        })
+    }
+
+    /// Check what fraction of a sprite's rect is within the stage bounds (0.0 to 1.0).
+    pub async fn sprite_visibility(&self, sprite_num: usize) -> f64 {
+        let (stage_w, stage_h) = reserve_player_ref(|player| {
+            (player.movie.rect.width(), player.movie.rect.height())
+        });
+        let sprite_rect = self.eval_datum(&format!("sprite({}).rect", sprite_num)).await;
+        match sprite_rect {
+            StaticDatum::IntRect(left, top, right, bottom) => {
+                let sprite_w = (right - left) as f64;
+                let sprite_h = (bottom - top) as f64;
+                let sprite_area = sprite_w * sprite_h;
+                if sprite_area <= 0.0 {
+                    return 0.0;
+                }
+                let ix_left = left.max(0);
+                let ix_top = top.max(0);
+                let ix_right = right.min(stage_w);
+                let ix_bottom = bottom.min(stage_h);
+                let visible_w = (ix_right - ix_left).max(0) as f64;
+                let visible_h = (ix_bottom - ix_top).max(0) as f64;
+                (visible_w * visible_h) / sprite_area
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Evaluate a Lingo expression and return the raw DatumRef.
     pub async fn eval(&self, command: &str) -> Result<DatumRef, ScriptError> {
         eval_lingo_command(command.to_string()).await
+    }
+
+    /// Evaluate a Lingo expression and return a `StaticDatum` for comparison.
+    /// Panics if the expression errors — use `eval()` directly to handle errors.
+    pub async fn eval_datum(&self, command: &str) -> StaticDatum {
+        let result = self.eval(command).await
+            .unwrap_or_else(|e| panic!("eval '{}' failed: {}", command, e.message));
+        StaticDatum::from(result)
     }
 
     /// Get the current frame number.
@@ -209,11 +318,21 @@ impl StageSnapshot {
 
     /// Save this snapshot and compare against a golden file.
     ///
+    /// The snapshot name is derived from the current test name + the given suffix,
+    /// e.g. calling `assert_snapshot("loaded", 0.0)` from test `e2e::habbo_v7::test_loading`
+    /// produces `e2e__habbo_v7__test_loading__loaded.png`.
+    ///
     /// - Always writes the actual PNG to `tests/snapshots/output/{name}.png`
     /// - If `SNAPSHOT_UPDATE=1`, also overwrites the golden file
     /// - If a golden exists, compares and panics if diff exceeds `max_diff_ratio`
     /// - If no golden exists, prints a warning and passes (first run)
-    pub fn assert_snapshot(&self, name: &str, max_diff_ratio: f64) {
+    pub fn assert_snapshot(&self, suffix: &str, max_diff_ratio: f64) {
+        let test_name = std::thread::current()
+            .name()
+            .unwrap_or("unknown")
+            .replace("::", "__");
+        let name = format!("{}__{}", test_name, suffix);
+
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let output_dir = Path::new(manifest_dir).join("tests/snapshots/output");
         let golden_dir = Path::new(manifest_dir).join("tests/snapshots/golden");
