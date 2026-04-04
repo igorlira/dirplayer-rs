@@ -1,5 +1,8 @@
 use vm_rust::player::testing::{run_test, TestPlayer, StaticDatum};
 
+const TEST_USERNAME: &str = "testuser";
+const TEST_PASSWORD: &str = "testpass";
+
 #[test]
 fn test_loading() {
     run_test(async {
@@ -28,7 +31,6 @@ fn test_loading() {
         player.snapshot_stage().assert_snapshot("preload", 0.0);
 
         // Wait until the loading screen is fully drawn
-        // Wait until the loading screen is fully drawn
         player.step_until_sprite_visible(100, "corner_element", 1.0).await;
 
         assert_eq!(
@@ -40,5 +42,22 @@ fn test_loading() {
         assert!(loaded_count > 2, "Should have loaded more than 2 casts, got {}", loaded_count);
 
         player.snapshot_stage().assert_snapshot("loaded_state", 0.005);
+
+        // --- Login form ---
+
+        // Type username
+        player.click_member_prefix("login_name").await;
+        player.step_frames(2).await;
+        player.type_text(TEST_USERNAME).await;
+
+        // Type password
+        player.click_member_prefix("login_password").await;
+        player.step_frames(2).await;
+        player.type_text(TEST_PASSWORD).await;
+
+        player.snapshot_stage().assert_snapshot("login_filled", 0.005);
+
+        // TODO: Click login button once native WebSocket support is added
+        // player.click_member("login_b_login_ok").await;
     });
 }
