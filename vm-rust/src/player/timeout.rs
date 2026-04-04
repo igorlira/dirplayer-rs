@@ -14,6 +14,8 @@ pub struct Timeout {
     pub handler: String,
     pub target_ref: DatumRef,
     pub is_scheduled: bool,
+    /// When this timeout should next fire (native only, ignored on wasm).
+    pub next_fire_at: Option<chrono::DateTime<chrono::Local>>,
 }
 
 impl TimeoutManager {
@@ -66,5 +68,6 @@ impl Timeout {
         let timeout_name = self.name.to_owned();
         JsApi::dispatch_schedule_timeout(&timeout_name, self.period);
         self.is_scheduled = true;
+        self.next_fire_at = Some(chrono::Local::now() + chrono::Duration::milliseconds(self.period as i64));
     }
 }

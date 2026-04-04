@@ -208,16 +208,24 @@ impl NetManager {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 // In native (test) mode, read the file directly from disk
+                // and fulfill the task immediately (no spawn_local) so that
+                // await_task callers don't block on a future that never runs.
                 let file_path = resolved_url_str.strip_prefix("file://").unwrap_or(&resolved_url_str);
                 let result: super::net_task::NetResult = match std::fs::read(file_path) {
                     Ok(bytes) => Ok(bytes),
                     Err(_) => Err(-1),
                 };
-                let shared_state_arc = Arc::clone(&self.shared_state);
-                async_std::task::spawn_local(async move {
-                    let mut shared_state = shared_state_arc.lock().await;
-                    shared_state.fulfill_task(task_id, result).await;
-                });
+                let mut shared_state = self.shared_state.try_lock().unwrap();
+                let final_bytes = match &result {
+                    Ok(bytes) => bytes.len() as u64,
+                    Err(_) => 0,
+                };
+                let new_state = super::net_task::NetTaskState {
+                    result: Some(result),
+                    bytes_loaded: final_bytes,
+                    bytes_total: final_bytes,
+                };
+                shared_state.task_states.insert(task_id, new_state);
             }
         } else {
             // Execute normal HTTP fetch

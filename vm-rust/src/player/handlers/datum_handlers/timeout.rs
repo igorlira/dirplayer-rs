@@ -193,6 +193,7 @@ impl TimeoutDatumHandlers {
                 period: timeout_period as u32,
                 target_ref: target_ref.clone(),
                 is_scheduled: false,
+                next_fire_at: None,
             };
             timeout.schedule();
             player.timeout_manager.add_timeout(timeout);

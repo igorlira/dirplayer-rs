@@ -16,6 +16,7 @@ use super::{
     types::TypeHandlers,
 };
 use std::collections::HashMap;
+use rand::Rng;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
@@ -372,8 +373,7 @@ impl BuiltInHandlerManager {
             let random_int = match player.movie.next_random_int(max) {
                 Some(value) => value,
                 None => {
-                    let random_value = js_sys::Math::random() * (max as f64);
-                    random_value.floor() as i32 + 1
+                    player.rng.random_range(1..=max)
                 }
             };
             
