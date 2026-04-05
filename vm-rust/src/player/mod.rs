@@ -279,6 +279,26 @@ pub struct DirPlayer {
     pub last_sprite_prop_ref: Option<DatumRef>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
     pub console: console::ConsoleBuffer,
+    /// Introduced in MX 2004 with a default value of 10; older movies have 9.
+    /// Behaves like an int but Director only supports values of 9 and 10.
+    /// Values < 9 or > 10 get rounded to nearest valid value.
+    pub script_execution_style: ScriptExecutionStyle,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScriptExecutionStyle {
+    Version9 = 9,
+    Version10 = 10,
+}
+
+impl From<i32> for ScriptExecutionStyle {
+    fn from(value: i32) -> Self {
+        if value < 10 {
+            ScriptExecutionStyle::Version9
+        } else {
+            ScriptExecutionStyle::Version10
+        }
+    }
 }
 
 /// Target frame for a movie transition (gotoNetMovie or go movie).
@@ -415,6 +435,7 @@ impl DirPlayer {
             virtual_scripts: FxHashMap::default(),
             console: console::ConsoleBuffer::new(),
             rng: rand::rngs::SmallRng::seed_from_u64(0),
+            script_execution_style: ScriptExecutionStyle::Version10,
         };
 
         result.reset();
@@ -455,6 +476,12 @@ impl DirPlayer {
                 &mut self.dir_cache,
             )
             .await;
+
+        self.script_execution_style = if self.movie.dir_version < 1000 {
+            ScriptExecutionStyle::Version9
+        } else {
+            ScriptExecutionStyle::Version10
+        };
 
         self.bg_color = self.movie.stage_color_ref.clone();
 
@@ -1440,6 +1467,7 @@ impl DirPlayer {
                     .collect();
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
             },
+            "scriptExecutionStyle" => Ok(self.alloc_datum(Datum::Int(self.script_execution_style as i32))),
             _ => {
                 let datum = self.movie.get_prop(prop)?;
                 Ok(self.alloc_datum(datum))
@@ -1555,6 +1583,10 @@ impl DirPlayer {
                     }
                     _ => Err(ScriptError::new("actorList must be a list".to_string())),
                 }
+            },
+            "scriptExecutionStyle" => {
+                self.script_execution_style = value.int_value()?.into();
+                Ok(())
             },
             _ => self.movie.set_prop(prop, value, &self.allocator)
         })

@@ -17,6 +17,7 @@ use crate::{
     utils::{log_i},
 };
 use crate::player::cast_lib::{cast_member_ref, CastLib};
+use crate::player::ScriptExecutionStyle;
 
 pub struct MovieHandlers {}
 
@@ -84,7 +85,10 @@ impl MovieHandlers {
             
             Ok(player.alloc_datum(match member {
                 Some(r) => Datum::CastMember(r),
-                None => Datum::Void
+                None => match player.script_execution_style {
+                    ScriptExecutionStyle::Version9 => Datum::CastMember(INVALID_CAST_MEMBER_REF),
+                    ScriptExecutionStyle::Version10 => Datum::Void,
+                }
             }))
         })
     }
