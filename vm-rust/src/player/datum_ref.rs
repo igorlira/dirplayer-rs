@@ -39,7 +39,6 @@ impl PartialEq for DatumRef {
             (DatumRef::Ref(id1, ..), DatumRef::Void) => *id1 == 0,
             (DatumRef::Void, DatumRef::Ref(id2, ..)) => *id2 == 0,
             (DatumRef::Ref(id1, ..), DatumRef::Ref(id2, ..)) => id1 == id2,
-            _ => false,
         }
     }
 }
