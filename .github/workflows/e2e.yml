@@ -91,7 +91,7 @@ jobs:
         run: bash scripts/run-browser-tests.sh
 
       - name: Upload test artifacts
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: browser-test-results
