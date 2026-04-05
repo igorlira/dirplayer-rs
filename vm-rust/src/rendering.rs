@@ -1402,7 +1402,7 @@ pub fn render_score_to_bitmap_with_offset(
                     None
                 };
 
-                let mut src_rect = IntRect::from(0, 0, 0, 0);
+                let src_rect;
 
                 let mut option = 0;
 
