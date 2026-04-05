@@ -35,16 +35,39 @@ jobs:
         run: cargo fetch
 
       - name: Run native e2e tests
+        id: native_tests
+        continue-on-error: true
         working-directory: ./vm-rust
         run: cargo test --test mod -- e2e --nocapture
 
+      - name: Generate snapshot diff grid
+        if: always()
+        run: |
+          sudo apt-get install -yq imagemagick >/dev/null 2>&1 || true
+          bash scripts/build-diff-grid.sh vm-rust/tests/snapshots /tmp/diff-report
+
       - name: Upload test artifacts
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-test-results
-          path: vm-rust/tests/snapshots/output/
+          path: |
+            vm-rust/tests/snapshots/output/
+            vm-rust/tests/snapshots/diff/
+            /tmp/diff-report/
           retention-days: 7
+
+      - name: Post snapshot diff comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const script = require('./scripts/post-snapshot-comment.js');
+            await script({ github, context, label: 'native', artifactName: 'native-test-results' });
+
+      - name: Fail if native tests failed
+        if: steps.native_tests.outcome == 'failure'
+        run: exit 1
 
   browser:
     name: Browser tests
@@ -111,12 +134,12 @@ jobs:
           retention-days: 7
 
       - name: Post snapshot diff comment on PR
-        if: github.event_name == 'pull_request' && hashFiles('/tmp/diff-report/comment.md') != ''
+        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
             const script = require('./scripts/post-snapshot-comment.js');
-            await script({ github, context });
+            await script({ github, context, label: 'browser', artifactName: 'browser-test-results' });
 
       - name: Fail if browser tests failed
         if: steps.browser_tests.outcome == 'failure'

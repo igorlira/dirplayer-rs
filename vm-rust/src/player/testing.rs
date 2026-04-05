@@ -212,6 +212,7 @@ impl StageSnapshot {
             let pixel_count = (self.width * self.height) as usize;
             let mut diff_pixels = 0usize;
             let mut max_diff: u8 = 0;
+            let mut diff_img = vec![0u8; pixel_count * 4];
             for i in 0..pixel_count {
                 let off = i * 4;
                 let dr = (self.data[off] as i16 - reference_raw[off] as i16).unsigned_abs() as u8;
@@ -222,8 +223,31 @@ impl StageSnapshot {
                 if ch_max > 0 {
                     diff_pixels += 1;
                     max_diff = max_diff.max(ch_max);
+                    // Red highlight for changed pixels
+                    diff_img[off] = 255;
+                    diff_img[off + 1] = 0;
+                    diff_img[off + 2] = 0;
+                    diff_img[off + 3] = 255;
+                } else {
+                    // Dimmed reference pixel
+                    diff_img[off] = reference_raw[off] >> 2;
+                    diff_img[off + 1] = reference_raw[off + 1] >> 2;
+                    diff_img[off + 2] = reference_raw[off + 2] >> 2;
+                    diff_img[off + 3] = reference_raw[off + 3];
                 }
             }
+
+            // Save diff image if there are differences
+            if diff_pixels > 0 {
+                let diff_dir = base.join("diff").join(suite).join("native").join(test);
+                std::fs::create_dir_all(&diff_dir).unwrap();
+                let diff_path = diff_dir.join(&file_name);
+                let diff_rgba: image::RgbaImage =
+                    image::ImageBuffer::from_raw(self.width, self.height, diff_img)
+                        .expect("Failed to create diff image");
+                diff_rgba.save(&diff_path).unwrap();
+            }
+
             let ratio = diff_pixels as f64 / pixel_count as f64;
             if ratio > max_diff_ratio {
                 return Err(format!(
