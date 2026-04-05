@@ -1113,7 +1113,6 @@ impl FontMemberHandlers {
                 // fallback: find closest palette index
                 0
             }
-            _ => 0, // fallback
         }
     }
 
