@@ -38,6 +38,14 @@ jobs:
         working-directory: ./vm-rust
         run: cargo test --test mod -- e2e --nocapture
 
+      - name: Upload test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-test-results
+          path: vm-rust/tests/snapshots/output/
+          retention-days: 7
+
   browser:
     name: Browser tests
     runs-on: ubuntu-latest
