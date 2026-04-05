@@ -224,6 +224,34 @@ pub trait TestHarness {
         }
     }
 
+    /// Snapshot the stage cropped to a sprite's bounding rect.
+    /// The result includes other sprites that overlap the same area.
+    ///
+    /// ```ignore
+    /// let snap = player.snapshot_sprite(sprite().member("avatar")).await?;
+    /// snapshots.verify("avatar", snap)?;
+    /// ```
+    async fn snapshot_sprite(&self, query: impl Into<SpriteQuery>) -> Result<SnapshotOutput, String> {
+        let query = query.into();
+        let sprite_num = self.find_sprite(&query)
+            .ok_or_else(|| format!("No sprite with {} found", query))?;
+        let (l, t, r, b) = self.sprite_rect(sprite_num).await?;
+        Ok(self.snapshot_stage().crop(l, t, r, b))
+    }
+
+    /// Render a single sprite in isolation (transparent background, no other
+    /// sprites) and return the result cropped to its bounding rect.
+    ///
+    /// ```ignore
+    /// let snap = player.snapshot_sprite_isolated(sprite().member("avatar")).await?;
+    /// snapshots.verify("avatar_only", snap)?;
+    /// ```
+    async fn snapshot_sprite_isolated(&self, query: impl Into<SpriteQuery>) -> Result<SnapshotOutput, String> {
+        // Default: fall back to the crop approach. Browser harness overrides
+        // this with a true isolated render.
+        self.snapshot_sprite(query).await
+    }
+
     /// Click the center of a sprite matched by query.
     ///
     /// ```ignore

@@ -7,6 +7,48 @@ pub enum SnapshotOutput {
     Base64Png(String),
 }
 
+impl SnapshotOutput {
+    /// Crop to a pixel rectangle (left, top, right, bottom). Coordinates are
+    /// clamped to the image bounds.
+    pub fn crop(self, left: i32, top: i32, right: i32, bottom: i32) -> Self {
+        match self {
+            SnapshotOutput::Rgba { width, height, data } => {
+                let l = (left.max(0) as u32).min(width);
+                let t = (top.max(0) as u32).min(height);
+                let r = (right.max(0) as u32).min(width);
+                let b = (bottom.max(0) as u32).min(height);
+                let cw = r.saturating_sub(l);
+                let ch = b.saturating_sub(t);
+                let mut cropped = Vec::with_capacity((cw * ch * 4) as usize);
+                for row in t..b {
+                    let start = ((row * width + l) * 4) as usize;
+                    let end = start + (cw * 4) as usize;
+                    cropped.extend_from_slice(&data[start..end]);
+                }
+                SnapshotOutput::Rgba { width: cw, height: ch, data: cropped }
+            }
+            SnapshotOutput::Base64Png(b64) => {
+                use base64::Engine;
+                let png_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&b64).expect("Invalid base64 in snapshot");
+                let img = image::load_from_memory_with_format(&png_bytes, image::ImageFormat::Png)
+                    .expect("Failed to decode PNG snapshot");
+                let (iw, ih) = (img.width(), img.height());
+                let l = (left.max(0) as u32).min(iw);
+                let t = (top.max(0) as u32).min(ih);
+                let r = (right.max(0) as u32).min(iw);
+                let b = (bottom.max(0) as u32).min(ih);
+                let cropped = image::imageops::crop_imm(&img, l, t, r - l, b - t).to_image();
+                let mut buf = std::io::Cursor::new(Vec::new());
+                cropped.write_to(&mut buf, image::ImageFormat::Png)
+                    .expect("Failed to encode cropped PNG");
+                let new_b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+                SnapshotOutput::Base64Png(new_b64)
+            }
+        }
+    }
+}
+
 /// Tracks snapshot paths and diff tolerance for snapshot verification.
 ///
 /// `suite` is the top-level test suite (e.g. "habbo").
