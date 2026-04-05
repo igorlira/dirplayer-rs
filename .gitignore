@@ -35,3 +35,5 @@ public/dcr*
 /dist-extension-firefox
 /dist-extension-firefox.zip
 /dist-polyfill
+
+/test-results

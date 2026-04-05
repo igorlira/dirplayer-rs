@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   TEST_ASSETS_URL: ${{ secrets.TEST_ASSETS_URL }}
+  HABBO_V7_USERNAME: ${{ secrets.HABBO_V7_USERNAME }}
+  HABBO_V7_PASSWORD: ${{ secrets.HABBO_V7_PASSWORD }}
 
 jobs:
   native:
