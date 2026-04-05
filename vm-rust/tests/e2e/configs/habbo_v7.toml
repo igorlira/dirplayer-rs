@@ -5,5 +5,5 @@ path = "dcr_woodpecker/habbo.dcr"
 suite = "habbo_v7"
 
 [params]
-username = "${HABBO_USERNAME:testuser}"
-password = "${HABBO_PASSWORD:testpass}"
+username = "${HABBO_V7_USERNAME:testuser}"
+password = "${HABBO_V7_PASSWORD:testpass}"
