@@ -652,67 +652,6 @@ pub fn multiply_datums(
             let right_float = right.parse::<f64>().unwrap_or(0.0);
             Datum::Float((*left as f64) * right_float)
         }
-        // Point multiplication
-        (Datum::Point(a), Datum::Int(right)) => {
-            let right_ref = player.alloc_datum(Datum::Int(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
-        }
-        (Datum::Point(a), Datum::Float(right)) => {
-            let right_ref = player.alloc_datum(Datum::Float(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
-        }
-        (Datum::Int(left), Datum::Point(b)) => {
-            let left_ref = player.alloc_datum(Datum::Int(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
-        }
-        (Datum::Float(left), Datum::Point(b)) => {
-            let left_ref = player.alloc_datum(Datum::Float(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
-        }
         (Datum::Point(p), Datum::List(_, list, _)) if list.len() == 2 => {
             let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
             for i in 0..2 {
