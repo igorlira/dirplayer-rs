@@ -60,6 +60,8 @@
     "build-extension-firefox": "vite build -c vite.config.extension-firefox.js",
     "build-polyfill": "vite build -c vite.config.polyfill.js",
     "build-vm": "cd vm-rust && wasm-pack build --target web",
+    "e2e-test-native": "cd vm-rust && cargo test --test mod e2e",
+    "e2e-test-browser": "./scripts/run-browser-tests.sh",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "proxy": "node ws-tcp-proxy-all.cjs",
@@ -88,11 +90,14 @@
   "devDependencies": {
     "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
     "@crxjs/vite-plugin": "^2.0.0-beta.25",
+    "@playwright/test": "^1.59.1",
     "@types/pako": "^2.0.4",
+    "@types/pngjs": "^6.0.5",
     "@vitejs/plugin-react": "^2.1.0",
     "concurrently": "^9.2.1",
     "electron": "^38.3.0",
     "electron-builder": "^26.0.12",
+    "pngjs": "^7.0.0",
     "vite": "^3.0.0",
     "vite-plugin-svgr": "^4.2.0",
     "wait-on": "^9.0.1"

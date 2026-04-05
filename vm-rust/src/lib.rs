@@ -602,7 +602,7 @@ pub async fn mcp_eval_lingo(code: String) -> String {
 }
 
 #[wasm_bindgen(start)]
-pub fn main() {
+pub fn start() {
     set_panic_hook();
     init_player();
 }

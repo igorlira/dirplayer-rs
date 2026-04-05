@@ -1,1 +1,1 @@
-mod habbo_v7;
+mod habbo;
