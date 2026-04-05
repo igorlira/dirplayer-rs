@@ -8,4 +8,5 @@ pub mod sound;
 pub mod text;
 pub mod palette;
 pub mod havok;
+pub mod havok_physics;
 pub mod hke_parser;

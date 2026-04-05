@@ -1095,70 +1095,9 @@ pub struct FontMember {
 
 // ---- Havok Physics Member ----
 
-use std::collections::HashMap as StdHashMap;
 
-/// Wrapper for rapier3d physics world state.
-/// This is NOT Clone because rapier types don't implement Clone.
-/// When HavokPhysicsState is cloned the rapier world is set to None
-/// and gets recreated on the next initialize().
-///
-/// NOTE: rapier3d-f64 v0.32 uses glam types (DVec3 for Vector, DQuat for Rotation).
-/// QueryPipeline is a borrow obtained from BroadPhaseBvh, not stored here.
-pub struct RapierWorld {
-    pub pipeline: rapier3d_f64::prelude::PhysicsPipeline,
-    pub gravity: rapier3d_f64::prelude::Vector,
-    pub integration_parameters: rapier3d_f64::prelude::IntegrationParameters,
-    pub island_manager: rapier3d_f64::prelude::IslandManager,
-    pub broad_phase: rapier3d_f64::prelude::DefaultBroadPhase,
-    pub narrow_phase: rapier3d_f64::prelude::NarrowPhase,
-    pub rigid_body_set: rapier3d_f64::prelude::RigidBodySet,
-    pub collider_set: rapier3d_f64::prelude::ColliderSet,
-    pub impulse_joint_set: rapier3d_f64::prelude::ImpulseJointSet,
-    pub multibody_joint_set: rapier3d_f64::prelude::MultibodyJointSet,
-    pub ccd_solver: rapier3d_f64::prelude::CCDSolver,
-    /// Map from Havok rigid body name to rapier RigidBodyHandle
-    pub body_handles: StdHashMap<String, rapier3d_f64::prelude::RigidBodyHandle>,
-    /// Map from Havok rigid body name to rapier ColliderHandle
-    pub collider_handles: StdHashMap<String, rapier3d_f64::prelude::ColliderHandle>,
-}
 
-impl RapierWorld {
-    pub fn new(gravity: [f64; 3]) -> Self {
-        use rapier3d_f64::prelude::*;
-        Self {
-            pipeline: PhysicsPipeline::new(),
-            gravity: Vector::new(gravity[0], gravity[1], gravity[2]),
-            integration_parameters: IntegrationParameters::default(),
-            island_manager: IslandManager::new(),
-            broad_phase: DefaultBroadPhase::new(),
-            narrow_phase: NarrowPhase::new(),
-            rigid_body_set: RigidBodySet::new(),
-            collider_set: ColliderSet::new(),
-            impulse_joint_set: ImpulseJointSet::new(),
-            multibody_joint_set: MultibodyJointSet::new(),
-            ccd_solver: CCDSolver::new(),
-            body_handles: StdHashMap::new(),
-            collider_handles: StdHashMap::new(),
-        }
-    }
-
-    pub fn step(&mut self) {
-        self.pipeline.step(
-            self.gravity,
-            &self.integration_parameters,
-            &mut self.island_manager,
-            &mut self.broad_phase,
-            &mut self.narrow_phase,
-            &mut self.rigid_body_set,
-            &mut self.collider_set,
-            &mut self.impulse_joint_set,
-            &mut self.multibody_joint_set,
-            &mut self.ccd_solver,
-            &(),
-            &(),
-        );
-    }
-}
+// RapierWorld and HavokCollisionFilter removed — replaced by native Havok physics
 
 #[derive(Clone, Debug)]
 pub struct HavokCorrector {
@@ -1204,10 +1143,36 @@ pub struct HavokRigidBody {
     pub corrector: HavokCorrector,
     pub is_fixed: bool,
     pub is_convex: bool,
+    /// Half-extents of the mesh bounding box, for box inertia computation.
+    pub inertia_half_extents: [f64; 3],
+    // --- Full Havok engine state (ported from C# reference) ---
+    /// Orientation quaternion [w, x, y, z]. Internal physics state.
+    pub orientation: [f64; 4],
+    /// Inverse mass (0 if pinned/fixed).
+    pub inverse_mass: f64,
+    /// 3x3 inertia tensor (row-major). I = UnitInertiaTensor * mass.
+    pub inertia_tensor: [f64; 9],
+    /// 3x3 inverse inertia tensor (row-major).
+    pub inverse_inertia_tensor: [f64; 9],
+    /// Mass-independent unit inertia tensor.
+    pub unit_inertia_tensor: [f64; 9],
+    /// Saved state for bisection rollback.
+    pub saved_position: [f64; 3],
+    pub saved_orientation: [f64; 4],
+    pub saved_linear_velocity: [f64; 3],
+    pub saved_angular_velocity: [f64; 3],
 }
 
 impl HavokRigidBody {
     pub fn new_movable(name: &str, mass: f64, is_convex: bool) -> Self {
+        // Default box inertia: I = m/12 * diag(dy²+dz², dx²+dz², dx²+dy²) with 200x default scale
+        let he = 10.0_f64; // default half-extent
+        let d = 2.0 * he;
+        let m12 = mass / 12.0;
+        let unit_diag = d * d + d * d; // simplified: all axes equal
+        let unit_i = [unit_diag, 0.0, 0.0, 0.0, unit_diag, 0.0, 0.0, 0.0, unit_diag];
+        let i_tensor = [unit_i[0]*mass, 0.0, 0.0, 0.0, unit_i[4]*mass, 0.0, 0.0, 0.0, unit_i[8]*mass];
+        let inv_i = if mass > 0.0 { [1.0/(i_tensor[0]), 0.0, 0.0, 0.0, 1.0/(i_tensor[4]), 0.0, 0.0, 0.0, 1.0/(i_tensor[8])] } else { [0.0; 9] };
         Self {
             name: name.to_string(),
             position: [0.0; 3],
@@ -1228,6 +1193,16 @@ impl HavokRigidBody {
             corrector: HavokCorrector::default(),
             is_fixed: false,
             is_convex,
+            inertia_half_extents: [10.0; 3],
+            orientation: [1.0, 0.0, 0.0, 0.0],
+            inverse_mass: if mass > 0.0 { 1.0 / mass } else { 0.0 },
+            inertia_tensor: i_tensor,
+            inverse_inertia_tensor: inv_i,
+            unit_inertia_tensor: unit_i,
+            saved_position: [0.0; 3],
+            saved_orientation: [1.0, 0.0, 0.0, 0.0],
+            saved_linear_velocity: [0.0; 3],
+            saved_angular_velocity: [0.0; 3],
         }
     }
 
@@ -1252,6 +1227,16 @@ impl HavokRigidBody {
             corrector: HavokCorrector::default(),
             is_fixed: true,
             is_convex,
+            inertia_half_extents: [10.0; 3],
+            orientation: [1.0, 0.0, 0.0, 0.0],
+            inverse_mass: 0.0,
+            inertia_tensor: [0.0; 9],
+            inverse_inertia_tensor: [0.0; 9],
+            unit_inertia_tensor: [0.0; 9],
+            saved_position: [0.0; 3],
+            saved_orientation: [1.0, 0.0, 0.0, 0.0],
+            saved_linear_velocity: [0.0; 3],
+            saved_angular_velocity: [0.0; 3],
         }
     }
 }
@@ -1347,6 +1332,15 @@ pub struct HavokCollisionInterest {
     pub script_instance: Option<crate::player::DatumRef>,
 }
 
+/// Collision contact info for the collisionList property
+#[derive(Clone, Debug)]
+pub struct HavokCollisionInfo {
+    pub body_a: String,
+    pub body_b: String,
+    pub point: [f64; 3],
+    pub normal: [f64; 3],
+}
+
 pub struct HavokPhysicsState {
     pub initialized: bool,
     pub w3d_cast_lib: i32,
@@ -1367,8 +1361,14 @@ pub struct HavokPhysicsState {
     pub step_callbacks: Vec<(String, crate::player::DatumRef)>,  // (handler_name, script_instance)
     pub disabled_collision_pairs: Vec<(String, String)>,
     pub hke_data: Vec<u8>,
-    /// Rapier3d physics world. Not Clone -- set to None on clone, recreated on initialize().
-    pub rapier: Option<Box<RapierWorld>>,
+    /// Ground Z for native Havok ground constraint (flat plane fallback)
+    pub ground_z: f64,
+    /// Half-extent Z for ground collision (car body extends this far below position)
+    pub ground_body_half_z: f64,
+    /// Collision meshes from HKE data (positioned in world space)
+    pub collision_meshes: Vec<crate::player::handlers::datum_handlers::cast_member::havok_physics::CollisionMesh>,
+    /// Cached collision list from last step (for Lingo collisionList property)
+    pub collision_list_cache: Vec<HavokCollisionInfo>,
 }
 
 impl Clone for HavokPhysicsState {
@@ -1393,7 +1393,10 @@ impl Clone for HavokPhysicsState {
             step_callbacks: self.step_callbacks.clone(),
             disabled_collision_pairs: self.disabled_collision_pairs.clone(),
             hke_data: self.hke_data.clone(),
-            rapier: None,  // Physics world is not cloned -- gets recreated on initialize()
+            ground_z: self.ground_z,
+            ground_body_half_z: self.ground_body_half_z,
+            collision_meshes: Vec::new(), // Not cloned — rebuilt on initialize
+            collision_list_cache: Vec::new(),
         }
     }
 }
@@ -1403,7 +1406,6 @@ impl fmt::Debug for HavokPhysicsState {
         f.debug_struct("HavokPhysicsState")
             .field("initialized", &self.initialized)
             .field("rigid_bodies", &self.rigid_bodies.len())
-            .field("rapier", &self.rapier.is_some())
             .finish()
     }
 }
@@ -1430,7 +1432,10 @@ impl Default for HavokPhysicsState {
             step_callbacks: Vec::new(),
             disabled_collision_pairs: Vec::new(),
             hke_data: Vec::new(),
-            rapier: None,
+            ground_z: -1e20,
+            ground_body_half_z: 8.0,
+            collision_meshes: Vec::new(),
+            collision_list_cache: Vec::new(),
         }
     }
 }

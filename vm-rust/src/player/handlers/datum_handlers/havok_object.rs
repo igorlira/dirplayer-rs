@@ -103,6 +103,17 @@ impl HavokObjectDatumHandlers {
             "rotation" => {
                 let axis = rb.rotation_axis;
                 let angle = rb.rotation_angle;
+                let quat = rb.orientation;
+                {
+                    static RLOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let n = RLOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n < 5 {
+                        web_sys::console::log_1(&format!(
+                            "[HAVOK-ROT] '{}': axis=({:.3},{:.3},{:.3}) angle={:.3} quat=({:.3},{:.3},{:.3},{:.3})",
+                            rb.name, axis[0], axis[1], axis[2], angle, quat[0], quat[1], quat[2], quat[3]
+                        ).into());
+                    }
+                }
                 // Drop borrow before alloc
                 let axis_ref = player.alloc_datum(Datum::Vector(axis));
                 let angle_ref = player.alloc_datum(Datum::Float(angle));
@@ -171,19 +182,8 @@ impl HavokObjectDatumHandlers {
                         .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name)))?;
                     rb.rotation_axis = axis;
                     rb.rotation_angle = angle;
-                }
-                // Sync rotation to rapier
-                if let Some(ref mut rapier) = havok.state.rapier {
-                    if let Some(handle) = rapier.body_handles.get(rb_name) {
-                        if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                            use rapier3d_f64::prelude::*;
-                            let axis_len = (axis[0]*axis[0] + axis[1]*axis[1] + axis[2]*axis[2]).sqrt();
-                            if axis_len > 1e-10 {
-                                let scaled_axis = Vector::new(axis[0], axis[1], axis[2]).normalize() * angle;
-                                body.set_rotation(rotation_from_angle(scaled_axis), true);
-                            }
-                        }
-                    }
+                    // Update internal quaternion from axis-angle degrees
+                    rb.orientation = crate::player::handlers::datum_handlers::cast_member::havok_physics::quat_from_axis_angle_degrees(axis, angle);
                 }
             }
             return Ok(());
@@ -232,14 +232,36 @@ impl HavokObjectDatumHandlers {
                     if let Some((axis, angle)) = rotation_data {
                         rb.rotation_axis = axis;
                         rb.rotation_angle = angle;
+                        rb.orientation = crate::player::handlers::datum_handlers::cast_member::havok_physics::quat_from_axis_angle_degrees(axis, angle);
                         needs_w3d_sync = true;
                     }
                 }
-                "mass" => { rb.mass = value.to_float()?; }
+                "mass" => {
+                    let new_mass = value.to_float()?;
+                    rb.mass = new_mass;
+                    // Recompute inertia from mass + half extents (from C# RigidBody.SetMass)
+                    crate::player::handlers::datum_handlers::cast_member::havok_physics::recompute_body_inertia(
+                        new_mass, rb.inertia_half_extents,
+                        &mut rb.unit_inertia_tensor, &mut rb.inertia_tensor,
+                        &mut rb.inverse_inertia_tensor, &mut rb.inverse_mass,
+                    );
+                }
                 "restitution" => { rb.restitution = value.to_float()?; }
                 "friction" => { rb.friction = value.to_float()?; }
                 "active" => { rb.active = value.int_value()? != 0; }
-                "pinned" => { rb.pinned = value.int_value()? != 0; }
+                "pinned" => {
+                    let pinned = value.int_value()? != 0;
+                    rb.pinned = pinned;
+                    if pinned {
+                        rb.linear_velocity = [0.0; 3];
+                        rb.angular_velocity = [0.0; 3];
+                        rb.inverse_mass = 0.0;
+                        rb.inverse_inertia_tensor = [0.0; 9];
+                    } else if rb.mass > 0.0 {
+                        rb.inverse_mass = 1.0 / rb.mass;
+                        rb.inverse_inertia_tensor = crate::player::handlers::datum_handlers::cast_member::havok_physics::mat3_inverse(rb.inertia_tensor);
+                    }
+                }
                 "linearVelocity" | "linearvelocity" => { if let Datum::Vector(v) = &value { rb.linear_velocity = *v; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
                 "angularVelocity" | "angularvelocity" => { if let Datum::Vector(v) = &value { rb.angular_velocity = *v; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
                 "linearMomentum" | "linearmomentum" => { if let Datum::Vector(v) = &value { rb.linear_momentum = *v; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
@@ -252,43 +274,16 @@ impl HavokObjectDatumHandlers {
         let sync_data = if needs_w3d_sync {
             havok.state.rigid_bodies.iter()
                 .find(|r| r.name.eq_ignore_ascii_case(rb_name))
-                .map(|rb| (rb.position, rb.rotation_axis, rb.rotation_angle))
+                .map(|rb| (rb.position, rb.orientation, rb.center_of_mass))
         } else { None };
 
-        // rb borrow is dropped -- now sync relevant properties to rapier
-        if let Some(ref mut rapier) = havok.state.rapier {
-            if let Some(handle) = rapier.body_handles.get(rb_name) {
-                if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                    use rapier3d_f64::prelude::*;
-                    match prop {
-                        "position" => {
-                            if let Datum::Vector(v) = &value {
-                                body.set_translation(Vector::new(v[0], v[1], v[2]), true);
-                            }
-                        }
-                        "linearVelocity" | "linearvelocity" => {
-                            if let Datum::Vector(v) = &value {
-                                body.set_linvel(Vector::new(v[0], v[1], v[2]), true);
-                            }
-                        }
-                        "angularVelocity" | "angularvelocity" => {
-                            if let Datum::Vector(v) = &value {
-                                body.set_angvel(Vector::new(v[0], v[1], v[2]), true);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // Sync rigid body position+rotation to W3D model transform
-        if let Some((pos, rot_axis, rot_angle)) = sync_data {
+        // Sync rigid body position+rotation to W3D model transform (quaternion-based)
+        if let Some((pos, orientation, com)) = sync_data {
             let w3d_ref = CastMemberRef { cast_lib: w3d_cast_lib, cast_member: w3d_cast_member };
             if let Some(w3d_member) = player.movie.cast_manager.find_mut_member_by_ref(&w3d_ref) {
                 if let Some(w3d) = w3d_member.member_type.as_shockwave3d_mut() {
-                    let t = crate::player::handlers::datum_handlers::cast_member::havok::axis_angle_to_transform_f64(
-                        rot_axis, rot_angle, pos,
+                    let t = crate::player::handlers::datum_handlers::cast_member::havok_physics::build_sync_transform(
+                        pos, orientation, com,
                     );
                     w3d.runtime_state.node_transforms.insert(rb_name.to_string(), t);
                 }
@@ -332,58 +327,50 @@ impl HavokObjectDatumHandlers {
                     rb.force[1] += force[1];
                     rb.force[2] += force[2];
                 }
-                // Forward to rapier
-                if let Some(ref mut rapier) = havok.state.rapier {
-                    if let Some(handle) = rapier.body_handles.get(rb_name) {
-                        if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                            use rapier3d_f64::prelude::*;
-                            body.add_force(Vector::new(force[0], force[1], force[2]), true);
-                        }
-                    }
-                }
                 Ok(DatumRef::Void)
             }
             "applyForceAtPoint" | "applyforceatpoint" => {
                 let force = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                let point = match player.get_datum(&args[1]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
                 {
-                    let has_horizontal = force[0].abs() > 0.1 || force[1].abs() > 0.1;
-                    static FAP_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                    let n = FAP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if n < 5 || (n % 300 == 0) || has_horizontal {
-                        let mag = (force[0]*force[0] + force[1]*force[1] + force[2]*force[2]).sqrt();
+                    static FLOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let n = FLOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let mag = (force[0]*force[0]+force[1]*force[1]+force[2]*force[2]).sqrt();
+                    // Log every non-zero force, or every 100th call
+                    if mag > 0.001 || n < 10 || (n % 100 == 0) {
                         web_sys::console::log_1(&format!(
-                            "[HAVOK-FAP] applyForceAtPoint on '{}': ({:.1},{:.1},{:.1}) mag={:.1}{}",
-                            rb_name, force[0], force[1], force[2], mag,
-                            if has_horizontal { " *** DRIVE ***" } else { "" }
+                            "[HAVOK-FAP {}] '{}': f=({:.2},{:.2},{:.2}) mag={:.2} pt=({:.1},{:.1},{:.1})",
+                            n, rb_name, force[0], force[1], force[2], mag, point[0], point[1], point[2]
                         ).into());
                     }
                 }
-                let point = match player.get_datum(&args[1]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
                     CastMemberType::HavokPhysics(h) => h,
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
+
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    // Add linear force
+                    use super::cast_member::havok_physics::{v3_sub, quat_rotate_v, v3_cross};
+                    // Add linear force (world-space)
                     rb.force[0] += force[0];
                     rb.force[1] += force[1];
                     rb.force[2] += force[2];
-                    // Compute torque = cross(point - (position + centerOfMass), force)
-                    let r = [
-                        point[0] - rb.position[0] - rb.center_of_mass[0],
-                        point[1] - rb.position[1] - rb.center_of_mass[1],
-                        point[2] - rb.position[2] - rb.center_of_mass[2],
-                    ];
-                    rb.torque[0] += r[1]*force[2] - r[2]*force[1];
-                    rb.torque[1] += r[2]*force[0] - r[0]*force[2];
-                    rb.torque[2] += r[0]*force[1] - r[1]*force[0];
+
+                    // Compute world-space lever arm from model-local point.
+                    // From x86 sub_10005A73: rel = point - COM, world_lever = quat_rotate(rel)
+                    let rel = v3_sub(point, rb.center_of_mass);
+                    let r = quat_rotate_v(rb.orientation, rel);
+
+                    // Torque = cross(world_lever, force)
+                    let t = v3_cross(r, force);
+                    rb.torque[0] += t[0];
+                    rb.torque[1] += t[1];
+                    rb.torque[2] += t[2];
                 }
-                // Forces stay in Havok state only - Euler integration in step() handles movement.
-                // Rapier handles gravity + collision (vertical) only.
                 Ok(DatumRef::Void)
             }
             "applyImpulse" | "applyimpulse" => {
@@ -397,19 +384,9 @@ impl HavokObjectDatumHandlers {
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    if rb.mass > 0.0 {
-                        rb.linear_velocity[0] += impulse[0] / rb.mass;
-                        rb.linear_velocity[1] += impulse[1] / rb.mass;
-                        rb.linear_velocity[2] += impulse[2] / rb.mass;
-                    }
-                }
-                // Forward to rapier
-                if let Some(ref mut rapier) = havok.state.rapier {
-                    if let Some(handle) = rapier.body_handles.get(rb_name) {
-                        if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                            use rapier3d_f64::prelude::*;
-                            body.apply_impulse(Vector::new(impulse[0], impulse[1], impulse[2]), true);
-                        }
+                    use super::cast_member::havok_physics::{v3_add, v3_scale};
+                    if rb.inverse_mass > 0.0 {
+                        rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                     }
                 }
                 Ok(DatumRef::Void)
@@ -423,26 +400,23 @@ impl HavokObjectDatumHandlers {
                     CastMemberType::HavokPhysics(h) => h,
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
+
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    if rb.mass > 0.0 {
-                        rb.linear_velocity[0] += impulse[0] / rb.mass;
-                        rb.linear_velocity[1] += impulse[1] / rb.mass;
-                        rb.linear_velocity[2] += impulse[2] / rb.mass;
-                    }
-                }
-                // Forward to rapier with point application
-                if let Some(ref mut rapier) = havok.state.rapier {
-                    if let Some(handle) = rapier.body_handles.get(rb_name) {
-                        if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                            use rapier3d_f64::prelude::*;
-                            body.apply_impulse_at_point(
-                                Vector::new(impulse[0], impulse[1], impulse[2]),
-                                Vector::new(point[0], point[1], point[2]),
-                                true,
-                            );
-                        }
+                    use super::cast_member::havok_physics::{v3_sub, v3_add, v3_scale, v3_cross, quat_rotate_v, mat3_transform};
+                    if rb.inverse_mass > 0.0 {
+                        // Linear: v += impulse * inverseMass
+                        rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
+
+                        // Rotate model-local point by body orientation
+                        let rel = v3_sub(point, rb.center_of_mass);
+                        let r = quat_rotate_v(rb.orientation, rel);
+
+                        // Angular: omega += I_inv * cross(lever, impulse)
+                        let torque_impulse = v3_cross(r, impulse);
+                        let ang = mat3_transform(rb.inverse_inertia_tensor, torque_impulse);
+                        rb.angular_velocity = v3_add(rb.angular_velocity, ang);
                     }
                 }
                 Ok(DatumRef::Void)
@@ -462,15 +436,6 @@ impl HavokObjectDatumHandlers {
                     rb.torque[1] += torque[1];
                     rb.torque[2] += torque[2];
                 }
-                // Forward to rapier
-                if let Some(ref mut rapier) = havok.state.rapier {
-                    if let Some(handle) = rapier.body_handles.get(rb_name) {
-                        if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                            use rapier3d_f64::prelude::*;
-                            body.add_torque(Vector::new(torque[0], torque[1], torque[2]), true);
-                        }
-                    }
-                }
                 Ok(DatumRef::Void)
             }
             "applyAngularImpulse" | "applyangularimpulse" => {
@@ -484,18 +449,9 @@ impl HavokObjectDatumHandlers {
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    rb.angular_velocity[0] += impulse[0];
-                    rb.angular_velocity[1] += impulse[1];
-                    rb.angular_velocity[2] += impulse[2];
-                }
-                // Forward to rapier
-                if let Some(ref mut rapier) = havok.state.rapier {
-                    if let Some(handle) = rapier.body_handles.get(rb_name) {
-                        if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                            use rapier3d_f64::prelude::*;
-                            body.apply_torque_impulse(Vector::new(impulse[0], impulse[1], impulse[2]), true);
-                        }
-                    }
+                    use super::cast_member::havok_physics::{v3_add, mat3_transform};
+                    // angVel += I_inv * angularImpulse (from C# RigidBody.ApplyAngularImpulse)
+                    rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, impulse));
                 }
                 Ok(DatumRef::Void)
             }
@@ -525,22 +481,7 @@ impl HavokObjectDatumHandlers {
                     if let Some((axis, angle)) = rotation {
                         rb.rotation_axis = axis;
                         rb.rotation_angle = angle;
-                    }
-                }
-                // Sync position to rapier
-                if let Some(ref mut rapier) = havok.state.rapier {
-                    if let Some(handle) = rapier.body_handles.get(rb_name) {
-                        if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                            use rapier3d_f64::prelude::*;
-                            body.set_translation(Vector::new(pos[0], pos[1], pos[2]), true);
-                            if let Some((axis, angle)) = rotation {
-                                let axis_len = (axis[0]*axis[0] + axis[1]*axis[1] + axis[2]*axis[2]).sqrt();
-                                if axis_len > 1e-10 {
-                                    let scaled_axis = Vector::new(axis[0], axis[1], axis[2]).normalize() * angle;
-                                    body.set_rotation(rotation_from_angle(scaled_axis), true);
-                                }
-                            }
-                        }
+                        rb.orientation = crate::player::handlers::datum_handlers::cast_member::havok_physics::quat_from_axis_angle_degrees(axis, angle);
                     }
                 }
                 // Always return TRUE (move succeeded)
@@ -559,15 +500,6 @@ impl HavokObjectDatumHandlers {
                 {
                     rb.position = pos;
                 }
-                // Sync position to rapier
-                if let Some(ref mut rapier) = havok.state.rapier {
-                    if let Some(handle) = rapier.body_handles.get(rb_name) {
-                        if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                            use rapier3d_f64::prelude::*;
-                            body.set_translation(Vector::new(pos[0], pos[1], pos[2]), true);
-                        }
-                    }
-                }
                 // Return 1.0 (fully moved)
                 Ok(player.alloc_datum(Datum::Float(1.0)))
             }
@@ -583,15 +515,6 @@ impl HavokObjectDatumHandlers {
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
                     rb.position = pos;
-                }
-                // Sync position to rapier
-                if let Some(ref mut rapier) = havok.state.rapier {
-                    if let Some(handle) = rapier.body_handles.get(rb_name) {
-                        if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                            use rapier3d_f64::prelude::*;
-                            body.set_translation(Vector::new(pos[0], pos[1], pos[2]), true);
-                        }
-                    }
                 }
                 Ok(DatumRef::Void)
             }
@@ -610,6 +533,10 @@ impl HavokObjectDatumHandlers {
                     rb.center_of_mass[1] += offset[1];
                     rb.center_of_mass[2] += offset[2];
                 }
+                // Native Havok: rb.position stays at VISUAL origin.
+                // COM offset is stored in rb.center_of_mass and used by
+                // build_sync_transform and applyForceAtPoint.
+                // Do NOT shift rb.position — that would break Lingo readback.
                 Ok(DatumRef::Void)
             }
             "getProp" => {

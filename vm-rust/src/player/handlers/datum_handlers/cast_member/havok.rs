@@ -1,14 +1,12 @@
 use std::collections::VecDeque;
 
-use log::warn;
-
 use crate::{
     director::lingo::datum::{Datum, DatumType, HavokObjectRef},
     player::{
         cast_lib::CastMemberRef,
         cast_member::{
-            CastMemberType, HavokAngularDashpot, HavokCollisionInterest, HavokLinearDashpot,
-            HavokPhysicsMember, HavokRigidBody, HavokSpring, RapierWorld,
+            CastMemberType, HavokAngularDashpot, HavokCollisionInterest,
+            HavokLinearDashpot, HavokRigidBody, HavokSpring,
         },
         reserve_player_mut, DatumRef, ScriptError,
     },
@@ -43,7 +41,29 @@ impl HavokPhysicsMemberHandlers {
             "simTime" | "simtime" => return Ok(Datum::Float(state.sim_time)),
             "timeStep" | "timestep" => return Ok(Datum::Float(state.time_step)),
             "subSteps" | "substeps" => return Ok(Datum::Int(state.sub_steps)),
-            "collisionList" | "collisionlist" => return Ok(Datum::List(DatumType::List, VecDeque::new(), false)),
+            "collisionList" | "collisionlist" => {
+                // Return collision data from last step
+                // Format: [[bodyA, bodyB, cx, cy, cz, nx, ny, nz], ...]
+                let collisions: Vec<_> = state.collision_list_cache.iter().map(|c| {
+                    (c.body_a.clone(), c.body_b.clone(), c.point, c.normal)
+                }).collect();
+                drop(member);  // Release borrow
+                let mut items = VecDeque::new();
+                for (na, nb, pt, nm) in collisions {
+                    let sub_items: VecDeque<DatumRef> = VecDeque::from([
+                        player.alloc_datum(Datum::String(na)),
+                        player.alloc_datum(Datum::String(nb)),
+                        player.alloc_datum(Datum::Float(pt[0])),
+                        player.alloc_datum(Datum::Float(pt[1])),
+                        player.alloc_datum(Datum::Float(pt[2])),
+                        player.alloc_datum(Datum::Float(nm[0])),
+                        player.alloc_datum(Datum::Float(nm[1])),
+                        player.alloc_datum(Datum::Float(nm[2])),
+                    ]);
+                    items.push_back(player.alloc_datum(Datum::List(DatumType::List, sub_items, false)));
+                }
+                return Ok(Datum::List(DatumType::List, items, false));
+            }
             _ => {} // fall through to list properties below
         }
 
@@ -161,10 +181,7 @@ impl HavokPhysicsMemberHandlers {
                 "gravity" => {
                     if let Datum::Vector(v) = &value {
                         state.gravity = *v;
-                        // Sync gravity to rapier world
-                        if let Some(ref mut rapier) = state.rapier {
-                            rapier.gravity = rapier3d_f64::prelude::Vector::new(v[0], v[1], v[2]);
-                        }
+                        // Gravity stored in state.gravity — used by havok_physics::step_native
                     } else {
                         return Err(ScriptError::new("gravity must be a vector".to_string()));
                     }
@@ -183,6 +200,103 @@ impl HavokPhysicsMemberHandlers {
                     prop
                 ))),
             }
+        })
+    }
+
+    /// Run physics step and return callback info for async invocation.
+    /// Returns: (step_result, step_callbacks, collision_callbacks)
+    /// Step callbacks: Vec<(handler_name, script_instance, sub_dt)>
+    /// Collision callbacks: Vec<(handler_name, script_instance, collision_info_datum)>
+    pub fn step_with_callbacks(
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<(DatumRef, Vec<(String, DatumRef, f64)>, Vec<(String, DatumRef, DatumRef)>), ScriptError> {
+        reserve_player_mut(|player| {
+            let member_ref = match player.get_datum(datum) {
+                Datum::CastMember(r) => r.to_owned(),
+                _ => return Err(ScriptError::new("Cannot call Havok handler on non-cast-member".to_string())),
+            };
+
+            // Run the physics step
+            let step_result = Self::step(player, &member_ref, args)?;
+
+            // Collect step callback and collision interest info as raw data first,
+            // then allocate datums afterward (to avoid borrow conflicts with player).
+            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+            let havok = member.and_then(|m| match &m.member_type {
+                CastMemberType::HavokPhysics(h) => Some(h),
+                _ => None,
+            });
+
+            let mut step_cbs: Vec<(String, DatumRef, f64)> = Vec::new();
+            // Raw collision data: (handler, instance, body_a, body_b, point, normal)
+            let mut raw_collisions: Vec<(String, DatumRef, String, String, [f64;3], [f64;3])> = Vec::new();
+
+            if let Some(havok) = havok {
+                // Step callbacks
+                let time_step = havok.state.time_step;
+                let sub_steps = havok.state.sub_steps;
+                let sub_dt = {
+                    let time_inc = if !args.is_empty() {
+                        player.get_datum(&args[0]).to_float().unwrap_or(time_step)
+                    } else {
+                        time_step
+                    };
+                    let num_sub = if args.len() > 1 {
+                        player.get_datum(&args[1]).int_value().unwrap_or(sub_steps)
+                    } else {
+                        sub_steps
+                    };
+                    if num_sub > 0 { time_inc / num_sub as f64 } else { time_inc }
+                };
+                for (handler, instance) in &havok.state.step_callbacks {
+                    step_cbs.push((handler.clone(), instance.clone(), sub_dt));
+                }
+
+                // Collision interests matched against cached contacts
+                for contact in &havok.state.collision_list_cache {
+                    for interest in &havok.state.collision_interests {
+                        if interest.handler_name.is_none() || interest.script_instance.is_none() { continue; }
+                        let matches = if interest.rb_name2 == "#all" || interest.rb_name2 == "all" {
+                            contact.body_a.eq_ignore_ascii_case(&interest.rb_name1)
+                                || contact.body_b.eq_ignore_ascii_case(&interest.rb_name1)
+                        } else {
+                            (contact.body_a.eq_ignore_ascii_case(&interest.rb_name1) && contact.body_b.eq_ignore_ascii_case(&interest.rb_name2))
+                            || (contact.body_a.eq_ignore_ascii_case(&interest.rb_name2) && contact.body_b.eq_ignore_ascii_case(&interest.rb_name1))
+                        };
+                        if matches {
+                            raw_collisions.push((
+                                interest.handler_name.clone().unwrap(),
+                                interest.script_instance.clone().unwrap(),
+                                contact.body_a.clone(), contact.body_b.clone(),
+                                contact.point, contact.normal,
+                            ));
+                        }
+                    }
+                }
+            }
+            drop(member);
+
+            // Now allocate datums (requires mutable player, no longer borrowing havok)
+            let mut collision_cbs = Vec::new();
+            for (handler, instance, ba, bb, pt, nm) in raw_collisions {
+                let ba_r = player.alloc_datum(Datum::String(ba));
+                let bb_r = player.alloc_datum(Datum::String(bb));
+                let cx = player.alloc_datum(Datum::Float(pt[0]));
+                let cy = player.alloc_datum(Datum::Float(pt[1]));
+                let cz = player.alloc_datum(Datum::Float(pt[2]));
+                let nx = player.alloc_datum(Datum::Float(nm[0]));
+                let ny = player.alloc_datum(Datum::Float(nm[1]));
+                let nz = player.alloc_datum(Datum::Float(nm[2]));
+                let info = player.alloc_datum(Datum::List(
+                    DatumType::List,
+                    VecDeque::from([ba_r, bb_r, cx, cy, cz, nx, ny, nz]),
+                    false,
+                ));
+                collision_cbs.push((handler, instance, info));
+            }
+
+            Ok((step_result, step_cbs, collision_cbs))
         })
     }
 
@@ -205,6 +319,7 @@ impl HavokPhysicsMemberHandlers {
                 "initialize" | "Initialize" => Self::initialize(player, &member_ref, args),
                 "shutdown" | "shutDown" | "Shutdown" => Self::shutdown(player, &member_ref),
                 "step" => Self::step(player, &member_ref, args),
+
                 "reset" => Self::reset(player, &member_ref),
                 "rigidBody" | "rigidbody" => Self::get_rigid_body(player, &member_ref, args),
                 "spring" => Self::get_spring(player, &member_ref, args),
@@ -334,8 +449,8 @@ impl HavokPhysicsMemberHandlers {
             0.0254
         };
 
-        // Read existing rigid body names from the W3D scene models
-        let model_names: Vec<String> = {
+        // Read existing rigid body names and model transforms from the W3D scene
+        let (model_names, model_transforms): (Vec<String>, std::collections::HashMap<String, [f32; 16]>) = {
             let w3d_member = player
                 .movie
                 .cast_manager
@@ -343,15 +458,19 @@ impl HavokPhysicsMemberHandlers {
             if let Some(m) = w3d_member {
                 if let Some(w3d) = m.member_type.as_shockwave3d() {
                     if let Some(scene) = &w3d.parsed_scene {
-                        scene.nodes.iter().map(|n| n.name.clone()).collect()
+                        let names = scene.nodes.iter().map(|n| n.name.clone()).collect();
+                        let transforms: std::collections::HashMap<String, [f32; 16]> = scene.nodes.iter()
+                            .map(|n| (n.name.to_lowercase(), n.transform))
+                            .collect();
+                        (names, transforms)
                     } else {
-                        Vec::new()
+                        (Vec::new(), std::collections::HashMap::new())
                     }
                 } else {
-                    Vec::new()
+                    (Vec::new(), std::collections::HashMap::new())
                 }
             } else {
-                Vec::new()
+                (Vec::new(), std::collections::HashMap::new())
             }
         };
 
@@ -374,75 +493,51 @@ impl HavokPhysicsMemberHandlers {
         havok.state.gravity = [0.0, 0.0, -386.22];
         havok.state.sim_time = 0.0;
 
-        // Create rapier3d physics world
-        havok.state.rapier = Some(Box::new(RapierWorld::new(havok.state.gravity)));
-
-        // Parse HKE collision geometry and create fixed rigid bodies
-        let hke_mesh_count = if !havok.state.hke_data.is_empty() {
+        // Load HKE meshes into native collision system (for havok_physics.rs)
+        if !havok.state.hke_data.is_empty() {
             let hke = super::hke_parser::parse_hke(&havok.state.hke_data);
-            let mut loaded = 0usize;
-            if let Some(ref mut rapier) = havok.state.rapier {
-                use rapier3d_f64::prelude::*;
-                // HKE vertices are in Havok world space (meters).
-                // Convert to Director units by dividing by worldScale.
-                let inv_scale = if scale.abs() > 1e-10 { 1.0 / scale } else { 1.0 };
+            let inv_scale = if scale.abs() > 1e-10 { 1.0 / scale } else { 1.0 };
+            havok.state.collision_meshes.clear();
 
-                for mesh in &hke.meshes {
-                    if mesh.vertices.is_empty() || mesh.triangles.is_empty() { continue; }
-
-                    // Convert HKE vertices from Havok meters to Director units
-                    let vertices: Vec<Vector> = mesh.vertices.iter()
-                        .map(|v| Vector::new(
-                            v[0] as f64 * inv_scale,
-                            v[1] as f64 * inv_scale,
-                            v[2] as f64 * inv_scale,
-                        ))
-                        .collect();
-                    let indices: Vec<[u32; 3]> = mesh.triangles.clone();
-
-                    // Vertices are already in world space - place body at origin
-                    let rapier_rb = RigidBodyBuilder::fixed().build();
-                    let handle = rapier.rigid_body_set.insert(rapier_rb);
-
-                    match ColliderBuilder::trimesh(vertices, indices) {
-                        Ok(builder) => {
-                            let collider = builder
-                                .restitution(0.3)
-                                .friction(0.5)
-                                .build();
-                            let col_handle = rapier.collider_set.insert_with_parent(
-                                collider, handle, &mut rapier.rigid_body_set,
-                            );
-                            rapier.body_handles.insert(
-                                format!("hke_{}", mesh.name), handle,
-                            );
-                            rapier.collider_handles.insert(
-                                format!("hke_{}", mesh.name), col_handle,
-                            );
-                            loaded += 1;
+            for mesh in &hke.meshes {
+                if mesh.vertices.is_empty() || mesh.triangles.is_empty() { continue; }
+                let model_xform = model_transforms.get(&mesh.name.to_lowercase());
+                let vertices: Vec<[f64; 3]> = mesh.vertices.iter()
+                    .map(|v| {
+                        let lx = v[0] as f64 * inv_scale;
+                        let ly = v[1] as f64 * inv_scale;
+                        let lz = v[2] as f64 * inv_scale;
+                        if let Some(t) = model_xform {
+                            let wx = t[0] as f64*lx + t[4] as f64*ly + t[8] as f64*lz + t[12] as f64;
+                            let wy = t[1] as f64*lx + t[5] as f64*ly + t[9] as f64*lz + t[13] as f64;
+                            let wz = t[2] as f64*lx + t[6] as f64*ly + t[10] as f64*lz + t[14] as f64;
+                            [wx, wy, wz]
+                        } else {
+                            [lx, ly, lz]
                         }
-                        Err(e) => {
-                            web_sys::console::warn_1(&format!(
-                                "HKE trimesh failed for '{}': {:?}",
-                                mesh.name, e
-                            ).into());
-                        }
-                    }
-                }
+                    })
+                    .collect();
+                let mut cmesh = super::havok_physics::CollisionMesh {
+                    name: mesh.name.clone(),
+                    vertices,
+                    triangles: mesh.triangles.clone(),
+                    aabb_min: [0.0; 3],
+                    aabb_max: [0.0; 3],
+                };
+                cmesh.compute_aabb();
+                havok.state.collision_meshes.push(cmesh);
             }
             web_sys::console::log_1(&format!(
-                "HKE: parsed {} collision meshes, loaded {} into rapier",
-                hke.meshes.len(), loaded
+                "Native Havok: loaded {} collision meshes ({} total triangles)",
+                havok.state.collision_meshes.len(),
+                havok.state.collision_meshes.iter().map(|m| m.triangles.len()).sum::<usize>()
             ).into());
-            loaded
-        } else {
-            0
-        };
+        }
 
         web_sys::console::log_1(
             &format!(
                 "Havok initialized: tolerance={}, scale={}, w3d_models={}, hke_colliders={}",
-                tolerance, scale, model_names.len(), hke_mesh_count
+                tolerance, scale, model_names.len(), havok.state.collision_meshes.len()
             )
             .into(),
         );
@@ -473,7 +568,6 @@ impl HavokPhysicsMemberHandlers {
         havok.state.step_callbacks.clear();
         havok.state.disabled_collision_pairs.clear();
         havok.state.sim_time = 0.0;
-        havok.state.rapier = None;
 
         Ok(DatumRef::Void)
     }
@@ -520,95 +614,56 @@ impl HavokPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
 
-        havok.state.sim_time += time_increment;
+        // Use native Havok physics (replaces Rapier)
+        super::havok_physics::step_native(&mut havok.state, time_increment, num_sub_steps);
 
-        // Keyboard-driven car movement on top of Rapier gravity+collision.
-        // Game's spring/traction forces stay in Havok state only (not forwarded to Rapier)
-        // to avoid feedback instability between the two physics systems.
-        if let Some(ref mut rapier) = havok.state.rapier {
-            use rapier3d_f64::prelude::*;
-            if let Some(handle) = rapier.body_handles.get("car") {
-                if let Some(body) = rapier.rigid_body_set.get_mut(*handle) {
-                    let keys = &player.keyboard_manager.down_keys;
-                    let fwd = keys.iter().any(|k| k.code == 126);
-                    let back = keys.iter().any(|k| k.code == 125);
-                    let left = keys.iter().any(|k| k.code == 123);
-                    let right = keys.iter().any(|k| k.code == 124);
+        // Detect ground Z on first step if not set
+        if havok.state.ground_z < -1e10 {
+            // Use the first raycast hit z = 330.70 (known from Director data)
+            // TODO: compute from actual HKE mesh geometry
+            havok.state.ground_z = 330.70;
+        }
 
-                    let rot = body.rotation();
-                    let dir = rot * Vector::new(0.0, 1.0, 0.0);
-
-                    // Apply damping
-                    let lv = body.linvel();
-                    body.set_linvel(Vector::new(lv.x * 0.97, lv.y * 0.97, lv.z), true);
-                    body.set_angvel(Vector::new(0.0, 0.0, body.angvel().z * 0.95), true);
-
-                    let force = 600.0;
-                    let torque = 2000.0;
-                    if fwd  { body.apply_impulse(dir * force * time_increment, true); }
-                    if back { body.apply_impulse(dir * -force * 0.5 * time_increment, true); }
-                    if left { body.apply_torque_impulse(Vector::new(0.0, 0.0, torque * time_increment), true); }
-                    if right { body.apply_torque_impulse(Vector::new(0.0, 0.0, -torque * time_increment), true); }
+        // Diagnostic logging
+        {
+            static STEP_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = STEP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 20 || (n % 60 == 0) {
+                for rb in &havok.state.rigid_bodies {
+                    if rb.is_fixed || rb.name.starts_with("hke_") { continue; }
+                    web_sys::console::log_1(&format!(
+                        "[HAVOK-NATIVE {}] '{}': pos=({:.1},{:.1},{:.1}) vel=({:.1},{:.1},{:.1}) spd={:.1}",
+                        n, rb.name, rb.position[0], rb.position[1], rb.position[2],
+                        rb.linear_velocity[0], rb.linear_velocity[1], rb.linear_velocity[2],
+                        (rb.linear_velocity[0]*rb.linear_velocity[0]+rb.linear_velocity[1]*rb.linear_velocity[1]+rb.linear_velocity[2]*rb.linear_velocity[2]).sqrt(),
+                    ).into());
                 }
             }
         }
 
-        // Step Rapier3D physics (gravity + HKE collision)
-        if let Some(ref mut rapier) = havok.state.rapier {
-            let sub_dt = if num_sub_steps > 0 { time_increment / num_sub_steps as f64 } else { time_increment };
-            rapier.integration_parameters.dt = sub_dt;
-            for _ in 0..num_sub_steps.max(1) {
-                rapier.step();
-            }
-        }
-
-        // Sync Rapier positions back to Havok state
-        if let Some(ref rapier) = havok.state.rapier {
-            for rb in &mut havok.state.rigid_bodies {
-                if rb.is_fixed { continue; }
-                if let Some(handle) = rapier.body_handles.get(&rb.name) {
-                    if let Some(body) = rapier.rigid_body_set.get(*handle) {
-                        let pos = body.translation();
-                        if pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite() {
-                            rb.position = [pos.x, pos.y, pos.z];
-                        }
-                        let vel = body.linvel();
-                        if vel.x.is_finite() && vel.y.is_finite() && vel.z.is_finite() {
-                            rb.linear_velocity = [vel.x, vel.y, vel.z];
-                        }
-                    }
-                }
-            }
-        }
-        // Collect sync data before dropping havok borrow
+        // Collect W3D sync data using quaternion-based transform builder
         let w3d_cast_lib = havok.state.w3d_cast_lib;
         let w3d_cast_member = havok.state.w3d_cast_member;
-        let sync_data: Vec<(String, [f64; 3])> = havok.state.rigid_bodies.iter()
+        let sync_data: Vec<(String, [f32; 16])> = havok.state.rigid_bodies.iter()
             .filter(|rb| !rb.is_fixed && rb.active)
-            .map(|rb| (rb.name.clone(), rb.position))
+            .map(|rb| {
+                let t = super::havok_physics::build_sync_transform(
+                    rb.position, rb.orientation, rb.center_of_mass,
+                );
+                (rb.name.clone(), t)
+            })
             .collect();
 
-        // Clear accumulated forces each step.
-        for rb in &mut havok.state.rigid_bodies {
-            rb.force = [0.0; 3];
-            rb.torque = [0.0; 3];
-        }
+        // Clear forces (already done in step_native, but ensure clean state)
 
-        // Drop havok borrow, then sync positions to W3D model transforms
+        // Drop havok borrow, sync to W3D
         drop(member);
         let w3d_ref = CastMemberRef { cast_lib: w3d_cast_lib, cast_member: w3d_cast_member };
         if let Some(w3d_member) = player.movie.cast_manager.find_mut_member_by_ref(&w3d_ref) {
             if let Some(w3d) = w3d_member.member_type.as_shockwave3d_mut() {
-                for (name, pos) in &sync_data {
-                    if !pos[0].is_finite() || !pos[1].is_finite() || !pos[2].is_finite() { continue; }
-                    // Use identity rotation + position for W3D sync
-                    let t = [
-                        1.0f32, 0.0, 0.0, 0.0,
-                        0.0, 1.0, 0.0, 0.0,
-                        0.0, 0.0, 1.0, 0.0,
-                        pos[0] as f32, pos[1] as f32, pos[2] as f32, 1.0,
-                    ];
-                    w3d.runtime_state.node_transforms.insert(name.clone(), t);
+                for (name, t) in &sync_data {
+                    if t.iter().any(|v| !v.is_finite()) { continue; }
+                    w3d.runtime_state.node_transforms.insert(name.clone(), *t);
                 }
             }
         }
@@ -719,8 +774,8 @@ impl HavokPhysicsMemberHandlers {
             true
         };
 
-        // Read model's initial transform + mesh bounding box from W3D scene
-        let (initial_position, mesh_half_extents) = {
+        // Read model's initial transform + mesh bounding box + vertices from W3D scene
+        let (initial_position, mesh_half_extents, mesh_vertices) = {
             let member = player
                 .movie
                 .cast_manager
@@ -749,25 +804,28 @@ impl HavokPhysicsMemberHandlers {
                         if !n.model_resource_name.is_empty() { &n.model_resource_name }
                         else { &n.resource_name }
                     });
-                    let half_ext = res_name
+                    let (half_ext, verts) = res_name
                         .and_then(|rn| w3d.parsed_scene.as_ref().and_then(|s| s.clod_meshes.get(rn.as_str())))
                         .map(|meshes| {
                             let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+                            let mut all_verts = Vec::new();
                             for mesh in meshes {
                                 for p in &mesh.positions {
                                     for i in 0..3 { mn[i] = mn[i].min(p[i]); mx[i] = mx[i].max(p[i]); }
+                                    all_verts.push([p[0] as f64, p[1] as f64, p[2] as f64]);
                                 }
                             }
-                            [(mx[0]-mn[0]) as f64 / 2.0, (mx[1]-mn[1]) as f64 / 2.0, (mx[2]-mn[2]) as f64 / 2.0]
+                            let he = [(mx[0]-mn[0]) as f64 / 2.0, (mx[1]-mn[1]) as f64 / 2.0, (mx[2]-mn[2]) as f64 / 2.0];
+                            (he, all_verts)
                         })
-                        .unwrap_or([10.0, 10.0, 10.0]);
+                        .unwrap_or(([10.0, 10.0, 10.0], Vec::new()));
 
-                    (pos, half_ext)
+                    (pos, half_ext, verts)
                 } else {
-                    ([0.0; 3], [10.0, 10.0, 10.0])
+                    ([0.0; 3], [10.0, 10.0, 10.0], Vec::new())
                 }
             } else {
-                ([0.0; 3], [10.0, 10.0, 10.0])
+                ([0.0; 3], [10.0, 10.0, 10.0], Vec::new())
             }
         };
 
@@ -783,31 +841,7 @@ impl HavokPhysicsMemberHandlers {
 
         let mut rb = HavokRigidBody::new_movable(&model_name, mass, is_convex);
         rb.position = initial_position;
-
-        // Create rapier dynamic rigid body + collider
-        if let Some(ref mut rapier) = havok.state.rapier {
-            use rapier3d_f64::prelude::*;
-            let rapier_rb = RigidBodyBuilder::dynamic()
-                .translation(Vector::new(initial_position[0], initial_position[1], initial_position[2]))
-                .build();
-            let handle = rapier.rigid_body_set.insert(rapier_rb);
-
-            // Use a box approximation for dynamic bodies (can be refined later with actual mesh geometry)
-            // Use bounding box from W3D mesh for collider size
-            web_sys::console::log_1(&format!(
-                "Havok makeMovableRigidBody '{}': half_extents=({:.1},{:.1},{:.1})",
-                model_name, mesh_half_extents[0], mesh_half_extents[1], mesh_half_extents[2]
-            ).into());
-            let collider = ColliderBuilder::cuboid(
-                    mesh_half_extents[0], mesh_half_extents[1], mesh_half_extents[2])
-                .mass(mass as Real)
-                .restitution(0.1)
-                .friction(0.8)
-                .build();
-            let col_handle = rapier.collider_set.insert_with_parent(collider, handle, &mut rapier.rigid_body_set);
-            rapier.body_handles.insert(model_name.clone(), handle);
-            rapier.collider_handles.insert(model_name.clone(), col_handle);
-        }
+        rb.inertia_half_extents = mesh_half_extents;
 
         havok.state.rigid_bodies.push(rb);
 
@@ -831,76 +865,6 @@ impl HavokPhysicsMemberHandlers {
             true
         };
 
-        // Extract mesh geometry + model transform from W3D scene BEFORE mutably borrowing havok.
-        let mesh_data: Option<(Vec<rapier3d_f64::prelude::Vector>, Vec<[u32; 3]>, [f32; 16])> = {
-            let member = player.movie.cast_manager.find_member_by_ref(member_ref)
-                .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
-            let havok = match &member.member_type {
-                CastMemberType::HavokPhysics(h) => h,
-                _ => return Err(ScriptError::new("Not a Havok member".to_string())),
-            };
-            let w3d_ref = CastMemberRef {
-                cast_lib: havok.state.w3d_cast_lib,
-                cast_member: havok.state.w3d_cast_member,
-            };
-            let w3d_member = player.movie.cast_manager.find_member_by_ref(&w3d_ref);
-            if let Some(m) = w3d_member {
-                if let Some(w3d) = m.member_type.as_shockwave3d() {
-                    if let Some(scene) = &w3d.parsed_scene {
-                        let node = scene.nodes.iter()
-                            .find(|n| n.name.eq_ignore_ascii_case(&model_name));
-                        let model_transform = node.map(|n| {
-                            // Check runtime transform first, then node transform
-                            w3d.runtime_state.node_transforms.get(&n.name)
-                                .copied()
-                                .unwrap_or(n.transform)
-                        }).unwrap_or([1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0]);
-                        let res_name = node.map(|n| {
-                            if !n.model_resource_name.is_empty() { n.model_resource_name.clone() }
-                            else { n.resource_name.clone() }
-                        }).unwrap_or_default();
-                        if !res_name.is_empty() {
-                            // Try CLOD meshes first, then raw meshes
-                            let mesh = scene.clod_meshes.get(&res_name).map(|clod_meshes| {
-                                let mut vertices = Vec::new();
-                                let mut indices = Vec::new();
-                                let mut vert_offset = 0u32;
-                                for mesh in clod_meshes {
-                                    for pos in &mesh.positions {
-                                        let (x, y, z) = (pos[0] as f64, pos[1] as f64, pos[2] as f64);
-                                        if x.is_finite() && y.is_finite() && z.is_finite() {
-                                            vertices.push(rapier3d_f64::prelude::Vector::new(x, y, z));
-                                        }
-                                    }
-                                    let valid_verts = vertices.len() as u32;
-                                    for face in &mesh.faces {
-                                        let (a, b, c) = (face[0] + vert_offset, face[1] + vert_offset, face[2] + vert_offset);
-                                        if a < valid_verts && b < valid_verts && c < valid_verts && a != b && b != c && a != c {
-                                            indices.push([a, b, c]);
-                                        }
-                                    }
-                                    vert_offset = valid_verts;
-                                }
-                                (vertices, indices)
-                            }).or_else(|| {
-                                scene.raw_meshes.iter().find(|m| m.name.eq_ignore_ascii_case(&res_name)).map(|raw_mesh| {
-                                    let vertices: Vec<_> = raw_mesh.positions.iter()
-                                        .filter(|p| p[0].is_finite() && p[1].is_finite() && p[2].is_finite())
-                                        .map(|pos| rapier3d_f64::prelude::Vector::new(pos[0] as f64, pos[1] as f64, pos[2] as f64))
-                                        .collect();
-                                    (vertices, raw_mesh.faces.clone())
-                                })
-                            });
-                            match mesh {
-                                Some((v, i)) if !v.is_empty() && !i.is_empty() => Some((v, i, model_transform)),
-                                _ => None,
-                            }
-                        } else { None }
-                    } else { None }
-                } else { None }
-            } else { None }
-        };
-
         let member = player
             .movie
             .cast_manager
@@ -912,55 +876,6 @@ impl HavokPhysicsMemberHandlers {
         };
 
         let rb = HavokRigidBody::new_fixed(&model_name, is_convex);
-
-        // Create rapier fixed rigid body + collider
-        if let Some(ref mut rapier) = havok.state.rapier {
-            use rapier3d_f64::prelude::*;
-            // Place the fixed body at the model's world position
-            let (tx, ty, tz) = mesh_data.as_ref()
-                .map(|(_, _, t)| (t[12] as f64, t[13] as f64, t[14] as f64))
-                .unwrap_or((0.0, 0.0, 0.0));
-            let rapier_rb = RigidBodyBuilder::fixed()
-                .translation(Vector::new(tx, ty, tz))
-                .build();
-            let handle = rapier.rigid_body_set.insert(rapier_rb);
-
-            let collider = if let Some((vertices, indices, _transform)) = mesh_data {
-                web_sys::console::log_1(
-                    &format!(
-                        "Havok makeFixedRigidBody '{}': using trimesh collider ({} verts, {} tris)",
-                        model_name, vertices.len(), indices.len()
-                    ).into(),
-                );
-                // trimesh() returns Result in rapier v0.32
-                match ColliderBuilder::trimesh(vertices, indices) {
-                    Ok(builder) => builder.restitution(0.3).friction(0.5).build(),
-                    Err(e) => {
-                        web_sys::console::log_1(
-                            &format!("Havok: trimesh collider failed for '{}': {:?}, falling back to box", model_name, e).into(),
-                        );
-                        ColliderBuilder::cuboid(100.0, 100.0, 1.0)
-                            .restitution(0.3)
-                            .friction(0.5)
-                            .build()
-                    }
-                }
-            } else {
-                web_sys::console::log_1(
-                    &format!(
-                        "Havok makeFixedRigidBody '{}': no mesh data, using large box collider",
-                        model_name
-                    ).into(),
-                );
-                ColliderBuilder::cuboid(100.0, 100.0, 1.0)
-                    .restitution(0.3)
-                    .friction(0.5)
-                    .build()
-            };
-            let col_handle = rapier.collider_set.insert_with_parent(collider, handle, &mut rapier.rigid_body_set);
-            rapier.body_handles.insert(model_name.clone(), handle);
-            rapier.collider_handles.insert(model_name.clone(), col_handle);
-        }
 
         havok.state.rigid_bodies.push(rb);
 
@@ -1106,35 +1021,6 @@ impl HavokPhysicsMemberHandlers {
             CastMemberType::HavokPhysics(h) => h,
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
-
-        // Determine the name of the body to delete
-        let rb_name_to_delete: Option<String> = match &arg {
-            Datum::String(name) => Some(name.clone()),
-            Datum::Int(index) => {
-                let idx = (*index as usize).saturating_sub(1);
-                if idx < havok.state.rigid_bodies.len() {
-                    Some(havok.state.rigid_bodies[idx].name.clone())
-                } else { None }
-            }
-            _ => None,
-        };
-
-        // Remove from rapier
-        if let Some(ref name) = rb_name_to_delete {
-            if let Some(ref mut rapier) = havok.state.rapier {
-                if let Some(handle) = rapier.body_handles.remove(name) {
-                    rapier.rigid_body_set.remove(
-                        handle,
-                        &mut rapier.island_manager,
-                        &mut rapier.collider_set,
-                        &mut rapier.impulse_joint_set,
-                        &mut rapier.multibody_joint_set,
-                        true,
-                    );
-                }
-                rapier.collider_handles.remove(name);
-            }
-        }
 
         // Remove from havok state
         match &arg {
