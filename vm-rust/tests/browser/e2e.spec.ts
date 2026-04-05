@@ -23,7 +23,8 @@ interface TestResults {
 
 function compareSnapshots(
   actualPath: string,
-  referencePath: string
+  referencePath: string,
+  diffPath: string | null
 ): { diffRatio: number; diffPixels: number; totalPixels: number } {
   const actual = PNG.sync.read(fs.readFileSync(actualPath));
   const reference = PNG.sync.read(fs.readFileSync(referencePath));
@@ -37,13 +38,38 @@ function compareSnapshots(
   const totalPixels = actual.width * actual.height;
   let diffPixels = 0;
 
+  // Build a diff image: changed pixels shown in red on a dimmed reference
+  const diffImg = diffPath ? new PNG({ width: actual.width, height: actual.height }) : null;
+
   for (let i = 0; i < totalPixels; i++) {
     const off = i * 4;
     const dr = Math.abs(actual.data[off] - reference.data[off]);
     const dg = Math.abs(actual.data[off + 1] - reference.data[off + 1]);
     const db = Math.abs(actual.data[off + 2] - reference.data[off + 2]);
     const da = Math.abs(actual.data[off + 3] - reference.data[off + 3]);
-    if (Math.max(dr, dg, db, da) > 0) diffPixels++;
+    const changed = Math.max(dr, dg, db, da) > 0;
+    if (changed) diffPixels++;
+
+    if (diffImg) {
+      if (changed) {
+        // Red highlight with intensity proportional to the diff
+        diffImg.data[off] = 255;
+        diffImg.data[off + 1] = 0;
+        diffImg.data[off + 2] = 0;
+        diffImg.data[off + 3] = 255;
+      } else {
+        // Dimmed reference pixel
+        diffImg.data[off] = reference.data[off] >> 2;
+        diffImg.data[off + 1] = reference.data[off + 1] >> 2;
+        diffImg.data[off + 2] = reference.data[off + 2] >> 2;
+        diffImg.data[off + 3] = reference.data[off + 3];
+      }
+    }
+  }
+
+  if (diffImg && diffPixels > 0 && diffPath) {
+    fs.mkdirSync(path.dirname(diffPath), { recursive: true });
+    fs.writeFileSync(diffPath, new Uint8Array(PNG.sync.write(diffImg)));
   }
 
   return { diffRatio: diffPixels / totalPixels, diffPixels, totalPixels };
@@ -88,7 +114,9 @@ function processSnapshot(
     return;
   }
 
-  const diff = compareSnapshots(outputPath, referencePath);
+  const diffDir = path.join(SNAPSHOTS_BASE, "diff", suite, "browser", testName);
+  const diffPath = path.join(diffDir, fileName);
+  const diff = compareSnapshots(outputPath, referencePath, diffPath);
   if (diff.diffRatio > maxDiffRatio) {
     throw new Error(
       `Snapshot '${suite}/browser/${testName}/${name}' differs from reference: ` +
