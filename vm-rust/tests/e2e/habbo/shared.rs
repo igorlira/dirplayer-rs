@@ -1,5 +1,5 @@
 use vm_rust::director::static_datum::StaticDatum;
-use vm_rust::player::testing_shared::{SnapshotContext, TestHarness};
+use vm_rust::player::testing_shared::{sprite, datum, SnapshotContext, TestHarness};
 
 pub async fn assert_entry(
     player: &mut impl TestHarness,
@@ -13,7 +13,7 @@ pub async fn assert_entry(
     player.init_movie().await;
 
     // Wait for the boot sequence to initialize
-    player.step_until_datum(10.0, "sprite(1).member.name", &StaticDatum::String("Logo".into())).await?;
+    player.step_until(datum("sprite(1).member.name").equals(StaticDatum::String("Logo".into()))).timeout(10.0).await?;
 
     if player.get_global_ref("gCore").is_none() {
         return Err("gCore global should exist".into());
@@ -25,8 +25,8 @@ pub async fn assert_entry(
     snapshots.verify("preload", player.snapshot_stage())?;
 
     // Wait until the loading screen is fully drawn
-    player.step_until_sprite_visible(30.0, "login_b_login_ok", 1.0).await?;
-    player.step_until_sprite_visible(30.0, "corner_element", 1.0).await?;
+    player.step_until(sprite().member("login_b_login_ok").visible(1.0)).await?;
+    player.step_until(sprite().member("corner_element").visible(1.0)).await?;
     let loaded_count = player.eval_datum("gCore.get(#castload_manager).pLoadedCasts.count").await?
         .as_integer().unwrap_or(0);
     if loaded_count <= 2 {
@@ -47,19 +47,19 @@ pub async fn assert_login(
     let snapshots = SnapshotContext::new(suite, "login");
 
     // --- Login form ---
-    player.click_member_prefix("login_name").await?;
+    player.click_sprite(sprite().member_prefix("login_name")).await?;
     player.step_frames(2).await;
     player.type_text(username).await;
 
-    player.click_member_prefix("login_password").await?;
+    player.click_sprite(sprite().member_prefix("login_password")).await?;
     player.step_frames(2).await;
     player.type_text(password).await;
 
     snapshots.verify("login_filled", player.snapshot_stage())?;
 
     // Click login button
-    player.click_member("login_b_login_ok").await?;
-    player.step_until_sprite_visible(30.0, "entry_bar_ownhabbo_icon_image", 1.0).await?;
+    player.click_sprite(sprite().member("login_b_login_ok")).await?;
+    player.step_until(sprite().member("entry_bar_ownhabbo_icon_image").visible(1.0)).await?;
     snapshots.verify("login_submitted", player.snapshot_stage())?;
 
     Ok(())
@@ -71,15 +71,15 @@ pub async fn assert_navigate_pub(
 ) -> Result<(), String> {
     let snapshots = SnapshotContext::new(suite, "navigation");
 
-    player.step_until_sprite_visible(30.0, "Hotel Navigator_back", 1.0).await?;
+    player.step_until(sprite().member("Hotel Navigator_back").visible(1.0)).await?;
 
     snapshots.verify("navigator_opened", player.snapshot_stage())?;
 
-    player.step_until_sprite_visible(30.0, "Hotel Navigator_nav_roomlist", 1.0).await?;
-    player.click_member_at("Hotel Navigator_nav_roomlist", 100, 9).await?;
-    player.step_until_sprite_visible(30.0, "Hotel Navigator_nav_go_button", 1.0).await?;
-    player.click_member("Hotel Navigator_nav_go_button").await?;
-    player.step_until_sprite_visible(30.0, "Room_info_stand_info_stand", 1.0).await?;
+    player.step_until(sprite().member("Hotel Navigator_nav_roomlist").visible(1.0)).await?;
+    player.click_sprite_at(sprite().member("Hotel Navigator_nav_roomlist"), 100, 9).await?;
+    player.step_until(sprite().member("Hotel Navigator_nav_go_button").visible(1.0)).await?;
+    player.click_sprite(sprite().member("Hotel Navigator_nav_go_button")).await?;
+    player.step_until(sprite().member_prefix("puppet_hilite_sh").visible(1.0)).await?;
     snapshots.verify("room_entered", player.snapshot_stage())?;
     Ok(())
 }
