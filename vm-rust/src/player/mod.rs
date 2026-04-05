@@ -3291,7 +3291,7 @@ pub fn player_semaphone() -> &'static Mutex<()> {
 }
 
 pub fn init_player() {
-    console_log::init_with_level(log::Level::Warn).unwrap_or(());
+    console_log::init_with_level(log::Level::Error).unwrap_or(());
     let (tx, rx) = channel::unbounded();
     let (event_tx, event_rx) = channel::unbounded();
     unsafe {

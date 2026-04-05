@@ -15,7 +15,6 @@ browser_e2e_test!(test_furnifactory_load, |player| async move {
 
     player
         .step_until(sprite().member("alertbox2_start-up").visible(1.0))
-        .timeout(10.0)
         .await?;
     snapshots.verify("init", player.snapshot_stage())?;
 
@@ -24,14 +23,12 @@ browser_e2e_test!(test_furnifactory_load, |player| async move {
         .await?;
     player
         .step_until(datum("ilk(oComputer)").equals(StaticDatum::Symbol("instance".into())))
-        .timeout(10.0)
         .await?;
     player
         .step_until(
             datum("not oComputer.oTimer.bPaused and oComputer.oTimer.iTime < 57")
                 .equals(StaticDatum::Int(1)),
         )
-        .timeout(10.0)
         .await?;
     snapshots.verify("in_game", player.snapshot_stage())?;
 
