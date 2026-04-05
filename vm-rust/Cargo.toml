@@ -94,6 +94,7 @@ features = [
   'AudioContext',
   'AudioBuffer',
   'AudioBufferSourceNode',
+  'AudioScheduledSourceNode',
   'GainNode',
   'StereoPannerNode',
   'AudioParam',
