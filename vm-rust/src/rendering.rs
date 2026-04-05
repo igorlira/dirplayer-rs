@@ -2635,7 +2635,7 @@ impl PlayerCanvasRenderer {
             bitmap.width.into(),
             bitmap.height.into(),
         );
-        self.ctx2d.set_fill_style(&safe_js_string("white"));
+        self.ctx2d.set_fill_style_str("white");
         match image_data {
             Ok(image_data) => {
                 self.ctx2d.put_image_data(&image_data, 0.0, 0.0).unwrap();
