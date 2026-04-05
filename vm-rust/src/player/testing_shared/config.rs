@@ -1,0 +1,130 @@
+use std::collections::HashMap;
+use serde::Deserialize;
+use crate::player::reserve_player_mut;
+
+const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
+
+/// Test configuration loaded from a TOML file.
+///
+/// Each test suite has a `.toml` config in `tests/e2e/configs/`.
+///
+/// Example:
+/// ```toml
+/// [movie]
+/// path = "dcr_woodpecker/habbo.dcr"
+///
+/// [test]
+/// suite = "habbo_v7"
+///
+/// [external_params]
+/// connection.info.host = "localhost"
+///
+/// [params]
+/// username = "${HABBO_USERNAME:testuser}"
+/// password = "${HABBO_PASSWORD:testpass}"
+/// ```
+///
+/// String values support `${VAR:default}` env var interpolation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestConfig {
+    pub movie: MovieConfig,
+    #[serde(default)]
+    pub test: TestSection,
+    #[serde(default)]
+    pub external_params: HashMap<String, String>,
+    #[serde(default)]
+    pub params: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MovieConfig {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestSection {
+    #[serde(default)]
+    pub suite: String,
+    #[serde(default = "TestSection::default_timeout")]
+    pub default_timeout: f64,
+}
+
+impl Default for TestSection {
+    fn default() -> Self {
+        TestSection {
+            suite: String::new(),
+            default_timeout: DEFAULT_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl TestSection {
+    fn default_timeout() -> f64 { DEFAULT_TIMEOUT_SECS }
+}
+
+impl TestConfig {
+    /// Parse a TOML string into a TestConfig, resolving `${VAR:default}`
+    /// placeholders in all string values from environment variables.
+    ///
+    /// - `${VAR}` — replaced by the env var `VAR`; panics if unset.
+    /// - `${VAR:fallback}` — replaced by `VAR` if set, otherwise `fallback`.
+    pub fn from_toml(toml_str: &str) -> Self {
+        let mut cfg: TestConfig = toml::from_str(toml_str).expect("Failed to parse test config TOML");
+        cfg.movie.path = Self::resolve_env(&cfg.movie.path);
+        cfg.test.suite = Self::resolve_env(&cfg.test.suite);
+        cfg.external_params = cfg.external_params.into_iter()
+            .map(|(k, v)| (k, Self::resolve_env(&v)))
+            .collect();
+        cfg.params = cfg.params.into_iter()
+            .map(|(k, v)| (k, Self::resolve_env(&v)))
+            .collect();
+        cfg
+    }
+
+    /// Shorthand for the snapshot suite name.
+    pub fn suite(&self) -> &str {
+        &self.test.suite
+    }
+
+    /// Get a param value, panicking if not found.
+    pub fn param(&self, key: &str) -> &str {
+        self.params.get(key)
+            .unwrap_or_else(|| panic!("Missing required test param '{}'", key))
+    }
+
+    /// Apply `[external_params]` to the player, equivalent to the
+    /// frontend's `set_external_params()` call.
+    pub fn apply_external_params(&self) {
+        if self.external_params.is_empty() {
+            return;
+        }
+        let params = self.external_params.clone();
+        reserve_player_mut(|player| {
+            player.external_params = params;
+        });
+    }
+
+    /// Resolve `${VAR}` and `${VAR:default}` placeholders in a string.
+    fn resolve_env(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(start) = rest.find("${") {
+            result.push_str(&rest[..start]);
+            let after = &rest[start + 2..];
+            let end = after.find('}').expect("Unclosed ${...} in config value");
+            let token = &after[..end];
+            let resolved = if let Some(colon) = token.find(':') {
+                let var = &token[..colon];
+                let default = &token[colon + 1..];
+                std::env::var(var).unwrap_or_else(|_| default.to_string())
+            } else {
+                std::env::var(token)
+                    .unwrap_or_else(|_| panic!("Env var '{}' not set and no default provided", token))
+            };
+            result.push_str(&resolved);
+            rest = &after[end + 1..];
+        }
+        result.push_str(rest);
+        result
+    }
+}
