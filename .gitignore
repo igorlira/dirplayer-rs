@@ -10,6 +10,7 @@
 # testing
 /coverage
 vm-rust/tests/snapshots/output/
+vm-rust/tests/snapshots/diff/
 
 # production
 /build

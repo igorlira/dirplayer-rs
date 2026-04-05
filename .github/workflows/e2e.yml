@@ -88,7 +88,15 @@ jobs:
         run: cargo fetch
 
       - name: Build and run browser e2e tests
+        id: browser_tests
+        continue-on-error: true
         run: bash scripts/run-browser-tests.sh
+
+      - name: Generate snapshot diff grid
+        if: always()
+        run: |
+          sudo apt-get install -yq imagemagick >/dev/null 2>&1 || true
+          bash scripts/build-diff-grid.sh vm-rust/tests/snapshots /tmp/diff-report
 
       - name: Upload test artifacts
         if: always()
@@ -97,5 +105,19 @@ jobs:
           name: browser-test-results
           path: |
             vm-rust/tests/snapshots/output/
+            vm-rust/tests/snapshots/diff/
+            /tmp/diff-report/
             test-results/
           retention-days: 7
+
+      - name: Post snapshot diff comment on PR
+        if: github.event_name == 'pull_request' && hashFiles('/tmp/diff-report/comment.md') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const script = require('./scripts/post-snapshot-comment.js');
+            await script({ github, context });
+
+      - name: Fail if browser tests failed
+        if: steps.browser_tests.outcome == 'failure'
+        run: exit 1
