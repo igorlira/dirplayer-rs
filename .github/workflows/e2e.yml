@@ -44,7 +44,10 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli
+        run: |
+          WASM_BINDGEN_VERSION=$(cargo metadata --manifest-path vm-rust/Cargo.toml --format-version 1 | \
+            python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; print(next(p['version'] for p in pkgs if p['name']=='wasm-bindgen'))")
+          cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
 
       - name: Download test assets
         run: |
