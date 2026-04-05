@@ -88,6 +88,6 @@ jobs:
         with:
           name: browser-test-results
           path: |
-            vm-rust/snapshots/output/
+            vm-rust/tests/snapshots/output/
             test-results/
           retention-days: 7
