@@ -6,7 +6,7 @@ use crate::player::{
     reserve_player_mut, reserve_player_ref,
     PLAYER_OPT,
 };
-use crate::player::testing_shared::{TestHarness, SnapshotOutput};
+use crate::player::testing_shared::{TestHarness, SnapshotOutput, SpriteQuery};
 
 /// Browser test harness that lets the real player runtime drive the frame loop.
 /// Instead of calling `run_single_frame` directly, we let `init_player()`'s
@@ -173,6 +173,46 @@ impl TestHarness for BrowserTestPlayer {
                 reserve_player_mut(|player| renderer.draw_frame(player));
             }
         });
+
+        Self::canvas_to_snapshot()
+    }
+
+    async fn snapshot_sprite_isolated(&self, query: impl Into<SpriteQuery>) -> Result<SnapshotOutput, String> {
+        use crate::rendering::with_renderer_mut;
+        use crate::rendering_gpu::Renderer;
+
+        Self::ensure_renderer();
+
+        let query = query.into();
+        let sprite_num = self.find_sprite(&query)
+            .ok_or_else(|| format!("No sprite with {} found", query))?;
+        let (l, t, r, b) = self.sprite_rect(sprite_num).await?;
+
+        with_renderer_mut(|renderer_lock| {
+            if let Some(renderer) = renderer_lock {
+                reserve_player_mut(|player| {
+                    renderer.draw_sprite_isolated(player, sprite_num as i16);
+                });
+            }
+        });
+
+        let full = Self::canvas_to_snapshot();
+        // Restore the full frame so subsequent renders aren't broken
+        with_renderer_mut(|renderer_lock| {
+            if let Some(renderer) = renderer_lock {
+                reserve_player_mut(|player| renderer.draw_frame(player));
+            }
+        });
+
+        Ok(full.crop(l, t, r, b))
+    }
+}
+
+impl BrowserTestPlayer {
+    /// Capture the current canvas contents as a base64 PNG snapshot.
+    fn canvas_to_snapshot() -> SnapshotOutput {
+        use crate::rendering::RENDERER_LOCK;
+        use crate::rendering_gpu::Renderer;
 
         let data_url = RENDERER_LOCK.with(|lock| {
             let renderer = lock.borrow();

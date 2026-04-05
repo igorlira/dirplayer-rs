@@ -4609,4 +4609,18 @@ impl super::Renderer for WebGL2Renderer {
     fn preview_font_size(&self) -> Option<u16> {
         self.preview_font_size
     }
+
+    fn draw_sprite_isolated(&mut self, player: &mut DirPlayer, channel_num: i16) {
+        // Clear to transparent
+        let gl = self.context.gl();
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+
+        // Advance caches so textures are available
+        self.texture_cache.next_frame();
+        self.rendered_text_cache.next_frame();
+
+        self.quad.bind(self.context.gl());
+        self.render_sprite(player, channel_num);
+    }
 }

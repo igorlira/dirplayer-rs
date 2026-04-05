@@ -74,6 +74,10 @@ pub async fn assert_navigate_pub(
     player.step_until(sprite().member("Hotel Navigator_back").visible(1.0)).await?;
 
     snapshots.verify("navigator_opened", player.snapshot_stage())?;
+    snapshots.verify(
+        "navigator_public",
+        player.snapshot_sprite(sprite().member("Hotel Navigator_back")).await?,
+    )?;
 
     player.step_until(sprite().member("Hotel Navigator_nav_roomlist").visible(1.0)).await?;
     player.click_sprite_at(sprite().member("Hotel Navigator_nav_roomlist"), 100, 9).await?;
