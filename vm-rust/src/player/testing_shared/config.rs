@@ -105,6 +105,8 @@ impl TestConfig {
     }
 
     /// Resolve `${VAR}` and `${VAR:default}` placeholders in a string.
+    /// On native, reads from `std::env::var`. On WASM, reads from
+    /// `window.__testEnv` (injected by the test runner).
     fn resolve_env(s: &str) -> String {
         let mut result = String::with_capacity(s.len());
         let mut rest = s;
@@ -116,15 +118,30 @@ impl TestConfig {
             let resolved = if let Some(colon) = token.find(':') {
                 let var = &token[..colon];
                 let default = &token[colon + 1..];
-                std::env::var(var).unwrap_or_else(|_| default.to_string())
+                Self::get_env(var).unwrap_or_else(|| default.to_string())
             } else {
-                std::env::var(token)
-                    .unwrap_or_else(|_| panic!("Env var '{}' not set and no default provided", token))
+                Self::get_env(token)
+                    .unwrap_or_else(|| panic!("Env var '{}' not set and no default provided", token))
             };
             result.push_str(&resolved);
             rest = &after[end + 1..];
         }
         result.push_str(rest);
         result
+    }
+
+    /// Platform-appropriate env var lookup.
+    fn get_env(name: &str) -> Option<String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        { std::env::var(name).ok() }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let window = web_sys::window()?;
+            let test_env = js_sys::Reflect::get(&window, &"__testEnv".into()).ok()?;
+            if test_env.is_undefined() || test_env.is_null() { return None; }
+            let val = js_sys::Reflect::get(&test_env, &name.into()).ok()?;
+            val.as_string()
+        }
     }
 }
