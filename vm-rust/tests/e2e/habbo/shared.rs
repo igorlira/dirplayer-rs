@@ -1,7 +1,7 @@
 use vm_rust::director::static_datum::StaticDatum;
 use vm_rust::player::testing_shared::{SnapshotContext, TestHarness};
 
-pub async fn test_habbo_entry(
+pub async fn assert_entry(
     player: &mut impl TestHarness,
     suite: &str,
     movie_asset: &str,
@@ -11,13 +11,10 @@ pub async fn test_habbo_entry(
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;
-    player.step_frames(5).await;
 
-    // By frame 5, the boot sequence should be underway
-    let logo = player.eval_datum("sprite(1).member.name").await?;
-    if logo != StaticDatum::String("Logo".into()) {
-        return Err(format!("Expected Logo sprite, got {:?}", logo));
-    }
+    // Wait for the boot sequence to initialize
+    player.step_until_datum(10.0, "sprite(1).member.name", &StaticDatum::String("Logo".into())).await?;
+
     if player.get_global_ref("gCore").is_none() {
         return Err("gCore global should exist".into());
     }
@@ -41,7 +38,7 @@ pub async fn test_habbo_entry(
     Ok(())
 }
 
-pub async fn test_habbo_login(
+pub async fn assert_login(
     player: &mut impl TestHarness,
     suite: &str,
     username: &str,
@@ -65,5 +62,24 @@ pub async fn test_habbo_login(
     player.step_until_sprite_visible(30.0, "entry_bar_ownhabbo_icon_image", 1.0).await?;
     snapshots.verify("login_submitted", player.snapshot_stage())?;
 
+    Ok(())
+}
+
+pub async fn assert_navigate_pub(
+    player: &mut impl TestHarness,
+    suite: &str,
+) -> Result<(), String> {
+    let snapshots = SnapshotContext::new(suite, "navigation");
+
+    player.step_until_sprite_visible(30.0, "Hotel Navigator_back", 1.0).await?;
+
+    snapshots.verify("navigator_opened", player.snapshot_stage())?;
+
+    player.step_until_sprite_visible(30.0, "Hotel Navigator_nav_roomlist", 1.0).await?;
+    player.click_member_at("Hotel Navigator_nav_roomlist", 100, 9).await?;
+    player.step_until_sprite_visible(30.0, "Hotel Navigator_nav_go_button", 1.0).await?;
+    player.click_member("Hotel Navigator_nav_go_button").await?;
+    player.step_until_sprite_visible(30.0, "Room_info_stand_info_stand", 1.0).await?;
+    snapshots.verify("room_entered", player.snapshot_stage())?;
     Ok(())
 }

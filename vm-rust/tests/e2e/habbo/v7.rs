@@ -8,12 +8,13 @@ const USERNAME: &str = "crimetime";
 const PASSWORD: &str = "test123";
 
 hybrid_e2e_test!(test_habbo_v7_entry, |player| async move {
-    shared::test_habbo_entry(&mut player, SUITE, MOVIE).await?;
+    shared::assert_entry(&mut player, SUITE, MOVIE).await?;
     Ok(())
 });
 
 browser_e2e_test!(test_habbo_v7_login, |player| async move {
-    shared::test_habbo_entry(&mut player, SUITE, MOVIE).await?;
-    shared::test_habbo_login(&mut player, SUITE, USERNAME, PASSWORD).await?;
+    shared::assert_entry(&mut player, SUITE, MOVIE).await?;
+    shared::assert_login(&mut player, SUITE, USERNAME, PASSWORD).await?;
+    shared::assert_navigate_pub(&mut player, SUITE).await?;
     Ok(())
 });

@@ -3,58 +3,41 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, Response};
 
 use crate::director::file::read_director_file_bytes;
-use async_std::channel;
 use crate::player::{
-    events::PlayerVMEvent,
-    fire_pending_timeouts,
-    reserve_player_mut, run_single_frame,
+    commands::PlayerVMCommand,
+    reserve_player_mut, reserve_player_ref,
     PLAYER_OPT,
 };
 use crate::player::testing_shared::{TestHarness, SnapshotOutput};
 
-/// Browser-based test harness. Works on top of the global player
-/// initialized by `#[wasm_bindgen(start)]`.
-pub struct BrowserTestPlayer {
-    event_rx: channel::Receiver<PlayerVMEvent>,
-}
+/// Browser test harness that lets the real player runtime drive the frame loop.
+/// Instead of calling `run_single_frame` directly, we let `init_player()`'s
+/// loops run normally and interact via polling and input events.
+pub struct BrowserTestPlayer {}
 
 impl BrowserTestPlayer {
     pub fn new() -> Self {
-        // Create fresh channels and a fresh player for each test.
-        let (tx, _rx) = channel::unbounded();
-        let (event_tx, event_rx) = channel::unbounded();
+        // init_player() already ran via #[wasm_bindgen(start)], but we
+        // skipped it with __dirplayerTestMode. We need to re-init with
+        // fresh state for each test.
         unsafe {
-            // Replace with a fresh player, discarding old state.
-            // Leak the old player to avoid SIGABRT from dangling async tasks.
             if let Some(old) = PLAYER_OPT.take() {
                 std::mem::forget(old);
             }
-            crate::player::PLAYER_TX = None;
-            crate::player::PLAYER_EVENT_TX = Some(event_tx);
-            PLAYER_OPT = Some(crate::player::DirPlayer::new(tx));
         }
-        BrowserTestPlayer { event_rx }
-    }
+        // Run full init_player which sets up channels, command loop,
+        // event loop — the complete runtime.
+        crate::player::init_player();
 
-    /// Drain and process any pending events from the event channel.
-    async fn drain_events(&self) {
-        use crate::player::{
-            events::{player_invoke_global_event, player_invoke_targeted_event},
-            handlers::datum_handlers::player_call_datum_handler,
-        };
-        while let Ok(event) = self.event_rx.try_recv() {
-            let _ = match event {
-                PlayerVMEvent::Global(name, args) => {
-                    player_invoke_global_event(&name, &args).await
-                }
-                PlayerVMEvent::Targeted(name, args, instances) => {
-                    player_invoke_targeted_event(&name, &args, instances.as_ref()).await
-                }
-                PlayerVMEvent::Callback(receiver, name, args) => {
-                    player_call_datum_handler(&receiver, &name, &args).await
-                }
-            };
+        // Also init xtra managers
+        unsafe {
+            crate::player::xtra::multiuser::MULTIUSER_XTRA_MANAGER_OPT =
+                Some(crate::player::xtra::multiuser::MultiuserXtraManager::new());
+            crate::player::xtra::xmlparser::XMLPARSER_XTRA_MANAGER_OPT =
+                Some(crate::player::xtra::xmlparser::XmlParserXtraManager::new());
         }
+
+        BrowserTestPlayer {}
     }
 
     async fn fetch_bytes(url: &str) -> Vec<u8> {
@@ -73,8 +56,17 @@ impl BrowserTestPlayer {
         js_sys::Uint8Array::new(&buffer).to_vec()
     }
 
-    /// Sleep for the given number of milliseconds, yielding to the browser
-    /// event loop so pending fetches and spawned tasks can complete.
+    /// Wait for the next animation frame.
+    async fn next_frame() {
+        let promise = js_sys::Promise::new(&mut |resolve, _| {
+            web_sys::window().unwrap()
+                .request_animation_frame(&resolve)
+                .unwrap();
+        });
+        let _ = JsFuture::from(promise).await;
+    }
+
+    /// Sleep for the given number of milliseconds.
     async fn sleep_ms(ms: u32) {
         let promise = js_sys::Promise::new(&mut |resolve, _| {
             web_sys::window().unwrap()
@@ -85,10 +77,8 @@ impl BrowserTestPlayer {
     }
 
     /// Ensure a renderer exists, creating one if needed.
-    /// Expects `#stage_canvas_container` to already exist in the DOM.
     fn ensure_renderer() {
         use crate::rendering::RENDERER_LOCK;
-
         RENDERER_LOCK.with(|lock| {
             if lock.borrow().is_some() { return; }
             crate::rendering::player_create_canvas().unwrap();
@@ -100,6 +90,23 @@ impl TestHarness for BrowserTestPlayer {
     fn asset_path(&self, relative: &str) -> String {
         format!("/assets/{}", relative)
     }
+
+    async fn init_movie(&mut self) {
+        // Trigger play() which spawns the real init sequence and frame loop.
+        // Then yield frames until the movie has initialized.
+        reserve_player_mut(|player| {
+            player.is_playing = false; // Reset so play() doesn't early-return
+        });
+        unsafe {
+            let player = PLAYER_OPT.as_mut().unwrap();
+            player.play();
+        }
+        // Wait a few frames for the init sequence to run
+        for _ in 0..10 {
+            Self::next_frame().await;
+        }
+    }
+
     async fn load_movie(&mut self, url: &str) {
         let full_url = if url.starts_with("http://") || url.starts_with("https://") {
             url.to_string()
@@ -127,20 +134,45 @@ impl TestHarness for BrowserTestPlayer {
     }
 
     async fn step_frame(&mut self) -> bool {
-        fire_pending_timeouts().await;
-        let (is_playing, _) = run_single_frame().await;
-        // Sleep for one frame period so wall-clock time matches the movie's
-        // tempo. This also yields to the browser event loop for fetch
-        // completions and WebSocket messages.
-        let delay_ms = reserve_player_mut(|player| {
-            let tempo = player.movie.get_effective_tempo();
-            if tempo > 0 { 1000 / tempo } else { 33 }
+        // Yield to the browser — the real frame loop, command loop,
+        // and event loop all run during this yield.
+        Self::next_frame().await;
+        reserve_player_ref(|player| player.is_playing)
+    }
+
+    // Override input methods to dispatch through the command channel
+    // so they're processed by the command loop at the right time,
+    // avoiding concurrent access with the frame loop.
+
+    async fn click(&mut self, x: i32, y: i32) {
+        use crate::player::commands::player_dispatch;
+        reserve_player_mut(|player| {
+            player.mouse_loc = (x, y);
+            player.movie.mouse_down = true;
         });
-        Self::sleep_ms(delay_ms).await;
-        // Process any events that arrived during the sleep (WebSocket
-        // messages, callbacks dispatched by Lingo scripts, etc.)
-        self.drain_events().await;
-        is_playing
+        player_dispatch(PlayerVMCommand::MouseDown((x, y)));
+        self.step_frame().await;
+        reserve_player_mut(|player| {
+            player.mouse_loc = (x, y);
+            player.movie.mouse_down = false;
+        });
+        player_dispatch(PlayerVMCommand::MouseUp((x, y)));
+    }
+
+    async fn key_down(&mut self, key: &str, code: u16) {
+        use crate::player::commands::player_dispatch;
+        reserve_player_mut(|player| {
+            player.keyboard_manager.key_down(key.to_string(), code);
+        });
+        player_dispatch(PlayerVMCommand::KeyDown(key.to_string(), code));
+    }
+
+    async fn key_up(&mut self, key: &str, code: u16) {
+        use crate::player::commands::player_dispatch;
+        reserve_player_mut(|player| {
+            player.keyboard_manager.key_up(key, code);
+        });
+        player_dispatch(PlayerVMCommand::KeyUp(key.to_string(), code));
     }
 
     fn snapshot_stage(&self) -> SnapshotOutput {
