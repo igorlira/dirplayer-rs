@@ -79,16 +79,16 @@ impl CastMemberRefHandlers {
                         .find_member_by_ref(&cast_member_ref)
                         .unwrap();
                     let text_data = cast_member.member_type.as_text().unwrap();
-                    let char_pos = player.get_datum(&args[0]).int_value()? as u16;
+                    let char_pos = player.get_datum(&args[0]).int_value()?;
                     let char_width: i32 = 7;
                     let line_height: i32 = get_text_member_line_height(&text_data) as i32;
 
                     let (x, y) = if text_data.text.is_empty() || char_pos <= 0 {
                         (0, 0)
-                    } else if char_pos > text_data.text.len() as u16 {
+                    } else if char_pos > text_data.text.len() as i32 {
                         (char_width * text_data.text.len() as i32, line_height)
                     } else {
-                        (char_width * (char_pos - 1) as i32, line_height)
+                        (char_width * (char_pos - 1), line_height)
                     };
 
                     let x_ref = player.alloc_datum(Datum::Int(x));
