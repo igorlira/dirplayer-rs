@@ -5,12 +5,10 @@ pub struct ScriptInstanceRef(ScriptInstanceId, *mut u32);
 
 impl ScriptInstanceRef {
     #[inline]
-    pub fn from_id(id: ScriptInstanceId, ref_count: *mut u32) -> Self {
+    pub unsafe fn from_id(id: ScriptInstanceId, ref_count: *mut u32) -> Self {
         let val = id.into();
-        unsafe {
-            let mut_ref = &mut *ref_count;
-            *mut_ref += 1;
-        }
+        let mut_ref = &mut *ref_count;
+        *mut_ref += 1;
         Self(val, ref_count)
     }
 
@@ -31,7 +29,7 @@ impl std::ops::Deref for ScriptInstanceRef {
 
 impl Clone for ScriptInstanceRef {
     fn clone(&self) -> Self {
-        Self::from_id(self.0, self.1)
+        unsafe { Self::from_id(self.0, self.1) }
     }
 }
 
