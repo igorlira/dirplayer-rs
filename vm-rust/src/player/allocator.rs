@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use log::{debug, warn};
 
 use crate::director::lingo::datum::Datum;

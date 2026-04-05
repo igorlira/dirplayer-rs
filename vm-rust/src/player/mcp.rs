@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 use crate::{director::{

@@ -1,4 +1,4 @@
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use log::{warn, debug};
 use std::cell::Cell;
 use std::rc::Rc;

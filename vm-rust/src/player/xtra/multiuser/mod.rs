@@ -1,5 +1,5 @@
 use async_std::{channel::Sender, task::spawn_local};
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
 

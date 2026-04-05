@@ -1,4 +1,4 @@
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use itertools::Itertools;
 use std::{
     collections::HashMap,

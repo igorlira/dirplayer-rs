@@ -73,7 +73,7 @@ use async_std::{
 use cast_manager::CastPreloadReason;
 use cast_member::{CastMemberType, CastMemberTypeId};
 use datum_ref::DatumRef;
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
 use log::{debug, error, warn};
 use manual_future::{ManualFuture, ManualFutureCompleter};
