@@ -1437,14 +1437,22 @@ impl BuiltInHandlerManager {
                 .iter()
                 .any(|key| key.code == key_code);
 
-            // Debug: log arrow key checks
-            if is_pressed && (key_code == 123 || key_code == 124 || key_code == 125 || key_code == 126) {
-                static KP_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                let n = KP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n < 3 {
+            // Debug: log arrow key checks (per-key counters)
+            if is_pressed && (key_code == 123 || key_code == 124) {
+                static KP_LR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                if KP_LR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
                     web_sys::console::log_1(&format!(
-                        "[KEY] keyPressed({}) = TRUE, down_keys={:?}",
-                        key_code, player.keyboard_manager.down_keys.iter().map(|k| k.code).collect::<Vec<_>>()
+                        "[KEY-STEER] keyPressed({}) = TRUE ({})",
+                        key_code, if key_code == 123 { "LEFT" } else { "RIGHT" }
+                    ).into());
+                }
+            }
+            if is_pressed && (key_code == 125 || key_code == 126) {
+                static KP_UD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                if KP_UD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                    web_sys::console::log_1(&format!(
+                        "[KEY-DRIVE] keyPressed({}) = TRUE ({})",
+                        key_code, if key_code == 126 { "UP" } else { "DOWN" }
                     ).into());
                 }
             }

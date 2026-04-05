@@ -2512,7 +2512,15 @@ impl WebGL2Renderer {
             TextureSource::Shockwave3dScene { width, height, member_key, scene, runtime_state, active_camera, extra_cameras } => {
                 // Render primary camera
                 self.scene3d.active_camera = active_camera;
-                let _ = self.scene3d.render_scene_with_state(&self.context, member_key, &scene, width, height, Some(&runtime_state));
+                if let Err(e) = self.scene3d.render_scene_with_state(
+                    &self.context, member_key, &scene, width, height, Some(&runtime_state)
+                ) {
+                    web_sys::console::error_1(&format!(
+                        "[3D] Render failed for member {:?} primary camera {:?}: {:?}",
+                        member_key, self.scene3d.active_camera, e
+                    ).into());
+                    return;
+                }
 
                 // Render additional cameras on top (multi-camera: skybox + game world)
                 if extra_cameras.is_empty() {
@@ -2523,7 +2531,7 @@ impl WebGL2Renderer {
                 }
                 for cam_name in &extra_cameras {
                     let should_clear = runtime_state.camera_clear_at_render
-                        .get(cam_name).copied().unwrap_or(true);
+                        .get(&cam_name.to_ascii_lowercase()).copied().unwrap_or(true);
                     static CAM_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                     if !CAM_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                         web_sys::console::log_1(&format!(
@@ -2532,10 +2540,16 @@ impl WebGL2Renderer {
                         ).into());
                     }
                     self.scene3d.active_camera = Some(cam_name.clone());
-                    let _ = self.scene3d.render_scene_with_state_ex(
+                    if let Err(e) = self.scene3d.render_scene_with_state_ex(
                         &self.context, member_key, &scene, width, height,
                         Some(&runtime_state), should_clear,
-                    );
+                    ) {
+                        web_sys::console::error_1(&format!(
+                            "[3D] Render failed for member {:?} extra camera {:?}: {:?}",
+                            member_key, self.scene3d.active_camera, e
+                        ).into());
+                        return;
+                    }
                 }
 
                 // TODO: Backdrops should render BEFORE 3D scene (need separate clear logic)

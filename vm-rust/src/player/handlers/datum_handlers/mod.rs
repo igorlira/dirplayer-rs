@@ -132,7 +132,11 @@ pub async fn player_call_datum_handler(
             }
         }
         DatumType::CastMemberRef => {
-            cast_member_ref::CastMemberRefHandlers::call(obj_ref, handler_name, args)
+            if cast_member_ref::CastMemberRefHandlers::has_async_handler(obj_ref, handler_name) {
+                cast_member_ref::CastMemberRefHandlers::call_async(obj_ref, handler_name, args).await
+            } else {
+                cast_member_ref::CastMemberRefHandlers::call(obj_ref, handler_name, args)
+            }
         }
         DatumType::Rect => RectDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Point => PointDatumHandlers::call(obj_ref, handler_name, args),

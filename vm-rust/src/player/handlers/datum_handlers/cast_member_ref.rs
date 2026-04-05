@@ -81,6 +81,59 @@ impl CastMemberRefHandlers {
         }
     }
 
+    /// Check if a cast member handler needs async dispatch.
+    /// Currently only Havok "step" needs it (for step callbacks and collision interest callbacks).
+    pub fn has_async_handler(datum: &DatumRef, handler_name: &str) -> bool {
+        if handler_name != "step" { return false; }
+        // Check if this is a Havok member
+        reserve_player_ref(|player| {
+            let r = match player.get_datum(datum) {
+                Datum::CastMember(r) => r.to_owned(),
+                _ => return false,
+            };
+            player.movie.cast_manager.find_member_by_ref(&r)
+                .map_or(false, |m| matches!(m.member_type, CastMemberType::HavokPhysics(_)))
+        })
+    }
+
+    /// Async handler for Havok step — runs physics with per-substep callback invocation.
+    /// From the original engine (x86 sub_100175C0):
+    ///   for each substep:
+    ///     1. Integrate forces → velocity (Euler)
+    ///     2. Apply actions (springs, dashpots, drag)
+    ///     3. Step collision (Rapier)
+    ///     4. Read back positions
+    ///     5. Invoke step callbacks ← this is where Lingo handlers run
+    ///   After all substeps:
+    ///     6. Invoke collision interest callbacks
+    ///     7. Sync to W3D models, clear forces
+    pub fn call_async<'a>(
+        datum: &'a DatumRef,
+        _handler_name: &'a str,
+        args: &'a Vec<DatumRef>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DatumRef, ScriptError>> + 'a>> {
+        Box::pin(async move {
+            // Run the full physics step via the monolithic sync path.
+            // This does: Euler integrate (full_dt) + Rapier substeps + readback + W3D sync + clear forces.
+            let (step_result, step_cbs, collision_cbs) = HavokPhysicsMemberHandlers::step_with_callbacks(datum, args)?;
+
+            // After the step, invoke step callbacks (async, post-step).
+            for (cb_handler, cb_instance, dt_value) in &step_cbs {
+                let dt_ref = reserve_player_mut(|player| {
+                    player.alloc_datum(Datum::Float(*dt_value))
+                });
+                let _ = super::player_call_datum_handler(cb_instance, cb_handler, &vec![dt_ref]).await;
+            }
+
+            // Invoke collision interest callbacks (async, post-step).
+            for (cb_handler, cb_instance, collision_info_ref) in &collision_cbs {
+                let _ = super::player_call_datum_handler(cb_instance, cb_handler, &vec![collision_info_ref.clone()]).await;
+            }
+
+            Ok(step_result)
+        })
+    }
+
     pub fn call(
         datum: &DatumRef,
         handler_name: &str,

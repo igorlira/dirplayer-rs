@@ -31,6 +31,7 @@ pub struct Mesh3dBuffers {
     pub has_bones: bool,
     pub has_vertex_colors: bool,
     pub has_texcoord2: bool,
+    pub texcoord2_direct: bool,
     pub meshdeform_uv_synced: bool,
 }
 
@@ -249,6 +250,7 @@ impl Mesh3dBuffers {
             vbo_vertex_colors,
             ibo,
             has_texcoord2: texcoords2.is_some(),
+            texcoord2_direct: false,
             meshdeform_uv_synced: false,
             index_count,
             has_bones,
@@ -281,6 +283,7 @@ impl Mesh3dBuffers {
         gl.vertex_attrib_pointer_with_i32(3, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
         gl.bind_vertex_array(None);
         self.has_texcoord2 = true;
+        self.texcoord2_direct = true;
     }
 
     /// Bind this mesh for drawing

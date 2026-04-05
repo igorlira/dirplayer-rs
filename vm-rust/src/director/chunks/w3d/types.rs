@@ -88,6 +88,9 @@ pub struct W3dShader {
     pub render_pass: u32,
     pub texture_layers: Vec<W3dTextureLayer>,
     pub shader_type: W3dShaderType,
+    /// When true, textured models use actual diffuse color for lighting.
+    /// When false (default), textured models use white (1,1,1) for lighting.
+    pub use_diffuse_with_texture: bool,
     // NPR-specific fields
     pub toon_steps: u32,      // ShaderPainter: number of quantization steps
     pub outline_width: f32,   // ShaderInker: outline thickness

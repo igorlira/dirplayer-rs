@@ -99,6 +99,16 @@ impl Transform3dDatumHandlers {
             }
             "rotation" => {
                 if let Datum::Vector(v) = val {
+                    // Log non-zero Z rotation (steering)
+                    if v[2].abs() > 0.1 {
+                        static ROT_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        if ROT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
+                            web_sys::console::log_1(&format!(
+                                "[T3D-ROT] transform.rotation = ({:.1},{:.1},{:.1}) pos=({:.1},{:.1},{:.1})",
+                                v[0], v[1], v[2], m[12], m[13], m[14]
+                            ).into());
+                        }
+                    }
                     // Preserve position and scale, rebuild rotation
                     let pos = [
                         if m[12].is_finite() { m[12] } else { 0.0 },

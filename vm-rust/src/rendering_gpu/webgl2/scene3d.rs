@@ -61,6 +61,7 @@ struct Shader3d {
     u_has_lightmap: Option<WebGlUniformLocation>,
     u_lightmap_intensity: Option<WebGlUniformLocation>,
     u_has_texcoord2: Option<WebGlUniformLocation>,
+    u_texcoord2_direct: Option<WebGlUniformLocation>,
     // Layer 2 (third texture layer)
     u_layer2_tex: Option<WebGlUniformLocation>,
     u_layer2_blend: Option<WebGlUniformLocation>,
@@ -101,6 +102,7 @@ struct TextureLayerBinding<'a> {
     tex: &'a WebGlTexture,
     blend: i32,       // 1=multiply, 2=add, 3=replace, 4=decal
     intensity: f32,
+    wrap: (u8, u8),   // (repeat_s, repeat_t): 0=clamp, 1=repeat
 }
 
 struct TextureBindResult<'a> {
@@ -261,6 +263,7 @@ uniform mat4 u_bone_matrices[48];
 
 // Texture coordinate transform
 uniform mat4 u_tex_transform;
+uniform int u_texcoord2_direct;
 
 out vec3 v_position;
 out vec3 v_normal;
@@ -299,9 +302,13 @@ void main() {
         base_uv = vec2(a_texcoord.x + 0.5, 0.5 - a_texcoord.y);  // CLOD remap
     }
     v_texcoord = (u_tex_transform * vec4(base_uv, 0.0, 1.0)).xy;
-    v_texcoord2 = (u_skinning_enabled == -1)
-        ? a_texcoord2
-        : vec2(a_texcoord2.x + 0.5, 0.5 - a_texcoord2.y);
+    if (u_skinning_enabled == -1) {
+        v_texcoord2 = a_texcoord2;  // overlay: pass through as-is
+    } else if (u_texcoord2_direct > 0) {
+        v_texcoord2 = vec2(a_texcoord2.x, 1.0 - a_texcoord2.y);  // meshDeform: flip V for Director→OpenGL
+    } else {
+        v_texcoord2 = vec2(a_texcoord2.x + 0.5, 0.5 - a_texcoord2.y);
+    }
     v_view_dist = -view_pos.z;
     gl_Position = u_projection * view_pos;
 }
@@ -330,6 +337,7 @@ uniform sampler2D u_lightmap_tex;
 uniform int u_has_lightmap;       // blend mode: 0=none, 1=multiply, 2=add, 3=replace, 4=decal
 uniform float u_lightmap_intensity;
 uniform int u_has_texcoord2;
+uniform int u_texcoord2_direct;
 // Layer 2 (third texture layer)
 uniform sampler2D u_layer2_tex;
 uniform int u_layer2_blend;       // same encoding as u_has_lightmap
@@ -440,7 +448,8 @@ void main() {
             vec4 lm_sample = texture(u_lightmap_tex, lm_uv);
             float intensity = u_lightmap_intensity;
             if (u_has_lightmap == 1) {
-                // Multiply blend (shadow map): darken lit areas
+                // Multiply blend: lightmap represents light intensity.
+                // Bright lightmap = lit (keep base), dark lightmap = shadow (darken).
                 final_color *= mix(vec3(1.0), lm_sample.rgb, intensity);
             } else if (u_has_lightmap == 2) {
                 // Additive blend (lightmap): brighten with light data
@@ -468,36 +477,59 @@ void main() {
 
     // Non-textured path: use material diffuse color (or vertex color if available)
     vec3 base_color = (u_has_vertex_color > 0) ? v_vertex_color.rgb : u_diffuse_color.rgb;
-    vec3 result = u_emissive_color.rgb + u_global_ambient * u_ambient_color.rgb;
+    bool lightmap_only = (u_has_texture == 0 && u_has_lightmap > 0);
+    vec3 result = u_emissive_color.rgb;
 
-    for (int i = 0; i < 8; i++) {
-        if (i >= u_num_lights) break;
-        if (u_light_type[i] == 0) {
-            result += u_light_color[i] * u_ambient_color.rgb;
-        } else {
-            vec3 L;
-            float atten = 1.0;
-            if (u_light_type[i] == 1) {
-                L = normalize(u_light_pos[i]);
+    if (lightmap_only) {
+        // Director lightmap-only shaders use the material diffuse color as the base
+        // that the baked lightmap multiplies over. Applying dynamic lighting again
+        // here washes out the floor and doesn't match Director's output.
+        result += base_color;
+    } else {
+        result += u_global_ambient * u_ambient_color.rgb;
+
+        for (int i = 0; i < 8; i++) {
+            if (i >= u_num_lights) break;
+            if (u_light_type[i] == 0) {
+                result += u_light_color[i] * u_ambient_color.rgb;
             } else {
-                vec3 light_dir = u_light_pos[i] - v_position;
-                float dist = length(light_dir);
-                L = light_dir / dist;
-                atten = 1.0 / (1.0 + 0.01 * dist + 0.0001 * dist * dist);
-            }
+                vec3 L;
+                float atten = 1.0;
+                if (u_light_type[i] == 1) {
+                    L = normalize(u_light_pos[i]);
+                } else {
+                    vec3 light_dir = u_light_pos[i] - v_position;
+                    float dist = length(light_dir);
+                    L = light_dir / dist;
+                    atten = 1.0 / (1.0 + 0.01 * dist + 0.0001 * dist * dist);
+                }
 
-            // Two-sided lighting: use abs(N·L) so back faces also receive light
-            float diff = abs(dot(N, L));
-            if (u_shader_mode == 1 && u_toon_steps > 0.0) {
-                diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
-            }
-            result += atten * u_light_color[i] * base_color * diff;
+                // Two-sided lighting: use abs(N·L) so back faces also receive light
+                float diff = abs(dot(N, L));
+                if (u_shader_mode == 1 && u_toon_steps > 0.0) {
+                    diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
+                }
+                result += atten * u_light_color[i] * base_color * diff;
 
-            if (u_shininess > 0.0 && diff > 0.0) {
-                vec3 H = normalize(L + V);
-                float spec = pow(max(dot(N, H), 0.0), u_shininess);
-                result += u_light_color[i] * u_specular_color.rgb * spec * atten;
+                if (u_shininess > 0.0 && diff > 0.0) {
+                    vec3 H = normalize(L + V);
+                    float spec = pow(max(dot(N, H), 0.0), u_shininess);
+                    result += u_light_color[i] * u_specular_color.rgb * spec * atten;
+                }
             }
+        }
+    }
+
+    // Apply lightmap even for non-textured models (e.g., floor with no base texture
+    // but lightmap in textureList[2] from lightmapmanager)
+    if (u_has_lightmap > 0) {
+        vec2 lm_uv = (u_has_texcoord2 > 0) ? v_texcoord2 : v_texcoord;
+        vec4 lm_sample = texture(u_lightmap_tex, lm_uv);
+        float intensity = u_lightmap_intensity;
+        if (u_has_lightmap == 1) {
+            result *= mix(vec3(1.0), lm_sample.rgb, intensity);
+        } else if (u_has_lightmap == 2) {
+            result += lm_sample.rgb * intensity;
         }
     }
 
@@ -545,6 +577,7 @@ void main() {
             u_has_lightmap: u("u_has_lightmap"),
             u_lightmap_intensity: u("u_lightmap_intensity"),
             u_has_texcoord2: u("u_has_texcoord2"),
+            u_texcoord2_direct: u("u_texcoord2_direct"),
             u_layer2_tex: u("u_layer2_tex"),
             u_layer2_blend: u("u_layer2_blend"),
             u_layer2_intensity: u("u_layer2_intensity"),
@@ -1150,6 +1183,7 @@ void main() {
         gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
         gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
         gl.uniform1i(shader.u_has_texcoord2.as_ref(), 0);
+        gl.uniform1i(shader.u_texcoord2_direct.as_ref(), 0);
 
         // Draw all meshes with proper material/texture binding
         if let Some(gpu_data) = self.member_data.get(&member_key) {
@@ -1248,10 +1282,12 @@ void main() {
                             if mesh.tex_coords.len() >= 2 && !mesh.tex_coords[1].is_empty() {
                                 mesh_buf.update_texcoord2(context.gl(), &mesh.tex_coords[1]);
                                 mesh_buf.meshdeform_uv_synced = true;
-                                // Log UV2 sync for MAP models
-                                if resource_name.contains("MAP") || resource_name.starts_with("map") {
+                                // Log UV2 sync for MAP and Main models
+                                if resource_name.contains("MAP") || resource_name.starts_with("map")
+                                    || resource_name.starts_with("Main")
+                                {
                                     web_sys::console::log_1(&format!(
-                                        "[W3D-UV2] resource=\"{}\" mesh={} uv2_count={}",
+                                        "[W3D-UV2-SYNC] resource=\"{}\" mesh={} uv2_count={}",
                                         resource_name, mesh_idx, mesh.tex_coords[1].len()
                                     ).into());
                                 }
@@ -1370,6 +1406,7 @@ void main() {
 
         // Skinning defaults to off (enabled when bone data is present)
         gl.uniform1i(shader.u_has_texcoord2.as_ref(), 0);
+        gl.uniform1i(shader.u_texcoord2_direct.as_ref(), 0);
 
         // Traverse scene graph and draw model nodes
         if self.member_data.contains_key(&member_key) {
@@ -1390,7 +1427,7 @@ void main() {
             // Check if active camera has a rootNode filter
             let root_node_filter: Option<String> = runtime_state.and_then(|rs| {
                 self.active_camera.as_ref()
-                    .and_then(|cam| rs.camera_root_nodes.get(cam))
+                    .and_then(|cam| rs.camera_root_nodes.get(&cam.to_ascii_lowercase()))
                     .cloned()
             });
 
@@ -2018,6 +2055,10 @@ void main() {
                         if mesh_buf.has_vertex_colors { 1 } else { 0 });
                     gl.uniform1i(shader.u_has_texcoord2.as_ref(),
                         if mesh_buf.has_texcoord2 { 1 } else { 0 });
+                    gl.uniform1i(
+                        shader.u_texcoord2_direct.as_ref(),
+                        if mesh_buf.texcoord2_direct { 1 } else { 0 },
+                    );
 
                     mesh_buf.bind(gl);
                     mesh_buf.draw(gl);
@@ -2834,7 +2875,7 @@ void main() {
 
         let mut diffuse_name = String::new();
 
-        for layer in layers {
+        for (layer_idx, layer) in layers.iter().enumerate() {
             if layer.name.is_empty() { continue; }
             let lower = layer.name.to_lowercase();
             let tex = gpu_data.textures.get(&lower);
@@ -2851,11 +2892,13 @@ void main() {
                 continue;
             }
 
-            // First non-specular texture is the diffuse base
-            if result.diffuse.is_none() {
+            // Position 0 (textureList[1]) = diffuse base texture.
+            // Position 1+ (textureList[2+]) = extra layers (lightmaps).
+            // Use array position, not first-found, so lightmaps in position 1+
+            // don't get misclassified as diffuse when position 0 is empty.
+            if layer_idx == 0 && result.diffuse.is_none() {
                 result.diffuse = Some(tex);
                 diffuse_name = lower;
-                // Store texture coordinate transform (non-identity = scrolling/rotation/etc.)
                 if layer.tex_transform != identity {
                     result.diffuse_tex_transform = layer.tex_transform;
                 }
@@ -2877,7 +2920,11 @@ void main() {
                 //   blend_func 2 = #replace / GL_MODULATE
                 //   blend_func 3 = #blend / GL_DECAL
                 let blend = if lower.contains("lightmap") && !lower.contains("shadow") {
-                    2 // add for lightmaps (name heuristic)
+                    // Lightmap-only meshes (empty textureList[1], lightmap in textureList[2])
+                    // should shade as material color multiplied by light intensity.
+                    let lightmap_only = layer_idx > 0
+                        && layers[..layer_idx].iter().all(|prev| prev.name.is_empty());
+                    if lightmap_only { 1 } else { 2 }
                 } else {
                     match layer.blend_func {
                         1 => 2,  // #add / GL_ADD → our add mode
@@ -2890,6 +2937,7 @@ void main() {
                     tex,
                     blend,
                     intensity: layer.intensity,
+                    wrap: (layer.repeat_s, layer.repeat_t),
                 });
             }
         }
@@ -2914,11 +2962,9 @@ void main() {
             }
         }
 
-        // If no diffuse found but we have extra layers, promote the first to diffuse
-        if result.diffuse.is_none() && !result.extra_layers.is_empty() {
-            let first = result.extra_layers.remove(0);
-            result.diffuse = Some(first.tex);
-        }
+        // Do not promote textureList[2+] into diffuse when textureList[1] is empty.
+        // Director uses that layout for lightmap-only meshes, which should render via
+        // the non-textured material path plus the extra lightmap layer.
 
         // Diagnostic: log multi-layer binding results for shaders with 2+ named layers
         {
@@ -2978,6 +3024,10 @@ void main() {
             gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(layer.tex));
             gl.uniform1i(shader.u_has_lightmap.as_ref(), layer.blend);
             gl.uniform1f(shader.u_lightmap_intensity.as_ref(), layer.intensity);
+            let wrap_s = if layer.wrap.0 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
+            let wrap_t = if layer.wrap.1 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, wrap_s as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, wrap_t as i32);
         } else {
             gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
         }
@@ -2988,6 +3038,10 @@ void main() {
             gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(layer.tex));
             gl.uniform1i(shader.u_layer2_blend.as_ref(), layer.blend);
             gl.uniform1f(shader.u_layer2_intensity.as_ref(), layer.intensity);
+            let wrap_s = if layer.wrap.0 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
+            let wrap_t = if layer.wrap.1 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, wrap_s as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, wrap_t as i32);
         } else {
             gl.uniform1i(shader.u_layer2_blend.as_ref(), 0);
         }
@@ -3101,6 +3155,16 @@ void main() {
             gl.uniform1i(shader.u_shader_mode.as_ref(), 0);
         }
 
+        // IFX default: when a texture is bound and useDiffuseWithTexture is false,
+        // force diffuse to white (1,1,1) so lighting doesn't attenuate the textured surface.
+        // Shaders with useDiffuseWithTexture=true (e.g., lightmap clones) keep their actual diffuse.
+        if tex_bound {
+            let use_diffuse = w3d_shader_opt.map(|s| s.use_diffuse_with_texture).unwrap_or(false);
+            if !use_diffuse {
+                gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
+            }
+        }
+
         // Apply blend mode based on material opacity and first texture layer's blend function
         let first_blend_func = self.get_first_blend_func(scene, model_node, runtime_state);
         let opacity = w3d_shader_opt
@@ -3197,12 +3261,38 @@ void main() {
                     gl.uniform1f(shader.u_opacity.as_ref(), 1.0);
                 }
                 let mut tex_bound = false;
+                let mut has_lightmap_layer = false;
                 if let Some(gpu_data) = self.member_data.get(member_key) {
                     let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                    has_lightmap_layer = !layers.extra_layers.is_empty();
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
                 if !tex_bound {
                     gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+                }
+                // IFX default: white diffuse for textured models unless useDiffuseWithTexture
+                if tex_bound && !w3d_shader.use_diffuse_with_texture {
+                    gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
+                }
+                // Diagnostic: log all MainA/MainB mesh rendering (one-time per combo)
+                if model_node.name.eq_ignore_ascii_case("MainA") || model_node.name.eq_ignore_ascii_case("MainB") {
+                    use std::sync::Mutex;
+                    use std::collections::HashSet;
+                    static LOGGED_MAIN_ALL: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+                    let key = format!("{}:{}", model_node.name, mesh_idx);
+                    if let Ok(mut guard) = LOGGED_MAIN_ALL.lock() {
+                        let set = guard.get_or_insert_with(HashSet::new);
+                        if set.insert(key) {
+                            let layer_names: Vec<String> = w3d_shader.texture_layers.iter().map(|l| l.name.clone()).collect();
+                            let mat_desc = mat.map(|m| format!("diff=[{:.2},{:.2},{:.2}]", m.diffuse[0], m.diffuse[1], m.diffuse[2]))
+                                .unwrap_or_else(|| "NO_MAT".to_string());
+                            web_sys::console::log_1(&format!(
+                                "[W3D-MAIN-DIAG] model=\"{}\" mesh={} shader=\"{}\" tex_bound={} has_lightmap={} use_diff_tex={} layers={:?} {}",
+                                model_node.name, mesh_idx, w3d_shader.name, tex_bound, has_lightmap_layer,
+                                w3d_shader.use_diffuse_with_texture, layer_names, mat_desc
+                            ).into());
+                        }
+                    }
                 }
                 let first_bf = w3d_shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
@@ -3358,6 +3448,11 @@ void main() {
             if tex_bound {
                 if let Some(m) = mat {
                     self.set_material_uniforms(gl, shader, m);
+                }
+                // IFX default: white diffuse for textured models unless useDiffuseWithTexture
+                let use_diffuse = w3d_shader.map(|s| s.use_diffuse_with_texture).unwrap_or(false);
+                if !use_diffuse {
+                    gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
                 }
                 let first_bf = w3d_shader
                     .and_then(|s| s.texture_layers.first())
@@ -3678,13 +3773,13 @@ void main() {
 
         // Check for orthographic projection mode
         let is_ortho = runtime_state
-            .and_then(|rs| rs.camera_projection_mode.get(cam_name))
+            .and_then(|rs| rs.camera_projection_mode.get(&cam_name.to_ascii_lowercase()))
             .map(|&m| m == 1)
             .unwrap_or(false);
 
         let mut proj = if is_ortho {
             let ortho_h = runtime_state
-                .and_then(|rs| rs.camera_ortho_height.get(cam_name))
+                .and_then(|rs| rs.camera_ortho_height.get(&cam_name.to_ascii_lowercase()))
                 .copied()
                 .unwrap_or(100.0);
             let half_h = ortho_h * 0.5;
@@ -3775,7 +3870,7 @@ void main() {
                 // so its pass uses only emissive (no scene lighting wash-out).
                 if let Some(ref cam) = self.active_camera {
                     if let Some(rs) = runtime_state {
-                        if let Some(root) = rs.camera_root_nodes.get(cam) {
+                        if let Some(root) = rs.camera_root_nodes.get(&cam.to_ascii_lowercase()) {
                             if !self.is_child_of(scene, &light.name, root) {
                                 continue;
                             }

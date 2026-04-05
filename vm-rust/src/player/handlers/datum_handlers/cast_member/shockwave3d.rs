@@ -2008,7 +2008,7 @@ impl Shockwave3dMemberHandlers {
                     {
                         static RAY_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                         let n = RAY_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if n < 3 {
+                        if n < 20 {
                             let member_name = player.movie.cast_manager.find_member_by_ref(&member_ref)
                                 .map(|m| m.name.clone()).unwrap_or_default();
                             let model_count = scene.as_ref().map(|s| s.nodes.len()).unwrap_or(0);
@@ -2026,9 +2026,17 @@ impl Shockwave3dMemberHandlers {
                     let mut results = Vec::new();
                     if let Some(scene) = scene {
                         use crate::director::chunks::w3d::raycast::{Ray, raycast_scene_multi};
+                        // Normalize direction to ensure unit vector — some models may have
+                        // scaled world transforms that produce non-unit axis vectors.
+                        let dir_len = ((direction[0]*direction[0] + direction[1]*direction[1] + direction[2]*direction[2]) as f64).sqrt();
+                        let norm_dir = if dir_len > 1e-10 {
+                            [(direction[0] / dir_len) as f32, (direction[1] / dir_len) as f32, (direction[2] / dir_len) as f32]
+                        } else {
+                            [0.0f32, 0.0, -1.0] // Default downward
+                        };
                         let ray = Ray {
                             origin: [origin[0] as f32, origin[1] as f32, origin[2] as f32],
-                            direction: [direction[0] as f32, direction[1] as f32, direction[2] as f32],
+                            direction: norm_dir,
                         };
                         let excluded_ref = if excluded_nodes.is_empty() { None } else { Some(&excluded_nodes) };
                         let hits = raycast_scene_multi(
