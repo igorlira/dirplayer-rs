@@ -10,6 +10,7 @@ export default defineConfig({
   use: {
     headless: !!process.env.CI,
     baseURL: "http://127.0.0.1:9101",
+    video: process.env.CI ? "on" : "off",
   },
   webServer: {
     command:
