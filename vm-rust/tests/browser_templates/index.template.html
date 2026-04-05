@@ -33,6 +33,8 @@
 
     try {
       await init();
+      // Wire up timeout triggering now that wasm exports are available
+      window.__wasm_trigger_timeout = wasm.trigger_timeout;
       log('Module loaded. Running tests...');
 
       const testFns = Object.keys(wasm)

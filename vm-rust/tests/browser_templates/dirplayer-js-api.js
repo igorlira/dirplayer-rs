@@ -17,12 +17,27 @@ export function onScriptErrorCleared() {}
 export function onDebugMessage() {}
 export function onDebugContent() {}
 
-// Timeouts are fired directly by fire_pending_timeouts() in the test harness,
-// not via JS setInterval, to avoid concurrent access between the command loop
-// and test code. These stubs are intentionally no-ops.
-export function onScheduleTimeout() {}
-export function onClearTimeout() {}
-export function onClearTimeouts() {}
+// Timeout handling — mirrors the real Electron host behavior.
+// Uses setInterval to call trigger_timeout, which dispatches
+// TimeoutTriggered commands through the player's command loop.
+const _timeoutHandles = {};
+export function onScheduleTimeout(name, periodMs) {
+  if (_timeoutHandles[name]) clearInterval(_timeoutHandles[name]);
+  _timeoutHandles[name] = setInterval(() => {
+    if (window.__wasm_trigger_timeout) window.__wasm_trigger_timeout(name);
+  }, periodMs);
+}
+export function onClearTimeout(name) {
+  if (_timeoutHandles[name]) {
+    clearInterval(_timeoutHandles[name]);
+    delete _timeoutHandles[name];
+  }
+}
+export function onClearTimeouts() {
+  for (const name of Object.keys(_timeoutHandles)) {
+    clearInterval(_timeoutHandles[name]);
+  }
+}
 
 export function onDatumSnapshot() {}
 export function onScriptInstanceSnapshot() {}

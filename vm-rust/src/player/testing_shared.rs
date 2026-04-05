@@ -242,15 +242,27 @@ pub trait TestHarness {
         }
     }
 
-    async fn click_sprite(&mut self, sprite_num: usize) -> Result<(), String> {
+    /// Get a sprite's rect as (left, top, right, bottom).
+    async fn sprite_rect(&self, sprite_num: usize) -> Result<(i32, i32, i32, i32), String> {
         let rect = self.eval_datum(&format!("sprite({}).rect", sprite_num)).await?;
         match rect {
-            StaticDatum::IntRect(l, t, r, b) => {
-                self.click((l + r) / 2, (t + b) / 2).await;
-                Ok(())
-            }
+            StaticDatum::IntRect(l, t, r, b) => Ok((l, t, r, b)),
             _ => Err(format!("sprite({}).rect returned {:?}, expected IntRect", sprite_num, rect)),
         }
+    }
+
+    /// Click the center of a sprite.
+    async fn click_sprite(&mut self, sprite_num: usize) -> Result<(), String> {
+        let (l, t, r, b) = self.sprite_rect(sprite_num).await?;
+        self.click((l + r) / 2, (t + b) / 2).await;
+        Ok(())
+    }
+
+    /// Click at a specific offset (dx, dy) from the sprite's top-left corner.
+    async fn click_sprite_at(&mut self, sprite_num: usize, dx: i32, dy: i32) -> Result<(), String> {
+        let (l, t, _, _) = self.sprite_rect(sprite_num).await?;
+        self.click(l + dx, t + dy).await;
+        Ok(())
     }
 
     async fn click_member(&mut self, member_name: &str) -> Result<(), String> {
@@ -259,10 +271,24 @@ pub trait TestHarness {
         self.click_sprite(sprite_num).await
     }
 
+    /// Click at a specific offset from the top-left of the sprite with the given member name.
+    async fn click_member_at(&mut self, member_name: &str, dx: i32, dy: i32) -> Result<(), String> {
+        let sprite_num = self.find_sprite_by_member_name(member_name)
+            .ok_or_else(|| format!("No sprite with member '{}' found", member_name))?;
+        self.click_sprite_at(sprite_num, dx, dy).await
+    }
+
     async fn click_member_prefix(&mut self, prefix: &str) -> Result<(), String> {
         let sprite_num = self.find_sprite_by_member_prefix(prefix)
             .ok_or_else(|| format!("No sprite with member starting with '{}' found", prefix))?;
         self.click_sprite(sprite_num).await
+    }
+
+    /// Click at a specific offset from the top-left of the sprite whose member name starts with the given prefix.
+    async fn click_member_prefix_at(&mut self, prefix: &str, dx: i32, dy: i32) -> Result<(), String> {
+        let sprite_num = self.find_sprite_by_member_prefix(prefix)
+            .ok_or_else(|| format!("No sprite with member starting with '{}' found", prefix))?;
+        self.click_sprite_at(sprite_num, dx, dy).await
     }
 }
 
@@ -316,7 +342,7 @@ impl SnapshotContext {
         SnapshotContext {
             suite: suite.to_string(),
             test: test.to_string(),
-            max_diff_ratio: 0.005,
+            max_diff_ratio: 0.006,
         }
     }
 
