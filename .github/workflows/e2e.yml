@@ -1,0 +1,75 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    name: Native tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test assets
+        run: |
+          curl -fSL "${{ secrets.TEST_ASSETS_URL }}" -o assets.zip
+          unzip -qo assets.zip -d public/
+
+      - name: Cargo fetch
+        working-directory: ./vm-rust
+        run: cargo fetch
+
+      - name: Run native e2e tests
+        working-directory: ./vm-rust
+        run: cargo test --test mod -- e2e --nocapture
+
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli
+
+      - name: Download test assets
+        run: |
+          curl -fSL "${{ secrets.TEST_ASSETS_URL }}" -o assets.zip
+          unzip -qo assets.zip -d public/
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Cargo fetch
+        working-directory: ./vm-rust
+        run: cargo fetch
+
+      - name: Build and run browser e2e tests
+        run: bash scripts/run-browser-tests.sh
+
+      - name: Upload test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: |
+            vm-rust/snapshots/output/
+            test-results/
+          retention-days: 7

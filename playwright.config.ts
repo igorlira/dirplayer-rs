@@ -8,7 +8,7 @@ export default defineConfig({
   testDir: "./vm-rust/tests/browser",
   timeout: 300_000,
   use: {
-    headless: false,
+    headless: !!process.env.CI,
     baseURL: "http://127.0.0.1:9101",
   },
   webServer: {
