@@ -554,6 +554,7 @@ impl CastMemberRefHandlers {
                 FontMemberHandlers::set_prop(player, member_ref, prop, value)
             }),
             CastMemberTypeId::Bitmap => BitmapMemberHandlers::set_prop(member_ref, prop, value),
+            CastMemberTypeId::Sound => SoundMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Palette => reserve_player_mut(|player| {
                 PaletteMemberHandlers::set_prop(player, member_ref, prop, value)
             }),

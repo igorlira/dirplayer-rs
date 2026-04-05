@@ -603,6 +603,13 @@ impl CastMemberType {
         };
     }
 
+    pub fn as_sound_mut(&mut self) -> Option<&mut SoundMember> {
+        return match self {
+            Self::Sound(data) => Some(data),
+            _ => None,
+        };
+    }
+
     pub fn as_font(&self) -> Option<&FontMember> {
         return match self {
             Self::Font(data) => Some(data),
