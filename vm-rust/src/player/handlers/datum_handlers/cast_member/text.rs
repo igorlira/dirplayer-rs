@@ -945,7 +945,7 @@ impl TextMemberHandlers {
         match prop_lc.as_str() {
             "text" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     let new_text = value?.trim_end_matches('\0').to_string();
@@ -982,7 +982,7 @@ impl TextMemberHandlers {
             ),
             "alignment" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().alignment = value?;
                     Ok(())
@@ -990,7 +990,7 @@ impl TextMemberHandlers {
             ),
             "wordwrap" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().word_wrap = value?;
                     Ok(())
@@ -998,7 +998,7 @@ impl TextMemberHandlers {
             ),
             "width" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().width = value? as u16;
                     Ok(())
@@ -1006,7 +1006,7 @@ impl TextMemberHandlers {
             ),
             "font" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let font_name = value?;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
@@ -1019,7 +1019,7 @@ impl TextMemberHandlers {
             ),
             "fontsize" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let size = value? as u16;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
@@ -1056,7 +1056,7 @@ impl TextMemberHandlers {
             ),
             "fixedlinespace" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member
                         .member_type
@@ -1068,7 +1068,7 @@ impl TextMemberHandlers {
             ),
             "topspacing" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().top_spacing = value? as i16;
                     Ok(())
@@ -1076,7 +1076,7 @@ impl TextMemberHandlers {
             ),
             "boxtype" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().box_type = value?;
                     Ok(())
@@ -1084,7 +1084,7 @@ impl TextMemberHandlers {
             ),
             "antialias" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().anti_alias = value?;
                     Ok(())
@@ -1092,7 +1092,7 @@ impl TextMemberHandlers {
             ),
             "html" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let html_string = value?;
                     let spans = HtmlParser::parse_html(&html_string).map_err(|e| {
@@ -1238,7 +1238,7 @@ impl TextMemberHandlers {
             ),
             "height" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_data = cast_member.member_type.as_text_mut().unwrap();
                     // Setting height is a no-op for #adjust box type
@@ -1250,7 +1250,7 @@ impl TextMemberHandlers {
             ),
             "forecolor" | "color" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let color_val = value?;
                     // If value > 255, treat as RGB, otherwise as palette index
@@ -1267,7 +1267,7 @@ impl TextMemberHandlers {
             ),
             "bgcolor" | "backcolor" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let color_val = value?;
                     // If value > 255, treat as RGB, otherwise as palette index
@@ -1284,7 +1284,7 @@ impl TextMemberHandlers {
             ),
             "lineheight" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().fixed_line_space = value? as u16;
                     Ok(())
@@ -1293,7 +1293,7 @@ impl TextMemberHandlers {
             // TextInfo (3D text / D6+ text member) property setters
             "tunneldepth" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1304,7 +1304,7 @@ impl TextMemberHandlers {
             ),
             "beveldepth" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1315,7 +1315,7 @@ impl TextMemberHandlers {
             ),
             "smoothness" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1326,7 +1326,7 @@ impl TextMemberHandlers {
             ),
             "reflectivity" => borrow_member_mut(
                 member_ref,
-                |player| value.float_value().or_else(|_| value.int_value().map(|i| i as f64)),
+                |_player| value.float_value().or_else(|_| value.int_value().map(|i| i as f64)),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1337,7 +1337,7 @@ impl TextMemberHandlers {
             ),
             "beveltype" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1354,7 +1354,7 @@ impl TextMemberHandlers {
             ),
             "displaymode" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1370,7 +1370,7 @@ impl TextMemberHandlers {
             ),
             "directionalpreset" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1394,7 +1394,7 @@ impl TextMemberHandlers {
             ),
             "texturetype" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1411,7 +1411,7 @@ impl TextMemberHandlers {
             ),
             "directionalcolor" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1427,7 +1427,7 @@ impl TextMemberHandlers {
             ),
             "ambientcolor" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1442,7 +1442,7 @@ impl TextMemberHandlers {
             ),
             "specularcolor" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1505,7 +1505,7 @@ impl TextMemberHandlers {
             ),
             "texturemember" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1544,7 +1544,7 @@ impl TextMemberHandlers {
             ),
             "editable" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1555,7 +1555,7 @@ impl TextMemberHandlers {
             ),
             "autotab" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1566,7 +1566,7 @@ impl TextMemberHandlers {
             ),
             "directtostage" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1577,7 +1577,7 @@ impl TextMemberHandlers {
             ),
             "prerender" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1594,7 +1594,7 @@ impl TextMemberHandlers {
             ),
             "savebitmap" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1605,7 +1605,7 @@ impl TextMemberHandlers {
             ),
             "kerning" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1616,7 +1616,7 @@ impl TextMemberHandlers {
             ),
             "kerningthreshold" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1627,7 +1627,7 @@ impl TextMemberHandlers {
             ),
             "usehypertextstyles" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1638,7 +1638,7 @@ impl TextMemberHandlers {
             ),
             "antialiasthreshold" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1649,7 +1649,7 @@ impl TextMemberHandlers {
             ),
             "scrolltop" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -1660,7 +1660,7 @@ impl TextMemberHandlers {
             ),
             "centerregpoint" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if text_member.info.is_none() {
@@ -1674,7 +1674,7 @@ impl TextMemberHandlers {
             ),
             "rtf" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     let rtf_string = value?;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();

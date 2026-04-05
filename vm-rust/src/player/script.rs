@@ -338,7 +338,7 @@ pub fn get_current_scope<'a>(
 }
 
 pub fn get_current_script<'a>(
-    player: &'a DirPlayer,
+    _player: &'a DirPlayer,
     ctx: &'a BytecodeHandlerContext,
 ) -> Option<&'a Script> {
     return Some(unsafe { &*ctx.script_ptr });

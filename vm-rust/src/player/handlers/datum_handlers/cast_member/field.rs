@@ -320,7 +320,7 @@ impl FieldMemberHandlers {
         match prop {
             "text" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().text = value?.trim_end_matches('\0').to_string();
                     Ok(())
@@ -355,7 +355,7 @@ impl FieldMemberHandlers {
             ),
             "alignment" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().alignment = value?;
                     Ok(())
@@ -363,7 +363,7 @@ impl FieldMemberHandlers {
             ),
             "wordWrap" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().word_wrap = value?;
                     Ok(())
@@ -371,7 +371,7 @@ impl FieldMemberHandlers {
             ),
             "width" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().width = value? as u16;
                     Ok(())
@@ -379,7 +379,7 @@ impl FieldMemberHandlers {
             ),
             "height" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().fixed_line_space = value? as u16;
                     Ok(())
@@ -387,7 +387,7 @@ impl FieldMemberHandlers {
             ),
             "font" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().font = value?;
                     Ok(())
@@ -395,7 +395,7 @@ impl FieldMemberHandlers {
             ),
             "fontSize" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let font_size = value? as u16;
                     let field = cast_member.member_type.as_field_mut().unwrap();
@@ -405,7 +405,7 @@ impl FieldMemberHandlers {
             ),
             "fontStyle" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().font_style = value?;
                     Ok(())
@@ -413,7 +413,7 @@ impl FieldMemberHandlers {
             ),
             "fixedLineSpace" | "lineHeight" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member
                         .member_type
@@ -425,7 +425,7 @@ impl FieldMemberHandlers {
             ),
             "topSpacing" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().top_spacing = value? as i16;
                     Ok(())
@@ -433,7 +433,7 @@ impl FieldMemberHandlers {
             ),
             "boxType" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |_player| value.string_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().box_type = value?;
                     Ok(())
@@ -441,7 +441,7 @@ impl FieldMemberHandlers {
             ),
             "antialias" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().anti_alias = value?;
                     Ok(())
@@ -449,7 +449,7 @@ impl FieldMemberHandlers {
             ),
             "autoTab" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().auto_tab = value?;
                     Ok(())
@@ -457,7 +457,7 @@ impl FieldMemberHandlers {
             ),
             "editable" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().editable = value?;
                     Ok(())
@@ -465,7 +465,7 @@ impl FieldMemberHandlers {
             ),
             "border" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().border = value? as u16;
                     Ok(())
@@ -473,7 +473,7 @@ impl FieldMemberHandlers {
             ),
             "margin" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().margin = value? as u16;
                     Ok(())
@@ -481,7 +481,7 @@ impl FieldMemberHandlers {
             ),
             "boxDropShadow" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().box_drop_shadow = value? as u16;
                     Ok(())
@@ -489,7 +489,7 @@ impl FieldMemberHandlers {
             ),
             "dropShadow" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().drop_shadow = value? as u16;
                     Ok(())
@@ -497,7 +497,7 @@ impl FieldMemberHandlers {
             ),
             "scrollTop" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().scroll_top = value? as u16;
                     Ok(())
@@ -505,7 +505,7 @@ impl FieldMemberHandlers {
             ),
             "hilite" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |_player| value.bool_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().hilite = value?;
                     Ok(())
@@ -513,7 +513,7 @@ impl FieldMemberHandlers {
             ),
             "foreColor" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let v = value? as u8;
                     cast_member.member_type.as_field_mut().unwrap().fore_color = Some(ColorRef::PaletteIndex(v));
@@ -522,7 +522,7 @@ impl FieldMemberHandlers {
             ),
             "backColor" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |cast_member, value| {
                     let v = value? as u8;
                     cast_member.member_type.as_field_mut().unwrap().back_color = Some(ColorRef::PaletteIndex(v));
@@ -531,7 +531,7 @@ impl FieldMemberHandlers {
             ),
             "media" => borrow_member_mut(
                 member_ref,
-                |player| value.media_value(),
+                |_player| value.media_value(),
                 |cast_member, value| {
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     match value? {

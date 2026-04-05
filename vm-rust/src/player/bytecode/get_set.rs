@@ -57,7 +57,7 @@ impl GetSetUtils {
     }
 
     pub fn get_top_level_prop(
-        player: &mut DirPlayer,
+        _player: &mut DirPlayer,
         prop_name: &str,
     ) -> Result<Datum, ScriptError> {
         match prop_name {
