@@ -604,5 +604,17 @@ pub async fn mcp_eval_lingo(code: String) -> String {
 #[wasm_bindgen(start)]
 pub fn start() {
     set_panic_hook();
+    // In test mode, BrowserTestPlayer::new() handles initialization
+    // with fresh state for each test. Skip init_player() here to avoid
+    // spawning command/event loops that interfere with the test harness.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let is_test = web_sys::window()
+            .and_then(|w| js_sys::Reflect::get(&w, &"__dirplayerTestMode".into()).ok())
+            .map_or(false, |v| v.is_truthy());
+        if is_test {
+            return;
+        }
+    }
     init_player();
 }

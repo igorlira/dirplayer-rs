@@ -9,7 +9,11 @@ export function onScoreChanged() {}
 export function onChannelChanged() {}
 export function onChannelDisplayNameChanged() {}
 export function onFrameChanged() {}
-export function onScriptError() {}
+export function onScriptError(data) {
+  const msg = data?.message || JSON.stringify(data);
+  console.error('[SCRIPT ERROR]', msg, data);
+  if (window.__onScriptError) window.__onScriptError(msg);
+}
 export function onScopeListChanged() {}
 export function onBreakpointListChanged() {}
 export function onGlobalListChanged() {}

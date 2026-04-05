@@ -10,10 +10,20 @@
     #output { white-space: pre-wrap; padding: 8px; background: #222; border-radius: 4px; }
   </style>
   <script>
-    window.getAudioContext = function() { return new AudioContext(); };
-    window.__snapshots = [];
-    window.__saveSnapshot = function(suite, name, base64png) {
-      window.__snapshots.push({ suite, name, data: base64png });
+    window.__dirplayerTestMode = true;
+    window._audioContext = null;
+    window.getAudioContext = function() {
+      if (!window._audioContext) window._audioContext = new AudioContext();
+      return window._audioContext;
+    };
+    window.__scriptErrors = [];
+    window.__onScriptError = function(msg) {
+      window.__scriptErrors.push(msg);
+    };
+    window.__saveSnapshot = function(suite, name, base64png, maxDiffRatio) {
+      if (window.__playwrightSaveSnapshot) {
+        window.__playwrightSaveSnapshot(suite, name, base64png, maxDiffRatio || 0);
+      }
     };
     window.__testResults = null;
   </script>

@@ -7,7 +7,6 @@ import { PNG } from "pngjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SNAPSHOTS_BASE = path.join(__dirname, "..", "snapshots");
 const UPDATE_SNAPSHOTS = process.env.SNAPSHOT_UPDATE === "1";
-const MAX_DIFF_RATIO = parseFloat(process.env.SNAPSHOT_MAX_DIFF || "0.005");
 
 interface TestResult {
   name: string;
@@ -50,7 +49,64 @@ function compareSnapshots(
   return { diffRatio: diffPixels / totalPixels, diffPixels, totalPixels };
 }
 
+function processSnapshot(
+  suitePath: string,
+  name: string,
+  base64data: string,
+  maxDiffRatio: number
+) {
+  const slashIdx = suitePath.indexOf("/");
+  const suite = slashIdx >= 0 ? suitePath.substring(0, slashIdx) : suitePath;
+  const testName =
+    slashIdx >= 0 ? suitePath.substring(slashIdx + 1) : "default";
+
+  const outputDir = path.join(SNAPSHOTS_BASE, "output", suite, "browser", testName);
+  const referenceDir = path.join(SNAPSHOTS_BASE, "reference", suite, "browser", testName);
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(referenceDir, { recursive: true });
+
+  const fileName = `${name}.png`;
+  const outputPath = path.join(outputDir, fileName);
+  const referencePath = path.join(referenceDir, fileName);
+
+  fs.writeFileSync(outputPath, new Uint8Array(Buffer.from(base64data, "base64")));
+  console.log(`Saved: ${suite}/browser/${testName}/${fileName}`);
+
+  if (UPDATE_SNAPSHOTS) {
+    fs.writeFileSync(
+      referencePath,
+      new Uint8Array(Buffer.from(base64data, "base64"))
+    );
+    console.log(`Updated reference: ${suite}/browser/${testName}/${fileName}`);
+    return;
+  }
+
+  if (!fs.existsSync(referencePath)) {
+    console.log(
+      `No reference for '${suite}/browser/${testName}/${name}'. Run with SNAPSHOT_UPDATE=1 to create.`
+    );
+    return;
+  }
+
+  const diff = compareSnapshots(outputPath, referencePath);
+  if (diff.diffRatio > maxDiffRatio) {
+    throw new Error(
+      `Snapshot '${suite}/browser/${testName}/${name}' differs from reference: ` +
+        `${(diff.diffRatio * 100).toFixed(4)}% pixels changed ` +
+        `(${diff.diffPixels}/${diff.totalPixels}, threshold: ${(maxDiffRatio * 100).toFixed(4)}%)`
+    );
+  }
+}
+
 test("browser e2e tests", async ({ page }) => {
+  // Expose snapshot handler so snapshots are saved as they're taken
+  await page.exposeFunction(
+    "__playwrightSaveSnapshot",
+    (suite: string, name: string, data: string, maxDiffRatio: number) => {
+      processSnapshot(suite, name, data, maxDiffRatio);
+    }
+  );
+
   await page.goto("/index.html");
 
   // Wait for all wasm tests to complete
@@ -72,74 +128,18 @@ test("browser e2e tests", async ({ page }) => {
     `${testResults.passed} passed, ${testResults.failed} failed`
   );
 
-  // Process snapshots
-  const snapshots = await page.evaluate(
-    () =>
-      (window as any).__snapshots as {
-        suite: string;
-        name: string;
-        data: string;
-      }[]
+  // Check for VM script errors
+  const scriptErrors = await page.evaluate(
+    () => (window as any).__scriptErrors as string[]
   );
-
-  for (const snap of snapshots) {
-    // snap.suite is "suite/test" (e.g. "habbo/load")
-    // Layout: snapshots/{suite}/browser/{test}/{name}.png
-    const slashIdx = snap.suite.indexOf("/");
-    const suite = slashIdx >= 0 ? snap.suite.substring(0, slashIdx) : snap.suite;
-    const testName = slashIdx >= 0 ? snap.suite.substring(slashIdx + 1) : "default";
-
-    const outputDir = path.join(
-      SNAPSHOTS_BASE,
-      "output",
-      suite,
-      "browser",
-      testName
-    );
-    const referenceDir = path.join(
-      SNAPSHOTS_BASE,
-      "reference",
-      suite,
-      "browser",
-      testName
-    );
-    fs.mkdirSync(outputDir, { recursive: true });
-    fs.mkdirSync(referenceDir, { recursive: true });
-
-    const fileName = `${snap.name}.png`;
-    const outputPath = path.join(outputDir, fileName);
-    const referencePath = path.join(referenceDir, fileName);
-
-    fs.writeFileSync(
-      outputPath,
-      new Uint8Array(Buffer.from(snap.data, "base64"))
-    );
-    console.log(`Saved: ${suite}/browser/${testName}/${fileName}`);
-
-    if (UPDATE_SNAPSHOTS) {
-      fs.writeFileSync(
-        referencePath,
-        new Uint8Array(Buffer.from(snap.data, "base64"))
-      );
-      console.log(`Updated reference: ${suite}/browser/${testName}/${fileName}`);
-      continue;
+  if (scriptErrors.length > 0) {
+    console.log(`\n${scriptErrors.length} script error(s):`);
+    for (const err of scriptErrors) {
+      console.log(`  ✗ ${err}`);
     }
-
-    if (!fs.existsSync(referencePath)) {
-      console.log(
-        `No reference for '${suite}/browser/${testName}/${snap.name}'. Run with SNAPSHOT_UPDATE=1 to create.`
-      );
-      continue;
-    }
-
-    const diff = compareSnapshots(outputPath, referencePath);
-    if (diff.diffRatio > MAX_DIFF_RATIO) {
-      throw new Error(
-        `Snapshot '${suite}/browser/${testName}/${snap.name}' differs from reference: ` +
-          `${(diff.diffRatio * 100).toFixed(4)}% pixels changed ` +
-          `(${diff.diffPixels}/${diff.totalPixels}, threshold: ${(MAX_DIFF_RATIO * 100).toFixed(4)}%)`
-      );
-    }
+    throw new Error(
+      `${scriptErrors.length} script error(s) during test:\n${scriptErrors.join("\n")}`
+    );
   }
 
   // Assert all tests passed

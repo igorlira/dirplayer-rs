@@ -1,8 +1,6 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Request, RequestInit, Response};
 
-use crate::director::file::read_director_file_bytes;
 use crate::player::{
     commands::PlayerVMCommand,
     reserve_player_mut, reserve_player_ref,
@@ -16,44 +14,48 @@ use crate::player::testing_shared::{TestHarness, SnapshotOutput};
 pub struct BrowserTestPlayer {}
 
 impl BrowserTestPlayer {
-    pub fn new() -> Self {
-        // init_player() already ran via #[wasm_bindgen(start)], but we
-        // skipped it with __dirplayerTestMode. We need to re-init with
-        // fresh state for each test.
+    pub async fn new() -> Self {
+        // Stop the current movie and clear all timeouts before resetting.
+        unsafe {
+            if let Some(player) = PLAYER_OPT.as_mut() {
+                player.stop();
+                player.timeout_manager.clear();
+            }
+        }
+        crate::js_api::JsApi::dispatch_clear_timeouts();
+
         unsafe {
             if let Some(old) = PLAYER_OPT.take() {
                 std::mem::forget(old);
             }
-        }
-        // Run full init_player which sets up channels, command loop,
-        // event loop — the complete runtime.
-        crate::player::init_player();
-
-        // Also init xtra managers
-        unsafe {
+            // Create fresh channels to disconnect any old command/event loops
+            // from init_player(). This prevents them from holding the semaphore
+            // or interfering with our inline init_movie().
+            let (tx, rx) = async_std::channel::unbounded();
+            let (event_tx, event_rx) = async_std::channel::unbounded();
+            crate::player::PLAYER_TX = Some(tx.clone());
+            crate::player::PLAYER_EVENT_TX = Some(event_tx);
+            PLAYER_OPT = Some(crate::player::DirPlayer::new(tx));
             crate::player::xtra::multiuser::MULTIUSER_XTRA_MANAGER_OPT =
                 Some(crate::player::xtra::multiuser::MultiuserXtraManager::new());
             crate::player::xtra::xmlparser::XMLPARSER_XTRA_MANAGER_OPT =
                 Some(crate::player::xtra::xmlparser::XmlParserXtraManager::new());
+            // Spawn fresh command and event loops for the new channels
+            async_std::task::spawn_local(async move {
+                crate::player::commands::run_command_loop(rx).await;
+            });
+            async_std::task::spawn_local(async move {
+                crate::player::events::run_event_loop(event_rx).await;
+            });
         }
+
+        // Init logger (normally done by init_player which we skip in test mode)
+        let _ = console_log::init_with_level(log::Level::Warn);
+
+        // Load the system font (required for text rendering)
+        crate::player::font::player_load_system_font("/assets/charmap-system.png").await;
 
         BrowserTestPlayer {}
-    }
-
-    async fn fetch_bytes(url: &str) -> Vec<u8> {
-        let mut opts = RequestInit::new();
-        opts.method("GET");
-        let request = Request::new_with_str_and_init(url, &opts)
-            .unwrap_or_else(|e| panic!("Failed to create request for {}: {:?}", url, e));
-        let window = web_sys::window().unwrap();
-        let resp_value = JsFuture::from(window.fetch_with_request(&request)).await
-            .unwrap_or_else(|e| panic!("Fetch failed for {}: {:?}", url, e));
-        let resp: Response = resp_value.dyn_into().unwrap();
-        if !resp.ok() {
-            panic!("HTTP {} fetching {}", resp.status(), url);
-        }
-        let buffer = JsFuture::from(resp.array_buffer().unwrap()).await.unwrap();
-        js_sys::Uint8Array::new(&buffer).to_vec()
     }
 
     /// Wait for the next animation frame.
@@ -92,18 +94,12 @@ impl TestHarness for BrowserTestPlayer {
     }
 
     async fn init_movie(&mut self) {
-        // Trigger play() which spawns the real init sequence and frame loop.
-        // Then yield frames until the movie has initialized.
         reserve_player_mut(|player| {
-            player.is_playing = false; // Reset so play() doesn't early-return
+            player.is_playing = false;
         });
         unsafe {
             let player = PLAYER_OPT.as_mut().unwrap();
             player.play();
-        }
-        // Wait a few frames for the init sequence to run
-        for _ in 0..10 {
-            Self::next_frame().await;
         }
     }
 
@@ -115,22 +111,13 @@ impl TestHarness for BrowserTestPlayer {
             format!("{}{}", origin, url)
         };
 
-        let data = Self::fetch_bytes(&full_url).await;
-        let file_name = full_url.rsplit('/').next().unwrap_or("movie.dcr");
-        let base_url = &full_url[..full_url.rfind('/').map(|i| i + 1).unwrap_or(0)];
-
-        let dir_file = read_director_file_bytes(&data, file_name, base_url)
-            .unwrap_or_else(|e| panic!("Failed to parse {}: {:?}", file_name, e));
-
-        reserve_player_mut(|player| {
-            player.is_playing = true;
-            player.is_script_paused = false;
-        });
-
         unsafe {
             let player = PLAYER_OPT.as_mut().unwrap();
-            player.load_movie_from_dir(dir_file).await;
+            player.load_movie_from_file(&full_url).await;
         }
+
+        // Initialize the renderer now that the stage size is known
+        Self::ensure_renderer();
     }
 
     async fn step_frame(&mut self) -> bool {

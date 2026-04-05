@@ -90,7 +90,10 @@ pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
     warn!("Starting command loop");
 
     while !rx.is_closed() {
-        let item = rx.recv().await.unwrap();
+        let item = match rx.recv().await {
+            Ok(item) => item,
+            Err(_) => break, // Channel closed (sender dropped)
+        };
         let result = run_player_command(item.command).await;
         match result {
             Ok(result) => {
