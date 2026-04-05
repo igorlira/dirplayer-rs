@@ -28,6 +28,10 @@ impl BrowserTestPlayer {
             if let Some(old) = PLAYER_OPT.take() {
                 std::mem::forget(old);
             }
+            // Increment generation so old frame/command loops from previous
+            // tests detect staleness and exit.
+            crate::player::PLAYER_GENERATION += 1;
+
             // Create fresh channels to disconnect any old command/event loops
             // from init_player(). This prevents them from holding the semaphore
             // or interfering with our inline init_movie().

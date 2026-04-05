@@ -3144,9 +3144,14 @@ pub async fn run_frame_loop() {
         }
     }
 
+    let generation = unsafe { PLAYER_GENERATION };
     let mut is_playing = true;
     let mut last_frame_time = chrono::Local::now();
     while is_playing {
+        // Exit if the player was reset (e.g. between tests)
+        if unsafe { PLAYER_GENERATION } != generation {
+            return;
+        }
         // Check for pending gotoNetMovie completion
         let goto_transition = reserve_player_ref(|player| {
             if let Some((task_id, ref target)) = player.pending_goto_net_movie {
@@ -3274,6 +3279,11 @@ pub async fn player_is_playing() -> bool {
 pub(crate) static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
 static mut PLAYER_EVENT_TX: Option<Sender<PlayerVMEvent>> = None;
 pub static mut PLAYER_OPT: Option<DirPlayer> = None;
+
+/// Generation counter incremented each time the player is reset (e.g. between
+/// tests). Long-running spawned tasks (frame loop, command loop) capture the
+/// generation at spawn time and exit when it becomes stale.
+pub(crate) static mut PLAYER_GENERATION: u64 = 0;
 
 pub fn player_semaphone() -> &'static Mutex<()> {
     static MAP: OnceLock<Mutex<()>> = OnceLock::new();
