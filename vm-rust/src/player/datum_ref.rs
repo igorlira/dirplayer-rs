@@ -11,9 +11,9 @@ pub enum DatumRef {
 
 impl DatumRef {
     #[inline]
-    pub fn from_id(id: DatumId, ref_count: *mut u32) -> DatumRef {
+    pub unsafe fn from_id(id: DatumId, ref_count: *mut u32) -> DatumRef {
         if id != 0 {
-            let mut_ref = unsafe { &mut *ref_count };
+            let mut_ref = &mut *ref_count;
             if *mut_ref != u32::MAX {
                 *mut_ref += 1;
             }
@@ -57,7 +57,7 @@ impl Clone for DatumRef {
     fn clone(&self) -> Self {
         match self {
             DatumRef::Void => DatumRef::Void,
-            DatumRef::Ref(id, ref_count) => DatumRef::from_id(*id, ref_count.clone()),
+            DatumRef::Ref(id, ref_count) => unsafe { DatumRef::from_id(*id, ref_count.clone()) },
         }
     }
 }

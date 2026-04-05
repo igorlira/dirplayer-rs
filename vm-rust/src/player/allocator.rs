@@ -422,7 +422,7 @@ impl DatumAllocator {
 
     pub fn get_datum_ref(&self, id: DatumId) -> Option<DatumRef> {
         if let Some(entry) = self.datums.get(id) {
-            Some(DatumRef::from_id(id, entry.ref_count.get()))
+            Some(unsafe { DatumRef::from_id(id, entry.ref_count.get()) })
         } else {
             None
         }
