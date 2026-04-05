@@ -1,0 +1,3 @@
+[submodule "vm-rust/tests/snapshots/reference"]
+	path = vm-rust/tests/snapshots/reference
+	url = git@github.com:igorlira/dirplayer-e2e-snapshots.git

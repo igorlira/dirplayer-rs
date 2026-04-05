@@ -46,8 +46,11 @@ pub mod score_keyframes;
 pub mod stream_status;
 pub mod virtual_scripts;
 pub mod console;
+pub mod testing_shared;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod testing;
+#[cfg(target_arch = "wasm32")]
+pub mod testing_browser;
 
 use std::{
     collections::HashMap,
@@ -1931,6 +1934,18 @@ pub struct ScriptError {
     pub message: String,
 }
 
+impl std::fmt::Display for ScriptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl From<ScriptError> for String {
+    fn from(e: ScriptError) -> String {
+        e.message
+    }
+}
+
 impl ScriptError {
     pub fn new(message: String) -> ScriptError {
         Self::new_code(ScriptErrorCode::Generic, message)
@@ -2790,41 +2805,50 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
 ///
 /// This contains the core per-frame logic extracted from `run_frame_loop`, minus the
 /// timing/delay logic and gotoNetMovie handling which are loop-level concerns.
+/// Fire all scheduled timeouts immediately. In the real player, timeouts are
+/// driven by JS `setInterval`, but in tests there is no JS event loop (native)
+/// or frames run too fast for intervals to fire (browser). Call this each frame
+/// in test harnesses before `run_single_frame`.
+/// Fire scheduled timeouts whose period has elapsed according to wall-clock time.
+/// Each timeout that fires is rescheduled to `now + period`. The time is captured
+/// once at the start so handlers that take time don't cause cascading re-fires.
+pub async fn fire_pending_timeouts() {
+    let now = testing_shared::now_ms();
+    let pending_timeouts: Vec<(DatumRef, String, String)> = reserve_player_mut(|player| {
+        let mut ready = Vec::new();
+        for t in player.timeout_manager.timeouts.values_mut() {
+            if t.is_scheduled {
+                let remaining = t.next_fire_ms - now;
+                if remaining <= 0.0 {
+                    t.next_fire_ms = now + t.period as f64;
+                    ready.push((t.target_ref.clone(), t.handler.clone(), t.name.clone()));
+                }
+            }
+        }
+        ready
+    });
+    for (target_ref, handler_name, timeout_name) in pending_timeouts {
+        let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name.clone()));
+        let args = vec![ref_datum];
+        let result = if target_ref != DatumRef::Void {
+            player_call_datum_handler(&target_ref, &handler_name, &args).await
+        } else {
+            player_invoke_global_event(&handler_name, &args).await
+        };
+        if let Err(err) = result {
+            if err.code != ScriptErrorCode::HandlerNotFound {
+                warn!("Timeout '{}' handler '{}' error: {}", timeout_name, handler_name, err.message);
+            }
+        }
+    }
+}
+
 pub async fn run_single_frame() -> (bool, bool) {
     let (mut is_playing, mut is_script_paused) = reserve_player_ref(|player| {
         (player.is_playing, player.is_script_paused)
     });
     if !is_playing {
         return (false, is_script_paused);
-    }
-
-    // On native (non-wasm), timeouts are not driven by JS setTimeout.
-    // Fire all scheduled timeouts once per frame. In the real player, JS
-    // setTimeout runs independently, but test frames execute in microseconds
-    // so wall-clock timing doesn't work. Firing once per frame matches the
-    // effective behavior where each timeout fires between frames.
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let pending_timeouts: Vec<(DatumRef, String, String)> = reserve_player_ref(|player| {
-            player.timeout_manager.timeouts.values()
-                .filter(|t| t.is_scheduled)
-                .map(|t| (t.target_ref.clone(), t.handler.clone(), t.name.clone()))
-                .collect()
-        });
-        for (target_ref, handler_name, timeout_name) in pending_timeouts {
-            let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name.clone()));
-            let args = vec![ref_datum];
-            let result = if target_ref != DatumRef::Void {
-                player_call_datum_handler(&target_ref, &handler_name, &args).await
-            } else {
-                player_invoke_global_event(&handler_name, &args).await
-            };
-            if let Err(err) = result {
-                if err.code != ScriptErrorCode::HandlerNotFound {
-                    warn!("Timeout '{}' handler '{}' error: {}", timeout_name, handler_name, err.message);
-                }
-            }
-        }
     }
 
     // Dispatch streamStatus for any net tasks that completed since last check

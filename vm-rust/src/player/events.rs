@@ -25,12 +25,12 @@ pub enum PlayerVMEvent {
 }
 
 pub fn player_dispatch_global_event(handler_name: &str, args: &Vec<DatumRef>) {
-    let tx = unsafe { PLAYER_EVENT_TX.clone() }.unwrap();
-    tx.try_send(PlayerVMEvent::Global(
-        handler_name.to_owned(),
-        args.to_owned(),
-    ))
-    .unwrap();
+    if let Some(tx) = unsafe { PLAYER_EVENT_TX.clone() } {
+        let _ = tx.try_send(PlayerVMEvent::Global(
+            handler_name.to_owned(),
+            args.to_owned(),
+        ));
+    }
 }
 
 pub fn player_dispatch_callback_event(
@@ -38,13 +38,13 @@ pub fn player_dispatch_callback_event(
     handler_name: &str,
     args: &Vec<DatumRef>,
 ) {
-    let tx = unsafe { PLAYER_EVENT_TX.clone() }.unwrap();
-    tx.try_send(PlayerVMEvent::Callback(
-        receiver,
-        handler_name.to_owned(),
-        args.to_owned(),
-    ))
-    .unwrap();
+    if let Some(tx) = unsafe { PLAYER_EVENT_TX.clone() } {
+        let _ = tx.try_send(PlayerVMEvent::Callback(
+            receiver,
+            handler_name.to_owned(),
+            args.to_owned(),
+        ));
+    }
 }
 
 pub fn player_dispatch_targeted_event(
@@ -52,13 +52,13 @@ pub fn player_dispatch_targeted_event(
     args: &Vec<DatumRef>,
     instance_ids: Option<&Vec<ScriptInstanceRef>>,
 ) {
-    let tx = unsafe { PLAYER_EVENT_TX.clone() }.unwrap();
-    tx.try_send(PlayerVMEvent::Targeted(
-        handler_name.to_owned(),
-        args.to_owned(),
-        instance_ids.map(|x| x.to_owned()),
-    ))
-    .unwrap();
+    if let Some(tx) = unsafe { PLAYER_EVENT_TX.clone() } {
+        let _ = tx.try_send(PlayerVMEvent::Targeted(
+            handler_name.to_owned(),
+            args.to_owned(),
+            instance_ids.map(|x| x.to_owned()),
+        ));
+    }
 }
 
 pub fn player_dispatch_event_to_sprite(
@@ -443,7 +443,10 @@ pub async fn player_dispatch_movie_callback(
 pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
     warn!("Starting event loop");
     while !rx.is_closed() {
-        let item = rx.recv().await.unwrap();
+        let item = match rx.recv().await {
+            Ok(item) => item,
+            Err(_) => break, // Channel closed (sender dropped)
+        };
         player_wait_available().await;
         if !player_is_playing().await {
             continue;
