@@ -24,7 +24,7 @@ JS_BASENAME=$(ls "$RUNNER_DIR"/mod-*.js | xargs -n1 basename | grep -v _bg | hea
 # Scans all TOML configs for ${VAR_NAME...} patterns and collects
 # their values from the current environment.
 CONFIG_DIR="tests/e2e/configs"
-ENV_VARS=$(grep -hroP '\$\{\K[A-Z_]+' "$CONFIG_DIR"/*.toml 2>/dev/null | sort -u)
+ENV_VARS=$(grep -hroE '\$\{[A-Z0-9_]+' "$CONFIG_DIR"/*.toml 2>/dev/null | sed 's/\${//' | sort -u)
 TEST_ENV_JSON="{"
 FIRST=true
 for VAR in $ENV_VARS; do
