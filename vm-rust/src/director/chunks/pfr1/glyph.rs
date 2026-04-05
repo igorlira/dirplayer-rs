@@ -3273,10 +3273,10 @@ pub fn parse_glyph(
     let mut best_glyph: Option<OutlineGlyph> = None;
     let mut best_score: i32 = -1;
     let mut best_is_header = false;
-    let mut header_score: i32 = 0;
-    let mut direct_score: i32 = 0;
-    let mut header_contours = 0usize;
-    let mut direct_contours = 0usize;
+    let header_score: i32;
+    let direct_score: i32;
+    let header_contours: usize;
+    let direct_contours: usize;
 
     {
         let known_offsets = if known_gps_offsets.is_empty() { None } else { Some(known_gps_offsets) };
