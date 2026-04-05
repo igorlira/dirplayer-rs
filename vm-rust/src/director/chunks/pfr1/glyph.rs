@@ -1570,8 +1570,8 @@ impl<'a> Pfr1HeaderParser<'a> {
 
     /// Process curve commands 7-15
     fn process_curve(&mut self, cmd: i32) {
-        let mut v5: u32 = 0;
-        let mut path: u32 = 0; // 49, 54, or 70
+        let v5: u32;
+        let path: u32; // 49, 54, or 70
 
         match cmd {
             7 => { v5 = 2210; path = 49; }
