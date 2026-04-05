@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  TEST_ASSETS_URL: ${{ secrets.TEST_ASSETS_URL }}
 
 jobs:
   native:
@@ -18,7 +19,11 @@ jobs:
 
       - name: Download test assets
         run: |
-          curl -fSL "${{ secrets.TEST_ASSETS_URL }}" -o assets.zip
+          if [ -z "$TEST_ASSETS_URL" ]; then
+            echo "::error::TEST_ASSETS_URL secret is not set"
+            exit 1
+          fi
+          curl -fSL "$TEST_ASSETS_URL" -o assets.zip
           unzip -qo assets.zip -d public/
 
       - name: Cargo fetch
@@ -43,7 +48,11 @@ jobs:
 
       - name: Download test assets
         run: |
-          curl -fSL "${{ secrets.TEST_ASSETS_URL }}" -o assets.zip
+          if [ -z "$TEST_ASSETS_URL" ]; then
+            echo "::error::TEST_ASSETS_URL secret is not set"
+            exit 1
+          fi
+          curl -fSL "$TEST_ASSETS_URL" -o assets.zip
           unzip -qo assets.zip -d public/
 
       - uses: actions/setup-node@v4
