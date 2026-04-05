@@ -22,6 +22,14 @@ interface FlashInstance {
 // Map of "castLib:castMember" -> FlashInstance
 const instances = new Map<string, FlashInstance>();
 
+// Track pending Flash instance creations so the WASM frame loop can wait for them
+let flashLoadingCount = 0;
+
+// Track when getVariable/callFunction is called on a non-existent instance.
+// This signals the frame loop to wait — the rendering loop will dispatch
+// the Flash member creation shortly after.
+let flashAccessBeforeReady = false;
+
 // Intercept fetch to rewrite URLs based on fetchRewriteRules config.
 // On the server (empty rules), no rewriting happens — webserver should handle proxying.
 function getFetchRewriteRules(): Array<{pathPrefix: string, targetHost: string, targetPort: string, targetProtocol: string}> {
@@ -140,6 +148,11 @@ export async function createFlashInstance(
   // Destroy existing instance if any
   destroyFlashInstance(castLib, castMember);
 
+  flashLoadingCount++;
+  console.log(`[Flash] Instance ${key} creation started (pending: ${flashLoadingCount})`);
+
+  try {
+
   const ruffle = await loadRuffle();
 
   // Hidden container for Ruffle - pixels are read back and composited into dirplayer's canvas
@@ -215,20 +228,33 @@ export async function createFlashInstance(
   });
 
   // Find the internal canvas element that Ruffle renders to
-  setTimeout(() => {
-    const shadow = player.shadowRoot;
-    if (shadow) {
-      const canvas = shadow.querySelector('canvas');
-      if (canvas) instance.canvas = canvas;
-    }
-    if (!instance.canvas) {
-      const canvas = player.querySelector('canvas');
-      if (canvas) instance.canvas = canvas;
-    }
-    if (instance.canvas) {
-      startFrameCapture(key);
-    }
-  }, 500);
+  await new Promise<void>((resolve) => {
+    setTimeout(() => {
+      const shadow = player.shadowRoot;
+      if (shadow) {
+        const canvas = shadow.querySelector('canvas');
+        if (canvas) instance.canvas = canvas;
+      }
+      if (!instance.canvas) {
+        const canvas = player.querySelector('canvas');
+        if (canvas) instance.canvas = canvas;
+      }
+      if (instance.canvas) {
+        startFrameCapture(key);
+      }
+      resolve();
+    }, 500);
+  });
+
+  // Give the SWF time to run its ActionScript initialization (ExternalInterface callbacks etc.)
+  console.log(`[Flash] Instance ${key} loaded, waiting for SWF ActionScript to initialize...`);
+  await new Promise(resolve => setTimeout(resolve, 3000));
+
+  } finally {
+    flashLoadingCount--;
+    flashAccessBeforeReady = false;
+    console.log(`[Flash] Instance ${key} fully ready (pending: ${flashLoadingCount})`);
+  }
 }
 
 /**
@@ -306,6 +332,7 @@ function getVariable(castLib: number, castMember: number, path: string): string 
   const instance = instances.get(key);
   if (!instance) {
     console.warn(`ruffleGetVariable: no instance for ${key}`);
+    flashAccessBeforeReady = true;
     return null;
   }
 
@@ -366,6 +393,7 @@ function callFunction(castLib: number, castMember: number, path: string, argsXml
   const instance = instances.get(key);
   if (!instance) {
     console.warn(`ruffleCallFunction: no instance for ${key}`);
+    flashAccessBeforeReady = true;
     return null;
   }
 
@@ -699,6 +727,11 @@ export function initFlashBridge(): void {
       return trigger_lingo_callback_on_script(castLib, castMember, handlerName, argsJson, flashCastLib, flashCastMember);
     }
   };
+
+  // Expose flash loading state for WASM frame loop to check.
+  // Also returns true if scripts tried to access a Flash instance that doesn't exist yet
+  // (the rendering loop will dispatch it shortly).
+  win.isFlashLoading = () => flashLoadingCount > 0 || flashAccessBeforeReady;
 
   // Ensure RufflePlayer config is set up before any instances are created
   win.RufflePlayer = win.RufflePlayer || {};

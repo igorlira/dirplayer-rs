@@ -87,9 +87,11 @@ function loadRuffle(): Promise<void> {
 }
 
 function initCore() {
+  const requireClick = polyfillScript?.hasAttribute('data-require-click') ?? false;
   const config = {
     wasmUrl: getEmbeddedWasmUrl(),
     systemFontUrl: getEmbeddedFontUrl(),
+    requireClickToPlay: requireClick,
   };
 
   // Register with version for priority negotiation (deferred init handled inside initPolyfill)

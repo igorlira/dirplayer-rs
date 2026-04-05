@@ -1,3 +1,12 @@
+/// Case-insensitive match for Lingo property lookups.
+/// Lingo is case-insensitive, so `the markerlist` and `the markerList` must both work.
+macro_rules! match_ci {
+    ($val:expr, { $($($pat:literal)|+ => $body:expr),*, _ => $default:expr $(,)? }) => {
+        $(if $( $val.eq_ignore_ascii_case($pat) )||+ { $body } else)*
+        { $default }
+    };
+}
+
 pub mod allocator;
 pub mod bitmap;
 pub mod bytecode;
@@ -20,6 +29,7 @@ pub mod handlers;
 pub mod keyboard;
 pub mod keyboard_events;
 pub mod keyboard_map;
+pub mod mcp;
 pub mod movie;
 pub mod net_manager;
 pub mod net_task;
@@ -34,6 +44,7 @@ pub mod timeout;
 pub mod xtra;
 pub mod score_keyframes;
 pub mod virtual_scripts;
+pub mod console;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -58,8 +69,9 @@ use cast_member::{CastMemberType, CastMemberTypeId};
 use datum_ref::DatumRef;
 use fxhash::FxHashMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
-use log::{debug, warn};
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::wasm_bindgen;
+use log::{debug, error, warn};
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use net_manager::NetManager;
 use profiling::{end_profiling, start_profiling};
@@ -131,9 +143,11 @@ use crate::player::handlers::datum_handlers::xml::{XmlDocument, XmlNode};
 use crate::player::handlers::movie::MovieHandlers;
 use crate::player::handlers::datum_handlers::player_call_datum_handler;
 
-fn trace_output(message: &str, trace_log_file: &str) {
+fn trace_output(player: &DirPlayer, message: &str) {
     use crate::js_api::JsApi;
-
+    
+    player.console.write_line(message);
+    let trace_log_file = &player.movie.trace_log_file;
     if trace_log_file.is_empty() {
         JsApi::dispatch_debug_message(message);
     } else {
@@ -292,6 +306,7 @@ pub struct DirPlayer {
     /// Optional fake movie path override. When set, `the moviePath` and `the movieName`
     /// return values derived from this path, while actual file fetching uses the real URL.
     pub movie_path_override: Option<String>,
+    pub console: console::ConsoleBuffer,
 }
 
 /// Target frame for a movie transition (gotoNetMovie or go movie).
@@ -435,21 +450,58 @@ impl DirPlayer {
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
+            console: console::ConsoleBuffer::new(),
         };
 
         result.reset();
         result
     }
 
+    /// Pre-dispatch Flash members for all active sprites so they start loading
+    /// before Lingo scripts try to access them.
+    pub fn pre_dispatch_flash_members(&mut self) {
+        for channel in &self.movie.score.channels {
+            if let Some(member_ref) = &channel.sprite.member {
+                let flash_key = (member_ref.cast_lib, member_ref.cast_member);
+                if self.flash_frame_buffers.contains_key(&flash_key) {
+                    continue;
+                }
+                if let Some(member) = self.movie.cast_manager.find_member_by_ref(member_ref) {
+                    if let CastMemberType::Flash(flash_member) = &member.member_type {
+                        if crate::rendering::has_swf_signature(&flash_member.data) {
+                            let data = flash_member.data.clone();
+                            let w = channel.sprite.width.max(1) as u32;
+                            let h = channel.sprite.height.max(1) as u32;
+                            web_sys::console::log_1(&format!(
+                                "[Flash] Pre-dispatching {}:{} ({}x{}, {} bytes)",
+                                member_ref.cast_lib, member_ref.cast_member,
+                                w, h, data.len()
+                            ).into());
+                            JsApi::dispatch_flash_member_loaded(
+                                member_ref.cast_lib,
+                                member_ref.cast_member,
+                                &data,
+                                w,
+                                h,
+                            );
+                            self.flash_frame_buffers.insert(flash_key, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn load_movie_from_file(&mut self, path: &str) {
         let task_id = self.net_manager.preload_net_thing(path.to_owned());
         self.net_manager.await_task(task_id).await;
-        let task = self.net_manager.get_task(task_id).unwrap();
+        let task = self.net_manager.get_task(task_id)
+            .expect(&format!("Network task not found for '{}'", path));
         let data_bytes = self
             .net_manager
             .get_task_result(Some(task_id))
-            .unwrap()
-            .unwrap();
+            .expect(&format!("No response received for '{}'", path))
+            .expect(&format!("Network request failed for '{}'", path));
 
         let file_name = task.resolved_url
             .path_segments()
@@ -461,7 +513,7 @@ impl DirPlayer {
             &file_name,
             &get_base_url(&task.resolved_url).to_string(),
         )
-        .unwrap();
+        .expect(&format!("Failed to parse movie file '{}'", path));
         self.load_movie_from_dir(movie_file).await;
     }
 
@@ -533,7 +585,7 @@ impl DirPlayer {
         self.is_script_paused = false;
 
         use crate::js_api::safe_string;
-        web_sys::console::log_1(&format!("Loading Movie: {} (version: {})", safe_string(&self.movie.file_name), self.movie.dir_version).into());
+        debug!("Loading Movie: {} (version: {})", safe_string(&self.movie.file_name), self.movie.dir_version);
 
         async_std::task::spawn_local(async move {
             run_movie_init_sequence().await;
@@ -818,7 +870,7 @@ impl DirPlayer {
     }
 
     #[allow(dead_code)]
-    pub fn get_global(&self, name: &String) -> Option<&Datum> {
+    pub fn get_global(&self, name: &str) -> Option<&Datum> {
         self.globals
             .get(name)
             .map(|datum_ref| self.get_datum(datum_ref))
@@ -1117,7 +1169,7 @@ impl DirPlayer {
                 if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
                     let sn = self.movie.cast_manager.get_script_by_ref(&entry.script_instance.script)
                         .map(|s| s.name.clone()).unwrap_or_else(|| format!("si#{}", si_id));
-                    let dtype = self.allocator.datums.get(id).map(|e| e.datum.type_str()).unwrap_or("?".to_string());
+                    let dtype = self.allocator.datums.get(id).map(|e| e.datum.type_str()).unwrap_or("?");
                     *si_new.entry(format!("si({}).{} [{}]", sn, prop_name.as_str(), dtype)).or_insert(0) += 1;
                     accounted.insert(id);
                 }
@@ -1310,28 +1362,28 @@ impl DirPlayer {
     }
 
     fn get_movie_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
-        match prop {
+        match_ci!(prop, {
             "datumStats" => {
                 let stats = self.allocator.datum_type_stats();
                 web_sys::console::log_1(&stats.clone().into());
                 Ok(self.alloc_datum(Datum::String(stats)))
-            }
+            },
             "datumSnapshot" => {
                 self.allocator.take_datum_snapshot();
-                web_sys::console::log_1(&"Datum snapshot taken. Use 'put the datumStats' to see new datums since snapshot.".into());
+                debug!("Datum snapshot taken. Use 'put the datumStats' to see new datums since snapshot.");
                 Ok(DatumRef::Void)
-            }
+            },
             "datumLeakScan" => {
                 let stats = self.datum_leak_scan();
                 web_sys::console::log_1(&stats.clone().into());
                 Ok(self.alloc_datum(Datum::String(stats)))
-            }
+            },
             "systemDate" => {
                 let date_id = self.allocator.get_free_script_instance_id();
                 let date_obj = crate::player::handlers::datum_handlers::date::DateObject::new(date_id);
                 self.date_objects.insert(date_id, date_obj);
                 Ok(self.alloc_datum(Datum::DateRef(date_id)))
-            }
+            },
             "stage" => Ok(self.alloc_datum(Datum::Stage)),
             "time" => Ok(self.alloc_datum(Datum::String(
                 chrono::Local::now().format("%H:%M %p").to_string(),
@@ -1343,36 +1395,37 @@ impl DirPlayer {
             ))),
             "keyboardFocusSprite" => {
                 Ok(self.alloc_datum(Datum::Int(self.keyboard_focus_sprite as i32)))
-            }
+            },
             "frameTempo" => {
                 // Get tempo from current frame in score, or use default frame_rate
                 let frame_tempo = self.movie.score.get_frame_tempo(self.movie.current_frame)
                     .unwrap_or(self.movie.frame_rate as u32);
                 Ok(self.alloc_datum(Datum::Int(frame_tempo as i32)))
-            }
+            },
             "mouseLoc" => {
                 let x_ref = self.alloc_datum(Datum::Int(self.mouse_loc.0));
                 let y_ref = self.alloc_datum(Datum::Int(self.mouse_loc.1));
                 Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
-            }
+            },
             "mouseH" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
             "mouseV" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
             "stillDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
             "rollover" => {
                 let sprite = get_sprite_at(self, self.mouse_loc.0, self.mouse_loc.1, false);
                 Ok(self.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
-            }
+            },
             "keyCode" => Ok(self.alloc_datum(Datum::Int(self.keyboard_manager.key_code() as i32))),
             "shiftDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_shift_down()))),
             "optionDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
             "commandDown" => {
                 Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_command_down())))
-            }
+            },
             "controlDown" => {
                 Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_control_down())))
-            }
+            },
             "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
             "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
+            "keyPressed" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key_pressed()))),
             "floatPrecision" => Ok(self.alloc_datum(Datum::Int(self.float_precision as i32))),
             "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
             "ticks" => Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))),
@@ -1388,7 +1441,7 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::String(
                     frame_label.unwrap_or_else(|| "0".to_string()),
                 )))
-            }
+            },
             "currentSpriteNum" => {
                 // TODO: this can also be called by a static script
                 let script_instance_ref = self
@@ -1408,11 +1461,10 @@ impl DirPlayer {
                         }
                     }
                 }
-                
+
                 // Default: return 0 when no sprite context is available
                 Ok(self.alloc_datum(Datum::Int(0)))
-            }
-            // Return the actual DatumRef from globals
+            },
             "actorList" => {
                 // Return the reference to the global actorList, not a clone of its contents
                 Ok(self
@@ -1420,7 +1472,7 @@ impl DirPlayer {
                     .get("actorList")
                     .unwrap_or(&DatumRef::Void)
                     .clone())
-            }
+            },
             "clickOn" => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
             "environment" | "environmentPropList" => {
                 // Build the environment property list
@@ -1492,7 +1544,7 @@ impl DirPlayer {
                 let x_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.0));
                 let y_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.1));
                 Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
-            }
+            },
             "markerList" => {
                 let labels: Vec<_> = self.movie.score.frame_labels
                     .iter()
@@ -1507,7 +1559,7 @@ impl DirPlayer {
                     })
                     .collect();
                 Ok(self.alloc_datum(Datum::PropList(props, false)))
-            }
+            },
             "xtraList" => {
                 let xtra_names = xtra::manager::get_registered_xtra_names();
                 let xtra_list: VecDeque<DatumRef> = xtra_names
@@ -1519,22 +1571,22 @@ impl DirPlayer {
                     })
                     .collect();
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
-            }
+            },
             "runMode" => {
                 let mode = self.external_params.get("_runMode")
                     .cloned()
                     .unwrap_or_else(|| "Plugin".to_string());
                 Ok(self.alloc_datum(Datum::String(mode)))
-            }
+            },
             _ => {
                 let datum = self.movie.get_prop(prop)?;
                 Ok(self.alloc_datum(datum))
             }
-        }
+        })
     }
 
-    fn get_player_prop(&mut self, prop: &String) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+    fn get_player_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
+        match prop {
             "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
             "productVersion" => Ok(self.alloc_datum(Datum::String("10.1".to_string()))), // TODO
             "runMode" => {
@@ -1590,8 +1642,8 @@ impl DirPlayer {
         }
     }
 
-    fn set_player_prop(&mut self, prop: &String, value: &DatumRef) -> Result<(), ScriptError> {
-        match prop.as_str() {
+    fn set_player_prop(&mut self, prop: &str, value: &DatumRef) -> Result<(), ScriptError> {
+        match prop {
             "itemDelimiter" => {
                 let value = self.get_datum(value);
                 self.movie.item_delimiter = (value.string_value()?).chars().next().unwrap();
@@ -1618,6 +1670,7 @@ impl DirPlayer {
             "beepOn" | "centerStage" | "fixStageSize" => Ok(Datum::Int(0)),
             "exitLock" => Ok(datum_bool(self.movie.exit_lock)),
             "key" => Ok(Datum::String(self.keyboard_manager.key())),
+            "keyPressed" => Ok(Datum::String(self.keyboard_manager.key_pressed())),
             "keyCode" => Ok(Datum::Int(self.keyboard_manager.key_code() as i32)),
             "stageColor" => Ok(Datum::Int(0)),
             "doubleClick" => Ok(datum_bool(self.is_double_click)),
@@ -1656,28 +1709,28 @@ impl DirPlayer {
     }
 
     fn set_movie_prop(&mut self, prop: &str, value: Datum) -> Result<(), ScriptError> {
-        match prop {
+        match_ci!(prop, {
             "keyboardFocusSprite" => {
                 // TODO switch focus
                 self.keyboard_focus_sprite = value.int_value()? as i16;
                 Ok(())
-            }
+            },
             "selStart" => {
                 self.text_selection_start = value.int_value()? as u16;
                 Ok(())
-            }
+            },
             "selEnd" => {
                 self.text_selection_end = value.int_value()? as u16;
                 Ok(())
-            }
+            },
             "floatPrecision" => {
                 self.float_precision = value.int_value()? as u8;
                 Ok(())
-            }
+            },
             "centerStage" => {
                 // TODO
                 Ok(())
-            }
+            },
             "actorList" => {
                 // Setting actorList - update the global variable
                 match value {
@@ -1689,9 +1742,9 @@ impl DirPlayer {
                     }
                     _ => Err(ScriptError::new("actorList must be a list".to_string())),
                 }
-            }
-            _ => self.movie.set_prop(prop, value, &self.allocator),
-        }
+            },
+            _ => self.movie.set_prop(prop, value, &self.allocator)
+        })
     }
 
     fn on_script_error(&mut self, err: &ScriptError) {
@@ -1775,7 +1828,7 @@ impl DirPlayer {
         // Get the loop setting from the cast member
         let loop_count = {
             let member_datum = self.get_datum(&member_ref);
-            if let Datum::CastMember(ref cast_member_ref) = member_datum {
+            if let Datum::CastMember(cast_member_ref) = member_datum {
                 if let Some(cast_member) = self.movie.cast_manager.find_member_by_ref(cast_member_ref) {
                     if let CastMemberType::Sound(sound_member) = &cast_member.member_type {
                         if sound_member.info.loop_enabled {
@@ -2091,7 +2144,7 @@ pub fn player_handle_scope_return(scope: &ScopeResult) {
 }
 
 pub async fn player_call_global_handler(
-    handler_name: &String,
+    handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     let receiver_handler = unsafe {
@@ -2366,7 +2419,7 @@ pub async fn player_call_script_handler_raw_args(
                 "== Script: (member {} of castLib {}) Handler: {}",
                 cast_member, cast_lib, handler_name
             );
-            trace_output(&msg, &trace_file);
+            trace_output(player, &msg);
             
             // ADD THIS BLOCK HERE - Clear expression tracker for new handler
             use crate::player::bytecode::handler_manager::EXPRESSION_TRACKER;
@@ -2545,8 +2598,7 @@ pub async fn player_call_script_handler_raw_args(
     let scope = reserve_player_mut(|player| {
         // Trace handler exit
         if player.movie.trace_script {
-            let trace_file = player.movie.trace_log_file.clone();
-            trace_output("--> end", &trace_file);
+            trace_output(player, "--> end");
         }
 
         let result = {
@@ -2800,9 +2852,7 @@ async fn run_movie_init_sequence() {
                     });
                     return;
                 }
-                web_sys::console::log_1(
-                    &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
-                );
+                error!("⚠ stepFrame[{}] error: {}", idx, err.message);
                 reserve_player_mut(|player| {
                     player.on_script_error(&err);
                     player.is_in_frame_update = false;
@@ -2957,6 +3007,12 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     });
 }
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = "isFlashLoading", catch)]
+    fn is_flash_loading() -> Result<bool, wasm_bindgen::JsValue>;
+}
+
 pub async fn run_frame_loop() {
     unsafe {
         let player = PLAYER_OPT.as_ref().unwrap();
@@ -2992,6 +3048,28 @@ pub async fn run_frame_loop() {
             continue;
         }
 
+        // Pre-dispatch Flash members for sprites on the current frame so they start
+        // loading before Lingo scripts try to access them.
+        reserve_player_mut(|player| {
+            player.pre_dispatch_flash_members();
+        });
+
+        // Wait for pending Flash/Ruffle instances to finish loading BEFORE running scripts.
+        // Ruffle needs time to initialize its WASM renderer, load the SWF, and run
+        // the ActionScript initialization (ExternalInterface callbacks etc.).
+        // The JS side keeps flashLoadingCount > 0 until the SWF has fully settled.
+        if is_flash_loading().unwrap_or(false) {
+            web_sys::console::log_1(&"[Flash] Waiting for Ruffle instance to finish loading...".into());
+            // Poll every 100ms until Ruffle is done, up to 15 seconds max
+            for _ in 0..150 {
+                timeout(Duration::from_millis(100), future::pending::<()>()).await.unwrap_err();
+                if !is_flash_loading().unwrap_or(false) {
+                    break;
+                }
+            }
+            web_sys::console::log_1(&"[Flash] Ruffle instance ready, resuming frame loop.".into());
+        }
+
         if !is_script_paused {
             player_wait_available().await;
 
@@ -3010,6 +3088,20 @@ pub async fn run_frame_loop() {
                     }
                 });
             }
+        }
+
+        // Also check after frame execution: if scripts tried to access a Flash
+        // instance that doesn't exist yet, wait for the rendering loop to dispatch
+        // it and for Ruffle to finish loading before the next frame.
+        if is_flash_loading().unwrap_or(false) {
+            web_sys::console::log_1(&"[Flash] Scripts accessed unready Flash instance, waiting...".into());
+            for _ in 0..150 {
+                timeout(Duration::from_millis(100), future::pending::<()>()).await.unwrap_err();
+                if !is_flash_loading().unwrap_or(false) {
+                    break;
+                }
+            }
+            web_sys::console::log_1(&"[Flash] Ruffle instance ready, resuming frame loop.".into());
         }
 
         // Get the target frame delay based on cached tempo for current frame
