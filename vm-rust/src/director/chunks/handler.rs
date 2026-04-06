@@ -1,5 +1,5 @@
 use binary_reader::BinaryReader;
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use std::convert::TryInto;
 
 use crate::director::lingo::{constants::opcode_names, opcode::OpCode, script::ScriptContext};

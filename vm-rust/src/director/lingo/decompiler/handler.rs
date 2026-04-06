@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::{Cell, RefCell};
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 use crate::director::chunks::handler::HandlerDef;
 use crate::director::chunks::script::ScriptChunk;

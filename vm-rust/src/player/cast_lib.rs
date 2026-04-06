@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use url::Url;
 
 use crate::{

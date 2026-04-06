@@ -1,4 +1,4 @@
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 use crate::player::cast_member::PaletteMember;
 

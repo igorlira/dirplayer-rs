@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use itertools::Itertools;
 
 use crate::director::{

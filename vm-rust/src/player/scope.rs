@@ -1,4 +1,4 @@
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 use super::{
     cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF},

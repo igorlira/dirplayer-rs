@@ -1,4 +1,4 @@
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use xml::reader::{EventReader, XmlEvent};
 
 use crate::{

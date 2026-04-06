@@ -4,7 +4,7 @@ use std::{
     rc::Rc,
 };
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use itertools::Itertools;
 use log::{debug, warn};
 use url::Url;
