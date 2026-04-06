@@ -344,66 +344,23 @@ impl BitmapDatumHandlers {
                         return Ok(player.alloc_datum(datum_bool(false)));
                     }
 
-                    // Clone alpha data and palette ref to avoid borrow issues
+                    // Clone the alpha data to avoid borrow issues
                     let alpha_data = alpha_bitmap.data.clone();
-                    let alpha_palette = alpha_bitmap.palette_ref.clone();
-
-                    // Build LUT: palette index → grayscale luminance for alpha value.
-                    // 8-bit images store palette indices, not raw brightness.
-                    // In systemMac: index 0 = white (255,255,255), index 255 = black (0,0,0).
-                    let alpha_lut = {
-                        let palettes = player.movie.cast_manager.palettes();
-                        let mut lut = [0u8; 256];
-                        for idx in 0..256u16 {
-                            let (r, g, b) = crate::player::bitmap::bitmap::resolve_color_ref(
-                                &palettes,
-                                &crate::player::sprite::ColorRef::PaletteIndex(idx as u8),
-                                &alpha_palette,
-                                8,
-                            );
-                            lut[idx as usize] = ((r as u16 + g as u16 + b as u16) / 3) as u8;
-                        }
-                        lut
-                    };
-
-                    // Debug: count non-white values in the grayscale alpha source
-                    {
-                        let mut non_zero_idx = 0usize;
-                        let mut non_white_count = 0usize;
-                        let mut first_nonwhite = String::new();
-                        for i in 0..alpha_data.len() {
-                            let idx_val = alpha_data[i];
-                            if idx_val != 0 { // index 0 = white in grayscale
-                                non_zero_idx += 1;
-                                let alpha_val = alpha_lut[idx_val as usize];
-                                if alpha_val < 255 {
-                                    non_white_count += 1;
-                                    if first_nonwhite.is_empty() {
-                                        first_nonwhite = format!("px{}:idx={},alpha={}", i, idx_val, alpha_val);
-                                    }
-                                }
-                            }
-                        }
-                        web_sys::console::log_1(&format!(
-                            "[setAlpha] src={}x{} dst={}x{} non_zero_idx={}/{} non_white_alpha={} first={}",
-                            width, height, width, height,
-                            non_zero_idx, alpha_data.len(),
-                            non_white_count,
-                            if first_nonwhite.is_empty() { "none".to_string() } else { first_nonwhite },
-                        ).into());
-                    }
 
                     let bitmap = player
                         .bitmap_manager
                         .get_bitmap_mut(*bitmap_ref)
                         .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
 
+                    // Copy alpha values from the 8-bit image to the alpha channel of the 32-bit image.
+                    // Director's setAlpha uses raw palette indices as alpha values directly:
+                    // index 0 = transparent, index 255 = opaque.
                     for y in 0..height {
                         for x in 0..width {
                             let alpha_idx = y as usize * width as usize + x as usize;
                             let dst_idx = (y as usize * width as usize + x as usize) * 4 + 3;
                             if alpha_idx < alpha_data.len() && dst_idx < bitmap.data.len() {
-                                bitmap.data[dst_idx] = alpha_lut[alpha_data[alpha_idx] as usize];
+                                bitmap.data[dst_idx] = alpha_data[alpha_idx];
                             }
                         }
                     }

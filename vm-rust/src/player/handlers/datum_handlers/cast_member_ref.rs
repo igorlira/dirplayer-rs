@@ -157,7 +157,6 @@ impl CastMemberRefHandlers {
                         .cast_manager
                         .find_member_by_ref(&cast_member_ref)
                         .expect("cast member ref should be valid in charPosToLoc");
-                    let text_data = cast_member.member_type.as_text().expect("charPosToLoc only works on text members");
                     let char_pos = player.get_datum(&args[0]).int_value()? as u16;
                     let char_width: i32 = 7;
 
