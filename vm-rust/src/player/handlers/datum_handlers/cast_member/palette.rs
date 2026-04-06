@@ -1,4 +1,4 @@
-use crate::{director::{chunks::palette, enums::MemberType, lingo::datum::Datum}, player::{DirPlayer, ScriptError, cast_lib::CastMemberRef, cast_member::{CastMember, CastMemberType, Media}}};
+use crate::{director::lingo::datum::Datum, player::{DirPlayer, ScriptError, cast_lib::CastMemberRef, cast_member::{CastMemberType, Media}}};
 
 
 pub struct PaletteMemberHandlers;

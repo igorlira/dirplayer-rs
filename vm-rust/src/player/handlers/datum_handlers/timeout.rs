@@ -1,5 +1,4 @@
 use crate::{
-    console_warn,
     director::lingo::datum::Datum,
     player::{
         reserve_player_mut, reserve_player_ref, timeout::Timeout, DatumRef, DirPlayer, ScriptError,
@@ -194,6 +193,7 @@ impl TimeoutDatumHandlers {
                 period: timeout_period as u32,
                 target_ref: target_ref.clone(),
                 is_scheduled: false,
+                next_fire_ms: 0.0,
             };
             timeout.schedule();
             player.timeout_manager.add_timeout(timeout);

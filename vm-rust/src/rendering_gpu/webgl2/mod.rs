@@ -23,7 +23,7 @@ use crate::player::{
     bitmap::drawing::CopyPixelsParams,
     cast_lib::CastMemberRef,
     cast_member::CastMemberType,
-    font::{bitmap_font_copy_char, measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference, BitmapFont},
+    font::{measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference},
     geometry::IntRect,
     handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
     score::{get_concrete_sprite_rect, get_sprite_at, ScoreRef},
@@ -4608,5 +4608,19 @@ impl super::Renderer for WebGL2Renderer {
 
     fn preview_font_size(&self) -> Option<u16> {
         self.preview_font_size
+    }
+
+    fn draw_sprite_isolated(&mut self, player: &mut DirPlayer, channel_num: i16) {
+        // Clear to transparent
+        let gl = self.context.gl();
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+
+        // Advance caches so textures are available
+        self.texture_cache.next_frame();
+        self.rendered_text_cache.next_frame();
+
+        self.quad.bind(self.context.gl());
+        self.render_sprite(player, channel_num);
     }
 }

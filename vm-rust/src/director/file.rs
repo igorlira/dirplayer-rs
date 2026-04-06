@@ -8,7 +8,6 @@ use crate::director::guid::*;
 use crate::director::rifx::RIFXReaderContext;
 use crate::director::utils::*;
 use crate::io::reader::DirectorExt;
-use crate::utils::log_i;
 use binary_reader::BinaryReader;
 use itertools::Itertools;
 use log::debug;
@@ -354,11 +353,10 @@ fn read_casts(
                 if cast.is_none() && cast_entry.file_path.is_empty() {
                     // Cast has no CAS* chunk AND no file_path - this is unusual
                     // It should either be internal (has CAS*) or external (has file_path)
-                    #[cfg(target_arch = "wasm32")]
-                    web_sys::console::warn_1(&format!(
+                    log::warn!(
                         "Cast '{}' (id={}) has no CAS* chunk and no file_path - data may be missing",
                         &cast_entry.name, &cast_entry.id
-                    ).into());
+                    );
                 }
                 if let Some(cast) = cast {
                     // TODO cast.populate(castEntry.name, castEntry.id, castEntry.minMember);

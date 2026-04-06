@@ -6,7 +6,7 @@ use std::{
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
-use log::{debug, log, warn};
+use log::{debug, warn};
 use url::Url;
 
 use crate::js_api::ascii_safe;
@@ -390,6 +390,7 @@ impl CastManager {
             (Datum::Float(num), None) => self
                 .find_member_ref_by_number(*num as u32)
                 .map(|member_ref| Ok(Some(member_ref))),
+            (Datum::CastMember(member_ref), _) => Some(Ok(Some(member_ref.clone()))),
             _ => Some(Err(ScriptError::new(format!(
                 "Member number or name type invalid: {}",
                 member_name_or_num.type_str()
@@ -703,11 +704,11 @@ impl CastManager {
                         // Also map by member number (STXT formatting runs reference fonts by member number)
                         font_manager.font_by_id.entry(member_number as u16).or_insert(font_ref);
 
-                        console::log_1(&format!(
+                        log::debug!(
                             "Loaded PFR font '{}': ref={}, id={}, member={}, char_size={}x{}, first_char={}",
                             font_name, font_ref, font_id, member_number, char_width, char_height,
                             font_data.first_char_num.unwrap_or(32)
-                        ).into());
+                        );
 
                         loaded_count += 1;
                     } else {
@@ -792,11 +793,11 @@ impl CastManager {
                             }
                             font_manager.font_by_id.entry(member_number as u16).or_insert(font_ref);
 
-                            console::log_1(&format!(
+                            log::debug!(
                                 "Loaded scaled font '{}': ref={}, member={}, char_size={}x{}",
                                 font_name, font_ref, member_number,
                                 font_data_clone.char_width, font_data_clone.char_height
-                            ).into());
+                            );
 
                             loaded_count += 1;
                         } else {
@@ -812,12 +813,12 @@ impl CastManager {
         }
 
         if loaded_count > 0 {
-            console::log_1(&format!(
+            log::debug!(
                 "Font loading complete: {} loaded, {} skipped, {} cache entries, {} id mappings",
                 loaded_count, skipped_count,
                 font_manager.font_cache.len(),
                 font_manager.font_by_id.len()
-            ).into());
+            );
 
             // Log all cached font keys to browser console
             let keys: Vec<&String> = font_manager.font_cache.keys().collect();

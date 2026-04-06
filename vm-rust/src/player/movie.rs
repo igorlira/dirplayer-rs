@@ -14,7 +14,6 @@ use crate::{
 use super::{
     allocator::DatumAllocator, bitmap::manager::BitmapManager, cast_manager::CastManager,
     geometry::IntRect, net_manager::NetManager, score::Score, ScriptError, ScriptReceiver,
-    reserve_player_mut,
 };
 
 pub struct Movie {

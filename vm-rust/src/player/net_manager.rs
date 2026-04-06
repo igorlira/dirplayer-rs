@@ -27,9 +27,25 @@ impl NetManagerSharedState {
         };
     }
 
+    pub fn update_task_progress(&mut self, task_id: u32, bytes_loaded: u64, bytes_total: u64) {
+        if let Some(state) = self.task_states.get_mut(&task_id) {
+            state.bytes_loaded = bytes_loaded;
+            state.bytes_total = bytes_total;
+        }
+    }
+
     pub async fn fulfill_task(&mut self, id: u32, result: NetResult) {
+        let (bytes_loaded, bytes_total) = self.task_states.get(&id)
+            .map(|s| (s.bytes_loaded, s.bytes_total))
+            .unwrap_or((0, 0));
+        let final_bytes = match &result {
+            Ok(bytes) => bytes.len() as u64,
+            Err(_) => bytes_loaded,
+        };
         let new_state = NetTaskState {
             result: Some(result),
+            bytes_loaded: final_bytes,
+            bytes_total: if bytes_total > 0 { bytes_total } else { final_bytes },
         };
         self.task_states.insert(id, new_state);
 
@@ -166,7 +182,7 @@ impl NetManager {
         // Set task initial state
         {
             let mut shared_shared = self.shared_state.try_lock().unwrap();
-            shared_shared.update_task_state(task_id, NetTaskState { result: None });
+            shared_shared.update_task_state(task_id, NetTaskState { result: None, bytes_loaded: 0, bytes_total: 0 });
         }
 
         // Push the task
@@ -174,18 +190,43 @@ impl NetManager {
 
         // For file:// URLs, don't execute the fetch task - wait for JS to provide data
         if is_file_url {
-            // Emit event to request file data from Electron
-            let window = web_sys::window().unwrap();
-            let event_init = web_sys::CustomEventInit::new();
-            let detail = js_sys::Object::new();
-            js_sys::Reflect::set(&detail, &"taskId".into(), &task_id.into()).unwrap();
-            js_sys::Reflect::set(&detail, &"url".into(), &resolved_url_str.into()).unwrap();
-            event_init.set_detail(&detail);
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Emit event to request file data from Electron
+                let window = web_sys::window().unwrap();
+                let event_init = web_sys::CustomEventInit::new();
+                let detail = js_sys::Object::new();
+                js_sys::Reflect::set(&detail, &"taskId".into(), &task_id.into()).unwrap();
+                js_sys::Reflect::set(&detail, &"url".into(), &resolved_url_str.into()).unwrap();
+                event_init.set_detail(&detail);
 
-            let event =
-                web_sys::CustomEvent::new_with_event_init_dict("dirplayer:netRequest", &event_init)
-                    .unwrap();
-            window.dispatch_event(&event).unwrap();
+                let event =
+                    web_sys::CustomEvent::new_with_event_init_dict("dirplayer:netRequest", &event_init)
+                        .unwrap();
+                window.dispatch_event(&event).unwrap();
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                // In native (test) mode, read the file directly from disk
+                // and fulfill the task immediately (no spawn_local) so that
+                // await_task callers don't block on a future that never runs.
+                let file_path = resolved_url_str.strip_prefix("file://").unwrap_or(&resolved_url_str);
+                let result: super::net_task::NetResult = match std::fs::read(file_path) {
+                    Ok(bytes) => Ok(bytes),
+                    Err(_) => Err(-1),
+                };
+                let mut shared_state = self.shared_state.try_lock().unwrap();
+                let final_bytes = match &result {
+                    Ok(bytes) => bytes.len() as u64,
+                    Err(_) => 0,
+                };
+                let new_state = super::net_task::NetTaskState {
+                    result: Some(result),
+                    bytes_loaded: final_bytes,
+                    bytes_total: final_bytes,
+                };
+                shared_state.task_states.insert(task_id, new_state);
+            }
         } else {
             // Execute normal HTTP fetch
             let shared_state_arc = Arc::clone(&self.shared_state);
@@ -202,7 +243,7 @@ impl NetManager {
         task: NetTask,
         shared_state_arc: Arc<Mutex<NetManagerSharedState>>,
     ) {
-        let result = fetch_net_task(&task).await;
+        let result = fetch_net_task(&task, Arc::clone(&shared_state_arc)).await;
         let mut shared_state = shared_state_arc.lock().await;
         shared_state.fulfill_task(id, result).await;
     }
@@ -228,7 +269,7 @@ impl NetManager {
         // Set task initial state
         {
             let mut shared_shared = self.shared_state.try_lock().unwrap();
-            shared_shared.update_task_state(task_id, NetTaskState { result: None });
+            shared_shared.update_task_state(task_id, NetTaskState { result: None, bytes_loaded: 0, bytes_total: 0 });
         }
 
         // Push the task and execute it

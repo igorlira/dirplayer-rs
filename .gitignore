@@ -9,6 +9,8 @@
 
 # testing
 /coverage
+vm-rust/tests/snapshots/output/
+vm-rust/tests/snapshots/diff/
 
 # production
 /build
@@ -34,3 +36,5 @@ public/dcr*
 /dist-extension-firefox
 /dist-extension-firefox.zip
 /dist-polyfill
+
+/test-results

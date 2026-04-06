@@ -58,6 +58,15 @@ pub trait Renderer {
 
     /// Get the preview font size override
     fn preview_font_size(&self) -> Option<u16>;
+
+    /// Render a single sprite in isolation on a transparent background
+    /// and return the canvas data URL. The sprite is rendered at its
+    /// normal stage position but nothing else is drawn.
+    fn draw_sprite_isolated(&mut self, player: &mut DirPlayer, channel_num: i16) {
+        // Default: just draw the full frame (callers crop).
+        // Backends can override for a true isolated render.
+        self.draw_frame(player);
+    }
 }
 
 /// Check if WebGL2 is supported in this browser
@@ -190,6 +199,13 @@ impl Renderer for DynamicRenderer {
         match self {
             DynamicRenderer::Canvas2D(r) => r.preview_font_size,
             DynamicRenderer::WebGL2(r) => r.preview_font_size,
+        }
+    }
+
+    fn draw_sprite_isolated(&mut self, player: &mut DirPlayer, channel_num: i16) {
+        match self {
+            DynamicRenderer::Canvas2D(r) => r.draw_sprite_isolated(player, channel_num),
+            DynamicRenderer::WebGL2(r) => r.draw_sprite_isolated(player, channel_num),
         }
     }
 }

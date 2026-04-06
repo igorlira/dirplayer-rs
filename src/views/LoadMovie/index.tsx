@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import styles from './styles.module.css';
-import { load_movie_file, play, set_base_path, set_external_params } from 'vm-rust';
+import { load_movie_file, set_base_path, set_external_params } from 'vm-rust';
 import { useMountEffect } from '../../utils/hooks';
 import { isDebugSession } from '../../utils/debug';
 import { getBasePath, getFullPathFromOrigin } from '../../utils/path';

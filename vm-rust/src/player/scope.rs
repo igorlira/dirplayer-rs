@@ -2,7 +2,6 @@ use fxhash::FxHashMap;
 
 use super::{
     cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF},
-    script::ScriptHandlerRef,
     script_ref::ScriptInstanceRef,
     DatumRef,
 };

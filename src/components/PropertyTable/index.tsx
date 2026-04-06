@@ -70,16 +70,14 @@ function PropertyValue({ value }: { value: unknown }) {
       <span>
         <span className={styles.propNull}>&lt;{value.length} bytes&gt;</span>
         {" "}
-        <a
-          href="#"
+        <button
           className={styles.propExpandToggle}
-          onClick={(e) => {
-            e.preventDefault();
+          onClick={() => {
             downloadBlob(value, "data.bin");
           }}
         >
           (Save)
-        </a>
+        </button>
       </span>
     );
   }

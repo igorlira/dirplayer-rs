@@ -1,6 +1,5 @@
 use binary_reader::BinaryReader;
 
-use crate::utils::log_i;
 
 #[derive(Clone)]
 pub struct KeyTableEntry {
@@ -46,9 +45,12 @@ impl KeyTableChunk {
             entry_size2: entry_size2,
             entry_count: entry_count,
             used_count: used_count,
-            entries: (0..entry_count)
-                .map(|_| KeyTableEntry::from_reader(reader, dir_version).unwrap())
-                .collect(),
+            entries: {
+                let all_entries: Vec<KeyTableEntry> = (0..entry_count)
+                    .map(|_| KeyTableEntry::from_reader(reader, dir_version).unwrap())
+                    .collect();
+                all_entries.into_iter().filter(|e| e.section_id > 0).collect()
+            },
         });
     }
 }

@@ -27,7 +27,6 @@ use js_sys::Reflect;
 use wasm_bindgen_futures::JsFuture;
 
 use std::cell::RefCell;
-use std::cell::RefMut;
 use std::rc::Rc;
 
 use js_sys::Uint8Array;
@@ -412,7 +411,7 @@ impl SoundChannelDatumHandlers {
         if !ch.playlist_segments.is_empty() {
             ch.current_segment_index = Some(0);
             ch.status = SoundStatus::Playing;
-            ch.playback_start_context_time = ch.audio_context.current_time();
+            ch.playback_start_context_time = ch.context_time();
 
             debug!("▶️ Starting async playlist playback");
 
@@ -998,12 +997,15 @@ impl WebAudioBackend {
 // Sound Manager - manages all sound channels
 pub struct SoundManager {
     channels: Vec<Rc<RefCell<SoundChannel>>>,
-    audio_context: Arc<AudioContext>,
+    audio_context: Option<Arc<AudioContext>>,
 }
 
 impl SoundManager {
     pub fn new(num_channels: usize) -> Result<Self, ScriptError> {
-        let context = Arc::new(getAudioContext());
+        #[cfg(target_arch = "wasm32")]
+        let context = Some(Arc::new(getAudioContext()));
+        #[cfg(not(target_arch = "wasm32"))]
+        let context: Option<Arc<AudioContext>> = None;
 
         let mut channels = Vec::with_capacity(num_channels);
         for i in 0..num_channels {
@@ -1047,7 +1049,7 @@ impl SoundManager {
         }
     }
 
-    pub fn audio_context(&self) -> Arc<AudioContext> {
+    pub fn audio_context(&self) -> Option<Arc<AudioContext>> {
         self.audio_context.clone()
     }
 }
@@ -1095,7 +1097,7 @@ pub struct SoundChannel {
     pub queued_members: Vec<DatumRef>,
 
     // Web Audio backend
-    pub audio_context: Arc<AudioContext>,
+    pub audio_context: Option<Arc<AudioContext>>,
     pub current_audio_buffer: Option<Rc<AudioBuffer>>,
 
     pub expected_sample_rate: Option<u32>,
@@ -1105,6 +1107,13 @@ pub struct SoundChannel {
 }
 
 impl SoundChannel {
+    fn audio_context(&self) -> &AudioContext {
+        self.audio_context.as_ref().expect("AudioContext not available (non-wasm target?)")
+    }
+
+    pub fn context_time(&self) -> f64 {
+        self.audio_context.as_ref().map_or(0.0, |ctx| ctx.current_time())
+    }
 
     /// Find MP3 start with ROBUST validation (checks 3+ consecutive frames)
     /// Also verifies minimum data size to avoid false positives
@@ -1272,12 +1281,12 @@ impl SoundChannel {
 
         self.start_segment_playback(&sound_member, loop_count)?;
         self.status = SoundStatus::Playing;
-        self.playback_start_context_time = self.audio_context.current_time();
+        self.playback_start_context_time = self.context_time();
 
         Ok(())
     }
 
-    pub fn new(channel: i32, audio_context: Arc<AudioContext>) -> Self {
+    pub fn new(channel: i32, audio_context: Option<Arc<AudioContext>>) -> Self {
         Self {
             channel_num: channel,
             member: None,
@@ -1425,7 +1434,7 @@ impl SoundChannel {
             };
             (
                 seg.member_ref.clone(),
-                ch.audio_context.clone(),
+                ch.audio_context.clone().expect("Audio context not initialized"),
                 ch.channel_num,
                 ch.is_decoding.clone(),
             )
@@ -1464,7 +1473,7 @@ impl SoundChannel {
 
         // Set playing status
         self.status = SoundStatus::Playing;
-        self.playback_start_context_time = self.audio_context.current_time();
+        self.playback_start_context_time = self.context_time();
         self.elapsed_time = 0.0;
 
         Ok(())
@@ -1480,7 +1489,7 @@ impl SoundChannel {
         let player = player_opt.ok_or_else(|| JsValue::from_str("Player not initialized"))?;
 
         // FIX: audio_context is an Arc, so we dereference it to get a reference (&AudioContext)
-        let audio_context = player.sound_manager.audio_context();
+        let audio_context = player.sound_manager.audio_context().expect("Audio context not initialized");
 
         // Load and create the buffer
         // FIX: Dereferencing Arc<AudioContext> to pass &AudioContext
@@ -1668,12 +1677,14 @@ impl SoundChannel {
         let (channel_num, audio_context, loop_count) = {
             let mut this = self_rc.borrow_mut();
             
-            let state = (*this.audio_context).state();
-            debug!("🎵 AudioContext state: {:?}", state);
-            
-            if state == web_sys::AudioContextState::Suspended {
-                let resume_result = (*this.audio_context).resume();
-                debug!("🎵 AudioContext resume result: {:?}", resume_result);
+            if let Some(ref ctx) = this.audio_context {
+                let state = ctx.state();
+                debug!("🎵 AudioContext state: {:?}", state);
+
+                if state == web_sys::AudioContextState::Suspended {
+                    let resume_result = ctx.resume();
+                    debug!("🎵 AudioContext resume result: {:?}", resume_result);
+                }
             }
 
             console::log_1(
@@ -1695,7 +1706,7 @@ impl SoundChannel {
                 return;
             }
             
-            (this.channel_num, this.audio_context.clone(), this.loop_count)
+            (this.channel_num, this.audio_context.clone().unwrap(), this.loop_count)
         };
 
         let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
@@ -1868,7 +1879,7 @@ impl SoundChannel {
                 let mut ch = self_rc_clone.borrow_mut();
 
                 // Create source node
-                let source = match ch.audio_context.create_buffer_source() {
+                let source = match ch.audio_context().create_buffer_source() {
                     Ok(s) => s,
                     Err(_) => {
                         web_sys::console::log_1(
@@ -1881,7 +1892,7 @@ impl SoundChannel {
                 source.set_loop(loop_count == 0); 
 
                 // Create gain node
-                let gain = match ch.audio_context.create_gain() {
+                let gain = match ch.audio_context().create_gain() {
                     Ok(g) => g,
                     Err(_) => {
                         error!("❌ Failed to create GainNode");
@@ -1891,7 +1902,7 @@ impl SoundChannel {
                 gain.gain().set_value((volume / 255.0) as f32);
 
                 // Create pan node
-                let pan = match ch.audio_context.create_stereo_panner() {
+                let pan = match ch.audio_context().create_stereo_panner() {
                     Ok(p) => p,
                     Err(_) => {
                         error!("❌ Failed to create StereoPannerNode");
@@ -1903,14 +1914,14 @@ impl SoundChannel {
                 // Connect audio graph
                 let _ = source.connect_with_audio_node(&pan);
                 let _ = pan.connect_with_audio_node(&gain);
-                let _ = gain.connect_with_audio_node(&ch.audio_context.destination());
+                let _ = gain.connect_with_audio_node(&ch.audio_context().destination());
 
                 // Store state BEFORE setting up callback (we need ch dropped)
                 ch.source_node = Some(Rc::new(source.clone()));
                 ch.gain_node = Some(Rc::new(gain));
                 ch.pan_node = Some(Rc::new(pan));
                 ch.status = SoundStatus::Playing;
-                ch.playback_start_context_time = ch.audio_context.current_time();
+                ch.playback_start_context_time = ch.context_time();
                 ch.elapsed_time = 0.0;
                 *ch.is_decoding.borrow_mut() = false;
 
@@ -2095,7 +2106,7 @@ impl SoundChannel {
         // Get AudioContext
         let (ctx, channel_num) = {
             let ch = self_rc.borrow();
-            (ch.audio_context.clone(), ch.channel_num)
+            (ch.audio_context.clone().unwrap(), ch.channel_num)
         };
 
         console::log_1(
@@ -2274,7 +2285,7 @@ impl SoundChannel {
             ch.source_node = Some(Rc::new(source));
             ch.gain_node = Some(Rc::new(gain));
             ch.status = SoundStatus::Playing;
-            ch.playback_start_context_time = ch.audio_context.current_time();
+            ch.playback_start_context_time = ch.context_time();
             ch.elapsed_time = 0.0;
             *ch.is_decoding.borrow_mut() = false;
         }
@@ -2304,7 +2315,7 @@ impl SoundChannel {
         let datum = player.get_datum(&member_ref);
 
         if let Some(sound_member) = Self::resolve_sound_member(player, &datum) {
-            let audio_context = this.audio_context.clone();
+            let audio_context = this.audio_context.clone().unwrap();
 
             // CRITICAL FIX: Don't check for MP3 patterns here!
             // If MP3 decoding failed and we're in fallback, just try PCM.
@@ -2485,7 +2496,7 @@ impl SoundChannel {
             this.gain_node = Some(Rc::new(gain));
             this.pan_node = Some(Rc::new(pan));
             this.status = SoundStatus::Playing;
-            this.playback_start_context_time = this.audio_context.current_time();
+            this.playback_start_context_time = this.context_time();
         } else {
             error!("❌ Could not resolve sound member");
             this.status = SoundStatus::Idle;
@@ -2602,7 +2613,9 @@ impl SoundChannel {
 
             if let Some(ref source) = self.source_node {
                 // Suspend the audio context — stops all nodes temporarily
-                let _ = self.audio_context.suspend();
+                if let Some(ref ctx) = self.audio_context {
+                    let _ = ctx.suspend();
+                }
                 debug!("⏸️ Paused playback");
             }
         }
@@ -2615,7 +2628,9 @@ impl SoundChannel {
 
             if let Some(ref source) = self.source_node {
                 // Resume the AudioContext
-                let _ = self.audio_context.resume();
+                if let Some(ref ctx) = self.audio_context {
+                    let _ = ctx.resume();
+                }
                 debug!("▶️ Resumed playback");
             }
         }
@@ -3201,7 +3216,7 @@ impl SoundChannel {
         debug!("🎵 Starting MP3 playback via Web Audio");
 
         // Step 1: Decode MP3 to AudioBuffer
-        let audio_buffer = Self::decode_mp3_to_wav(&self.audio_context, mp3_bytes).await?;
+        let audio_buffer = Self::decode_mp3_to_wav(self.audio_context(), mp3_bytes).await?;
 
         // Step 3: Stop any existing playback
         if let Some(ref source) = self.source_node {
@@ -3211,11 +3226,11 @@ impl SoundChannel {
         self.source_node = None;
 
         // Step 4: Create new source node
-        let source = self.audio_context.create_buffer_source()?;
+        let source = self.audio_context().create_buffer_source()?;
         source.set_buffer(Some(&audio_buffer));
  
         // Create FRESH gain and pan nodes
-        let gain = match self.audio_context.create_gain() {
+        let gain = match self.audio_context().create_gain() {
             Ok(g) => g,
             Err(_) => {
                 error!("❌ Failed to create GainNode");
@@ -3227,7 +3242,7 @@ impl SoundChannel {
         gain.gain().set_value((volume / 255.0) as f32);
         debug!("🔊 Setting gain to {} (volume: {})", volume / 255.0, volume);
 
-        let pan = match self.audio_context.create_stereo_panner() {
+        let pan = match self.audio_context().create_stereo_panner() {
             Ok(p) => p,
             Err(_) => {
                 error!("❌ Failed to create StereoPannerNode");
@@ -3240,7 +3255,7 @@ impl SoundChannel {
 
         let _ = source.connect_with_audio_node(&pan);
         let _ = pan.connect_with_audio_node(&gain);
-        let _ = gain.connect_with_audio_node(&self.audio_context.destination());
+        let _ = gain.connect_with_audio_node(&self.audio_context().destination());
 
         // Step 6: Set up on-ended callback
         let channel_index = self.channel_num;
@@ -3256,7 +3271,7 @@ impl SoundChannel {
         debug!("called source.start()");
         self.source_node = Some(Rc::new(source));
         self.status = SoundStatus::Playing;
-        self.playback_start_context_time = self.audio_context.current_time();
+        self.playback_start_context_time = self.context_time();
 
         debug!("✅ MP3 playback started on channel {}", self.channel_num);
 
@@ -3683,7 +3698,7 @@ impl SoundChannel {
 
         self.expected_sample_rate = Some(sound_member.info.sample_rate);
 
-        let _ = self.audio_context.resume();
+        let _ = self.audio_context().resume();
 
         let sound_data = &sound_member.sound.data();
         let channels = sound_member.info.channels;
@@ -3707,7 +3722,7 @@ impl SoundChannel {
         let num_frames = audio_data.samples.len() / audio_data.num_channels as usize;
 
         let buffer = self
-            .audio_context
+            .audio_context.as_ref().unwrap()
             .create_buffer(
                 audio_data.num_channels as u32,
                 num_frames as u32,
@@ -3726,18 +3741,18 @@ impl SoundChannel {
         }
 
         let source = self
-            .audio_context
+            .audio_context.as_ref().unwrap()
             .create_buffer_source()
             .map_err(|e| ScriptError::new(format!("Failed to create source: {:?}", e)))?;
         source.set_buffer(Some(&buffer));
 
         let gain = self
-            .audio_context
+            .audio_context.as_ref().unwrap()
             .create_gain()
             .map_err(|e| ScriptError::new(format!("Failed to create gain: {:?}", e)))?;
         gain.gain().set_value((self.volume / 255.0) as f32);
 
-        let pan = self.audio_context.create_stereo_panner().ok();
+        let pan = self.audio_context().create_stereo_panner().ok();
 
         if let Some(ref pan_node) = pan {
             source.connect_with_audio_node(pan_node).map_err(|e| {
@@ -3753,7 +3768,7 @@ impl SoundChannel {
             })?;
         }
 
-        gain.connect_with_audio_node(&self.audio_context.destination())
+        gain.connect_with_audio_node(&self.audio_context().destination())
             .map_err(|e| {
                 ScriptError::new(format!("Failed to connect gain to destination: {:?}", e))
             })?;
@@ -3786,7 +3801,7 @@ impl SoundChannel {
         self.gain_node = Some(Rc::new(gain));
         self.pan_node = pan.map(Rc::new);
         self.status = SoundStatus::Playing;
-        self.playback_start_context_time = self.audio_context.current_time();
+        self.playback_start_context_time = self.context_time();
 
         Ok(())
     }
@@ -3824,7 +3839,7 @@ impl SoundChannel {
 
                     self.start_segment_playback(sound_member, loop_count)?;
                     self.status = SoundStatus::Playing;
-                    self.playback_start_context_time = self.audio_context.current_time();
+                    self.playback_start_context_time = self.context_time();
                 } else {
                     return Err(ScriptError::new("Member is not a sound".to_string()));
                 }
@@ -3866,7 +3881,7 @@ impl SoundChannel {
             .into(),
         );
 
-        let context: &AudioContext = &*self.audio_context;
+        let context = self.audio_context.clone().expect("AudioContext not available (non-wasm target?)");
 
         // Resume context if needed
         let state_val = Reflect::get(context.as_ref(), &"state".into())?;
@@ -3940,7 +3955,7 @@ impl SoundChannel {
 
         // Set status to Playing BEFORE starting the source
         self.status = SoundStatus::Playing;
-        self.playback_start_context_time = self.audio_context.current_time();
+        self.playback_start_context_time = self.context_time();
 
         source.start()?;
         debug!("called source.start()");
@@ -3955,7 +3970,7 @@ impl SoundChannel {
 
         debug!("🎵 play_sound() called");
 
-        let context = &*self.audio_context;
+        let context = self.audio_context();
 
         // 🔊 If MP3 → decode & play via <audio>
         if let Some(ref compressed) = audio_data.compressed_data {
@@ -4026,7 +4041,7 @@ impl SoundChannel {
     // This is the static entry point called by the AudioBufferSourceNode's 'onended' event.
     // It needs to safely retrieve the DirPlayer and the specific SoundChannel.
     pub fn handle_end_of_sound(channel_index: i32) {
-        use web_sys::console;
+        
 
         let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
         if player_opt.is_none() {
@@ -4257,20 +4272,25 @@ impl SoundChannel {
     /// to create a new source node immediately, without going through the full
     /// decode/resample pipeline. Returns true if successful.
     fn replay_cached_buffer(&mut self) -> bool {
-        use web_sys::console;
+        
+
+        let ctx = match self.audio_context.as_ref() {
+            Some(ctx) => ctx,
+            None => return false,
+        };
 
         let buffer = match self.current_audio_buffer {
             Some(ref buf) => buf.clone(),
             None => return false,
         };
 
-        let source = match self.audio_context.create_buffer_source() {
+        let source = match ctx.create_buffer_source() {
             Ok(s) => s,
             Err(_) => return false,
         };
         source.set_buffer(Some(&*buffer));
 
-        let gain = match self.audio_context.create_gain() {
+        let gain = match ctx.create_gain() {
             Ok(g) => g,
             Err(_) => return false,
         };
@@ -4278,7 +4298,7 @@ impl SoundChannel {
 
         // Connect: source -> gain -> destination
         let _ = source.connect_with_audio_node(&gain);
-        let _ = gain.connect_with_audio_node(&self.audio_context.destination());
+        let _ = gain.connect_with_audio_node(&ctx.destination());
 
         // Set up ended callback
         let channel_num = self.channel_num;
@@ -4293,14 +4313,14 @@ impl SoundChannel {
         self.source_node = Some(Rc::new(source));
         self.gain_node = Some(Rc::new(gain));
         self.status = SoundStatus::Playing;
-        self.playback_start_context_time = self.audio_context.current_time();
+        self.playback_start_context_time = ctx.current_time();
 
         debug!("⚡ Channel {} gapless replay from cached buffer", self.channel_num);
         true
     }
 
     fn spawn_playback_async(&self) {
-        use web_sys::console;
+        
         debug!("🚀 Spawning async playback task");
 
         // We need to get an Rc to self somehow

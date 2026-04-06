@@ -118,17 +118,15 @@ function DatumRow({ label, datumRef }: { label?: string; datumRef: DatumAccessRe
       {datum.type === "javascript" && (datum as any).bytes instanceof Uint8Array && (
         <>
           {" "}
-          <a
-            href="#"
+          <button
             className={pts.propExpandToggle}
             onClick={(e) => {
-              e.preventDefault();
               e.stopPropagation();
               downloadBlob((datum as any).bytes, "js_datum.bin");
             }}
           >
             (Save)
-          </a>
+          </button>
         </>
       )}
     </>
@@ -441,7 +439,7 @@ function Globals() {
   );
 }
 
-export default function DebugInspector({}: DebugInspectorProps) {
+export default function DebugInspector(_props: DebugInspectorProps) {
   const [selectedScopeIndex, setSelectedScopeIndex] = useState<number>();
 
   const factory = (node: TabNode) => {

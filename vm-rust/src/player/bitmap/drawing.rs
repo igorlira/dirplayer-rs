@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use nohash_hasher::IntMap;
 use rgb565::Rgb565;
 
 use crate::{
@@ -12,8 +11,7 @@ use crate::{
         font::{bitmap_font_copy_char, BitmapFont},
         geometry::IntRect,
         sprite::{ColorRef, is_skew_flip},
-        bitmap::bitmap::{get_system_default_palette, PaletteRef},
-        bitmap::palette::SYSTEM_WIN_PALETTE, Sprite, Score,
+        bitmap::bitmap::{get_system_default_palette, PaletteRef}, Sprite, Score,
         reserve_player_mut,
     },
 };
@@ -1954,8 +1952,23 @@ impl Bitmap {
 
                 // Indexed bitmap (1-8 bit) ink 36 color-key transparency
                 if (ink == 2 || ink == 36) && is_indexed {
-                    let ColorRef::PaletteIndex(i) = src.get_pixel_color_ref(sx, sy) else {
-                        unreachable!("indexed bitmap returned non-index color");
+                    let color_ref = src.get_pixel_color_ref(sx, sy);
+                    let ColorRef::PaletteIndex(i) = color_ref else {
+                        let (sr, sg, sb) = match &color_ref {
+                            ColorRef::Rgb(r, g, b) => (*r, *g, *b),
+                            _ => continue,
+                        };
+                        if (sr, sg, sb) == bg_color_resolved {
+                            continue;
+                        }
+                        let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                        let blended = if alpha >= 0.999 {
+                            (sr, sg, sb)
+                        } else {
+                            blend_color_alpha(dst_color, (sr, sg, sb), alpha)
+                        };
+                        self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
+                        continue;
                     };
 
                     // For 1-bit bitmaps: use strict index-based transparency only

@@ -704,20 +704,26 @@ impl TypeHandlers {
         let result = match obj_type {
             DatumType::Symbol => reserve_player_mut(|player| {
                 let s = player.get_datum(&args[0]).string_value()?;
-                let cast_num = if args.len() > 1 {
+                let (cast_num, slot) = if args.len() > 1 {
                     match player.get_datum(&args[1]) {
-                        Datum::CastLib(cast_num) => *cast_num,
+                        Datum::CastLib(cast_num) => (*cast_num, None),
+                        Datum::CastMember(member_ref) => {
+                            let cn = if member_ref.cast_lib > 0 { member_ref.cast_lib as u32 } else { 1 };
+                            let slot = if member_ref.cast_member > 0 { Some(member_ref.cast_member as u32) } else { None };
+                            (cn, slot)
+                        }
                         other => Err(ScriptError::new(format!(
                             "Unsupported call location type: {}",
                             other.type_str()
                         )))?,
                     }
                 } else {
-                    1
+                    (1, None)
                 };
                 let cast = player.movie.cast_manager.get_cast_mut(cast_num);
+                let member_slot = slot.unwrap_or_else(|| cast.first_free_member_id());
                 let member_ref = cast.create_member_at(
-                    cast.first_free_member_id(),
+                    member_slot,
                     &s,
                     &mut player.bitmap_manager,
                 )?;
@@ -1183,7 +1189,8 @@ impl TypeHandlers {
             let datum_ref = &args[0];
             match player.get_datum(datum_ref) {
                 Datum::PropList(_, _) => PropListDatumHandlers::sort(datum_ref, &vec![]),
-                _ => ListDatumHandlers::sort(datum_ref, &vec![]),
+                Datum::List(_, _, _) => ListDatumHandlers::sort(datum_ref, &vec![]),
+                _ => Ok(DatumRef::Void),
             }
         })
     }
@@ -1599,7 +1606,7 @@ impl TypeHandlers {
             let sample_rate = channel.sample_rate;
             let sample_count = channel.sample_count;
             let elapsed_time = channel.elapsed_time;
-            let ctx_time = channel.audio_context.current_time();
+            let ctx_time = channel.context_time();
             let start_time = channel.playback_start_context_time;
             let loop_count = channel.loop_count;
 
