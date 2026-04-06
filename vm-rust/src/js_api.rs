@@ -1568,6 +1568,7 @@ impl JsApi {
     pub fn dispatch_score_changed() {}
     pub fn dispatch_channel_changed(_: i16) {}
     pub fn dispatch_frame_changed(_: u32) {}
+    pub fn dispatch_playback_state_changed(_: bool) {}
     pub fn dispatch_debug_message(_: &str) {}
     pub fn dispatch_debug_content(_: js_sys::Object) {}
     pub fn dispatch_debug_bitmap(_: u32, _: u32, _: &[u8]) {}
