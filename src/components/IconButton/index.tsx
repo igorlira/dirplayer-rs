@@ -8,13 +8,14 @@ interface IIconButtonProps {
   onClick: () => void,
   disabled?: boolean,
   title?: string,
+  active?: boolean,
 }
 
 interface IFontAwesomeIconButtonProps extends IIconButtonProps {
   icon: IconProp,
 }
-export default function FontAwesomeIconButton({ icon, onClick, disabled, title }: IFontAwesomeIconButtonProps) {
-  return <BaseIconButton onClick={onClick} disabled={disabled} title={title}>
+export default function FontAwesomeIconButton({ icon, onClick, disabled, title, active }: IFontAwesomeIconButtonProps) {
+  return <BaseIconButton onClick={onClick} disabled={disabled} title={title} active={active}>
     <FontAwesomeIcon icon={icon} />
   </BaseIconButton>
 }
@@ -27,8 +28,8 @@ export function ReactIconButton({ icon: IconComponent, onClick, disabled, title 
 }
 
 
-function BaseIconButton({ onClick, disabled, title, children }: PropsWithChildren<IIconButtonProps>) {
-  return <button className={styles.iconButton} onClick={onClick} disabled={disabled} title={title}>
+function BaseIconButton({ onClick, disabled, title, active, children }: PropsWithChildren<IIconButtonProps>) {
+  return <button className={active ? styles.iconButtonActive : styles.iconButton} onClick={onClick} disabled={disabled} title={title}>
     {children}
   </button>
 }

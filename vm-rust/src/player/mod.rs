@@ -2840,7 +2840,6 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     });
 }
 
-<<<<<<< HEAD
 /// Execute one complete frame cycle: run frame scripts, then advance to the next frame.
 /// Returns (is_playing, is_script_paused) so callers can check if the movie is still running.
 ///

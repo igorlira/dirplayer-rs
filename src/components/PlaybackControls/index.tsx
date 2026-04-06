@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { faPlay, faStop, faRotateBack } from '@fortawesome/free-solid-svg-icons'
+import { faPlay, faStop, faBackwardStep } from '@fortawesome/free-solid-svg-icons'
 import IconButton from '../IconButton'
 import styles from './styles.module.css'
-import { play, stop, reset } from 'vm-rust'
+import { play, stop, rewind } from 'vm-rust'
 import { isElectron } from '../../utils/electron'
 import { isMcpEnabled, setMcpEnabled, getMcpPort, setMcpPort, getMcpUrl } from '../../mcp'
+import { useAppSelector } from '../../store/hooks'
 
 function McpToggle() {
   const [enabled, setEnabled] = useState(() => isMcpEnabled());
@@ -62,10 +63,12 @@ function McpToggle() {
 }
 
 export default function PlaybackControls() {
+  const isPlaying = useAppSelector(state => state.vm.isPlaying);
+
   return <div className={styles.container}>
-    <IconButton icon={faPlay} onClick={() => { play() }} />
-    <IconButton icon={faStop} onClick={() => { stop() }} />
-    <IconButton icon={faRotateBack} onClick={() => { reset() }} />
+    <IconButton icon={faBackwardStep} onClick={() => { rewind() }} title="Rewind" />
+    <IconButton icon={faStop} onClick={() => { stop() }} active={!isPlaying} title="Stop" />
+    <IconButton icon={faPlay} onClick={() => { play() }} active={isPlaying} title="Play" />
     {isElectron() && <>
       <div className={styles.spacer} />
       <McpToggle />
