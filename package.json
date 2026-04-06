@@ -88,6 +88,7 @@
     ]
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1024.0",
     "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
     "@crxjs/vite-plugin": "^2.0.0-beta.25",
     "@playwright/test": "^1.59.1",
