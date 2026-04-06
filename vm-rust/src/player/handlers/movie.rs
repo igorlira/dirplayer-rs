@@ -16,6 +16,7 @@ use crate::{
     },
     utils::{log_i},
 };
+use crate::player::cast_lib::{cast_member_ref, CastLib};
 
 pub struct MovieHandlers {}
 
@@ -61,29 +62,30 @@ impl MovieHandlers {
         })
     }
 
-    pub fn member(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn member(args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            if args.len() > 2 {
-                return Err(ScriptError::new(
-                    "Too many arguments for member".to_string(),
-                ));
-            }
-            let member_name_or_num_ref = args.get(0).unwrap();
+            let (member_name_or_num_ref, cast_name_or_num_ref) = match args {
+                [m, c] => (m, Some(c)),
+                [m] => (m, None),
+                _ => return Err(ScriptError::new(
+                    "Invalid arguments for member".to_string(),
+                )),
+            };
             let member_name_or_num = player.get_datum(member_name_or_num_ref);
             if let Datum::CastMember(_) = &member_name_or_num {
                 return Ok(member_name_or_num_ref.clone());
             }
-            let cast_name_or_num = args.get(1).map(|x| player.get_datum(x));
-            let member = player.movie.cast_manager.find_member_ref_by_identifiers(
+            let cast_name_or_num = cast_name_or_num_ref.map(|x| player.get_datum(x));
+            let cast = player.movie.cast_manager.find_cast_lib_by_identifier(cast_name_or_num);
+            let member = player.movie.cast_manager.find_member_ref_in_cast_by_identifier(
                 member_name_or_num,
-                cast_name_or_num,
-                &player.allocator,
+                cast,
             )?;
-            if let Some(member) = member {
-                Ok(player.alloc_datum(Datum::CastMember(member.to_owned())))
-            } else {
-                Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF)))
-            }
+            
+            Ok(player.alloc_datum(match member {
+                Some(r) => Datum::CastMember(r),
+                None => Datum::Void
+            }))
         })
     }
 
