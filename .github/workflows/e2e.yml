@@ -5,6 +5,18 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or commit SHA to test'
+        required: false
+        type: string
+        default: ''
+      rebase_on_main:
+        description: 'Rebase on main before running tests'
+        required: false
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,7 +35,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref || github.ref }}
           submodules: true
+          fetch-depth: 0
+
+      - name: Rebase on main
+        if: inputs.rebase_on_main
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin main
+          git rebase origin/main
 
       - name: Download test assets
         run: |
@@ -87,7 +109,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref || github.ref }}
           submodules: true
+          fetch-depth: 0
+
+      - name: Rebase on main
+        if: inputs.rebase_on_main
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin main
+          git rebase origin/main
 
       - name: Install wasm target
         run: rustup target add wasm32-unknown-unknown
