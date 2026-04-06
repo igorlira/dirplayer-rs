@@ -2601,22 +2601,17 @@ impl SoundChannel {
         if let Some(ref source) = self.source_node {
             let _ = source.stop_with_when(0.0);
             let _ = source.disconnect();
-            debug!("🛑 Stopped previous sound");
         }
-
         self.source_node = None;
     }
 
     pub fn pause(&mut self) {
         if self.status == SoundStatus::Playing {
             self.status = SoundStatus::Paused;
-
-            if let Some(ref source) = self.source_node {
-                // Suspend the audio context — stops all nodes temporarily
+            if self.source_node.is_some() {
                 if let Some(ref ctx) = self.audio_context {
                     let _ = ctx.suspend();
                 }
-                debug!("⏸️ Paused playback");
             }
         }
     }
@@ -2624,14 +2619,10 @@ impl SoundChannel {
     pub fn resume(&mut self) {
         if self.status == SoundStatus::Paused {
             self.status = SoundStatus::Playing;
-            // Don't reset playback_start_context_time on resume - original start is still valid
-
-            if let Some(ref source) = self.source_node {
-                // Resume the AudioContext
+            if self.source_node.is_some() {
                 if let Some(ref ctx) = self.audio_context {
                     let _ = ctx.resume();
                 }
-                debug!("▶️ Resumed playback");
             }
         }
     }

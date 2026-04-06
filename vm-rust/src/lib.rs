@@ -82,10 +82,23 @@ pub fn stop() {
 }
 
 #[wasm_bindgen]
-pub fn reset() {
-    reserve_player_mut(|player| {
-        player.reset();
+pub fn is_playing() -> bool {
+    reserve_player_ref(|player| player.is_playing)
+}
+
+#[wasm_bindgen]
+pub fn rewind() {
+    let was_playing = reserve_player_mut(|player| {
+        let was = player.is_playing;
+        player.stop();
+        player.pending_rewind = true;
+        was
     });
+    if !was_playing {
+        spawn_local(async move {
+            player::perform_rewind().await;
+        });
+    }
 }
 
 // Debug commands bypass the command queue to avoid deadlocks when a breakpoint
