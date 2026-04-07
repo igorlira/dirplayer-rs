@@ -3912,8 +3912,10 @@ impl WebGL2Renderer {
             };
             let box_width = width as i32;
             let line_width = line_width as i32;
-            if matches!(alignment.to_lowercase().as_str(), "center" | "#center") {
-                bitmap_start_x = ((box_width - line_width) / 2).max(0);
+            match alignment.to_lowercase().as_str() {
+                "center" | "#center" => bitmap_start_x = ((box_width - line_width) / 2).max(0),
+                "right" | "#right" => bitmap_start_x = (box_width - line_width).max(0),
+                _ => {}
             }
         }
 
@@ -4099,10 +4101,10 @@ impl WebGL2Renderer {
                         .chars()
                         .map(|c| font.get_char_advance(c as u8) as i32)
                         .sum();
-                let start_x = if matches!(alignment.to_lowercase().as_str(), "center" | "#center") {
-                    ((max_width - line_width) / 2).max(0)
-                } else {
-                    bitmap_start_x
+                let start_x = match alignment.to_lowercase().as_str() {
+                    "center" | "#center" => ((max_width - line_width) / 2).max(0),
+                    "right" | "#right" => (max_width - line_width).max(0),
+                    _ => bitmap_start_x,
                 };
 
                     let cell_has_ink = |code: u8| -> bool {

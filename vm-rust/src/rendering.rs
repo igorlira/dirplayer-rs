@@ -1674,12 +1674,14 @@ pub fn render_score_to_bitmap_with_offset(
                     ink9_mask_bitmap: None,
                     };
 
-                    bitmap.draw_text(
+                    bitmap.draw_text_wrapped(
                         &field_member.text,
                         &font,
                         font_bitmap,
                         sprite.loc_h,
                         sprite.loc_v,
+                        sprite.width,
+                        &field_member.alignment,
                         params,
                         &palettes,
                         field_member.fixed_line_space,
