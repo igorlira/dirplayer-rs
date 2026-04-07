@@ -192,7 +192,7 @@ pub fn get_channel_number_from_index(index: u32) -> u32 {
 /// D8+ uses inverted 0-255 scale: 0 → 100% (opaque), 255 → 0% (transparent).
 /// D5-D7 uses direct 0-100 percentage: 0 → 100% (opaque/not set).
 fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
-    if dir_version > 700 {
+    if dir_version > 600 {
         // D8+: inverted 0-255 scale
         if raw == 0 {
             100
@@ -625,7 +625,7 @@ impl Score {
                     // Shape sprites use different ink/blend encoding
                     sprite.blend = convert_raw_blend(data.blend, dir_version);
                     // Shape ink encoding: mask off the high bit and divide by 5
-                    sprite.ink = ((data.ink & 0x7F) / 5) as i32;
+                    sprite.ink = if dir_version > 700 { ((data.ink & 0x7F) / 5) as i32 } else { data.ink as i32 }
                 } else {
                     // Non-shape sprites: mask off the high bit (bit 7 is a flag, not part of ink number)
                     sprite.ink = (data.ink & 0x7F) as i32;
