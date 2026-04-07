@@ -13,7 +13,7 @@ pub mod scene3d;
 mod shaders;
 mod texture_cache;
 
-use log::debug;
+use log::{debug, warn};
 use itertools::Itertools;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{HtmlCanvasElement, WebGl2RenderingContext};
@@ -25,7 +25,7 @@ use crate::player::{
     bitmap::drawing::CopyPixelsParams,
     cast_lib::CastMemberRef,
     cast_member::CastMemberType,
-    font::{bitmap_font_copy_char, measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference, BitmapFont},
+    font::{measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference},
     geometry::IntRect,
     handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
     score::{get_concrete_sprite_rect, get_sprite_at, ScoreRef},
@@ -619,7 +619,7 @@ impl WebGL2Renderer {
         let palettes = player.movie.cast_manager.palettes();
         let (r, g, b) = resolve_color_ref(
             &palettes,
-            &player.movie.stage_color_ref,
+            &player.bg_color,
             &PaletteRef::BuiltIn(get_system_default_palette()),
             8, // bit depth
         );
@@ -2030,12 +2030,12 @@ impl WebGL2Renderer {
         // Colorize is also baked into the texture when has_fore_color or has_back_color is set
 
         let is_rendered_text = matches!(texture_source, TextureSource::RenderedText { .. });
-        let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 36 || i == 8 || i == 7);
+        let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 2 || i == 36 || i == 8 || i == 7);
 
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
-                let sprite_bg_for_matte = if ink == 7 || ink == 8 || ink == 9 || ink == 36 || ink == 40 || ink == 41 {
+                let sprite_bg_for_matte = if ink == 7 || ink == 8 || ink == 9 || ink == 36 || ink == 37 || ink == 39 || ink == 40 || ink == 41 {
                     Some(bg_color_rgb)
                 } else {
                     None
@@ -2047,6 +2047,14 @@ impl WebGL2Renderer {
                 }
             }
             TextureSource::SolidColor { r, g, b } => {
+                // For inks that make bgColor pixels transparent (7, 8, 36, 40),
+                // if the solid foreground color matches the resolved bgColor,
+                // the entire shape would be invisible — skip rendering.
+                if ink == 3 || ink == 7 || ink == 8 || ink == 36 || ink == 40 {
+                    if (r, g, b) == bg_color_rgb {
+                        return;
+                    }
+                }
                 self.get_or_create_solid_color_texture(r, g, b)
             }
             TextureSource::RenderedText {
@@ -2201,7 +2209,7 @@ impl WebGL2Renderer {
                 // For matte-like inks (bgTransparent 36, Matte 8, Not Ghost 7),
                 // skip the fill and rely on the alpha channel instead of color-keying.
                 // The shader will use alpha-based compositing for these inks.
-                let use_alpha_matte = button_ink == 36 || button_ink == 8 || button_ink == 7;
+                let use_alpha_matte = button_ink == 2 || button_ink == 36 || button_ink == 8 || button_ink == 7;
 
                 match button_type {
                     ButtonType::PushButton => {
@@ -2396,7 +2404,7 @@ impl WebGL2Renderer {
                         0,
                         &[],
                     ) {
-                        web_sys::console::warn_1(&format!("Native text render error for Button (WebGL2): {:?}", e).into());
+                        warn!("Native text render error for Button (WebGL2): {:?}", e);
                     }
                 }
 
@@ -2600,12 +2608,17 @@ impl WebGL2Renderer {
         // For indexed ink 36 bitmaps: transparency is baked into texture alpha,
         // so use Copy shader (whose discard works reliably) instead of BackgroundTransparent
         let is_ink36_indexed_baked = ink == 36 && bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8;
-        let text_needs_alpha = is_rendered_text && (ink == 36 || bg_color_rgb == (255, 255, 255));
+        // For 32-bit bitmaps with use_alpha and ink 36: transparency is baked into texture
+        // alpha by bitmap_to_rgba (bgColor pixels → alpha=0). Use Copy shader to avoid
+        // the BackgroundTransparent shader's color-key discard which would incorrectly
+        // hide content pixels that match bgColor.
+        let is_ink36_alpha_baked = ink == 36 && bitmap_bit_depth == 32 && bitmap_use_alpha;
+        let text_needs_alpha = is_rendered_text && (ink == 36 || ink == 2 || bg_color_rgb == (255, 255, 255));
         let ink_mode = if text_needs_alpha {
             InkMode::Copy
         } else if is_button_alpha_matte {
             InkMode::Copy
-        } else if is_ink36_indexed_baked {
+        } else if is_ink36_indexed_baked || is_ink36_alpha_baked {
             // Transparency baked into texture — use Copy shader for reliable discard
             InkMode::Copy
         } else if ink == 9 {
@@ -2646,6 +2659,14 @@ impl WebGL2Renderer {
                 // Darken uses standard alpha blending
                 // The shader multiplies src by bgColor, then we alpha-blend the result
                 self.context.set_blend_alpha();
+            }
+            InkMode::Light => {
+                // Light (ink 37): MAX(src, dst) per channel
+                self.context.set_blend_lighten();
+            }
+            InkMode::Dark => {
+                // Dark (ink 39): MIN(src, dst) per channel
+                self.context.set_blend_darken();
             }
             InkMode::Lighten => {
                 // Lighten in Director: skip bgColor pixels, blend others normally
@@ -2732,6 +2753,7 @@ impl WebGL2Renderer {
         // Note: Matte (ink 8) uses flood-fill matte in texture alpha, not color-key
         // (using the already-resolved bg_color_rgb from earlier)
         if effective_ink == InkMode::BackgroundTransparent
+            || effective_ink == InkMode::Ghost
             || effective_ink == InkMode::NotGhost
             || effective_ink == InkMode::Darken
             || effective_ink == InkMode::AddPin
@@ -2752,7 +2774,7 @@ impl WebGL2Renderer {
                 // For indexed ink 40 (2-8 bit): transparency is baked via RGB comparison with sprite's bgColor
                 // In both cases, disable shader color-key by setting tolerance to 0.
                 // For 16-bit and 32-bit: use small tolerance for floating-point RGB comparison.
-                let is_indexed_ink40 = bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && ink == 40;
+                let is_indexed_ink40 = bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && (ink == 37 || ink == 39 || ink == 40);
                 // 16-bit bitmaps need higher tolerance due to RGB565 quantization:
                 // max error is ~4/255 ≈ 0.016, so use 0.02 to cover rounding
                 let tolerance = if bitmap_bit_depth == 1 || is_indexed_ink40 {
@@ -2772,9 +2794,8 @@ impl WebGL2Renderer {
         // Unbind texture
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
 
-        // Reset blend equation if we used SubPin (which changes the blend equation to REVERSE_SUBTRACT)
-        // Note: Lighten now uses normal alpha blend, not MAX
-        if effective_ink == InkMode::SubPin {
+        // Reset blend equation if we used an ink that changes it from the default FUNC_ADD
+        if effective_ink == InkMode::SubPin || effective_ink == InkMode::Light || effective_ink == InkMode::Dark {
             self.context.reset_blend_equation();
         }
     }
@@ -2901,6 +2922,9 @@ impl WebGL2Renderer {
         // NOT flood-fill matte. See drawing.rs lines 160-163: if src == bg_color { dst }
         // Color-key comparison is handled in the shader, not texture matte.
         // For 16-bit and 32-bit, the shader compares pixel RGB with bgColor uniform.
+        // Ink 3 (Ghost) uses COLOR-KEY transparency (ALL bgColor pixels transparent)
+        // Ghost ink makes background transparent and inverts foreground colors
+        let should_use_colorkey_ink3 = ink == 3 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
         let should_use_colorkey_ink33 = ink == 33 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
         // Ink 35 (Sub Pin) uses COLOR-KEY transparency (ALL bgColor pixels transparent)
         // Same behavior as ink 33 but with subtractive blending
@@ -2912,12 +2936,21 @@ impl WebGL2Renderer {
         // See drawing.rs lines 1421-1437 for 32-bit ink 36 handling
         let is_indexed_not_1bit = bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8;
         let should_use_colorkey_ink36 = ink == 36 && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
+        // Ink 37 (Light) uses color-key transparency: skip bgColor pixels
+        // For indexed bitmaps: bake transparency based on palette index
+        // For 16-bit and 32-bit: use RGB color-key in shader
+        let should_use_colorkey_ink37 = ink == 37 && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
+        // Ink 39 (Dark) uses color-key transparency: skip bgColor pixels
+        let should_use_colorkey_ink39 = ink == 39 && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
         // Ink 40 (Lighten) uses color-key transparency: skip bgColor pixels
         // For indexed bitmaps: use palette index comparison in texture (baked alpha)
         // For 16-bit and 32-bit: use RGB color-key in shader
         let should_use_colorkey_ink40 = ink == 40 && (is_16bit || (is_32bit && !bitmap.use_alpha));
         // For indexed ink 40, we bake transparency based on palette index
         let is_ink40_indexed_transparent = ink == 40 && is_indexed_not_1bit;
+        // For indexed ink 37/39, bake transparency based on palette index
+        let is_ink37_indexed_transparent = ink == 37 && is_indexed_not_1bit;
+        let is_ink39_indexed_transparent = ink == 39 && is_indexed_not_1bit;
         // Total: when to use matte (either pre-computed or on-the-fly)
         // Note: ink 33 uses color-key in shader, NOT matte
         let should_use_matte = should_use_matte_ink0 || should_use_matte_ink7 || should_use_matte_ink8 || should_use_matte_ink9 || should_use_matte_ink32 || should_use_matte_ink41;
@@ -2926,9 +2959,7 @@ impl WebGL2Renderer {
         // This matches score rendering behavior where these inks use matte
         // The matte makes edge-connected background transparent while keeping interior pixels opaque
         //
-        // For ink 0, only compute matte when trim_white_space is true
         // Note: Ink 33 does NOT use flood-fill matte - it uses shader color-key
-        let is_matte_bitmap = bitmap.trim_white_space;
         let ink_7_needs_matte = ink == 7 && (is_indexed || is_16bit);
         let ink_8_needs_matte = ink == 8 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
         let ink_9_needs_matte = ink == 9 && (is_32bit && !bitmap.use_alpha);
@@ -2940,18 +2971,14 @@ impl WebGL2Renderer {
             && width > 0
             && height > 0
             && (
-                // Indexed bitmaps ink 0: matte only when trim_white_space
-                (is_indexed && is_matte_bitmap && ink == 0)
                 // Indexed bitmaps ink 7: ALWAYS use matte (flood-fill, not color-key)
-                || (is_indexed && ink == 7)
+                (is_indexed && ink == 7)
                 // Indexed bitmaps ink 8: ALWAYS use matte (flood-fill transparency)
                 || (is_indexed && ink == 8)
                 // Indexed bitmaps ink 32: ALWAYS use matte (blend shouldn't show bg)
                 || (is_indexed && ink == 32)
                 // Indexed bitmaps ink 41: ALWAYS use matte (background shouldn't darken)
                 || (is_indexed && ink == 41)
-                // 16-bit bitmaps ink 0: matte only when trim_white_space
-                || (is_16bit && should_use_matte_ink0)
                 // 16-bit bitmaps ink 7: ALWAYS use matte (flood-fill, not color-key)
                 || (is_16bit && ink == 7)
                 // 16-bit bitmaps ink 8: ALWAYS use matte (flood-fill transparency)
@@ -3057,7 +3084,7 @@ impl WebGL2Renderer {
                     false
                 };
 
-                // Special handling for ink 40 indexed bitmaps (2-8 bit):
+                // Special handling for ink 37/39/40 indexed bitmaps (2-8 bit):
                 // Compare RGB against sprite's bgColor (like drawing.rs lines 203-209)
                 // This matches Canvas2D: if src == bg_color, skip (transparent)
                 // Ink 9 (Mask): use the mask bitmap's grayscale as alpha
@@ -3077,7 +3104,7 @@ impl WebGL2Renderer {
                     None
                 };
 
-                let is_ink40_indexed_bg = if is_ink40_indexed_transparent {
+                let is_ink40_indexed_bg = if is_ink40_indexed_transparent || is_ink37_indexed_transparent || is_ink39_indexed_transparent {
                     if let Some(bg_color) = sprite_bg_color {
                         // Compare this pixel's RGB against sprite's bgColor
                         (r, g, b) == bg_color
@@ -3092,7 +3119,7 @@ impl WebGL2Renderer {
                     // Ink 9 (Mask): use mask bitmap's inverted grayscale as alpha
                     mask_a
                 } else if is_1bit_transparent || is_ink40_indexed_bg {
-                    // 1-bit or ink 40 indexed background pixel
+                    // 1-bit or ink 37/39/40 indexed background pixel
                     0
                 } else if ink == 0 && use_embedded_alpha {
                     // For 32-bit bitmaps with ink 0 (Copy) and use_alpha=true: use embedded alpha
@@ -3145,11 +3172,15 @@ impl WebGL2Renderer {
                     } else {
                         255
                     }
-                } else if should_use_colorkey_ink33 || should_use_colorkey_ink35 {
-                    // Ink 33/35 color-key: handled by shader
+                } else if should_use_colorkey_ink3 || should_use_colorkey_ink33 || should_use_colorkey_ink35 || should_use_colorkey_ink36 || should_use_colorkey_ink37 || should_use_colorkey_ink39 {
+                    // Ink 3/33/35/36/37/39 color-key transparency is handled by shader
+                    // The shader compares pixel RGB with bgColor uniform
+                    // All pixels are uploaded as opaque, shader discards matching pixels
+                    // Works for indexed (2-8 bit), 16-bit, and 32-bit (without use_alpha) bitmaps
+                    // Note: 1-bit bitmaps are excluded - they use is_1bit_transparent for alpha instead
                     255
                 } else if should_use_matte {
-                    // Use matte for inks 0 and 8 when trim_white_space is true
+                    // Use matte for inks 7, 8, 9, 41 (ink 0 matte handled above)
                     if let Some(ref computed) = computed_matte {
                         // Use computed flood-fill matte
                         if computed[y * width + x] { 255 } else { 0 }
@@ -3453,7 +3484,7 @@ impl WebGL2Renderer {
     /// Check if ink mode requires matte computation
     /// Matches Canvas2D's should_matte_sprite function
     fn should_matte_sprite(ink: i32) -> bool {
-        ink == 36 || ink == 33 || ink == 41 || ink == 8 || ink == 7 || ink == 32
+        ink == 3 || ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7  || ink == 32
     }
 
     /// Get or create a texture for a bitmap member
@@ -3549,7 +3580,7 @@ impl WebGL2Renderer {
         // Note: Ink 33 uses shader color-key, not texture matte, so no bgColor in cache key
         // Note: Ink 41 for indexed bitmaps uses palette index 0, not bgColor
         let is_ink_with_bgcolor_matte =
-            ((ink == 7 || ink == 8 || ink == 36 || ink == 40) && bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8)
+            ((ink == 7 || ink == 8 || ink == 36 || ink == 37 || ink == 39 || ink == 40) && bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8)
             || ((ink == 0 || ink == 8) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
             || ((ink == 9 || ink == 41) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
             || (ink == 36 && bitmap.original_bit_depth == 32 && bitmap.use_alpha);
@@ -3728,7 +3759,7 @@ impl WebGL2Renderer {
         // at the wrong size (e.g. 15 instead of 12), producing wrong glyph shapes.
         let requested_font_size = font_size;
         if DEBUG_WEBGL2_TEXT {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "[webgl2.text] text_len={} spans={} font='{}' in_size={} req={} box={}x{} wrap={} align='{}'",
                 text.len(),
                 styled_span_count,
@@ -3739,7 +3770,7 @@ impl WebGL2Renderer {
                 height,
                 word_wrap,
                 alignment
-            ).into());
+            );
         }
 
         // Get or load the font
@@ -3813,7 +3844,7 @@ impl WebGL2Renderer {
             }
 
             let result = font_opt.or_else(|| player.font_manager.get_system_font());
-            
+
             if DEBUG_WEBGL2_TEXT {
                 if let Some(ref f) = result {
                     web_sys::console::log_1(
@@ -3839,7 +3870,7 @@ impl WebGL2Renderer {
 
         let is_pfr_font = font.char_widths.is_some();
         if DEBUG_WEBGL2_TEXT {
-            web_sys::console::log_1(&format!(
+            debug!(
                 "[webgl2.text] selected font='{}' pfr={} font_size={} char={}x{} bitmap_ref={}",
                 font.font_name,
                 is_pfr_font,
@@ -3847,7 +3878,7 @@ impl WebGL2Renderer {
                 font.char_width,
                 font.char_height,
                 font.bitmap_ref
-            ).into());
+            );
         }
         let style_bits = font_style.unwrap_or(font.font_style);
         let bold = (style_bits & 1) != 0;
@@ -4030,17 +4061,16 @@ impl WebGL2Renderer {
             } else { "no spans".to_string() };
 
             if DEBUG_WEBGL2_TEXT {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "[render_text] font='{}' pfr={} native={} fg={:?} text='{}' spans=[{}]",
                     font_name, is_pfr_font, spans_for_native.is_some(), fg_color,
                     &text[..text.len().min(30)], span_info,
-                ).into());
+                );
             }
         }
 
         // Render text to the bitmap - use styled spans if available
         // BUT only use native rendering if the font is NOT a PFR bitmap font
-        // PFR fonts can't be used by Canvas2D, so we must use bitmap rendering
         if let Some(spans) = spans_for_native {
             // Parse alignment string to TextAlignment enum
             let text_alignment = match alignment_key.as_str() {
@@ -4074,10 +4104,10 @@ impl WebGL2Renderer {
             }
         } else {
             if DEBUG_WEBGL2_TEXT {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "[render_text] Using BITMAP rendering path for font='{}' text_len={}",
                     font.font_name, text.len()
-                ).into());
+                );
             }
 
             use crate::player::font::{
@@ -4157,10 +4187,10 @@ impl WebGL2Renderer {
                     }
                     let force_uppercase_fallback = is_pfr_font && caps_only_missing >= 8;
                     if DEBUG_WEBGL2_TEXT && force_uppercase_fallback {
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[webgl2.text.pfr.char] caps-only fallback enabled missing_lowercase={}",
                             caps_only_missing
-                        ).into());
+                        );
                     }
 
                     let mut x = start_x;
@@ -4180,13 +4210,13 @@ impl WebGL2Renderer {
                             if cell_has_ink(upper) {
                                 glyph_code = upper;
                                 if DEBUG_WEBGL2_TEXT {
-                                    web_sys::console::log_1(&format!(
+                                    debug!(
                                         "[webgl2.text.pfr.char] fallback '{}' ({}) -> '{}' ({})",
                                         ch,
                                         lower,
                                         upper as char,
                                         upper
-                                    ).into());
+                                    );
                                 }
                             }
                         } else if is_pfr_font && ch.is_ascii_lowercase() {
@@ -4195,13 +4225,13 @@ impl WebGL2Renderer {
                             if !cell_has_ink(lower) && cell_has_ink(upper) {
                                 glyph_code = upper;
                                 if DEBUG_WEBGL2_TEXT {
-                                    web_sys::console::log_1(&format!(
+                                    debug!(
                                         "[webgl2.text.pfr.char] fallback '{}' ({}) -> '{}' ({})",
                                         ch,
                                         lower,
                                         upper as char,
                                         upper
-                                    ).into());
+                                    );
                                 }
                             }
                         }
@@ -4216,7 +4246,7 @@ impl WebGL2Renderer {
                                     (char_x * font.grid_cell_width + font.char_offset_x) as i32;
                                 let src_y =
                                     (char_y * font.grid_cell_height + font.char_offset_y) as i32;
-                                web_sys::console::log_1(&format!(
+                                debug!(
                                     "[webgl2.text.pfr.char] i={} ch='{}' code={} adv={} dst=({}, {}) src=({}, {}) cell={}x{} glyph={}x{} first={} grid_cols={}",
                                     char_i,
                                     ch,
@@ -4232,15 +4262,15 @@ impl WebGL2Renderer {
                                     font.char_height,
                                     font.first_char_num,
                                     font.grid_columns
-                                ).into());
+                                );
                                 if use_tight_pfr {
-                                    web_sys::console::log_1(&format!(
+                                    debug!(
                                         "[webgl2.text.pfr.char] i={} code={} using tight copy (adv={}, glyph_w={})",
                                         char_i,
                                         glyph_code as u32,
                                         adv,
                                         font.char_width
-                                    ).into());
+                                    );
                                 }
                                 // Debug source glyph occupancy/bounds in the atlas cell.
                                 // This helps detect glyphs that are effectively empty or very thin.
@@ -4282,18 +4312,18 @@ impl WebGL2Renderer {
                                 }
                                 let bbox_w = if max_ix >= min_ix { max_ix - min_ix + 1 } else { 0 };
                                 let bbox_h = if max_iy >= min_iy { max_iy - min_iy + 1 } else { 0 };
-                                web_sys::console::log_1(&format!(
+                                debug!(
                                     "[webgl2.text.pfr.char.metrics] i={} code={} ink_px={} bbox={}x{}",
                                     char_i, glyph_code as u32, ink_px, bbox_w, bbox_h
-                                ).into());
+                                );
                             } else {
-                                web_sys::console::log_1(&format!(
+                                debug!(
                                     "[webgl2.text.pfr.char] i={} ch='{}' code={} below first_char_num={} -> skipped",
                                     char_i,
                                     ch,
                                     glyph_code as u32,
                                     font.first_char_num
-                                ).into());
+                                );
                             }
                         }
                         if use_tight_pfr {
@@ -4390,12 +4420,12 @@ impl WebGL2Renderer {
 
             if pfr_multi_span_styled {
                 if DEBUG_WEBGL2_TEXT {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[webgl2.text] PFR styled path spans={} line_spacing={} top_spacing={}",
                         styled_span_count,
                         render_line_spacing,
                         top_spacing
-                    ).into());
+                    );
                 }
                 #[derive(Clone)]
                 struct PfrRunStyle {
@@ -4557,7 +4587,7 @@ impl WebGL2Renderer {
                 if DEBUG_WEBGL2_TEXT {
                     let line_count = lines.len();
                     let max_line_width = lines.iter().map(|l| l.width).max().unwrap_or(0);
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[webgl2.text.pfr.styled] lines={} max_line_width={} box={}x{} y_start={} line_h={} spacing={} wrap={}",
                         line_count,
                         max_line_width,
@@ -4567,7 +4597,7 @@ impl WebGL2Renderer {
                         line_height,
                         render_line_spacing,
                         word_wrap
-                    ).into());
+                    );
                 }
 
                 for line in lines {
@@ -4673,14 +4703,14 @@ impl WebGL2Renderer {
                     let effective_lh = if render_line_spacing > 0 { render_line_spacing as i32 } else { line_height };
                     let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
                     if DEBUG_WEBGL2_TEXT {
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[webgl2.text.pfr.styled] line width={} start_x={} y={} step={} next_y={}",
                             line.width,
                             start_x,
                             y,
                             line_step,
                             y + line_step
-                        ).into());
+                        );
                     }
                     y += line_step;
                 }
@@ -4734,7 +4764,7 @@ impl WebGL2Renderer {
                         })
                         .max()
                         .unwrap_or(0);
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[webgl2.text.bitmap] lines={} max_line_width={} box={}x{} y_start={} line_h={} spacing={} wrap={} align='{}'",
                         lines_to_draw.len(),
                         max_line_width,
@@ -4745,29 +4775,29 @@ impl WebGL2Renderer {
                         render_line_spacing,
                         word_wrap,
                         alignment_key
-                    ).into());
+                    );
                 }
 
                 for line in lines_to_draw {
                     if DEBUG_WEBGL2_TEXT {
                         let line_width: i32 = line.chars().map(|c| font.get_char_advance(c as u8) as i32).sum();
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[webgl2.text.bitmap] draw line_w={} y={} text='{}'",
                             line_width,
                             y,
                             line.chars().take(60).collect::<String>()
-                        ).into());
+                        );
                     }
                     render_line(&line, y, &mut text_bitmap);
                     let effective_lh = if render_line_spacing > 0 { render_line_spacing as i32 } else { line_height };
                     let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
                     if DEBUG_WEBGL2_TEXT && is_pfr_font {
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[webgl2.text.pfr.simple] step={} next_y={} h={}",
                             line_step,
                             y + line_step,
                             render_height
-                        ).into());
+                        );
                     }
                     y += line_step;
                 }
@@ -4791,7 +4821,7 @@ impl WebGL2Renderer {
         // - Ink 36 (BgTransparent): composited with alpha blending
         // Filling background with bg_color at alpha=255 would make the entire
         // text area opaque, producing solid colored rectangles instead of text.
-        let is_transparency_ink = ink == 7 || ink == 8 || ink == 9 || ink == 36;
+        let is_transparency_ink = ink == 3 || ink == 7 || ink == 8 || ink == 9 || ink == 36;
         // When bgColor is default white, leave background transparent even for ink 0.
         // This matches Director behavior where text/field members with default white
         // bgColor appear transparent when composited over other content (e.g., 3D scenes).
@@ -5082,5 +5112,19 @@ impl super::Renderer for WebGL2Renderer {
 
     fn preview_font_size(&self) -> Option<u16> {
         self.preview_font_size
+    }
+
+    fn draw_sprite_isolated(&mut self, player: &mut DirPlayer, channel_num: i16) {
+        // Clear to transparent
+        let gl = self.context.gl();
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+
+        // Advance caches so textures are available
+        self.texture_cache.next_frame();
+        self.rendered_text_cache.next_frame();
+
+        self.quad.bind(self.context.gl());
+        self.render_sprite(player, channel_num);
     }
 }

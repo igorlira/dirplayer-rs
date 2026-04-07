@@ -482,6 +482,7 @@ pub fn update_flash_frame(cast_lib: i32, cast_member: i32, width: u32, height: u
         PaletteRef::BuiltIn(get_system_default_palette()),
     );
     bitmap.data = rgba_data.to_vec();
+    bitmap.use_alpha = true;
 
     unsafe {
         if let Some(player) = PLAYER_OPT.as_mut() {
