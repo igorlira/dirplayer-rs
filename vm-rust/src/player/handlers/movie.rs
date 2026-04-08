@@ -863,6 +863,7 @@ impl MovieHandlers {
         // Director's updateStage() forces an immediate stage redraw even from
         // inside enterFrame/prepareFrame loops. Yielding to the browser event loop
         // is only needed for busy-wait input handlers.
+        reserve_player_mut(|player| { player.stage_dirty = true; });
         crate::rendering::draw_frame_immediate();
 
         if should_yield {

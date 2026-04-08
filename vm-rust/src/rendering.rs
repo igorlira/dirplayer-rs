@@ -2891,7 +2891,12 @@ where
 
 pub fn draw_frame_immediate() {
     use crate::rendering_gpu::Renderer;
-    let tempo = reserve_player_ref(|player| player.current_frame_tempo as f64);
+    let (tempo, dirty) = reserve_player_ref(|player| {
+        (player.current_frame_tempo as f64, player.stage_dirty)
+    });
+    if !dirty {
+        return;
+    }
     let interval = if tempo > 0.0 {
         (60000.0 / tempo) as i64
     } else {
@@ -2900,7 +2905,10 @@ pub fn draw_frame_immediate() {
     if !was_frame_drawn_recently(interval) {
         with_renderer_mut(|renderer_lock| {
             if let Some(renderer) = renderer_lock {
-                reserve_player_mut(|player| renderer.draw_frame(player));
+                reserve_player_mut(|player| {
+                    renderer.draw_frame(player);
+                    player.stage_dirty = false;
+                });
             }
             mark_frame_drawn();
         });

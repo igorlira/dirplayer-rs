@@ -282,6 +282,7 @@ pub struct DirPlayer {
     pub last_nothing_yield_ms: f64, // Timestamp of last nothing() yield for time-throttled rendering
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
+    pub stage_dirty: bool, // Set when any sprite property changes; cleared after render
     pub has_frame_changed_in_go: bool,
     pub go_same_frame: bool,
     pub go_direction: u8,
@@ -442,6 +443,7 @@ impl DirPlayer {
             last_nothing_yield_ms: 0.0,
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
+            stage_dirty: true,
             has_frame_changed_in_go: false,
             go_same_frame: false,
             go_direction: 0,
@@ -906,6 +908,7 @@ impl DirPlayer {
         if !self.is_playing {
             return;
         }
+        self.stage_dirty = true;
 
         let prev_frame = self.movie.current_frame;
         let next_frame = self.get_next_frame();

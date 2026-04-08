@@ -3183,6 +3183,7 @@ where
 }
 
 pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<(), ScriptError> {
+    reserve_player_mut(|player| { player.stage_dirty = true; });
     let result = match prop_name {
         "visible" | "visibility" => borrow_sprite_mut(
             sprite_id,

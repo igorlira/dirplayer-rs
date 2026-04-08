@@ -103,9 +103,9 @@ impl GetSetBytecodeHandler {
 
     pub fn get_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
-        let (receiver, script_ref) = {
+        let (receiver, script_ref, cached) = {
             let scope = player.scopes.get(ctx.scope_ref).unwrap();
-            (scope.receiver.clone(), scope.script_ref.clone())
+            (scope.receiver.clone(), scope.script_ref.clone(), scope.cached_handler_instance.clone())
         };
         let name_id = player.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id).to_owned();
@@ -117,7 +117,13 @@ impl GetSetBytecodeHandler {
             // script runs with a child instance as receiver — e.g., when
             // `ancestor.getMember()` is called, `ancestor` should resolve to
             // the handler's own instance's ancestor, not the receiver's.
-            let handler_instance = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+            let handler_instance = if let Some(ref c) = cached {
+                c.clone()
+            } else {
+                let hi = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+                player.scopes.get_mut(ctx.scope_ref).unwrap().cached_handler_instance = Some(hi.clone());
+                hi
+            };
             script_get_prop(player, &handler_instance, &prop_name)?
         } else {
             script_get_static_prop(player, &script_ref, &prop_name)?
@@ -132,10 +138,10 @@ impl GetSetBytecodeHandler {
         let prop_name = ctx.get_name(name_id).to_owned();
 
         reserve_player_mut(|player| {
-            let (value_ref, receiver, script_ref) = {
+            let (value_ref, receiver, script_ref, cached) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 let value_ref = scope.stack.pop().unwrap();
-                (value_ref, scope.receiver.clone(), scope.script_ref.clone())
+                (value_ref, scope.receiver.clone(), scope.script_ref.clone(), scope.cached_handler_instance.clone())
             };
 
             match receiver {
@@ -147,7 +153,13 @@ impl GetSetBytecodeHandler {
                         )));
                     }
                     // Resolve on handler's owning instance level (see get_prop comment)
-                    let handler_instance = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+                    let handler_instance = if let Some(ref c) = cached {
+                        c.clone()
+                    } else {
+                        let hi = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+                        player.scopes.get_mut(ctx.scope_ref).unwrap().cached_handler_instance = Some(hi.clone());
+                        hi
+                    };
                     script_set_prop(player, &handler_instance, &prop_name, &value_ref, false)?;
                     Ok(HandlerExecutionResult::Advance)
                 }

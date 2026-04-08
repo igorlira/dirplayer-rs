@@ -47,9 +47,32 @@ impl PropListUtils {
         key: &Datum,
         allocator: &DatumAllocator,
     ) -> Result<i32, ScriptError> {
+        // For sorted prop lists with enough entries, use binary search
+        // (sorted lists are maintained by addProp/setaProp with find_index_to_add)
+        if prop_list.len() >= 8 {
+            // Try binary search: find insertion point, then check if the key matches
+            let mut low = 0i32;
+            let mut high = prop_list.len() as i32;
+            while low < high {
+                let mid = (low + high) / 2;
+                let mid_key = allocator.get_datum(&prop_list[mid as usize].0);
+                if datum_less_than(mid_key, key, allocator)? {
+                    low = mid + 1;
+                } else {
+                    high = mid;
+                }
+            }
+            // Binary search found insertion point `low`. Check if key at `low` matches.
+            if (low as usize) < prop_list.len() {
+                let found_key = allocator.get_datum(&prop_list[low as usize].0);
+                if Self::datum_equals_for_lookup(found_key, key, allocator)? {
+                    return Ok(low);
+                }
+            }
+            // Binary search may miss due to mixed key types — fall through to linear scan
+        }
         for (i, (k, _)) in prop_list.iter().enumerate() {
             let k_datum = allocator.get_datum(k);
-            // Lookup: exact match only
             if Self::datum_equals_for_lookup(k_datum, key, allocator)? {
                 return Ok(i as i32);
             }
