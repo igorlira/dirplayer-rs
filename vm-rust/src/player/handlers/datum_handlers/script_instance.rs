@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType},
     player::{
@@ -15,6 +14,7 @@ use crate::{
         virtual_scripts::VirtualScriptRegistry,
     },
 };
+use crate::player::script::script_get_prop_opt;
 
 pub struct ScriptInstanceDatumHandlers {}
 pub struct ScriptInstanceUtils {}
@@ -67,7 +67,7 @@ impl ScriptInstanceUtils {
     }
 
     pub fn get_handler(
-        name: &String,
+        name: &str,
         datum: &DatumRef,
         player: &DirPlayer,
     ) -> Result<Option<ScriptHandlerRef>, ScriptError> {
@@ -86,7 +86,7 @@ impl ScriptInstanceUtils {
     }
 
     pub fn get_script_instance_handler(
-        name: &String,
+        name: &str,
         instance_ref: &ScriptInstanceRef,
         player: &DirPlayer,
     ) -> Result<Option<ScriptHandlerRef>, ScriptError> {
@@ -115,7 +115,7 @@ impl ScriptInstanceUtils {
 
     pub fn get_handler_from_first_arg(
         args: &Vec<DatumRef>,
-        handler_name: &String,
+        handler_name: &str,
     ) -> Option<(Option<ScriptInstanceRef>, (CastMemberRef, String))> {
         reserve_player_mut(|player| {
             let receiver_handler = args
@@ -166,7 +166,7 @@ impl ScriptInstanceUtils {
 
     pub fn set_at(
         datum: &DatumRef,
-        key: &String,
+        key: &str,
         value: &DatumRef,
         player: &mut DirPlayer,
     ) -> Result<(), ScriptError> {
@@ -178,7 +178,7 @@ impl ScriptInstanceUtils {
                 ))
             }
         };
-        match key.as_str() {
+        match key {
             "ancestor" => {
                 let value_datum = player.get_datum(value).to_owned();
                 match value_datum {
@@ -211,7 +211,7 @@ impl ScriptInstanceDatumHandlers {
     /// Find a non-ScriptInstance ancestor (like TimeoutInstance) in the properties
     fn find_non_script_ancestor(datum: &DatumRef, player: &DirPlayer) -> Option<DatumRef> {
         let instance_ref = match player.get_datum(datum) {
-            Datum::ScriptInstanceRef(ref r) => r.clone(),
+            Datum::ScriptInstanceRef(r) => r.clone(),
             _ => return None,
         };
 
@@ -231,7 +231,7 @@ impl ScriptInstanceDatumHandlers {
                 let ancestor_datum = player.get_datum(ancestor_prop_ref);
                 match ancestor_datum {
                     // If ancestor is not a ScriptInstanceRef, return it for delegation
-                    Datum::ScriptInstanceRef(ref next_ref) => {
+                    Datum::ScriptInstanceRef(next_ref) => {
                         current_instance_ref = Some(next_ref.clone());
                         continue;
                     }
@@ -256,9 +256,9 @@ impl ScriptInstanceDatumHandlers {
         None
     }
 
-    pub fn has_async_handler(datum: &DatumRef, name: &String) -> Result<bool, ScriptError> {
+    pub fn has_async_handler(datum: &DatumRef, name: &str) -> Result<bool, ScriptError> {
         return reserve_player_ref(|player| {
-            if let Datum::ScriptInstanceRef(ref instance_ref) = player.get_datum(datum) {
+            if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(datum) {
                 if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, instance_ref, name) {
                     return Ok(true);
                 }
@@ -284,7 +284,7 @@ impl ScriptInstanceDatumHandlers {
 
     pub async fn call_async(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         let (instance_id, handler_ref) = reserve_player_ref(|player| {
@@ -321,7 +321,7 @@ impl ScriptInstanceDatumHandlers {
             }
 
             // Director system events should be silently ignored if not implemented
-            match handler_name.as_str() {
+            match handler_name {
                 "exitFrame" | "enterFrame" | "prepareFrame" | "idle" | "stepFrame" |
                 "mouseDown" | "mouseUp" | "mouseEnter" | "mouseLeave" | "mouseWithin" |
                 "keyDown" | "keyUp" | "beginSprite" | "endSprite" | "prepareMovie" |
@@ -500,7 +500,7 @@ impl ScriptInstanceDatumHandlers {
                     ))
                 }
             };
-            let prop_value = script_get_prop(player, &instance_ref, &prop_name)?;
+            let prop_value = script_get_prop_opt(player, &instance_ref, &prop_name).unwrap_or(DatumRef::Void);
             Ok(prop_value)
         })
     }
@@ -535,10 +535,10 @@ impl ScriptInstanceDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "setAt" => Self::set_at(datum, args),
             "handler" => Self::handler(datum, args),
             "setaProp" => Self::set_a_prop(datum, args),
@@ -568,7 +568,7 @@ impl ScriptInstanceDatumHandlers {
                 // Check for virtual script handler
                 let virtual_result = reserve_player_mut(|player| {
                     let instance_ref = match player.get_datum(datum) {
-                        Datum::ScriptInstanceRef(ref r) => r.clone(),
+                        Datum::ScriptInstanceRef(r) => r.clone(),
                         _ => return Ok(None),
                     };
                     VirtualScriptRegistry::try_call_instance_handler(player, &instance_ref, handler_name, args)
@@ -581,7 +581,7 @@ impl ScriptInstanceDatumHandlers {
 
                 // Check for non-ScriptInstance ancestor to delegate to (e.g., TimeoutInstance)
                 let (ancestor_ref, ancestor_type, script_name, script_missing) = reserve_player_ref(|player| {
-                    let (script_name, script_missing) = if let Datum::ScriptInstanceRef(ref inst_ref) = player.get_datum(datum) {
+                    let (script_name, script_missing) = if let Datum::ScriptInstanceRef(inst_ref) = player.get_datum(datum) {
                         let instance = player.allocator.get_script_instance(inst_ref);
                         let script = player.movie.cast_manager.get_script_by_ref(&instance.script);
                         match script {
@@ -642,7 +642,7 @@ impl ScriptInstanceDatumHandlers {
                 if let Datum::List(dtype, items, sorted) = actor_list {
                     // Get the instance ID we're looking for
                     let target_id = match player.get_datum(datum) {
-                        Datum::ScriptInstanceRef(ref instance_ref) => Some(**instance_ref),
+                        Datum::ScriptInstanceRef(instance_ref) => Some(**instance_ref),
                         _ => None,
                     };
 
@@ -651,7 +651,7 @@ impl ScriptInstanceDatumHandlers {
                         let new_items: VecDeque<DatumRef> = items.iter()
                             .filter(|item| {
                                 match player.get_datum(item) {
-                                    Datum::ScriptInstanceRef(ref item_ref) => **item_ref != target_id,
+                                    Datum::ScriptInstanceRef(item_ref) => **item_ref != target_id,
                                     _ => true, // Keep non-script-instance items
                                 }
                             })

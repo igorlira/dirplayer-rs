@@ -5,7 +5,7 @@ use num_derive::FromPrimitive;
 use std::convert::TryInto;
 use web_sys::console;
 
-use crate::{io::reader::DirectorExt, utils::log_i};
+use crate::io::reader::DirectorExt;
 
 #[derive(Copy, Clone, FromPrimitive, Debug)]
 pub enum MemberType {
@@ -1550,12 +1550,9 @@ impl TextMemberData {
         let current_pos = reader.pos; // safe now
         let val3_str = String::from_utf8_lossy(&val3_bytes);
 
-        console::log_1(
-            &format!(
-                "📍 Current position: {}, next 4 bytes should be '3TEX'",
-                current_pos
-            )
-            .into(),
+        debug!(
+            "📍 Current position: {}, next 4 bytes should be '3TEX'",
+            current_pos
         );
 
         if val3_str != "3TEX" {
@@ -1690,42 +1687,30 @@ impl TextMemberData {
         if let Some(ref tex) = self.tex_section {
             debug!("───────────────────────────────────");
             debug!("3TEX Section:");
-            console::log_1(
-                &format!(
-                    "  Color ID:      {} {}",
-                    tex.color_id,
-                    if tex.color_id == -1 {
-                        "(white FFFFFF)"
-                    } else {
-                        ""
-                    }
-                )
-                .into(),
+            debug!(
+                "  Color ID:      {} {}",
+                tex.color_id,
+                if tex.color_id == -1 {
+                    "(white FFFFFF)"
+                } else {
+                    ""
+                }
             );
             debug!("  BG Color ID:   {}", tex.bg_color_id);
             debug!("  Char Count:    {}", tex.char_count);
             debug!("  Line Count:    {}", tex.line_count);
             debug!("  Text Offset:   {}", tex.text_offset);
-            console::log_1(
-                &format!(
-                    "  Color 1:       RGB({}, {}, {})",
-                    tex.color1.0, tex.color1.1, tex.color1.2
-                )
-                .into(),
+            debug!(
+                "  Color 1:       RGB({}, {}, {})",
+                tex.color1.0, tex.color1.1, tex.color1.2
             );
-            console::log_1(
-                &format!(
-                    "  Color 2:       RGB({}, {}, {})",
-                    tex.color2.0, tex.color2.1, tex.color2.2
-                )
-                .into(),
+            debug!(
+                "  Color 2:       RGB({}, {}, {})",
+                tex.color2.0, tex.color2.1, tex.color2.2
             );
-            console::log_1(
-                &format!(
-                    "  Color 3:       RGB({}, {}, {})",
-                    tex.color3.0, tex.color3.1, tex.color3.2
-                )
-                .into(),
+            debug!(
+                "  Color 3:       RGB({}, {}, {})",
+                tex.color3.0, tex.color3.1, tex.color3.2
             );
             debug!("  Float 1:       {}", tex.float1);
             debug!("  Float 2:       {}", tex.float2);

@@ -22,7 +22,7 @@ jobs:
       run: cargo fetch
     - name: Test (Verbose)
       working-directory: ./vm-rust
-      run: cargo test --verbose
+      run: cargo test --verbose -- --skip e2e
     - name: Build
       working-directory: ./vm-rust
       run: wasm-pack build --target web

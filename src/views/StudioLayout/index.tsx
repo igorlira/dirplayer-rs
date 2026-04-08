@@ -5,7 +5,7 @@ import ScoreInspector from '../ScoreInspector';
 import PlaybackControls from '../../components/PlaybackControls';
 import CastInspector from '../CastInspector';
 import { useAppDispatch, useAppSelector, useMemberSubscriptions } from '../../store/hooks';
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { onMemberSelected } from '../../store/uiSlice';
 import { player_set_preview_member_ref } from 'vm-rust';
 import { ICastMemberIdentifier } from '../../vm';
@@ -22,11 +22,13 @@ import MessageInspector from '../MessageInspector';
 const StudioLayout = () => {
   const castSnapshots = useAppSelector((state) => state.vm.castSnapshots);
   const { memberRef: selectedMemberRef } = useSelectedObjects();
-  const selectedMemberId: ICastMemberIdentifier | undefined =
-    selectedMemberRef && {
-      castNumber: selectedMemberRef[0],
-      memberNumber: selectedMemberRef[1],
-    };
+  const selectedMemberId: ICastMemberIdentifier | undefined = useMemo(
+    () =>
+      selectedMemberRef
+        ? { castNumber: selectedMemberRef[0], memberNumber: selectedMemberRef[1] }
+        : undefined,
+    [selectedMemberRef]
+  );
 
   const dispatch = useAppDispatch();
   const setSelectedMemberId = (memberId: ICastMemberIdentifier) => {

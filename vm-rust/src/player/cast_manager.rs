@@ -6,7 +6,7 @@ use std::{
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
-use log::{debug, log, warn};
+use log::{debug, warn};
 use url::Url;
 
 use crate::js_api::ascii_safe;
@@ -215,7 +215,7 @@ impl CastManager {
     ) {
         for cast in self.casts.iter_mut() {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
-                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode)));
+                debug!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode);
                 match cast.preload_mode {
                     0 | 1 => {
                         // Preload: When Needed / After frame one
@@ -246,7 +246,15 @@ impl CastManager {
     }
 
     pub fn get_cast_mut(&mut self, number: u32) -> &mut CastLib {
-        return self.casts.get_mut(number as usize - 1).unwrap();
+        let n_casts = self.casts.len();
+        match self.casts.get_mut(number as usize - 1) {
+            Some(cast) => cast,
+            None => panic!(
+                "Cast index out of bounds: {} (# casts={})",
+                number,
+                n_casts
+            ),
+        }
     }
 
     pub fn casts_len(&self) -> usize {
@@ -304,7 +312,7 @@ impl CastManager {
         self.palette_cache.borrow().as_ref().unwrap().clone()
     }
 
-    pub fn find_member_ref_by_name(&self, name: &String) -> Option<CastMemberRef> {
+    pub fn find_member_ref_by_name(&self, name: &str) -> Option<CastMemberRef> {
         for cast in &self.casts {
             if let Some(member) = cast.find_member_by_name(name) {
                 return Some(CastMemberRef {
@@ -351,7 +359,7 @@ impl CastManager {
                 "Cast number or name invalid: {}",
                 cast_name_or_num
                     .map(|x| x.type_str())
-                    .unwrap_or("None".to_string())
+                    .unwrap_or("None")
             );
             None
         };
@@ -390,6 +398,7 @@ impl CastManager {
             (Datum::Float(num), None) => self
                 .find_member_ref_by_number(*num as u32)
                 .map(|member_ref| Ok(Some(member_ref))),
+            (Datum::CastMember(member_ref), _) => Some(Ok(Some(member_ref.clone()))),
             // Some expressions (e.g. "the number of castMembers") may produce
             // a list or other type. Try to coerce to int for member lookup.
             _ => {
@@ -744,11 +753,11 @@ impl CastManager {
                         // Also map by member number (STXT formatting runs reference fonts by member number)
                         font_manager.font_by_id.entry(member_number as u16).or_insert(font_ref);
 
-                        console::log_1(&format!(
+                        log::debug!(
                             "Loaded PFR font '{}': ref={}, id={}, member={}, char_size={}x{}, first_char={}",
                             font_name, font_ref, font_id, member_number, char_width, char_height,
                             font_data.first_char_num.unwrap_or(32)
-                        ).into());
+                        );
 
                         loaded_count += 1;
                     } else {
@@ -833,11 +842,11 @@ impl CastManager {
                             }
                             font_manager.font_by_id.entry(member_number as u16).or_insert(font_ref);
 
-                            console::log_1(&format!(
+                            log::debug!(
                                 "Loaded scaled font '{}': ref={}, member={}, char_size={}x{}",
                                 font_name, font_ref, member_number,
                                 font_data_clone.char_width, font_data_clone.char_height
-                            ).into());
+                            );
 
                             loaded_count += 1;
                         } else {
@@ -853,20 +862,20 @@ impl CastManager {
         }
 
         if loaded_count > 0 {
-            console::log_1(&format!(
+            log::debug!(
                 "Font loading complete: {} loaded, {} skipped, {} cache entries, {} id mappings",
                 loaded_count, skipped_count,
                 font_manager.font_cache.len(),
                 font_manager.font_by_id.len()
-            ).into());
+            );
 
             // Log all cached font keys to browser console
             let keys: Vec<&String> = font_manager.font_cache.keys().collect();
-            console::log_1(&format!("Font cache keys: {:?}", keys).into());
+            debug!("Font cache keys: {:?}", keys);
 
             // Log font_by_id mappings
             let id_mappings: Vec<(&u16, &crate::player::font::FontRef)> = font_manager.font_by_id.iter().collect();
-            console::log_1(&format!("Font by_id mappings: {:?}", id_mappings).into());
+            debug!("Font by_id mappings: {:?}", id_mappings);
         }
     }
 }

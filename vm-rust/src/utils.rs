@@ -16,37 +16,29 @@ pub fn set_panic_hook() {
 
 pub fn log_i(value: &str) {
     #[cfg(target_arch = "wasm32")]
-    {
-        web_sys::console::log_1(&safe_js_string(value));
-    }
+    web_sys::console::log_1(&safe_js_string(value));
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        println!("{value}");
-    }
+    log::debug!("{}", value);
 }
 
 #[macro_export]
 macro_rules! console_warn {
-  ($($arg:tt)*) => (
-    {
-      #[cfg(target_arch = "wasm32")]
-      web_sys::console::warn_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()));
-      #[cfg(not(target_arch = "wasm32"))]
-      eprintln!("{}", format_args!($($arg)*));
-    }
-  )
+  ($($arg:tt)*) => {{
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()));
+    #[cfg(not(target_arch = "wasm32"))]
+    log::warn!("{}", format_args!($($arg)*));
+  }}
 }
 
 #[macro_export]
 macro_rules! console_error {
-  ($($arg:tt)*) => (
-    {
-      #[cfg(target_arch = "wasm32")]
-      web_sys::console::error_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()));
-      #[cfg(not(target_arch = "wasm32"))]
-      eprintln!("{}", format_args!($($arg)*));
-    }
-  )
+  ($($arg:tt)*) => {{
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::error_1(&crate::js_api::safe_js_string(&format_args!($($arg)*).to_string().as_str()));
+    #[cfg(not(target_arch = "wasm32"))]
+    log::error!("{}", format_args!($($arg)*));
+  }}
 }
 
 pub fn get_basename_no_extension(path: &str) -> String {

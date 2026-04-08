@@ -1,0 +1,8 @@
+[movie]
+path = "dcr_habbo_v1/loader.dcr"
+
+[test]
+suite = "habbo_v1"
+
+[external_params]
+swText = "localhost:37121"

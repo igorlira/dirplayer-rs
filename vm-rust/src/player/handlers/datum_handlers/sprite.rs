@@ -132,7 +132,7 @@ impl SpriteDatumHandlers {
     /// This returns true for:
     /// 1. Handlers found on the sprite's attached script instances
     /// 2. Any handler that isn't a built-in sync handler (to allow fallback to global handlers)
-    pub fn has_async_handler(datum: &DatumRef, handler_name: &String) -> Result<bool, ScriptError> {
+    pub fn has_async_handler(datum: &DatumRef, handler_name: &str) -> Result<bool, ScriptError> {
         // First check if it's a built-in sync handler (case-insensitive)
         let name_lower = handler_name.to_lowercase();
         let is_sync_handler = matches!(name_lower.as_str(),
@@ -155,7 +155,7 @@ impl SpriteDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         let name_lower = handler_name.to_lowercase();
@@ -716,7 +716,7 @@ impl SpriteDatumHandlers {
                 if args.len() >= 3 {
                     reserve_player_mut(|player| {
                         let flash_object_path = match player.get_datum(&args[0]) {
-                            Datum::FlashObjectRef(ref fo) => fo.path.clone(),
+                            Datum::FlashObjectRef(fo) => fo.path.clone(),
                             Datum::String(s) => s.clone(),
                             other => {
                                 let type_name = other.type_str();
@@ -774,7 +774,7 @@ impl SpriteDatumHandlers {
 
                         // Get Flash member's cast_lib/cast_member from the flash object ref or sprite
                         let (flash_cl, flash_cm) = match player.get_datum(&args[0]) {
-                            Datum::FlashObjectRef(ref fo) => (fo.cast_lib, fo.cast_member),
+                            Datum::FlashObjectRef(fo) => (fo.cast_lib, fo.cast_member),
                             _ => {
                                 // Fallback: get from sprite's member
                                 let sprite_num = player.get_datum(datum).to_sprite_ref().unwrap_or(0);
@@ -880,7 +880,7 @@ impl SpriteDatumHandlers {
 
     pub async fn call_async(
         datum: DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         // First, try the sprite's attached script instances

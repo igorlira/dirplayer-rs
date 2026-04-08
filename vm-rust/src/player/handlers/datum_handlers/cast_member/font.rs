@@ -12,7 +12,7 @@ use crate::{
         bitmap::palette_map::PaletteMap,
         cast_lib::CastMemberRef,
         font::{
-            bitmap_font_copy_char, bitmap_font_copy_char_scaled, get_text_index_at_pos, measure_text, BitmapFont, DrawTextParams,
+            bitmap_font_copy_char_scaled, get_text_index_at_pos, measure_text, BitmapFont, DrawTextParams,
         },
         handlers::datum_handlers::{
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
@@ -24,7 +24,6 @@ use crate::{
 use crate::player::cast_member::CastMemberType;
 use crate::player::ColorRef;
 use std::borrow::Borrow;
-use std::convert::TryInto;
 use log::debug;
 use wasm_bindgen::JsCast;
 

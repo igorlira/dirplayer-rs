@@ -1,5 +1,5 @@
 use std::{
-    borrow::{Borrow, BorrowMut},
+    borrow::Borrow,
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
@@ -10,7 +10,6 @@ use chrono::Local;
 use itertools::Itertools;
 use log::{debug, warn};
 use wasm_bindgen::{prelude::*, Clamped};
-use web_sys::console;
 
 use crate::{js_api::safe_js_string, player::reserve_player_mut};
 use crate::{
@@ -20,22 +19,19 @@ use crate::{
         bitmap::{
             bitmap::{self, get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef},
             drawing::{should_matte_sprite, CopyPixelsParams},
-            manager::BitmapManager,
             mask::BitmapMask,
             palette_map::PaletteMap,
         },
         cast_lib::CastMemberRef,
         cast_member::CastMemberType,
         geometry::IntRect,
-        movie::Movie,
         reserve_player_ref,
         score::{
-            get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, Score, ScoreRef,
+            get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, ScoreRef,
         },
         sprite::{ColorRef, CursorRef, Sprite},
         DirPlayer, PLAYER_OPT,
     },
-    utils::log_i,
 };
 
 use crate::player::cast_manager::CastManager;

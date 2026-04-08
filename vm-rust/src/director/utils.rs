@@ -18,7 +18,7 @@ pub fn fourcc_to_string(fourcc: u32) -> String {
         ((fourcc >> 8) & 0xFF) as u8,
         ((fourcc) & 0xFF) as u8,
     ];
-    return String::from_utf8(chars).unwrap();
+    return String::from_utf8(chars).unwrap_or_else(|_| format!("0x{:08X}", fourcc));
 }
 
 pub fn human_version(ver: u16) -> u16 {

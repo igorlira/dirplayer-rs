@@ -136,6 +136,7 @@ impl VirtualScriptRegistry {
             }),
             color: ColorRef::Rgb(0, 0, 0),
             bg_color: ColorRef::Rgb(255, 255, 255),
+            reg_point: (0, 0),
         };
 
         // Insert directly (bypass insert_member which requires lctx for scripts)

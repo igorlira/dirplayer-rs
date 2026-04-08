@@ -1,6 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
 use std::convert::TryInto;
-use web_sys::console;
 
 use log::{debug};
 

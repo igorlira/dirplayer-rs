@@ -1,10 +1,10 @@
-use log::{debug, warn};
+use log::{debug, error, warn};
 
 use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        cast_lib::INVALID_CAST_MEMBER_REF,
+        cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF},
         datum_formatting::format_datum, ScriptInstanceRef, Score,
         reserve_player_mut, reserve_player_ref, reserve_player_mut_async,
         player_call_script_handler,
@@ -12,8 +12,7 @@ use crate::{
         handlers::datum_handlers::script_instance::ScriptInstanceUtils,
         DatumRef, ScriptError, ScriptErrorCode, get_score_sprite_mut, MovieFrameTarget,
         events::{
-            player_invoke_event_to_instances, player_invoke_static_event,
-            player_invoke_global_event, player_wait_available, player_unwrap_result,
+            player_invoke_event_to_instances, player_invoke_static_event, player_wait_available,
             dispatch_event_to_all_behaviors, player_dispatch_event_beginsprite,
             dispatch_system_event_to_timeouts, player_invoke_targeted_event
         },
@@ -115,6 +114,19 @@ impl MovieHandlers {
     }
 
     pub async fn go(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.is_empty() {
+            // "go" with no args is gotoLoop: go to nearest marker at or before current frame,
+            // or frame 1 if no markers exist
+            reserve_player_mut(|player| {
+                let current = player.movie.current_frame as i32;
+                let label_frame = player.movie.score.frame_labels.iter()
+                    .rev()
+                    .find(|fl| fl.frame_num <= current)
+                    .map(|fl| fl.frame_num as u32);
+                player.next_frame = Some(label_frame.unwrap_or(1));
+            });
+            return Ok(DatumRef::Void);
+        }
         // If a second argument is provided, it's a movie path: go frame X of movie "path"
         let go_to_movie = if args.len() >= 2 {
             reserve_player_mut(|player| {
@@ -735,10 +747,8 @@ impl MovieHandlers {
         });
 
         if already_updating || has_player_frame_changed {
-            web_sys::console::log_1(
-                &format!("🔄 execute_frame_update SKIPPED (already_updating={}, frame_changed={}, frame={})",
-                    already_updating, has_player_frame_changed, current_frame).into()
-            );
+            debug!("🔄 execute_frame_update SKIPPED (already_updating={}, frame_changed={}, frame={})", 
+                already_updating, has_player_frame_changed, current_frame);
             return Ok(());  // Exit early if already updating
         }
 
@@ -788,9 +798,7 @@ impl MovieHandlers {
                         });
                         return Err(err);
                     }
-                    web_sys::console::log_1(
-                        &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
-                    );
+                    error!("⚠ stepFrame[{}] error: {}", idx, err.message);
                     reserve_player_mut(|player| {
                         player.on_script_error(&err);
                         player.is_in_frame_update = false;

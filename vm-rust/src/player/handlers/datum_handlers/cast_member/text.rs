@@ -8,7 +8,7 @@ use crate::{
     },
     player::{
         bitmap::{
-            bitmap::{Bitmap, BuiltInPalette, PaletteRef, get_system_default_palette},
+            bitmap::{Bitmap, PaletteRef, get_system_default_palette},
             drawing::CopyPixelsParams,
         },
         cast_lib::CastMemberRef,
@@ -545,15 +545,6 @@ impl TextMemberHandlers {
                     // Older/runtime-created text members may not carry D6+ TextInfo.
                     // Director still treats centerRegPoint as a boolean property; default false.
                     Ok(datum_bool(false))
-                }
-            }
-            "regpoint" => {
-                if let Some(ref info) = text_data.info {
-                    let x_ref = player.alloc_datum(Datum::Int(info.reg_x));
-                    let y_ref = player.alloc_datum(Datum::Int(info.reg_y));
-                    Ok(Datum::List(DatumType::Point, VecDeque::from(vec![x_ref, y_ref]), false))
-                } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
             "image" => {
@@ -1767,28 +1758,6 @@ impl TextMemberHandlers {
                     }
                     if let Some(ref mut info) = text_member.info {
                         info.center_reg_point = value?;
-                    }
-                    Ok(())
-                },
-            ),
-            "regpoint" => borrow_member_mut(
-                member_ref,
-                |player| {
-                    let list = value.to_list()?;
-                    if list.len() >= 2 {
-                        let x = player.get_datum(&list[0]).int_value()?;
-                        let y = player.get_datum(&list[1]).int_value()?;
-                        Ok((x, y))
-                    } else {
-                        Err(ScriptError::new("regPoint requires a point with 2 elements".to_string()))
-                    }
-                },
-                |cast_member, value| {
-                    let text_member = cast_member.member_type.as_text_mut().unwrap();
-                    if let Some(ref mut info) = text_member.info {
-                        let (x, y) = value?;
-                        info.reg_x = x;
-                        info.reg_y = y;
                     }
                     Ok(())
                 },

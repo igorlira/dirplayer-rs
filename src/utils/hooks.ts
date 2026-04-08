@@ -7,5 +7,6 @@ export function useMountEffect(effect: () => void) {
       effect();
       isMounted.current = true;
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }

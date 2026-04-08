@@ -15,19 +15,15 @@ impl ThumChunk {
 
         reader.endian = original_endian;
 
-        let dump = format!(
+        log::debug!(
             "Thum raw_data ({} bytes): {:?}",
             raw_data.len(),
             raw_data
                 .iter()
-                .map(|b| format!("{:02X}", b))
-                .collect::<Vec<String>>()
-                .join(" ")
+                    .map(|b| format!("{:02X}", b))
+                    .collect::<Vec<String>>()
+                    .join(" ")
         );
-        #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&dump.as_str().into());
-        #[cfg(not(target_arch = "wasm32"))]
-        println!("{}", dump);
 
         Ok(ThumChunk { raw_data })
     }

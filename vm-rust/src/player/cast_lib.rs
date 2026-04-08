@@ -7,11 +7,11 @@ use crate::{
     director::{
         cast::CastDef, enums::{ScriptType, BitmapInfo},
         file::{read_director_file_bytes, DirectorFile},
-        lingo::{datum::Datum, datum::DatumType, script::ScriptContext},
+        lingo::{datum::Datum, script::ScriptContext},
     },
-    js_api::{self, JsApi},
+    js_api::JsApi,
     utils::{get_base_url, get_basename_no_extension, log_i},
-    player::{cast_member::ScriptMember, ci_string::CiString, ColorRef},
+    player::{cast_member::ScriptMember, ci_string::CiString},
 };
 
 use super::{
@@ -150,7 +150,7 @@ impl CastLib {
         self.members.get_mut(&number)
     }
 
-    pub fn find_member_by_name(&self, name: &String) -> Option<&CastMember> {
+    pub fn find_member_by_name(&self, name: &str) -> Option<&CastMember> {
         // Director returns the lowest-numbered member when duplicates exist in the same cast.
         // HashMap iteration order is non-deterministic, so we must track the best match.
         let mut best: Option<&CastMember> = None;
@@ -185,12 +185,12 @@ impl CastLib {
 
     pub fn set_prop(
         &mut self,
-        prop: &String,
+        prop: &str,
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
         // TODO
-        match prop.as_str() {
+        match prop {
             "preloadMode" => {
                 self.preload_mode = value.int_value()? as u16;
             }
@@ -210,8 +210,8 @@ impl CastLib {
         Ok(())
     }
 
-    pub fn get_prop(&self, prop: &String) -> Result<Datum, ScriptError> {
-        match prop.as_str() {
+    pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
+        match prop {
             "preloadMode" => Ok(Datum::Int(self.preload_mode as i32)),
             "fileName" => {
                 // Only return the fileName if the cast is actually loaded.
@@ -495,7 +495,7 @@ impl CastMemberRef {
 
 pub async fn player_cast_lib_set_prop(
     cast_lib: u32,
-    prop_name: &String,
+    prop_name: &str,
     value: Datum,
 ) -> Result<(), ScriptError> {
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };

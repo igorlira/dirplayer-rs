@@ -52,10 +52,6 @@ impl BitmapMemberHandlers {
                     PaletteRef::Default => Ok(Datum::PaletteRef(PaletteRef::Default)),
                 }
             },
-            "regPoint" => Ok(Datum::Point([
-                player.alloc_datum(Datum::Int(reg_x)),
-                player.alloc_datum(Datum::Int(reg_y)),
-            ])),
             "rect" => {
                 let width = bitmap.map(|x| x.width as i32).unwrap_or(0);
                 let height = bitmap.map(|x| x.height as i32).unwrap_or(0);
@@ -154,25 +150,6 @@ impl BitmapMemberHandlers {
                     Ok(())
                 })
             }
-            "regPoint" => borrow_member_mut(
-                member_ref,
-                |_| {},
-                |cast_member, _| {
-                    let arr = match value {
-                        Datum::Point(ref point_arr) => point_arr,
-                        _ => return Err(ScriptError::new("regPoint must be a Point".to_string())),
-                    };
-
-                    reserve_player_mut(|player| {
-                        let x = player.get_datum(&arr[0]).int_value()? as i16;
-                        let y = player.get_datum(&arr[1]).int_value()? as i16;
-
-                        cast_member.member_type.as_bitmap_mut().unwrap().reg_point = (x, y);
-
-                        Ok(())
-                    })
-                },
-            ),
             "paletteRef" => {
                 let bitmap_id = borrow_member_mut(
                     member_ref,

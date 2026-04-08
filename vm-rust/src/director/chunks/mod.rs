@@ -14,7 +14,6 @@ pub mod list;
 pub mod literal;
 pub mod media;
 pub mod palette;
-pub mod pfr_renderer;
 pub mod pfr1;
 pub mod score;
 pub mod score_order;

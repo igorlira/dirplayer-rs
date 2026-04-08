@@ -11,10 +11,10 @@ impl VoidDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: DatumRef,
-        handler_name: &String,
+        handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name {
             "addAt" | "add" | "append" | "duplicate" | "getAt" | "getOne" | "getLast" | "getFirst"
             | "distanceTo" | "getNormalized" | "normalize" | "crossProduct" | "dotProduct"
             | "cross" | "dot" | "angleBetween" | "getWorldTransform" | "addToWorld" | "removeFromWorld" | "isInWorld" => {
@@ -40,9 +40,9 @@ impl VoidDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         _: &DatumRef,
-        prop: &String,
+        prop: &str,
     ) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+        match prop {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol("void".to_owned()))),
             "count" | "length" => Ok(player.alloc_datum(Datum::Int(0))),
             "x" | "y" | "z" | "magnitude" => Ok(player.alloc_datum(Datum::Float(0.0))),
@@ -82,6 +82,10 @@ impl VoidDatumHandlers {
             // String slice operations on VOID should return empty string
             "char" | "word" | "line" | "item" => {
                 Ok(player.alloc_datum(Datum::String("".to_owned())))
+            }
+            "count" | "number" => {
+                // Director tolerates .count and .number on void, returning 0
+                Ok(player.alloc_datum(Datum::Int(0)))
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot get property '{}' on VOID - a variable or property that should contain an object is uninitialized",

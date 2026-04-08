@@ -641,7 +641,7 @@ pub fn multiply_datums(
             Datum::Point(result)
         }
         (Datum::List(_, list, _), Datum::Float(right)) => {
-            let mut new_list = vec![];
+            let mut ref_list = VecDeque::new();
             for item in list {
                 let item_datum = player.get_datum(item).clone();
                 let result_datum = match &item_datum {
@@ -654,11 +654,7 @@ pub fn multiply_datums(
                         )))
                     }
                 };
-                new_list.push(result_datum);
-            }
-            let mut ref_list = VecDeque::new();
-            for item in new_list {
-                ref_list.push_back(player.alloc_datum(item));
+                ref_list.push_back(player.alloc_datum(result_datum));
             }
             Datum::List(DatumType::List, ref_list, false)
         }
@@ -868,10 +864,23 @@ pub fn divide_datums(
     let result = match (&left, &right) {
         (Datum::Void, _) => Datum::Int(0),
         (Datum::Int(_), Datum::Void) | (Datum::Float(_), Datum::Void) => Datum::Int(0), // div by VOID → 0
-        (Datum::Int(left), Datum::Int(right)) => if *right == 0 { Datum::Int(0) } else { Datum::Int(left / right) },
-        (Datum::Int(left), Datum::Float(right)) => Datum::Float(if *right == 0.0 { 0.0 } else { (*left as f64) / right }),
-        (Datum::Float(left), Datum::Int(right)) => Datum::Float(if *right == 0 { 0.0 } else { left / (*right as f64) }),
-        (Datum::Float(left), Datum::Float(right)) => Datum::Float(if *right == 0.0 { 0.0 } else { left / right }),
+        (Datum::Int(left), Datum::Int(right)) => {
+            // Lingo coerces divisor 0 to 1 (ScummVM: LC::divData)
+            let d = if *right == 0 { 1 } else { *right };
+            Datum::Int(left / d)
+        }
+        (Datum::Int(left), Datum::Float(right)) => {
+            let d = if *right == 0.0 { 1.0 } else { *right };
+            Datum::Float((*left as f64) / d)
+        }
+        (Datum::Float(left), Datum::Int(right)) => {
+            let d = if *right == 0 { 1.0 } else { *right as f64 };
+            Datum::Float(left / d)
+        }
+        (Datum::Float(left), Datum::Float(right)) => {
+            let d = if *right == 0.0 { 1.0 } else { *right };
+            Datum::Float(left / d)
+        }
         // Vector / scalar
         (Datum::Vector(v), Datum::Int(s)) => { let s = *s as f64; if s == 0.0 { Datum::Vector([0.0, 0.0, 0.0]) } else { Datum::Vector([v[0] / s, v[1] / s, v[2] / s]) } }
         (Datum::Vector(v), Datum::Float(s)) => if *s == 0.0 { Datum::Vector([0.0, 0.0, 0.0]) } else { Datum::Vector([v[0] / s, v[1] / s, v[2] / s]) },
@@ -1015,6 +1024,20 @@ pub fn divide_datums(
             Datum::List(list_type.clone(), result_items, *sorted)
         }
         (Datum::Void, _) => Datum::Int(0),
+        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
+            let mut result = VecDeque::new();
+            for item in list {
+                let a_val = player.get_datum(item).clone();
+                let b_val = right.clone();
+                let quot = divide_datums(
+                    player.alloc_datum(a_val),
+                    player.alloc_datum(b_val),
+                    player,
+                )?;
+                result.push_back(player.alloc_datum(quot));
+            }
+            Datum::List(DatumType::List, result, false)
+        }
         _ => {
             return Err(ScriptError::new(format!(
                 "Div operator only works with ints and floats (Provided: {} and {})",

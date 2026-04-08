@@ -1,10 +1,11 @@
 import { useCallback, useState } from 'react';
 import styles from './styles.module.css';
-import { load_movie_file, play, set_base_path, set_external_params, set_movie_path_override } from 'vm-rust';
+import { load_movie_file, set_base_path, set_external_params, set_movie_path_override } from 'vm-rust';
 import { useMountEffect } from '../../utils/hooks';
 import { isDebugSession } from '../../utils/debug';
 import { getBasePath, getFullPathFromOrigin } from '../../utils/path';
 import { isElectron, openFileDialog } from '../../utils/electron';
+import { APP_TITLE } from '../../constants';
 
 type ExternalParam = { key: string; value: string };
 
@@ -59,6 +60,7 @@ export default function LoadMovie() {
   const defaultMovieUrl = process.env.REACT_APP_MOVIE_URL ? getFullPathFromOrigin(process.env.REACT_APP_MOVIE_URL) : '';
   const [movieUrl, setMovieUrl] = useState<string>(defaultMovieUrl || '');
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [hasError, setHasError] = useState(false);
   const [autoPlay, setAutoPlay] = useState<boolean>(process.env.REACT_APP_MOVIE_AUTO_PLAY === 'true');
   const [externalParams, setExternalParams] = useState<ExternalParam[]>([]);
   const [fakeMoviePath, setFakeMoviePath] = useState<string>('');
@@ -82,9 +84,11 @@ export default function LoadMovie() {
   const loadMovieFile = useCallback(async (fullPath: string, params?: ExternalParam[], fakePath?: string) => {
     try {
       setIsLoading(true);
+      setHasError(false);
       set_base_path(getBasePath(fullPath));
       set_external_params(paramsArrayToRecord(params ?? externalParams));
       set_movie_path_override(fakePath ?? fakeMoviePath ?? '');
+      document.title = `${fullPath.split('/').pop() || fullPath} - ${APP_TITLE}`;
       await load_movie_file(fullPath, autoPlay);
     } catch (e) {
       console.error('Failed to load movie', e);
@@ -94,6 +98,7 @@ export default function LoadMovie() {
   }, [autoPlay, externalParams, fakeMoviePath]);
 
   const onLoadClick = useCallback(async () => {
+    if (!movieUrl.trim()) { setHasError(true); return; }
     const updated = saveRecentMovie(movieUrl, externalParams, fakeMoviePath);
     setRecentMovies(updated);
     await loadMovieFile(movieUrl);
@@ -162,10 +167,10 @@ export default function LoadMovie() {
               id="url"
               name="url"
               type="text"
-              className={styles.input}
+              className={`${styles.input} ${hasError ? styles.inputError : ''}`}
               placeholder={isInElectron ? '/path/to/movie.dcr' : 'https://example.com/movie.dcr'}
               value={movieUrl}
-              onChange={e => setMovieUrl(e.currentTarget.value)}
+              onChange={e => { setMovieUrl(e.currentTarget.value); setHasError(false); }}
               disabled={isLoading}
             />
             {isInElectron && (

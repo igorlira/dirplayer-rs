@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>dirplayer browser tests</title>
+  <style>
+    body { font-family: monospace; margin: 16px; background: #1a1a1a; color: #eee; }
+    #stage_canvas_container { margin: 16px 0; background: #000; display: inline-block; }
+    #stage_canvas_container canvas { display: block; }
+    #output { white-space: pre-wrap; padding: 8px; background: #222; border-radius: 4px; }
+  </style>
+  <script>
+    window.__dirplayerTestMode = true;
+    window._audioContext = null;
+    window.getAudioContext = function() {
+      if (!window._audioContext) window._audioContext = new AudioContext();
+      return window._audioContext;
+    };
+    window.__scriptErrors = [];
+    window.__onScriptError = function(msg) {
+      window.__scriptErrors.push(msg);
+    };
+    window.__saveSnapshot = function(suite, name, base64png, maxDiffRatio) {
+      if (window.__playwrightSaveSnapshot) {
+        window.__playwrightSaveSnapshot(suite, name, base64png, maxDiffRatio || 0);
+      }
+    };
+    window.__testResults = null;
+    window.__testEnv = $TEST_ENV_JSON;
+  </script>
+  <script type="importmap">
+  { "imports": { "dirplayer-js-api": "./dirplayer-js-api.js" } }
+  </script>
+</head>
+<body>
+  <div id="stage_canvas_container"></div>
+  <pre id="output"></pre>
+  <script type="module">
+    import init, * as wasm from './$WASM_JS_FILE';
+    const el = document.getElementById('output');
+    function log(msg) { el.textContent += msg + '\n'; console.log(msg); }
+
+    const results = { tests: [], passed: 0, failed: 0, done: false };
+
+    try {
+      await init();
+      // Wire up timeout triggering now that wasm exports are available
+      window.__wasm_trigger_timeout = wasm.trigger_timeout;
+      log('Module loaded. Running tests...');
+
+      const testFns = Object.keys(wasm)
+        .filter(k => k.startsWith('test_') && typeof wasm[k] === 'function');
+
+      for (const name of testFns) {
+        try {
+          await wasm[name]();
+          results.tests.push({ name, status: 'pass' });
+          results.passed++;
+          log('✓ ' + name);
+        } catch (e) {
+          // Check for a Rust panic message (set by our panic hook)
+          const panicMsg = window.__testPanic;
+          const error = panicMsg || e.message || String(e);
+          window.__testPanic = undefined;
+          results.tests.push({ name, status: 'fail', error });
+          results.failed++;
+          log('✗ ' + name + ': ' + error);
+        }
+      }
+    } catch (e) {
+      results.tests.push({ name: '__init', status: 'fail', error: e.message });
+      results.failed++;
+      log('ERROR: ' + e.message + '\n' + e.stack);
+    }
+
+    results.done = true;
+    window.__testResults = results;
+    log('');
+    log(results.failed === 0
+      ? results.passed + ' passed'
+      : results.failed + ' failed, ' + results.passed + ' passed');
+  </script>
+</body>
+</html>

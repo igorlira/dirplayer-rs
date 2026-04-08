@@ -76,7 +76,7 @@ function ChunkTreeNode({
   onSelect: (chunkId: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const children = childrenMap[chunkId] || [];
+  const children = useMemo(() => childrenMap[chunkId] || [], [childrenMap, chunkId]);
   const hasChildren = children.length > 0;
 
   // When filtering, auto-expand nodes that have matching descendants
@@ -122,18 +122,16 @@ function ChunkTreeNode({
           </span>
         )}
         <span className={styles.chunkSize}>{formatSize(chunk.len)}</span>
-        <a
+        <button
           className={styles.chunkSave}
-          href="#"
           onClick={(e) => {
-            e.preventDefault();
             e.stopPropagation();
             onSave(chunkId, chunk.fourcc);
           }}
           title="Save chunk content to file"
         >
           (Save)
-        </a>
+        </button>
       </div>
       {isExpanded &&
         visibleChildren.map((childId) => {

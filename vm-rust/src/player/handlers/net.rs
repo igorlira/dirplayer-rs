@@ -43,45 +43,48 @@ impl NetHandlers {
 
     pub fn get_stream_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let (state, error, url, is_ok) = {
-                // Support: no args (last task), int task ID, or URL string
-                let task_id = if args.is_empty() {
-                    player.net_manager.get_last_task_id()
-                        .ok_or_else(|| ScriptError::new("No network tasks exist".to_string()))?
-                } else {
-                    let arg = player.get_datum(&args[0]);
-                    match arg {
-                        Datum::Int(id) => *id as u32,
-                        Datum::String(url) => {
-                            player.net_manager.find_task_by_url(url)
-                                .ok_or_else(|| ScriptError::new(format!("Network task not found for URL: {}", url)))?
-                        },
-                        _ => return Err(ScriptError::new(
-                            "getStreamStatus requires an integer task ID or URL string".to_string()
-                        ))
-                    }
-                };
-
-                let task = player.net_manager.get_task(task_id)
-                    .ok_or_else(|| ScriptError::new(format!("Network task {} not found", task_id)))?;
-                let task_state = player.net_manager.get_task_state(Some(task_id))
-                    .ok_or_else(|| ScriptError::new(format!("Network task state {} not found", task_id)))?;
-                let (state, error) =
-                    if task_state.is_done() && task_state.result.as_ref().unwrap().is_ok() {
-                        ("Complete", "OK")
-                    } else if task_state.is_done() && task_state.result.as_ref().unwrap().is_err() {
-                        ("Complete", "Task failed")
-                    } else {
-                        ("InProgress", "")
-                    };
-                let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
-                (
-                    state.to_owned(),
-                    error.to_owned(),
-                    task.url.to_owned(),
-                    is_ok,
-                )
+            // Support: no args (last task), int task ID, or URL string
+            let task_id = if args.is_empty() {
+                player.net_manager.get_last_task_id()
+                    .ok_or_else(|| ScriptError::new("No network tasks exist".to_string()))?
+            } else {
+                let arg = player.get_datum(&args[0]);
+                match arg {
+                    Datum::Int(id) => *id as u32,
+                    Datum::String(url) => {
+                        player.net_manager.find_task_by_url(url)
+                            .ok_or_else(|| ScriptError::new(format!("Network task not found for URL: {}", url)))?
+                    },
+                    _ => return Err(ScriptError::new(
+                        "getStreamStatus requires an integer task ID or URL string".to_string()
+                    ))
+                }
             };
+
+            let task = player.net_manager.get_task(task_id)
+                .ok_or_else(|| ScriptError::new(format!("Network task {} not found", task_id)))?;
+            let url = task.url.to_owned();
+
+            let task_state = player.net_manager.get_task_state(Some(task_id))
+                .ok_or_else(|| ScriptError::new(format!("Network task state {} not found", task_id)))?;
+
+            let (state, error, bytes_so_far, bytes_total) = match &task_state.result {
+                Some(Ok(bytes)) => {
+                    let len = bytes.len() as i32;
+                    ("Complete", "OK", len, len)
+                }
+                Some(Err(_code)) => {
+                    ("Error", "Error", 0i32, 0i32)
+                }
+                None => {
+                    if task_state.bytes_loaded > 0 {
+                        ("InProgress", "", task_state.bytes_loaded as i32, task_state.bytes_total as i32)
+                    } else {
+                        ("Connecting", "", 0i32, 0i32)
+                    }
+                }
+            };
+
             let result_map = Datum::PropList(
                 VecDeque::from(vec![
                     (
@@ -90,19 +93,19 @@ impl NetHandlers {
                     ),
                     (
                         player.alloc_datum(Datum::String("state".to_owned())),
-                        player.alloc_datum(Datum::String(state)),
+                        player.alloc_datum(Datum::String(state.to_owned())),
                     ),
                     (
                         player.alloc_datum(Datum::String("bytesSoFar".to_owned())),
-                        player.alloc_datum(Datum::Int(if is_ok { 100 } else { 0 })),
+                        player.alloc_datum(Datum::Int(bytes_so_far)),
                     ),
                     (
                         player.alloc_datum(Datum::String("bytesTotal".to_owned())),
-                        player.alloc_datum(Datum::Int(100)),
+                        player.alloc_datum(Datum::Int(bytes_total)),
                     ),
                     (
                         player.alloc_datum(Datum::String("error".to_owned())),
-                        player.alloc_datum(Datum::String(error)),
+                        player.alloc_datum(Datum::String(error.to_owned())),
                     ),
                 ]),
                 false,

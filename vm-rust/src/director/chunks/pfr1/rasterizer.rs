@@ -57,7 +57,7 @@ fn rasterize_glyph_canvas2d(
     // correctly creates holes in characters like 'o', 'e', 'q', etc.
     // Canvas2D's default fill() already uses non-zero winding, but we specify explicitly.
     {
-        use wasm_bindgen::JsCast;
+        
         let fill_rule = wasm_bindgen::JsValue::from_str("nonzero");
         let _ = js_sys::Reflect::apply(
             &js_sys::Function::from(

@@ -8,7 +8,6 @@ use crate::director::guid::*;
 use crate::director::rifx::RIFXReaderContext;
 use crate::director::utils::*;
 use crate::io::reader::DirectorExt;
-use crate::utils::log_i;
 use binary_reader::BinaryReader;
 use itertools::Itertools;
 use log::debug;
@@ -319,6 +318,13 @@ fn parse_font_table(
         }
     }
 
+    debug!(
+        "[Fmap] {} entries (from {} chunks): {:?}",
+        merged_table.len(),
+        chunk_ids.len(),
+        merged_table.iter().map(|(id, name)| format!("{}='{}'", id, name)).collect::<Vec<_>>()
+    );
+
     merged_table
 }
 
@@ -352,11 +358,12 @@ fn read_casts(
                     )
                 };
                 if cast.is_none() && cast_entry.file_path.is_empty() {
-                    #[cfg(target_arch = "wasm32")]
-                    web_sys::console::warn_1(&format!(
+                    // Cast has no CAS* chunk AND no file_path - this is unusual
+                    // It should either be internal (has CAS*) or external (has file_path)
+                    log::warn!(
                         "Cast '{}' (id={}) has no CAS* chunk and no file_path - data may be missing",
                         &cast_entry.name, &cast_entry.id
-                    ).into());
+                    );
                 }
                 if let Some(cast) = cast {
                     // TODO cast.populate(castEntry.name, castEntry.id, castEntry.minMember);

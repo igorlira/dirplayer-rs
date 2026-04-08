@@ -6,13 +6,10 @@ use crate::{
         lingo::{constants::get_opcode_name, opcode::OpCode},
     },
     player::{
-        bytecode::{
+        HandlerExecutionResult, PLAYER_OPT, ScriptError, bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
-        },
-        scope::ScopeRef,
-        script::Script,
-        HandlerExecutionResult, ScriptError, PLAYER_OPT,
+        }, reserve_player_mut, scope::ScopeRef, script::Script, trace_output
     },
 };
 
@@ -163,24 +160,7 @@ pub fn dump_execution_history_on_error(error_message: &str) {
     }
 }
 
-fn trace_output(message: &str, trace_log_file: &str) {
-    use crate::js_api::JsApi;
-    use crate::player::xtra::fileio::FILEIO_XTRA_MANAGER_OPT;
-
-    if trace_log_file.is_empty() {
-        JsApi::dispatch_debug_message(message);
-    } else {
-        // Append to file via FileIO virtual filesystem
-        let manager = unsafe { FILEIO_XTRA_MANAGER_OPT.as_mut() };
-        if let Some(mgr) = manager {
-            let entry = mgr.virtual_fs.entry(trace_log_file.to_string()).or_insert_with(Vec::new);
-            entry.extend_from_slice(message.as_bytes());
-            entry.push(b'\n');
-        }
-        // Emit file-append event for Electron/local file writing
-        crate::player::dispatch_file_write_event(trace_log_file, message);
-    }
-}
+// trace_output is imported from crate::player
 
 #[derive(Clone)]
 pub struct BytecodeHandlerContext {
@@ -216,7 +196,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::PushArgListNoRet => StackBytecodeHandler::push_arglist_no_ret(ctx),
             OpCode::PushSymb => StackBytecodeHandler::push_symb(ctx),
             OpCode::Swap => StackBytecodeHandler::swap(ctx),
-            OpCode::PushVarRef => StackBytecodeHandler::push_symb(ctx),
+            OpCode::PushVarRef => StackBytecodeHandler::push_var_ref(ctx),
             OpCode::GetProp => GetSetBytecodeHandler::get_prop(ctx),
             OpCode::GetObjProp => GetSetBytecodeHandler::get_obj_prop(ctx),
             OpCode::GetMovieProp => GetSetBytecodeHandler::get_movie_prop(ctx),
@@ -265,6 +245,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::PushFloat32 => StackBytecodeHandler::push_f32(ctx),
             OpCode::Mul => ArithmeticsBytecodeHandler::mul(ctx),
             OpCode::PushChunkVarRef => StackBytecodeHandler::push_chunk_var_ref(ctx),
+            OpCode::PushVarRef => StackBytecodeHandler::push_var_ref(ctx),
             OpCode::DeleteChunk => StringBytecodeHandler::delete_chunk(ctx),
             OpCode::GetTopLevelProp => GetSetBytecodeHandler::get_top_level_prop(ctx),
             OpCode::PutChunk => StringBytecodeHandler::put_chunk(ctx),
@@ -404,11 +385,10 @@ pub async fn player_execute_bytecode<'a>(
     if should_trace {
         let trace_file = {
             let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            let msg = format!("--> {}", bytecode_text);
+            trace_output(player, &msg);
             player.movie.trace_log_file.clone()
         };
-        
-        let msg = format!("--> {}", bytecode_text);
-        trace_output(&msg, &trace_file);
     }
 
     // Execute the bytecode
@@ -422,8 +402,7 @@ pub async fn player_execute_bytecode<'a>(
     if should_trace && result.is_ok() {
         match opcode {
             OpCode::SetLocal | OpCode::SetGlobal | OpCode::SetParam => {
-                let (trace_file, var_name, value) = {
-                    let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+                reserve_player_mut(|player| {
                     let scope = player.scopes.get(ctx.scope_ref).unwrap();
                     let handler = unsafe { &*ctx.handler_def_ptr };
                     let script = unsafe { &*ctx.script_ptr };
@@ -478,11 +457,13 @@ pub async fn player_execute_bytecode<'a>(
                     };
                     
                     let trace_file = player.movie.trace_log_file.clone();
+                    
+
+                    let msg = format!("== {} = {}", var_name, value_str);
+                    trace_output(player, &msg);
+
                     (trace_file, var_name, value_str)
-                };
-                
-                let msg = format!("== {} = {}", var_name, value);
-                trace_output(&msg, &trace_file);
+                });
             }
             _ => {}
         }

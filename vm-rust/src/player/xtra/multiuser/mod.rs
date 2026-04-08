@@ -14,7 +14,7 @@ macro_rules! multiuser_log {
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        self, DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref
+        DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref
     },
 };
 
@@ -210,17 +210,20 @@ impl MultiuserXtraManager {
                     };
                     // multiuser_log!("Multiuser: WebSocket message received: {:?}", message_str);
 
-                    let mut multiusr_manager =
-                        unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
-                    let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
-                    instance.dispatch_message(MultiuserMessage {
-                        error_code: 0,
-                        recipients: vec!["*".to_string()],
-                        sender_id: "System".to_string(),
-                        subject: "String".to_string(),
-                        content: Datum::String(message_str),
-                        time_stamp: 0, // TODO timestamp
-                    });
+                    let multiusr_manager =
+                        unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut() };
+                    if let Some(manager) = multiusr_manager {
+                        if let Some(instance) = manager.instances.get_mut(&instance_id) {
+                            instance.dispatch_message(MultiuserMessage {
+                                error_code: 0,
+                                recipients: vec!["*".to_string()],
+                                sender_id: "System".to_string(),
+                                subject: "String".to_string(),
+                                content: Datum::String(message_str),
+                                time_stamp: 0, // TODO timestamp
+                            });
+                        }
+                    }
                 });
 
                 let onerror_callback = Closure::<dyn FnMut(_)>::new(move |_e: Event| {
@@ -263,9 +266,10 @@ impl MultiuserXtraManager {
 
                 let onopen_callback = Closure::<dyn FnMut(_)>::new(move |_e: Event| {
                     multiuser_log!("Multiuser: WebSocket connected to {}", ws_url_clone);
-                    let mut multiusr_manager =
-                        unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
-                    let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
+                    let multiusr_manager =
+                        unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut() };
+                    let Some(manager) = multiusr_manager else { return; };
+                    let Some(instance) = manager.instances.get_mut(&instance_id) else { return; };
                     instance.dispatch_message(MultiuserMessage {
                         error_code: 0,
                         recipients: vec!["*".to_string()],

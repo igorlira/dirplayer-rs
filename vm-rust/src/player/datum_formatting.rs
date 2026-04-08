@@ -1,5 +1,5 @@
 use crate::{
-    director::lingo::datum::{Datum, DatumType},
+    director::lingo::datum::Datum,
     player::{allocator::ScriptInstanceAllocatorTrait, sprite::ColorRef, bitmap::bitmap::PaletteRef},
 };
 

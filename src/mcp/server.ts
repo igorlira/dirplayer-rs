@@ -29,12 +29,6 @@ interface McpResponse {
   };
 }
 
-interface McpNotification {
-  jsonrpc: '2.0';
-  method: string;
-  params?: Record<string, unknown>;
-}
-
 // MCP Server implementation
 export class McpServer {
   private wasm: WasmModule | null = null;
@@ -44,8 +38,6 @@ export class McpServer {
     name: 'dirplayer-vm',
     version: '1.0.0',
   };
-
-  constructor() {}
 
   setWasm(wasm: WasmModule) {
     this.wasm = wasm;

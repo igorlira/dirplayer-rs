@@ -2,6 +2,9 @@
 name = "vm-rust"
 version = "0.1.0"
 authors = ["Igor Lira <lira@hey.com>"]
+description = "A web-compatible Shockwave Player emulator written in Rust"
+repository = "https://github.com/igorlira/dirplayer-rs"
+license = "GPL-3.0-only"
 edition = "2024"
 
 [lib]
@@ -31,7 +34,6 @@ futures = "0.3.30"
 pest = "2.7.8"
 pest_derive = "2.7.8"
 chrono = "0.4.35"
-nohash-hasher = "0.2.0"
 rgb565 = "0.1.3"
 bitvec = "1.0.1"
 fxhash = "0.2.1"
@@ -43,6 +45,10 @@ log = "0.4.22"
 percent-encoding = "2"
 xml = "1.0"
 image = "0.25.8"
+rand = { version = "0.9", features = ["small_rng"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+base64 = "0.22"
+toml = "0.8"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
@@ -73,6 +79,8 @@ features = [
   'RequestInit',
   'RequestMode',
   'Response',
+  'ReadableStream',
+  'ReadableStreamDefaultReader',
   'console',
   'CssStyleDeclaration',
   'BinaryType',

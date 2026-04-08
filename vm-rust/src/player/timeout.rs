@@ -14,6 +14,8 @@ pub struct Timeout {
     pub handler: String,
     pub target_ref: DatumRef,
     pub is_scheduled: bool,
+    /// Wall-clock timestamp (ms) when this timeout should next fire.
+    pub next_fire_ms: f64,
 }
 
 impl TimeoutManager {
@@ -24,6 +26,11 @@ impl TimeoutManager {
     }
 
     pub fn add_timeout(&mut self, timeout: Timeout) {
+        // Cancel the old timeout if one exists with the same name,
+        // so it stops firing in fire_pending_timeouts.
+        if let Some(old) = self.timeouts.get_mut(&timeout.name) {
+            old.is_scheduled = false;
+        }
         self.timeouts.insert(timeout.name.to_owned(), timeout);
     }
 
@@ -66,5 +73,6 @@ impl Timeout {
         let timeout_name = self.name.to_owned();
         JsApi::dispatch_schedule_timeout(&timeout_name, self.period);
         self.is_scheduled = true;
+        self.next_fire_ms = crate::player::testing_shared::now_ms() + self.period as f64;
     }
 }

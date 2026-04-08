@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use nohash_hasher::IntMap;
 use rgb565::Rgb565;
 
 use crate::{
@@ -12,8 +11,7 @@ use crate::{
         font::{bitmap_font_copy_char, BitmapFont},
         geometry::IntRect,
         sprite::{ColorRef, is_skew_flip},
-        bitmap::bitmap::{get_system_default_palette, PaletteRef},
-        bitmap::palette::SYSTEM_WIN_PALETTE, Sprite, Score,
+        bitmap::bitmap::{get_system_default_palette, PaletteRef}, Sprite, Score,
         reserve_player_mut,
     },
 };
@@ -77,7 +75,7 @@ fn blend_color_alpha(dst: (u8, u8, u8), src: (u8, u8, u8), alpha: f32) -> (u8, u
 }
 
 pub fn should_matte_sprite(ink: u32) -> bool {
-    ink == 36 || ink == 33 || ink == 41 || ink == 8 || ink == 7 || ink == 32
+    ink == 2 || ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
 }
 
 /// Only ink 8 (Matte) uses pixel-level hit testing for mouse clicks.
@@ -215,6 +213,40 @@ fn blend_pixel(
         // If the source equals the bg_color, skip; otherwise blend normally.
         36 => {
             blend_color_alpha(dst, src, effective_alpha)
+        }
+        // 37 = Light (Lighten)
+        // Pick the higher of src and dst for each channel.
+        // bg_color pixels are transparent (skipped).
+        37 => {
+            if src == bg_color {
+                dst
+            } else {
+                let r = src.0.max(dst.0);
+                let g = src.1.max(dst.1);
+                let b = src.2.max(dst.2);
+                if blend_alpha >= 0.999 {
+                    (r, g, b)
+                } else {
+                    blend_color_alpha(dst, (r, g, b), blend_alpha)
+                }
+            }
+        }
+        // 39 = Dark (Darken)
+        // Pick the lower of src and dst for each channel.
+        // bg_color pixels are transparent (skipped).
+        39 => {
+            if src == bg_color {
+                dst
+            } else {
+                let r = src.0.min(dst.0);
+                let g = src.1.min(dst.1);
+                let b = src.2.min(dst.2);
+                if blend_alpha >= 0.999 {
+                    (r, g, b)
+                } else {
+                    blend_color_alpha(dst, (r, g, b), blend_alpha)
+                }
+            }
         }
         // 40 = Lighten
         40 => {
@@ -1983,9 +2015,24 @@ impl Bitmap {
                 }
 
                 // Indexed bitmap (1-8 bit) ink 36 color-key transparency
-                if ink == 36 && is_indexed {
-                    let ColorRef::PaletteIndex(i) = src.get_pixel_color_ref(sx, sy) else {
-                        unreachable!("indexed bitmap returned non-index color");
+                if (ink == 2 || ink == 36) && is_indexed {
+                    let color_ref = src.get_pixel_color_ref(sx, sy);
+                    let ColorRef::PaletteIndex(i) = color_ref else {
+                        let (sr, sg, sb) = match &color_ref {
+                            ColorRef::Rgb(r, g, b) => (*r, *g, *b),
+                            _ => continue,
+                        };
+                        if (sr, sg, sb) == bg_color_resolved {
+                            continue;
+                        }
+                        let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                        let blended = if alpha >= 0.999 {
+                            (sr, sg, sb)
+                        } else {
+                            blend_color_alpha(dst_color, (sr, sg, sb), alpha)
+                        };
+                        self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
+                        continue;
                     };
 
                     // For 1-bit bitmaps: use strict index-based transparency only
@@ -2061,7 +2108,7 @@ impl Bitmap {
 
                 // 16-bit bitmap ink 36 color-key transparency
                 // 16-bit is stored as 32-bit RGB, so compare RGB values directly
-                if ink == 36 && src.original_bit_depth == 16 {
+                if (ink == 2 || ink == 36) && src.original_bit_depth == 16 {
                     let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     // Skip pixel if it matches the sprite's bgColor (with tolerance
@@ -2088,7 +2135,7 @@ impl Bitmap {
 
                 // 32-bit bitmap ink 36 color-key transparency
                 // PFR font bitmaps are decoded to 32-bit RGBA; background is white, glyphs are black.
-                if ink == 36 && src.original_bit_depth == 32 {
+                if (ink == 2 || ink == 36) && src.original_bit_depth == 32 {
                     let (r, g, b, a) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     // Skip fully transparent pixels (use_alpha bitmaps like text member images)
@@ -2389,7 +2436,7 @@ impl Bitmap {
                 // ----------------------------------------------------------
                 // Director ink 36 (Blend) alpha semantics
                 // ----------------------------------------------------------
-                if ink == 36 && sa == 0 && src.original_bit_depth == 32 {
+                if (ink == 2 || ink == 36) && sa == 0 && src.original_bit_depth == 32 {
                     if (sr, sg, sb) == bg_color_resolved {
                         continue;
                     }
@@ -2402,7 +2449,7 @@ impl Bitmap {
                 // ----------------------------------------------------------
                 if !params.is_text_rendering
                     && sa == 255
-                    && ink == 36
+                    && (ink == 2 || ink == 36)
                     && (sr, sg, sb) == bg_color_resolved
                 {
                     continue; // This pixel is background → transparent

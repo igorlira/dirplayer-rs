@@ -236,6 +236,7 @@ impl ArithmeticsBytecodeHandler {
                     }
                     Datum::List(list_type, negated_items, sorted)
                 }
+                Datum::Void => Datum::Int(0),
                 _ => {
                     return Err(ScriptError::new(format!(
                         "Cannot inv non-numeric value: {}",

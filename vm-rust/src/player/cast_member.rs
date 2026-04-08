@@ -32,6 +32,7 @@ pub struct CastMember {
     pub member_type: CastMemberType,
     pub color: ColorRef,
     pub bg_color: ColorRef,
+    pub reg_point: (i32, i32),
 }
 
 #[derive(Clone)]
@@ -160,6 +161,7 @@ impl CastMember {
             member_type,
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point: (0, 0),
         }
     }
 }
@@ -1708,6 +1710,13 @@ impl CastMemberType {
         };
     }
 
+    pub fn as_sound_mut(&mut self) -> Option<&mut SoundMember> {
+        return match self {
+            Self::Sound(data) => Some(data),
+            _ => None,
+        };
+    }
+
     pub fn as_font(&self) -> Option<&FontMember> {
         return match self {
             Self::Font(data) => Some(data),
@@ -2124,7 +2133,7 @@ impl CastMember {
             return name;
         }
 
-        if let Some(ref pfr) = pfr {
+        if let Some(pfr) = pfr {
             if !pfr.font_name.is_empty() {
                 return pfr.font_name.clone();
             }
@@ -2315,6 +2324,7 @@ impl CastMember {
             member_type: CastMemberType::Flash(FlashMember { data, reg_point, flash_info }),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point: (0, 0),
         }
     }
 
@@ -2490,6 +2500,7 @@ impl CastMember {
             member_type: CastMemberType::VectorShape(vector_member),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point: (0, 0),
         })
     }
 
@@ -2763,6 +2774,7 @@ impl CastMember {
                     member_type: CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data)),
                     color: ColorRef::PaletteIndex(255),
                     bg_color: ColorRef::PaletteIndex(0),
+                    reg_point: (0, 0),
                 });
             }
 
@@ -2835,9 +2847,10 @@ impl CastMember {
                     number,
                     name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                     comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
-                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info, parsed_scene.as_deref()); CastMemberType::Shockwave3d(Shockwave3dMember { info, w3d_data, source_scene, parsed_scene, runtime_state: rs, converted_from_text: false, text3d_state: None, text3d_source: None }) },
+                    member_type: { let rs = Shockwave3dRuntimeState::from_info(&info, parsed_scene.as_deref()); CastMemberType::Shockwave3d(Shockwave3dMember { info: info.clone(), w3d_data, source_scene, parsed_scene, runtime_state: rs, converted_from_text: false, text3d_state: None, text3d_source: None }) },
                     color: ColorRef::PaletteIndex(255),
                     bg_color: ColorRef::PaletteIndex(0),
+                    reg_point: info.reg_point,
                 });
             }
 
@@ -2865,6 +2878,7 @@ impl CastMember {
                 member_type: CastMemberType::Text(text_member),
                 color: ColorRef::PaletteIndex(255),
                 bg_color: ColorRef::PaletteIndex(0),
+                reg_point: (0, 0),
             });
         }
         None
@@ -2942,6 +2956,7 @@ impl CastMember {
             }),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point: (0, 0),
         }
     }
 
@@ -3124,6 +3139,9 @@ impl CastMember {
             .map(|(r, g, b)| ColorRef::Rgb(r, g, b))
             .unwrap_or(ColorRef::PaletteIndex(0));
 
+        let reg_point = text_member.info.as_ref()
+            .map(|info| (info.reg_x, info.reg_y))
+            .unwrap_or((0, 0));
         CastMember {
             number,
             name: member_name,
@@ -3131,6 +3149,7 @@ impl CastMember {
             member_type: CastMemberType::Text(text_member),
             color: member_color,
             bg_color: member_bg_color,
+            reg_point,
         }
     }
 
@@ -3418,6 +3437,7 @@ impl CastMember {
                         }),
                         color: ColorRef::PaletteIndex(255),
                         bg_color: ColorRef::PaletteIndex(0),
+                        reg_point: (0, 0),
                     }
                 }
 
@@ -3454,6 +3474,7 @@ impl CastMember {
                             }),
                             color: ColorRef::PaletteIndex(255),
                             bg_color: ColorRef::PaletteIndex(0),
+                            reg_point: (0, 0),
                         }
                     }
                 }
@@ -3606,7 +3627,7 @@ impl CastMember {
                         source_scene: None,
                         parsed_scene,
                         runtime_state,
-                        info,
+                        info: info.clone(),
                         w3d_data,
                         converted_from_text: false,
                         text3d_state: None,
@@ -3614,6 +3635,7 @@ impl CastMember {
                     }),
                         color: ColorRef::PaletteIndex(255),
                         bg_color: ColorRef::PaletteIndex(0),
+                        reg_point: info.reg_point,
                     };
                 }
 
@@ -3638,6 +3660,7 @@ impl CastMember {
                         member_type: CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data)),
                         color: ColorRef::PaletteIndex(255),
                         bg_color: ColorRef::PaletteIndex(0),
+                        reg_point: (0, 0),
                     };
                 }
 
@@ -4179,6 +4202,10 @@ impl CastMember {
             member_type
         };
 
+        let reg_point = match &member_type {
+            CastMemberType::Bitmap(bm) => (bm.reg_point.0 as i32, bm.reg_point.1 as i32),
+            _ => (0, 0),
+        };
         CastMember {
             number,
             name: chunk
@@ -4190,6 +4217,7 @@ impl CastMember {
             member_type: member_type,
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
+            reg_point,
         }
     }
 }
