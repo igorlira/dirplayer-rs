@@ -264,7 +264,7 @@ impl SpriteDatumHandlers {
                     let value_ref = &args[1];
 
                     // Try built-in sprite property first
-                    match crate::player::score::sprite_set_prop_from_lingo(
+                    match crate::player::score::sprite_set_prop(
                         sprite_num as i16,
                         &prop_name,
                         value,
