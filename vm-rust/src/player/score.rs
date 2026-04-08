@@ -4089,108 +4089,15 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let bitmap_width = bitmap_member.info.width as i32;
             let bitmap_height = bitmap_member.info.height as i32;
 
-            // Determine the actual dimensions to use for the sprite rectangle.
-            // In some cases, we need to use the bitmap's original dimensions instead of
-            // the sprite's dimensions. This matches Director's behavior where sprites
-            // can either have explicitly set dimensions or inherit from their bitmap.
-            // Check if score dimensions represent a uniform scale of the bitmap.
-            // If scale_x and scale_y differ by more than 10%, the score dimensions
-            // are just a bounding box (not an intentional stretch) and we should
-            // use the bitmap's natural size instead.
-            let aspect_ratio_matches = if bitmap_width > 0 && bitmap_height > 0
-                && sprite.width > 0 && sprite.height > 0
-            {
-                let scale_x = sprite.width as f32 / bitmap_width as f32;
-                let scale_y = sprite.height as f32 / bitmap_height as f32;
-                let ratio = if scale_x > scale_y { scale_x / scale_y } else { scale_y / scale_x };
-                ratio <= 1.1
-            } else {
-                true // can't check, assume match
-            };
-
-            // Check if the sprite is intentionally stretched significantly larger
-            // than the bitmap in both dimensions. In that case, trust sprite dimensions
-            // regardless of aspect ratio differences.
-            // Also require that the scale factors aren't wildly uneven (ratio < 2.5),
-            // otherwise the sprite dims are likely a bounding box, not a real stretch.
-            let intentionally_stretched = sprite.width > 0 && sprite.height > 0
-                && bitmap_width > 0 && bitmap_height > 0
-                && sprite.width > bitmap_width * 3 / 2
-                && sprite.height > bitmap_height * 3 / 2
-                && {
-                    // Check max(scale_x/scale_y, scale_y/scale_x) < 2.5
-                    // Using integer math: 2*a < 5*b AND 2*b < 5*a
-                    let a = sprite.width as i64 * bitmap_height as i64;
-                    let b = sprite.height as i64 * bitmap_width as i64;
-                    2 * a < 5 * b && 2 * b < 5 * a
-                };
-
-            let is_debug_sprite = false;
-
-            let (sprite_width, sprite_height) = if sprite.has_size_tweened {
-                // Size tween is active — use the tweened dimensions directly,
-                // bypassing all bitmap-vs-sprite heuristics.
-                (sprite.width, sprite.height)
-            } else if sprite.bitmap_size_owned_by_sprite
-                && bitmap_width >= 10 && bitmap_height >= 10 {
-                if is_debug_sprite {
-                    debug!("Sprite {}: chose BITMAP_SIZE_OWNED_BY_SPRITE (sprite {}x{}, bitmap {}x{})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height);
-                }
-                // Sprite size is owned by bitmap, and bitmap is not tiny
-                (bitmap_width, bitmap_height)
-            } else if !aspect_ratio_matches
-                && bitmap_width >= 10 && bitmap_height >= 10 {
-                if is_debug_sprite {
-                    debug!("Sprite {}: chose ASPECT_RATIO_MISMATCH (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched);
-                }
-                if intentionally_stretched {
-                    (sprite.width, sprite.height)
-                } else {
-                    // Score dimensions have a different aspect ratio than the bitmap,
-                    // meaning they're a bounding box, not an intentional stretch.
-                    // Use bitmap's natural dimensions.
-                    (bitmap_width, bitmap_height)
-                }
-            } else if !sprite.has_size_changed
-                && (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
-                && bitmap_width >= 10 && bitmap_height >= 10 {
-                if is_debug_sprite {
-                    debug!("Sprite {}: chose NO_SIZE_CHANGE_BITMAP_LARGER (sprite {}x{}, bitmap {}x{}, has_size_changed={})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, sprite.has_size_changed);
-                }
-                // Sprite hasn't been explicitly resized and bitmap is larger (by sum).
-                (bitmap_width, bitmap_height)
-            } else if (sprite.width != bitmap_width || sprite.height != bitmap_height)
-                && (sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64)
-                && bitmap_width >= 10 && bitmap_height >= 10 {
-                if is_debug_sprite {
-                    debug!("Sprite {}: chose NON_PROPORTIONAL_SCALE (sprite {}x{}, bitmap {}x{})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height);
-                }
-                // Score dimensions differ from bitmap AND are not a clean proportional
-                // scale - they are an approximate bounding box. Use bitmap's natural size.
-                (bitmap_width, bitmap_height)
-            } else if sprite.has_size_changed && sprite.width != bitmap_width ||  sprite.has_size_changed && sprite.height != bitmap_height {
-                if is_debug_sprite {
-                    debug!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})", 
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched);
-                }
-                // Sprite dimensions differ from base — something (Lingo script,
-                // member change) has explicitly modified the size at runtime.
-                // Use the current dimensions directly.
+            // Always use sprite dimensions for rendering. The bitmap is stretched
+            // to fit (ScummVM: createWidget uses getBbox which returns _width/_height).
+            // The stretch flag only affects whether setCast resets dimensions on
+            // member change, not the rendering itself.
+            let (sprite_width, sprite_height) = if sprite.width > 0 && sprite.height > 0 {
                 (sprite.width, sprite.height)
             } else {
-                if is_debug_sprite {
-                    debug!("Sprite {}: chose DEFAULT (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned={})",
-                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height,
-                        aspect_ratio_matches, sprite.has_size_changed, sprite.bitmap_size_owned_by_sprite);
-                }
-                // Use sprite's explicit dimensions (default case)
-                (sprite.width, sprite.height)
+                (bitmap_width, bitmap_height)
             };
-
             // If centerRegPoint is enabled, set reg point to bitmap center.
             // Use bitmap coordinates here so the subsequent scaling step
             // correctly converts to sprite coordinates (sprite_width/2).
@@ -4200,7 +4107,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             }
 
             // Step 1: Calculate scaled registration offset
-            // The registration point needs to be scaled proportionally when sprite is stretched.
+            // The registration point is scaled proportionally to sprite dimensions.
             let scaled_reg_x = if bitmap_width > 0 {
                 ((reg_x as i32 * sprite_width) as f32 / bitmap_width as f32).round() as i32
             } else {
