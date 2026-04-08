@@ -2148,15 +2148,29 @@ impl WebGL2Renderer {
                 }
             }
             TextureSource::FilmLoop { initial_rect, width, height, .. } => {
-                // Cache filmloop textures — they are static score data that doesn't change per frame
+                // Cache filmloop textures per-frame: use the filmloop's current_frame as version
+                // so the cache hits when the frame hasn't changed, but re-renders on frame advance
+                let filmloop_frame = player.movie.cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .and_then(|cm| {
+                        if let CastMemberType::FilmLoop(fl) = &cm.member_type { Some(fl.current_frame) } else { None }
+                    })
+                    .unwrap_or(0);
+
                 let cache_key = TextureCacheKey {
                     member_ref: member_ref.clone(),
                     ink: ink as i32,
                     colorize: None,
                     sprite_bg_color: None,
                 };
-                if let Some(cached) = self.texture_cache.get(&cache_key) {
-                    cached.texture.clone()
+
+                if !self.texture_cache.needs_update(&cache_key, filmloop_frame) {
+                    if let Some(cached) = self.texture_cache.get(&cache_key) {
+                        cached.texture.clone()
+                    } else {
+                        // Shouldn't happen, but fall through to render
+                        return;
+                    }
                 } else {
                     // Render the film loop's score to an offscreen bitmap
                     let mut filmloop_bitmap = Bitmap::new(
@@ -2191,7 +2205,7 @@ impl WebGL2Renderer {
                     if self.context.upload_texture_rgba(&texture, width, height, &filmloop_bitmap.data).is_err() {
                         return;
                     }
-                    self.texture_cache.insert(cache_key, texture.clone(), width, height, 1);
+                    self.texture_cache.insert(cache_key, texture.clone(), width, height, filmloop_frame);
                     texture
                 }
             }
