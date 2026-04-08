@@ -1034,6 +1034,16 @@ impl WebGL2Renderer {
             )
         };
 
+        // Off-screen sprite culling: skip sprites entirely outside the viewport
+        {
+            let (stage_w, stage_h) = self.size;
+            if sprite_rect.right <= 0 || sprite_rect.bottom <= 0
+                || sprite_rect.left >= stage_w as i32 || sprite_rect.top >= stage_h as i32
+            {
+                return;
+            }
+        }
+
         // Determine what kind of texture we need based on member type
         enum TextureSource {
             Bitmap { image_ref: u32 },
@@ -2138,44 +2148,52 @@ impl WebGL2Renderer {
                 }
             }
             TextureSource::FilmLoop { initial_rect, width, height, .. } => {
-                // Render the film loop's score to an offscreen bitmap
-                let mut filmloop_bitmap = Bitmap::new(
-                    width as u16,
-                    height as u16,
-                    32,
-                    32,
-                    8, // alpha_depth = 8 for transparency support
-                    PaletteRef::BuiltIn(get_system_default_palette()),
-                );
-                // Enable alpha channel for filmloop transparency
-                filmloop_bitmap.use_alpha = true;
-                // Clear to fully transparent (RGBA 0,0,0,0) so only rendered sprites are visible
-                filmloop_bitmap.data.fill(0);
-
-                // Render the film loop's score to the offscreen bitmap
-                render_score_to_bitmap_with_offset(
-                    player,
-                    &ScoreRef::FilmLoop(member_ref.clone()),
-                    &mut filmloop_bitmap,
-                    None, // debug_sprite_num
-                    IntRect::from_size(0, 0, width as i32, height as i32),
-                    (initial_rect.left, initial_rect.top),
-                    Some(FilmLoopParentProps {
-                        ink: ink as u32,
-                        color: fg_color.clone(),
-                        bg_color: bg_color.clone(),
-                    }),
-                );
-
-                // Upload the filmloop bitmap as a texture
-                let texture = match self.context.create_texture() {
-                    Ok(t) => t,
-                    Err(_) => return,
+                // Cache filmloop textures — they are static score data that doesn't change per frame
+                let cache_key = TextureCacheKey {
+                    member_ref: member_ref.clone(),
+                    ink: ink as i32,
+                    colorize: None,
+                    sprite_bg_color: None,
                 };
-                if self.context.upload_texture_rgba(&texture, width, height, &filmloop_bitmap.data).is_err() {
-                    return;
+                if let Some(cached) = self.texture_cache.get(&cache_key) {
+                    cached.texture.clone()
+                } else {
+                    // Render the film loop's score to an offscreen bitmap
+                    let mut filmloop_bitmap = Bitmap::new(
+                        width as u16,
+                        height as u16,
+                        32,
+                        32,
+                        8, // alpha_depth = 8 for transparency support
+                        PaletteRef::BuiltIn(get_system_default_palette()),
+                    );
+                    filmloop_bitmap.use_alpha = true;
+                    filmloop_bitmap.data.fill(0);
+
+                    render_score_to_bitmap_with_offset(
+                        player,
+                        &ScoreRef::FilmLoop(member_ref.clone()),
+                        &mut filmloop_bitmap,
+                        None,
+                        IntRect::from_size(0, 0, width as i32, height as i32),
+                        (initial_rect.left, initial_rect.top),
+                        Some(FilmLoopParentProps {
+                            ink: ink as u32,
+                            color: fg_color.clone(),
+                            bg_color: bg_color.clone(),
+                        }),
+                    );
+
+                    let texture = match self.context.create_texture() {
+                        Ok(t) => t,
+                        Err(_) => return,
+                    };
+                    if self.context.upload_texture_rgba(&texture, width, height, &filmloop_bitmap.data).is_err() {
+                        return;
+                    }
+                    self.texture_cache.insert(cache_key, texture.clone(), width, height, 1);
+                    texture
                 }
-                texture
             }
             TextureSource::ButtonBitmap {
                 width, height, button_type, hilite, text,
