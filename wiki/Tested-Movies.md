@@ -21,11 +21,11 @@ Nintendo: Donkey Kong 64 Lore Quiz | Playable |  | https://archive.org/details/n
 Nintendo: Donkey Konk | Playable |  | https://archive.org/details/nintendo-shockwave-webgames
 Nintendo: Kremling Krunch | Playable |  | https://archive.org/details/nintendo-shockwave-webgames
 Nintendo: Camp Hyrule Fish Tails | Playable |  | https://archive.org/details/fish_20250602_202506
+Infestation | Playable | Has some wrong placed sprites | https://web.archive.org/web/20040409220201id_/http://dave-cole.com/infest/showinfest.htm
 Hobie in de Dierentuin | Partial | | 
 Mobiles Disco | Partial | | https://web.archive.org/web/20010510022454/http://www.sulake.com/mobiles/dcr_int_0519b_e/20000201_mobiles_disco.dcr
 Lumisota | Partial | | https://web.archive.org/web/20011207232510/http://www.sulake.com/lumisota/dcr18a/20000406_lumisota.dcr
 Hot Wheels: Road Rally Rumble | Partial | Script Error findPosNear| https://web.archive.org/web/19980524001420fw_/http://www.hotwheels.com/speedcity/raceway/sw/rw_londn.dcr
-Infestation | Playable | Has some wrong placed sprites | https://web.archive.org/web/20040409220201id_/http://dave-cole.com/infest/showinfest.htm
 X Files | Broken | Movie does not load | https://www.minijuegos.es/j/3202/
 100’s Marios | Broken | Script Error | https://qubedstudios.rustedlogic.net/mario2100.html
 Splat | Broken | Script Error | https://web.archive.org/web/20080705061338id_/http://jellygames2.com/game.php?gname=splat
