@@ -105,7 +105,7 @@ use crate::{
         geometry::IntRect,
         profiling::get_profiler_report,
         scope::Scope,
-        events::{player_dispatch_event_beginsprite,
+        events::{player_dispatch_event_beginsprite, player_invoke_event_to_instances,
         dispatch_event_to_all_behaviors, player_invoke_frame_and_movie_scripts, dispatch_system_event_to_timeouts,
         player_invoke_targeted_event},
     },
@@ -262,6 +262,7 @@ pub struct DirPlayer {
     pub debug_datum_refs: Vec<DatumRef>,
     pub eval_scope_index: Option<u32>,
     pub delay_until: Option<chrono::DateTime<chrono::Local>>,
+    pub go_same_frame: bool,
     /// Pending gotoNetMovie operation: (task_id, frame_destination).
     /// Overwritten by subsequent gotoNetMovie/go-to-movie calls (cancels previous).
     pub pending_goto_net_movie: Option<(u32, MovieFrameTarget)>,
@@ -408,6 +409,7 @@ impl DirPlayer {
             debug_datum_refs: vec![],
             eval_scope_index: None,
             delay_until: None,
+            go_same_frame: false,
             pending_goto_net_movie: None,
             is_in_transition: false,
             script_instance_list_cache: FxHashMap::default(),
@@ -2911,8 +2913,22 @@ pub async fn run_single_frame() -> (bool, bool) {
         return (is_playing, is_script_paused);
     }
 
+    // Check if delay() is in effect
+    let is_delayed = reserve_player_mut(|player| {
+        if let Some(until) = player.delay_until {
+            if chrono::Local::now() < until {
+                true
+            } else {
+                player.delay_until = None;
+                false
+            }
+        } else {
+            false
+        }
+    });
+
     let skip_frame = reserve_player_ref(|player| player.command_handler_yielding || player.in_mouse_command);
-    if skip_frame {
+    if skip_frame || is_delayed {
         return (is_playing, is_script_paused);
     }
 
@@ -2929,6 +2945,13 @@ pub async fn run_single_frame() -> (bool, bool) {
 
     // Relay exitFrame to timeout targets
     dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
+
+    let mut stayed_on_same_frame = false;
+
+    // Clear stale go_same_frame from previous frame's processing
+    reserve_player_mut(|player| {
+        player.go_same_frame = false;
+    });
 
     if has_player_frame_changed {
         player_wait_available().await;
@@ -2955,8 +2978,12 @@ pub async fn run_single_frame() -> (bool, bool) {
             });
         }
 
+        // go() already performed end_all_sprites + advance_frame + begin_all_sprites,
+        // so we only clear the flag here.
         (is_playing, is_script_paused) = reserve_player_mut(|player| {
             player.has_player_frame_changed = false;
+            player.go_same_frame = false;
+            player.has_frame_changed_in_go = false;
             (player.is_playing, player.is_script_paused)
         });
     } else {
@@ -2966,9 +2993,24 @@ pub async fn run_single_frame() -> (bool, bool) {
 
         player_wait_available().await;
 
-        let has_frame_changed = reserve_player_ref(|player| player.has_frame_changed_in_go);
+        let (has_frame_changed, go_same_frame) = reserve_player_ref(|player|
+            (player.has_frame_changed_in_go, player.go_same_frame));
 
-        if !has_frame_changed {
+        if go_same_frame {
+            // go(the frame) — stay on current frame, no advancement
+            reserve_player_mut(|player| {
+                player.go_same_frame = false;
+            });
+            stayed_on_same_frame = true;
+        } else if has_frame_changed {
+            // go(differentFrame) — go() already did end/begin/advance
+            reserve_player_mut(|player| {
+                player.has_frame_changed_in_go = false;
+                player.has_player_frame_changed = false;
+            });
+            stayed_on_same_frame = true;
+        } else {
+            // No go() called — normal frame advancement
             let ended_sprite_nums = reserve_player_mut_async(|player| {
                 Box::pin(async move {
                     player.end_all_sprites().await
@@ -2991,10 +3033,6 @@ pub async fn run_single_frame() -> (bool, bool) {
                 player.has_player_frame_changed = false;
                 (player.is_playing, player.is_script_paused)
             });
-        } else {
-            reserve_player_mut(|player| {
-                player.has_frame_changed_in_go = false;
-            });
         }
 
         player_wait_available().await;
@@ -3003,8 +3041,10 @@ pub async fn run_single_frame() -> (bool, bool) {
     player_wait_available().await;
 
     reserve_player_mut(|player| {
-        player.movie.frame_script_instance = None;
-        player.begin_all_sprites();
+        if !stayed_on_same_frame {
+            player.movie.frame_script_instance = None;
+            player.begin_all_sprites();
+        }
 
         player.movie.score.apply_tween_modifiers(player.movie.current_frame);
     });
@@ -3109,10 +3149,10 @@ pub async fn run_single_frame() -> (bool, bool) {
 
     for behavior_ref in &remaining_behaviors {
         let receivers = vec![behavior_ref.clone()];
-        let _ = player_invoke_targeted_event(
+        let _ = player_invoke_event_to_instances(
             &"beginSprite".to_string(),
             &vec![],
-            Some(&receivers),
+            &receivers,
         ).await;
     }
 
@@ -3146,7 +3186,6 @@ pub async fn run_frame_loop() {
 
     let generation = unsafe { PLAYER_GENERATION };
     let mut is_playing = true;
-    let mut last_frame_time = chrono::Local::now();
     while is_playing {
         // Exit if the player was reset (e.g. between tests)
         if unsafe { PLAYER_GENERATION } != generation {
@@ -3170,12 +3209,11 @@ pub async fn run_frame_loop() {
             (is_playing, _) = reserve_player_ref(|player| {
                 (player.is_playing, player.is_script_paused)
             });
-            last_frame_time = chrono::Local::now();
             continue;
         }
 
         // Run one frame cycle (scripts + advance)
-        let (playing, is_script_paused) = run_single_frame().await;
+        let (playing, _) = run_single_frame().await;
         is_playing = playing;
 
         if !is_playing {
@@ -3201,8 +3239,6 @@ pub async fn run_frame_loop() {
         .await
         .unwrap_err();
         player_wait_available().await;
-
-        last_frame_time = chrono::Local::now();
     }
 }
 

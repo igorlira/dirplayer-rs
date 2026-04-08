@@ -429,9 +429,17 @@ impl MovieHandlers {
             }
         }
         
-        reserve_player_mut(|player| {
-            player.has_frame_changed_in_go = true;
-        });
+        if frame_advanced {
+            reserve_player_mut(|player| {
+                player.has_frame_changed_in_go = true;
+            });
+        } else {
+            // go(the frame) — stay on current frame
+            // ONLY set go_same_frame, NOT has_frame_changed_in_go
+            reserve_player_mut(|player| {
+                player.go_same_frame = true;
+            });
+        }
 
         Ok(DatumRef::Void)
     }
