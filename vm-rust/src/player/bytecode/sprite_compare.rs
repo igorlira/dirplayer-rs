@@ -171,12 +171,11 @@ impl SpriteCompareBytecodeHandler {
 
                 // Extract rect coordinates - rect is stored as Datum::Rect([left, top, right, bottom])
                 match rect_datum {
-                    Datum::Rect(coords) => {
-                        // Rect is an array of 4 DatumRefs: [left, top, right, bottom]
-                        let left = player.get_datum(&coords[0]).int_value()?;
-                        let top = player.get_datum(&coords[1]).int_value()?;
-                        let right = player.get_datum(&coords[2]).int_value()?;
-                        let bottom = player.get_datum(&coords[3]).int_value()?;
+                    Datum::Rect(vals, _flags) => {
+                        let left = vals[0] as i32;
+                        let top = vals[1] as i32;
+                        let right = vals[2] as i32;
+                        let bottom = vals[3] as i32;
                         debug!("  sprite {} rect: [{}, {}, {}, {}]", sprite_num, left, top, right, bottom);
                         Ok((left, top, right, bottom))
                     }
@@ -351,11 +350,11 @@ impl SpriteCompareBytecodeHandler {
                 let rect_datum = sprite_get_prop(player, sprite_num, "rect")?;
 
                 match rect_datum {
-                    Datum::Rect(coords) => {
-                        let left = player.get_datum(&coords[0]).int_value()?;
-                        let top = player.get_datum(&coords[1]).int_value()?;
-                        let right = player.get_datum(&coords[2]).int_value()?;
-                        let bottom = player.get_datum(&coords[3]).int_value()?;
+                    Datum::Rect(vals, _flags) => {
+                        let left = vals[0] as i32;
+                        let top = vals[1] as i32;
+                        let right = vals[2] as i32;
+                        let bottom = vals[3] as i32;
                         Ok((left, top, right, bottom))
                     }
                     Datum::List(_, coords, _) => {

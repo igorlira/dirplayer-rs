@@ -194,24 +194,24 @@ impl BuiltInHandlerManager {
             );
 
             match obj {
-                Datum::Point(arr) => {
+                Datum::Point(vals, flags) => {
                     if index >= 2 {
                         return Err(ScriptError::new(format!(
                             "point index {} out of bounds",
                             position
                         )));
                     }
-                    Ok(arr[index].clone())
+                    Ok(player.alloc_datum(Datum::inline_component_to_datum(vals[index], Datum::inline_is_float(*flags, index))))
                 }
 
-                Datum::Rect(arr) => {
+                Datum::Rect(vals, flags) => {
                     if index >= 4 {
                         return Err(ScriptError::new(format!(
                             "rect index {} out of bounds",
                             position
                         )));
                     }
-                    Ok(arr[index].clone())
+                    Ok(player.alloc_datum(Datum::inline_component_to_datum(vals[index], Datum::inline_is_float(*flags, index))))
                 }
                 Datum::List(datum_type, list, ..) => {
                     let index = if *datum_type == crate::director::lingo::datum::DatumType::XmlChildNodes {
@@ -305,7 +305,7 @@ impl BuiltInHandlerManager {
             // Now take the mutable borrow
             let list_datum = player.get_datum_mut(list_ref);
             match list_datum {
-                Datum::Point(arr) => {
+                Datum::Point(vals, flags) => {
                     if index >= 2 {
                         return Err(ScriptError::new(format!(
                             "point index {} out of bounds",
@@ -313,20 +313,13 @@ impl BuiltInHandlerManager {
                         )));
                     }
 
-                    // Validate that it's an Int
-                    match new_value_datum {
-                        Datum::Int(_) => arr[index] = new_value,
-                        other => {
-                            return Err(ScriptError::new(format!(
-                                "Point component must be Int, got {}",
-                                other.type_str()
-                            )))
-                        }
-                    }
+                    let (component_val, is_float) = Datum::datum_to_inline_component(&new_value_datum)?;
+                    vals[index] = component_val;
+                    Datum::inline_set_float(flags, index, is_float);
 
                     Ok(())
                 }
-                Datum::Rect(arr) => {
+                Datum::Rect(vals, flags) => {
                     if index >= 4 {
                         return Err(ScriptError::new(format!(
                             "rect index {} out of bounds",
@@ -334,15 +327,9 @@ impl BuiltInHandlerManager {
                         )));
                     }
 
-                    match new_value_datum {
-                        Datum::Int(_) => arr[index] = new_value,
-                        other => {
-                            return Err(ScriptError::new(format!(
-                                "Rect component must be Int, got {}",
-                                other.type_str()
-                            )))
-                        }
-                    }
+                    let (component_val, is_float) = Datum::datum_to_inline_component(&new_value_datum)?;
+                    vals[index] = component_val;
+                    Datum::inline_set_float(flags, index, is_float);
 
                     Ok(())
                 }
@@ -691,9 +678,7 @@ impl BuiltInHandlerManager {
             "point" => TypeHandlers::point(args),
             "clickloc" => {
                 reserve_player_mut(|player| {
-                    let x_ref = player.alloc_datum(Datum::Int(player.movie.click_loc.0));
-                    let y_ref = player.alloc_datum(Datum::Int(player.movie.click_loc.1));
-                    Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                    Ok(player.alloc_datum(Datum::Point([player.movie.click_loc.0 as f64, player.movie.click_loc.1 as f64], 0)))
                 })
             }
             "constrainh" => {
@@ -1050,73 +1035,11 @@ impl BuiltInHandlerManager {
                 reserve_player_mut(|player| match player.get_datum(item) {
                     Datum::List(..) => ListDatumHandlers::duplicate(item, args),
                     Datum::PropList(..) => PropListDatumHandlers::duplicate(item, args),
-                    Datum::Point(arr) => {
-                        let val0 = player.get_datum(&arr[0]).clone();
-                        let val1 = player.get_datum(&arr[1]).clone();
-                        
-                        let new_arr: [DatumRef; 2] = [
-                            player.alloc_datum(match val0 {
-                                Datum::Int(n) => Datum::Int(n),
-                                Datum::Float(f) => Datum::Float(f),
-                                other => return Err(ScriptError::new(format!(
-                                    "Point component must be numeric, got {}",
-                                    other.type_str()
-                                ))),
-                            }),
-                            player.alloc_datum(match val1 {
-                                Datum::Int(n) => Datum::Int(n),
-                                Datum::Float(f) => Datum::Float(f),
-                                other => return Err(ScriptError::new(format!(
-                                    "Point component must be numeric, got {}",
-                                    other.type_str()
-                                ))),
-                            })
-                        ];
-
-                        Ok(player.alloc_datum(Datum::Point(new_arr)))
+                    Datum::Point(vals, flags) => {
+                        Ok(player.alloc_datum(Datum::Point(*vals, *flags)))
                     }
-                    Datum::Rect(arr) => {
-                        let val0 = player.get_datum(&arr[0]).clone();
-                        let val1 = player.get_datum(&arr[1]).clone();
-                        let val2 = player.get_datum(&arr[2]).clone();
-                        let val3 = player.get_datum(&arr[3]).clone();
-                        
-                        let new_arr: [DatumRef; 4] = [
-                            player.alloc_datum(match val0 {
-                                Datum::Int(n) => Datum::Int(n),
-                                Datum::Float(f) => Datum::Float(f),
-                                other => return Err(ScriptError::new(format!(
-                                    "Rect component must be numeric, got {}",
-                                    other.type_str()
-                                ))),
-                            }),
-                            player.alloc_datum(match val1 {
-                                Datum::Int(n) => Datum::Int(n),
-                                Datum::Float(f) => Datum::Float(f),
-                                other => return Err(ScriptError::new(format!(
-                                    "Rect component must be numeric, got {}",
-                                    other.type_str()
-                                ))),
-                            }),
-                            player.alloc_datum(match val2 {
-                                Datum::Int(n) => Datum::Int(n),
-                                Datum::Float(f) => Datum::Float(f),
-                                other => return Err(ScriptError::new(format!(
-                                    "Rect component must be numeric, got {}",
-                                    other.type_str()
-                                ))),
-                            }),
-                            player.alloc_datum(match val3 {
-                                Datum::Int(n) => Datum::Int(n),
-                                Datum::Float(f) => Datum::Float(f),
-                                other => return Err(ScriptError::new(format!(
-                                    "Rect component must be numeric, got {}",
-                                    other.type_str()
-                                ))),
-                            }),
-                        ];
-
-                        Ok(player.alloc_datum(Datum::Rect(new_arr)))
+                    Datum::Rect(vals, flags) => {
+                        Ok(player.alloc_datum(Datum::Rect(*vals, *flags)))
                     }
                     Datum::String(s) => Ok(player.alloc_datum(Datum::String(s.clone()))),
                     Datum::Int(i) => Ok(player.alloc_datum(Datum::Int(*i))),
@@ -1268,9 +1191,7 @@ impl BuiltInHandlerManager {
                     let index = if char_pos > 0 { (char_pos - 1) as usize } else { 0 };
                     let (x, y) = crate::player::font::get_text_char_pos(&text, &params, index);
 
-                    let x_ref = player.alloc_datum(Datum::Int(x as i32));
-                    let y_ref = player.alloc_datum(Datum::Int(y as i32));
-                    Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                    Ok(player.alloc_datum(Datum::Point([x as f64, y as f64], 0)))
                 })
             }
             _ => {

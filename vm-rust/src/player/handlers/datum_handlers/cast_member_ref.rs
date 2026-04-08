@@ -181,9 +181,7 @@ impl CastMemberRefHandlers {
                         (char_width * (char_pos - 1) as i32, line_height)
                     };
 
-                    let x_ref = player.alloc_datum(Datum::Int(x));
-                    let y_ref = player.alloc_datum(Datum::Int(y));
-                    Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                    Ok(player.alloc_datum(Datum::Point([x as f64, y as f64], 0)))
                 })
             }
             "getProp" => {
@@ -457,10 +455,7 @@ impl CastMemberRefHandlers {
             "loaded" | "mediaReady" => Ok(Datum::Int(1)),
             "width" | "height" | "rect" | "duration" => Ok(Datum::Void),
             "image" => Ok(Datum::Void),
-            "regPoint" => Ok(Datum::Point([
-                player.alloc_datum(Datum::Int(0)),
-                player.alloc_datum(Datum::Int(0)),
-            ])),
+            "regPoint" => Ok(Datum::Point([0.0, 0.0], 0)),
             _ => Err(ScriptError::new(format!(
                 "Cannot get prop {} of invalid cast member ({}, {})",
                 prop, member_ref.cast_lib, member_ref.cast_member
@@ -479,10 +474,7 @@ impl CastMemberRefHandlers {
             let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
                 .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
             let rp = member.reg_point;
-            return Ok(Datum::Point([
-                player.alloc_datum(Datum::Int(rp.0)),
-                player.alloc_datum(Datum::Int(rp.1)),
-            ]));
+            return Ok(Datum::Point([rp.0 as f64, rp.1 as f64], 0));
         }
         match &member_type {
             CastMemberTypeId::Bitmap => {
@@ -546,14 +538,9 @@ impl CastMemberRefHandlers {
                     let info = &shape_member.shape_info;
                     match prop {
                         "rect" => {
-                            let width = info.width() as i32;
-                            let height = info.height() as i32;
-                            Ok(Datum::Rect([
-                                player.alloc_datum(Datum::Int(0)),
-                                player.alloc_datum(Datum::Int(0)),
-                                player.alloc_datum(Datum::Int(width)),
-                                player.alloc_datum(Datum::Int(height)),
-                            ]))
+                            let width = info.width() as f64;
+                            let height = info.height() as f64;
+                            Ok(Datum::Rect([0.0, 0.0, width, height], 0))
                         }
                         "width" => Ok(Datum::Int(info.width() as i32)),
                         "height" => Ok(Datum::Int(info.height() as i32)),
@@ -645,12 +632,7 @@ impl CastMemberRefHandlers {
                         let w = vs.width().ceil() as i32;
                         let h = vs.height().ceil() as i32;
                         drop(cast_member);
-                        Ok(Datum::Rect([
-                            player.alloc_datum(Datum::Int(0)),
-                            player.alloc_datum(Datum::Int(0)),
-                            player.alloc_datum(Datum::Int(w)),
-                            player.alloc_datum(Datum::Int(h)),
-                        ]))
+                        Ok(Datum::Rect([0.0, 0.0, w as f64, h as f64], 0))
                     } else if prop == "vertexList" {
                         let vert_data: Vec<(i32, i32, i32, i32, i32, i32)> = vs.vertices.iter()
                             .map(|v| (
@@ -662,19 +644,13 @@ impl CastMemberRefHandlers {
                         drop(cast_member);
                         let list: VecDeque<DatumRef> = vert_data.iter().map(|(vx, vy, h1x, h1y, h2x, h2y)| {
                             let vertex_key = player.alloc_datum(Datum::Symbol("vertex".to_string()));
-                            let vx_ref = player.alloc_datum(Datum::Int(*vx));
-                            let vy_ref = player.alloc_datum(Datum::Int(*vy));
-                            let vertex_val = player.alloc_datum(Datum::Point([vx_ref, vy_ref]));
+                            let vertex_val = player.alloc_datum(Datum::Point([*vx as f64, *vy as f64], 0));
 
                             let h1_key = player.alloc_datum(Datum::Symbol("handle1".to_string()));
-                            let h1x_ref = player.alloc_datum(Datum::Int(*h1x));
-                            let h1y_ref = player.alloc_datum(Datum::Int(*h1y));
-                            let h1_val = player.alloc_datum(Datum::Point([h1x_ref, h1y_ref]));
+                            let h1_val = player.alloc_datum(Datum::Point([*h1x as f64, *h1y as f64], 0));
 
                             let h2_key = player.alloc_datum(Datum::Symbol("handle2".to_string()));
-                            let h2x_ref = player.alloc_datum(Datum::Int(*h2x));
-                            let h2y_ref = player.alloc_datum(Datum::Int(*h2y));
-                            let h2_val = player.alloc_datum(Datum::Point([h2x_ref, h2y_ref]));
+                            let h2_val = player.alloc_datum(Datum::Point([*h2x as f64, *h2y as f64], 0));
 
                             let prop_list = Datum::PropList(VecDeque::from(vec![
                                 (vertex_key, vertex_val),
@@ -701,18 +677,10 @@ impl CastMemberRefHandlers {
                     match prop {
                         "width" => Ok(Datum::Int((r - l) as i32)),
                         "height" => Ok(Datum::Int((b - t) as i32)),
-                        "rect" => Ok(Datum::Rect([
-                            player.alloc_datum(Datum::Int(l as i32)),
-                            player.alloc_datum(Datum::Int(t as i32)),
-                            player.alloc_datum(Datum::Int(r as i32)),
-                            player.alloc_datum(Datum::Int(b as i32)),
-                        ])),
+                        "rect" => Ok(Datum::Rect([l as f64, t as f64, r as f64, b as f64], 0)),
                         "regPoint" => {
                             let rp = flash.reg_point;
-                            Ok(Datum::Point([
-                                player.alloc_datum(Datum::Int(rp.0 as i32)),
-                                player.alloc_datum(Datum::Int(rp.1 as i32)),
-                            ]))
+                            Ok(Datum::Point([rp.0 as f64, rp.1 as f64], 0))
                         }
                         _ => Ok(Datum::Void),
                     }
@@ -770,9 +738,9 @@ impl CastMemberRefHandlers {
 
         if prop.eq_ignore_ascii_case("regPoint") {
             return reserve_player_mut(|player| {
-                let point = value.to_point()?;
-                let x = player.get_datum(&point[0]).int_value()?;
-                let y = player.get_datum(&point[1]).int_value()?;
+                let (vals, _flags) = value.to_point_inline()?;
+                let x = vals[0] as i32;
+                let y = vals[1] as i32;
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
                 member.reg_point = (x, y);

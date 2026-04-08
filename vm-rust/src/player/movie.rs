@@ -229,11 +229,7 @@ impl Movie {
                 reserve_player_mut(|player| {
                     let w = player.movie.rect.right as i32;
                     let h = player.movie.rect.bottom as i32;
-                    let l = player.alloc_datum(Datum::Int(0));
-                    let t = player.alloc_datum(Datum::Int(0));
-                    let r = player.alloc_datum(Datum::Int(w));
-                    let b = player.alloc_datum(Datum::Int(h));
-                    let rect = player.alloc_datum(Datum::Rect([l, t, r, b]));
+                    let rect = player.alloc_datum(Datum::Rect([0.0, 0.0, w as f64, h as f64], 0));
                     Ok(Datum::List(
                         crate::director::lingo::datum::DatumType::List,
                         VecDeque::from(vec![rect]),

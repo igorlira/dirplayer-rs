@@ -8,20 +8,10 @@ use super::{
 pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, ScriptError> {
     match prop {
         "rect" | "drawRect" => Ok(
-            Datum::Rect([
-                player.alloc_datum(Datum::Int(0)),
-                player.alloc_datum(Datum::Int(0)),
-                player.alloc_datum(Datum::Int(player.movie.rect.width())),
-                player.alloc_datum(Datum::Int(player.movie.rect.height())),
-            ])),
+            Datum::Rect([0.0, 0.0, player.movie.rect.width() as f64, player.movie.rect.height() as f64], 0)),
         "sourceRect" => {
             // TODO where does this come from?
-            Ok(Datum::Rect([
-                player.alloc_datum(Datum::Int(0)),
-                player.alloc_datum(Datum::Int(0)),
-                player.alloc_datum(Datum::Int(player.movie.rect.width())),
-                player.alloc_datum(Datum::Int(player.movie.rect.height())),
-            ]))
+            Ok(Datum::Rect([0.0, 0.0, player.movie.rect.width() as f64, player.movie.rect.height() as f64], 0))
         }
         "bgColor" => Ok(Datum::ColorRef(player.bg_color.clone())),
         "image" => {

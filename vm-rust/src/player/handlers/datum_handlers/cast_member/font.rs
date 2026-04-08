@@ -369,9 +369,9 @@ impl FontMemberHandlers {
                 )))
             }
             "locToCharPos" => {
-                let point_ref = player.get_datum(&args[0]).to_point()?;
-                let x = player.get_datum(&point_ref[0]).int_value()?;
-                let y = player.get_datum(&point_ref[1]).int_value()?;
+                let (pt_vals, _flags) = player.get_datum(&args[0]).to_point_inline()?;
+                let x = pt_vals[0] as i32;
+                let y = pt_vals[1] as i32;
 
                 let params = DrawTextParams {
                     font: &player.font_manager.get_system_font().unwrap(),
@@ -1504,12 +1504,7 @@ impl FontMemberHandlers {
                             measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
 
                         match prop {
-                            "rect" => Ok(Datum::Rect([
-                                player.alloc_datum(Datum::Int(0)),
-                                player.alloc_datum(Datum::Int(0)),
-                                player.alloc_datum(Datum::Int(width as i32)),
-                                player.alloc_datum(Datum::Int(height as i32)
-                            )])),
+                            "rect" => Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0)),
                             "height" => Ok(Datum::Int(height as i32)),
                             "image" => {
                                 // Create 32-bit bitmap for proper transparency

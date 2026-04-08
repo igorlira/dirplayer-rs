@@ -237,12 +237,7 @@ impl FieldMemberHandlers {
                 };
 
                 match prop {
-                    "rect" => Ok(Datum::Rect([
-                        player.alloc_datum(Datum::Int(0)),
-                        player.alloc_datum(Datum::Int(0)),
-                        player.alloc_datum(Datum::Int(width as i32)),
-                        player.alloc_datum(Datum::Int(height as i32))
-                    ])),
+                    "rect" => Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0)),
                     "height" => Ok(Datum::Int(height as i32)),
                     "picture" => {
                         let mut bitmap = Bitmap::new(
@@ -331,13 +326,13 @@ impl FieldMemberHandlers {
             ),
             "rect" => borrow_member_mut(
                 member_ref,
-                |player| -> Result<(i32, i32, i32, i32), ScriptError> {
-                    let rect = value.to_rect()?;
+                |_player| -> Result<(i32, i32, i32, i32), ScriptError> {
+                    let (vals, _flags) = value.to_rect_inline()?;
 
-                    let x1 = player.get_datum(&rect[0]).int_value()?;
-                    let y1 = player.get_datum(&rect[1]).int_value()?;
-                    let x2 = player.get_datum(&rect[2]).int_value()?;
-                    let y2 = player.get_datum(&rect[3]).int_value()?;
+                    let x1 = vals[0] as i32;
+                    let y1 = vals[1] as i32;
+                    let x2 = vals[2] as i32;
+                    let y2 = vals[3] as i32;
 
                     Ok((x1, y1, x2, y2))
                 },

@@ -825,10 +825,11 @@ impl MovieHandlers {
 
         player_wait_available().await;
 
-        // Render the frame between prepareFrame and enterFrame, matching
-        // Director's frame cycle where rendering occurs after scripts have
-        // updated sprite properties but before enterFrame fires.
-        crate::rendering::draw_frame_immediate();
+        // Skip mid-frame render for performance. Director renders once per
+        // frame after enterFrame. The post-enterFrame render below captures
+        // the final visual state. If a game needs mid-frame visibility,
+        // it can call updateStage() explicitly from prepareFrame.
+        // crate::rendering::draw_frame_immediate();
 
         reserve_player_mut(|player| {
             player.in_enter_frame = true;

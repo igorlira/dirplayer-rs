@@ -55,12 +55,7 @@ impl BitmapMemberHandlers {
             "rect" => {
                 let width = bitmap.map(|x| x.width as i32).unwrap_or(0);
                 let height = bitmap.map(|x| x.height as i32).unwrap_or(0);
-                Ok(Datum::Rect([
-                    player.alloc_datum(Datum::Int(0)),
-                    player.alloc_datum(Datum::Int(0)),
-                    player.alloc_datum(Datum::Int(width)),
-                    player.alloc_datum(Datum::Int(height))
-                ]))
+                Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0))
             }
             "depth" => Ok(Datum::Int(
                 bitmap

@@ -553,18 +553,11 @@ impl Shockwave3dMemberHandlers {
             "duration" => Ok(Datum::Int(info.duration as i32)),
 
             "regPoint" => {
-                let x = player.alloc_datum(Datum::Int(info.reg_point.0));
-                let y = player.alloc_datum(Datum::Int(info.reg_point.1));
-                Ok(Datum::Point([x, y]))
+                Ok(Datum::Point([info.reg_point.0 as f64, info.reg_point.1 as f64], 0))
             }
             "rect" => {
                 let r = info.default_rect;
-                Ok(Datum::Rect([
-                    player.alloc_datum(Datum::Int(r.0)),
-                    player.alloc_datum(Datum::Int(r.1)),
-                    player.alloc_datum(Datum::Int(r.2)),
-                    player.alloc_datum(Datum::Int(r.3)),
-                ]))
+                Ok(Datum::Rect([r.0 as f64, r.1 as f64, r.2 as f64, r.3 as f64], 0))
             }
             "width" => Ok(Datum::Int(info.default_rect.2 - info.default_rect.0)),
             "height" => Ok(Datum::Int(info.default_rect.3 - info.default_rect.1)),

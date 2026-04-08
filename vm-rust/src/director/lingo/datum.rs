@@ -199,8 +199,10 @@ pub enum Datum {
     ScriptInstanceRef(ScriptInstanceRef),
     CastMember(CastMemberRef),
     SpriteRef(i16),
-    Rect([DatumRef; 4]),
-    Point([DatumRef; 2]),
+    /// Inline rect: [left, top, right, bottom] with per-component int/float flags (bits 0-3).
+    Rect([f64; 4], u8),
+    /// Inline point: [x, y] with per-component int/float flags (bit 0 = x is float, bit 1 = y is float).
+    Point([f64; 2], u8),
     SoundChannel(u16),
     CursorRef(CursorRef),
     TimeoutRef(TimeoutRef),
@@ -309,8 +311,8 @@ impl Datum {
             Datum::ScriptInstanceRef(_) => DatumType::ScriptInstanceRef,
             Datum::CastMember(_) => DatumType::CastMemberRef,
             Datum::SpriteRef(_) => DatumType::SpriteRef,
-            Datum::Rect(_) => DatumType::Rect,
-            Datum::Point(_) => DatumType::Point,
+            Datum::Rect(..) => DatumType::Rect,
+            Datum::Point(..) => DatumType::Point,
             Datum::SoundChannel(_) => DatumType::SoundChannel,
             Datum::SoundRef(_) => DatumType::SoundRef,
             Datum::CursorRef(_) => DatumType::CursorRef,
@@ -353,7 +355,12 @@ impl Datum {
             Datum::Float(n) => Ok(n.to_string()),
             Datum::Symbol(s) => Ok(s.clone()),
             Datum::Vector(v) => Ok(format!("[{},{},{}]", v[0], v[1], v[2])),
-            Datum::Rect(r) => Ok(format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3])),
+            Datum::Rect(r, f) => {
+                let fmt = |i: usize| {
+                    if Datum::inline_is_float(*f, i) { format!("{:.4}", r[i]) } else { format!("{}", r[i] as i32) }
+                };
+                Ok(format!("({}, {}, {}, {})", fmt(0), fmt(1), fmt(2), fmt(3)))
+            },
             Datum::ColorRef(cr) => Ok(format!("{:?}", cr)),
             Datum::Void => Ok("VOID".to_string()),
             Datum::FlashObjectRef(fr) => Ok(fr.path.clone()),
@@ -374,7 +381,12 @@ impl Datum {
             Datum::Int(n) => Ok(Cow::Owned(n.to_string())),
             Datum::Symbol(s) => Ok(Cow::Borrowed(s)),
             Datum::Vector(v) => Ok(Cow::Owned(format!("[{},{},{}]", v[0], v[1], v[2]))),
-            Datum::Rect(r) => Ok(Cow::Owned(format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3]))),
+            Datum::Rect(r, f) => {
+                let fmt = |i: usize| {
+                    if Datum::inline_is_float(*f, i) { format!("{:.4}", r[i]) } else { format!("{}", r[i] as i32) }
+                };
+                Ok(Cow::Owned(format!("({}, {}, {}, {})", fmt(0), fmt(1), fmt(2), fmt(3))))
+            },
             Datum::ColorRef(cr) => Ok(Cow::Owned(format!("{:?}", cr))),
             Datum::Void => Ok(Cow::Borrowed("VOID")),
             _ => Err(ScriptError::new(format!(
@@ -586,21 +598,18 @@ impl Datum {
         }
     }
 
-    pub fn to_rect(&self) -> Result<[DatumRef; 4], ScriptError> {
+    pub fn to_rect_inline(&self) -> Result<([f64; 4], u8), ScriptError> {
         match self {
-            Datum::Rect(rect) => Ok(rect.clone()),
-            Datum::List(_, items, _) if items.len() == 4 => {
-                Ok([items[0].clone(), items[1].clone(), items[2].clone(), items[3].clone()])
-            }
+            Datum::Rect(vals, flags) => Ok((*vals, *flags)),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to rect".to_string(),
             )),
         }
     }
 
-    pub fn to_rect_mut(&mut self) -> Result<&mut [DatumRef; 4], ScriptError> {
+    pub fn to_rect_inline_mut(&mut self) -> Result<(&mut [f64; 4], &mut u8), ScriptError> {
         match self {
-            Datum::Rect(rect) => Ok(rect),
+            Datum::Rect(vals, flags) => Ok((vals, flags)),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to rect".to_string(),
             )),
@@ -634,18 +643,18 @@ impl Datum {
         }
     }
 
-    pub fn to_point(&self) -> Result<[DatumRef; 2], ScriptError> {
+    pub fn to_point_inline(&self) -> Result<([f64; 2], u8), ScriptError> {
         match self {
-            Datum::Point(point) => Ok(point.clone()),
+            Datum::Point(vals, flags) => Ok((*vals, *flags)),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to point".to_string(),
             )),
         }
     }
 
-    pub fn to_point_mut(&mut self) -> Result<&mut [DatumRef; 2], ScriptError> {
+    pub fn to_point_inline_mut(&mut self) -> Result<(&mut [f64; 2], &mut u8), ScriptError> {
         match self {
-            Datum::Point(point) => Ok(point),
+            Datum::Point(vals, flags) => Ok((vals, flags)),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to point".to_string(),
             )),
@@ -802,6 +811,62 @@ impl Datum {
             Datum::Int(value as i32)
         } else {
             Datum::Float(value as f64)
+        }
+    }
+
+    /// Read an inline point/rect component back as a Datum, respecting int/float flag.
+    pub fn inline_component_to_datum(val: f64, is_float: bool) -> Datum {
+        if is_float {
+            Datum::Float(val)
+        } else {
+            Datum::Int(val as i32)
+        }
+    }
+
+    /// Convert a Datum to an inline component value and float flag.
+    pub fn datum_to_inline_component(d: &Datum) -> Result<(f64, bool), ScriptError> {
+        match d {
+            Datum::Int(n) => Ok((*n as f64, false)),
+            Datum::Float(f) => Ok((*f, true)),
+            other => Err(ScriptError::new(format!(
+                "Point/Rect component must be numeric, got {}",
+                other.type_str()
+            ))),
+        }
+    }
+
+    /// Build a Point datum from two numeric Datums.
+    pub fn build_point(x: &Datum, y: &Datum) -> Result<Datum, ScriptError> {
+        let (xv, xf) = Datum::datum_to_inline_component(x)?;
+        let (yv, yf) = Datum::datum_to_inline_component(y)?;
+        let flags = (if xf { 1u8 } else { 0 }) | (if yf { 2u8 } else { 0 });
+        Ok(Datum::Point([xv, yv], flags))
+    }
+
+    /// Build a Rect datum from four numeric Datums.
+    pub fn build_rect(l: &Datum, t: &Datum, r: &Datum, b: &Datum) -> Result<Datum, ScriptError> {
+        let (lv, lf) = Datum::datum_to_inline_component(l)?;
+        let (tv, tf) = Datum::datum_to_inline_component(t)?;
+        let (rv, rf) = Datum::datum_to_inline_component(r)?;
+        let (bv, bf) = Datum::datum_to_inline_component(b)?;
+        let flags = (if lf { 1u8 } else { 0 })
+            | (if tf { 2u8 } else { 0 })
+            | (if rf { 4u8 } else { 0 })
+            | (if bf { 8u8 } else { 0 });
+        Ok(Datum::Rect([lv, tv, rv, bv], flags))
+    }
+
+    /// Check if component i is float in an inline flags byte.
+    pub fn inline_is_float(flags: u8, i: usize) -> bool {
+        (flags & (1 << i)) != 0
+    }
+
+    /// Set or clear the float flag for component i.
+    pub fn inline_set_float(flags: &mut u8, i: usize, is_float: bool) {
+        if is_float {
+            *flags |= 1 << i;
+        } else {
+            *flags &= !(1 << i);
         }
     }
 }

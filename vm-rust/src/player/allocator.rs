@@ -20,9 +20,9 @@ pub static mut ALLOCATOR_RESETTING: bool = false;
 
 const ARENA_CHUNK_SIZE: usize = 4096;
 
-const INT_POOL_MIN: i32 = -128;
-const INT_POOL_MAX: i32 = 255;
-const INT_POOL_SIZE: usize = (INT_POOL_MAX - INT_POOL_MIN + 1) as usize; // 384
+const INT_POOL_MIN: i32 = -1024;
+const INT_POOL_MAX: i32 = 4096;
+const INT_POOL_SIZE: usize = (INT_POOL_MAX - INT_POOL_MIN + 1) as usize; // 5121
 
 pub struct Arena<T> {
     chunks: Vec<Box<[Option<T>]>>,

@@ -1839,36 +1839,36 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::SpriteRef(_) => {
             map.str_set("type", &safe_js_string("spriteRef"));
         }
-        Datum::Rect(arr) => {
-            let x1 = player.get_datum(&arr[0]);
-            let y1 = player.get_datum(&arr[1]);
-            let x2 = player.get_datum(&arr[2]);
-            let y2 = player.get_datum(&arr[3]);
-            
+        Datum::Rect(vals, flags) => {
+            let x1 = Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(*flags, 0));
+            let y1 = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
+            let x2 = Datum::inline_component_to_datum(vals[2], Datum::inline_is_float(*flags, 2));
+            let y2 = Datum::inline_component_to_datum(vals[3], Datum::inline_is_float(*flags, 3));
+
             map.str_set("type", &safe_js_string("Rect"));
-            map.str_set("left", &concrete_datum_to_js_bridge(x1, player, depth + 1));
-            map.str_set("top", &concrete_datum_to_js_bridge(y1, player, depth + 1));
-            map.str_set("right", &concrete_datum_to_js_bridge(x2, player, depth + 1));
-            map.str_set("bottom", &concrete_datum_to_js_bridge(y2, player, depth + 1));
+            map.str_set("left", &concrete_datum_to_js_bridge(&x1, player, depth + 1));
+            map.str_set("top", &concrete_datum_to_js_bridge(&y1, player, depth + 1));
+            map.str_set("right", &concrete_datum_to_js_bridge(&x2, player, depth + 1));
+            map.str_set("bottom", &concrete_datum_to_js_bridge(&y2, player, depth + 1));
             map.str_set("value", &safe_js_string(&format!(
                 "rect({}, {}, {}, {})",
-                format_numeric_value(x1, player),
-                format_numeric_value(y1, player),
-                format_numeric_value(x2, player),
-                format_numeric_value(y2, player)
+                if Datum::inline_is_float(*flags, 0) { format!("{:.4}", vals[0]) } else { format!("{}", vals[0] as i32) },
+                if Datum::inline_is_float(*flags, 1) { format!("{:.4}", vals[1]) } else { format!("{}", vals[1] as i32) },
+                if Datum::inline_is_float(*flags, 2) { format!("{:.4}", vals[2]) } else { format!("{}", vals[2] as i32) },
+                if Datum::inline_is_float(*flags, 3) { format!("{:.4}", vals[3]) } else { format!("{}", vals[3] as i32) },
             )));
         }
-        Datum::Point(arr) => {
-            let x = player.get_datum(&arr[0]);
-            let y = player.get_datum(&arr[1]);
-            
+        Datum::Point(vals, flags) => {
+            let x = Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(*flags, 0));
+            let y = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
+
             map.str_set("type", &safe_js_string("Point"));
-            map.str_set("x", &concrete_datum_to_js_bridge(x, player, depth + 1));
-            map.str_set("y", &concrete_datum_to_js_bridge(y, player, depth + 1));
+            map.str_set("x", &concrete_datum_to_js_bridge(&x, player, depth + 1));
+            map.str_set("y", &concrete_datum_to_js_bridge(&y, player, depth + 1));
             map.str_set("value", &safe_js_string(&format!(
                 "point({}, {})",
-                format_numeric_value(x, player),
-                format_numeric_value(y, player)
+                if Datum::inline_is_float(*flags, 0) { format!("{:.4}", vals[0]) } else { format!("{}", vals[0] as i32) },
+                if Datum::inline_is_float(*flags, 1) { format!("{:.4}", vals[1]) } else { format!("{}", vals[1] as i32) },
             )));
         }
         Datum::CursorRef(cursor_ref) => {

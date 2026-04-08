@@ -68,9 +68,9 @@ impl SpriteDatumUtils {
         point_arg: &DatumRef,
     ) -> Result<Option<(String, usize)>, ScriptError> {
         let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-        let point = player.get_datum(point_arg).to_point()?;
-        let stage_x = player.get_datum(&point[0]).int_value()?;
-        let stage_y = player.get_datum(&point[1]).int_value()?;
+        let (vals, _flags) = player.get_datum(point_arg).to_point_inline()?;
+        let stage_x = vals[0] as i32;
+        let stage_y = vals[1] as i32;
 
         let sprite = match player.movie.score.get_sprite(sprite_num) {
             Some(s) => s,
@@ -818,17 +818,10 @@ impl SpriteDatumHandlers {
                         ));
                     }
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let stage_point = player.get_datum(&args[0]).clone();
-                    let (stage_x, stage_y) = match &stage_point {
-                        Datum::Point(refs) => {
-                            let x = player.get_datum(&refs[0]).int_value()?;
-                            let y = player.get_datum(&refs[1]).int_value()?;
-                            (x as i32, y as i32)
-                        }
-                        _ => return Err(ScriptError::new(
-                            "mapStageToMember requires a point argument".to_string(),
-                        )),
-                    };
+                    let (vals, _flags) = player.get_datum(&args[0]).to_point_inline().map_err(|_| ScriptError::new(
+                        "mapStageToMember requires a point argument".to_string(),
+                    ))?;
+                    let (stage_x, stage_y) = (vals[0] as i32, vals[1] as i32);
 
                     let sprite = player.movie.score.get_sprite(sprite_num);
                     if sprite.is_none() {
@@ -862,9 +855,7 @@ impl SpriteDatumHandlers {
                     let local_x = (stage_x - rect.left) * member_w / sprite_w;
                     let local_y = (stage_y - rect.top) * member_h / sprite_h;
 
-                    let x_ref = player.alloc_datum(Datum::Int(local_x));
-                    let y_ref = player.alloc_datum(Datum::Int(local_y));
-                    Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                    Ok(player.alloc_datum(Datum::Point([local_x as f64, local_y as f64], 0)))
                 })
             }
             "telltarget" | "findlabel" | "flashtostage" | "stagetoflash" => {

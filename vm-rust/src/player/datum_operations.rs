@@ -8,6 +8,75 @@ use crate::{
 
 use super::{sprite::ColorRef, DirPlayer, ScriptError};
 
+/// Perform a binary op on two inline components, preserving int/float semantics.
+/// If either operand is float, result is float.
+fn inline_binop_2(
+    a: [f64; 2], af: u8,
+    b: [f64; 2], bf: u8,
+    op: fn(f64, f64) -> f64,
+) -> ([f64; 2], u8) {
+    let vals = [op(a[0], b[0]), op(a[1], b[1])];
+    let flags = af | bf; // float if either is float
+    (vals, flags)
+}
+
+fn inline_binop_4(
+    a: [f64; 4], af: u8,
+    b: [f64; 4], bf: u8,
+    op: fn(f64, f64) -> f64,
+) -> ([f64; 4], u8) {
+    let vals = [op(a[0], b[0]), op(a[1], b[1]), op(a[2], b[2]), op(a[3], b[3])];
+    let flags = af | bf;
+    (vals, flags)
+}
+
+/// Apply a scalar op to each component of an inline point.
+/// Result type: if scalar is float OR component is float, result is float.
+fn inline_scalar_2(
+    a: [f64; 2], af: u8,
+    scalar: f64, scalar_is_float: bool,
+    op: fn(f64, f64) -> f64,
+) -> ([f64; 2], u8) {
+    let vals = [op(a[0], scalar), op(a[1], scalar)];
+    let flags = if scalar_is_float { 0b11 } else { af };
+    (vals, flags)
+}
+
+fn inline_scalar_4(
+    a: [f64; 4], af: u8,
+    scalar: f64, scalar_is_float: bool,
+    op: fn(f64, f64) -> f64,
+) -> ([f64; 4], u8) {
+    let vals = [op(a[0], scalar), op(a[1], scalar), op(a[2], scalar), op(a[3], scalar)];
+    let flags = if scalar_is_float { 0b1111 } else { af };
+    (vals, flags)
+}
+
+/// Extract point components from a list datum (for Point + List ops).
+fn list_to_point_vals(player: &DirPlayer, list: &VecDeque<DatumRef>) -> Result<([f64; 2], u8), ScriptError> {
+    if list.len() != 2 {
+        return Err(ScriptError::new(format!("Invalid list length for point op: {}", list.len())));
+    }
+    let (v0, f0) = Datum::datum_to_inline_component(player.get_datum(&list[0]))?;
+    let (v1, f1) = Datum::datum_to_inline_component(player.get_datum(&list[1]))?;
+    let flags = (if f0 { 1u8 } else { 0 }) | (if f1 { 2u8 } else { 0 });
+    Ok(([v0, v1], flags))
+}
+
+fn list_to_rect_vals(player: &DirPlayer, list: &VecDeque<DatumRef>) -> Result<([f64; 4], u8), ScriptError> {
+    if list.len() != 4 {
+        return Err(ScriptError::new(format!("Invalid list length for rect op: {}", list.len())));
+    }
+    let mut vals = [0.0; 4];
+    let mut flags = 0u8;
+    for i in 0..4 {
+        let (v, f) = Datum::datum_to_inline_component(player.get_datum(&list[i]))?;
+        vals[i] = v;
+        if f { flags |= 1 << i; }
+    }
+    Ok((vals, flags))
+}
+
 pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<Datum, ScriptError> {
     match (&left, &right) {
         (Datum::Void, some) => Ok(some.clone()),
@@ -16,32 +85,14 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
         (Datum::Float(a), Datum::Float(b)) => Ok(Datum::Float(a + b)),
         (Datum::Float(a), Datum::Int(b)) => Ok(Datum::Float(a + (*b as f64))),
         (Datum::Int(a), Datum::Float(b)) => Ok(Datum::Float((*a as f64) + b)),
-        (Datum::Rect(a), Datum::Rect(b)) => {
-            let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..4 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let sum = add_datums(a_val, b_val, player)?;
-                result[i] = player.alloc_datum(sum);
-            }
-            Ok(Datum::Rect(result))
+        (Datum::Rect(a, af), Datum::Rect(b, bf)) => {
+            let (vals, flags) = inline_binop_4(*a, *af, *b, *bf, |x, y| x + y);
+            Ok(Datum::Rect(vals, flags))
         }
-        (Datum::Rect(a), Datum::List(_, ref_list, _)) => {
-            if ref_list.len() == 4 {
-                let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-                for i in 0..4 {
-                    let a_val = player.get_datum(&a[i]).clone();
-                    let b_val = player.get_datum(&ref_list[i]).clone();
-                    let sum = add_datums(a_val, b_val, player)?;
-                    result[i] = player.alloc_datum(sum);
-                }
-                Ok(Datum::Rect(result))
-            } else {
-                Err(ScriptError::new(format!(
-                    "Invalid list length for add_datums: {}",
-                    ref_list.len()
-                )))
-            }
+        (Datum::Rect(a, af), Datum::List(_, ref_list, _)) => {
+            let (bv, bf) = list_to_rect_vals(player, ref_list)?;
+            let (vals, flags) = inline_binop_4(*a, *af, bv, bf, |x, y| x + y);
+            Ok(Datum::Rect(vals, flags))
         }
         // Vector combinations
         (Datum::Vector(a), Datum::Vector(b)) => {
@@ -138,60 +189,23 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
                 .join(", ");
             Ok(Datum::String(format!("{}{}", formatted, s)))
         }
-        (Datum::Point(a), Datum::Point(b)) => {
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let sum = add_datums(a_val, b_val, player)?;
-                result[i] = player.alloc_datum(sum);
-            }
-            Ok(Datum::Point(result))
+        (Datum::Point(a, af), Datum::Point(b, bf)) => {
+            let (vals, flags) = inline_binop_2(*a, *af, *b, *bf, |x, y| x + y);
+            Ok(Datum::Point(vals, flags))
         }
-        (Datum::Point(a), Datum::List(_, ref_list, _)) => {
-            if ref_list.len() == 2 {
-                let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-                for i in 0..2 {
-                    let a_val = player.get_datum(&a[i]).clone();
-                    let b_val = player.get_datum(&ref_list[i]).clone();
-                    let sum = add_datums(a_val, b_val, player)?;
-                    result[i] = player.alloc_datum(sum);
-                }
-                Ok(Datum::Point(result))
-            } else {
-                Err(ScriptError::new(format!(
-                    "Invalid list length for add_datums: {}",
-                    ref_list.len()
-                )))
-            }
+        (Datum::Point(a, af), Datum::List(_, ref_list, _)) => {
+            let (bv, bf) = list_to_point_vals(player, ref_list)?;
+            let (vals, flags) = inline_binop_2(*a, *af, bv, bf, |x, y| x + y);
+            Ok(Datum::Point(vals, flags))
         }
-        (Datum::List(_, ref_list, _), Datum::Point(b)) => {
-            if ref_list.len() == 2 {
-                let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-                for i in 0..2 {
-                    let a_val = player.get_datum(&ref_list[i]).clone();
-                    let b_val = player.get_datum(&b[i]).clone();
-                    let sum = add_datums(a_val, b_val, player)?;
-                    result[i] = player.alloc_datum(sum);
-                }
-                Ok(Datum::Point(result))
-            } else {
-                Err(ScriptError::new(format!(
-                    "Invalid list length for add_datums: {}",
-                    ref_list.len()
-                )))
-            }
+        (Datum::List(_, ref_list, _), Datum::Point(b, bf)) => {
+            let (av, af) = list_to_point_vals(player, ref_list)?;
+            let (vals, flags) = inline_binop_2(av, af, *b, *bf, |x, y| x + y);
+            Ok(Datum::Point(vals, flags))
         }
-        (Datum::Point(a), Datum::Int(b)) => {
-            let b_ref = player.alloc_datum(Datum::Int(*b));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&b_ref).clone();
-                let sum = add_datums(a_val, b_val, player)?;
-                result[i] = player.alloc_datum(sum);
-            }
-            Ok(Datum::Point(result))
+        (Datum::Point(a, af), Datum::Int(b)) => {
+            let (vals, flags) = inline_scalar_2(*a, *af, *b as f64, false, |x, y| x + y);
+            Ok(Datum::Point(vals, flags))
         }
         (Datum::ColorRef(a), Datum::ColorRef(b)) => match (a, b) {
             (ColorRef::PaletteIndex(a), ColorRef::PaletteIndex(b)) => {
@@ -249,32 +263,14 @@ pub fn subtract_datums(
         (Datum::Float(left), Datum::Float(right)) => Ok(Datum::Float(left - right)),
         (Datum::Float(left), Datum::Int(right)) => Ok(Datum::Float(left - (*right as f64))),
         (Datum::Int(left), Datum::Float(right)) => Ok(Datum::Float((*left as f64) - right)),
-        (Datum::Rect(a), Datum::Rect(b)) => {
-            let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..4 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let diff = subtract_datums(a_val, b_val, player)?;
-                result[i] = player.alloc_datum(diff);
-            }
-            Ok(Datum::Rect(result))
+        (Datum::Rect(a, af), Datum::Rect(b, bf)) => {
+            let (vals, flags) = inline_binop_4(*a, *af, *b, *bf, |x, y| x - y);
+            Ok(Datum::Rect(vals, flags))
         }
-        (Datum::Rect(a), Datum::List(_, ref_list, _)) => {
-            if ref_list.len() == 4 {
-                let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-                for i in 0..4 {
-                    let a_val = player.get_datum(&a[i]).clone();
-                    let b_val = player.get_datum(&ref_list[i]).clone();
-                    let diff = subtract_datums(a_val, b_val, player)?;
-                    result[i] = player.alloc_datum(diff);
-                }
-                Ok(Datum::Rect(result))
-            } else {
-                Err(ScriptError::new(format!(
-                    "Invalid list length for subtract_datums: {}",
-                    ref_list.len()
-                )))
-            }
+        (Datum::Rect(a, af), Datum::List(_, ref_list, _)) => {
+            let (bv, bf) = list_to_rect_vals(player, ref_list)?;
+            let (vals, flags) = inline_binop_4(*a, *af, bv, bf, |x, y| x - y);
+            Ok(Datum::Rect(vals, flags))
         }
         // Vector
         (Datum::Vector(a), Datum::Vector(b)) => {
@@ -337,60 +333,23 @@ pub fn subtract_datums(
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
-        (Datum::Point(a), Datum::Point(b)) => {
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let diff = subtract_datums(a_val, b_val, player)?;
-                result[i] = player.alloc_datum(diff);
-            }
-            Ok(Datum::Point(result))
+        (Datum::Point(a, af), Datum::Point(b, bf)) => {
+            let (vals, flags) = inline_binop_2(*a, *af, *b, *bf, |x, y| x - y);
+            Ok(Datum::Point(vals, flags))
         }
-        (Datum::Point(a), Datum::List(_, ref_list, _)) => {
-            if ref_list.len() == 2 {
-                let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-                for i in 0..2 {
-                    let a_val = player.get_datum(&a[i]).clone();
-                    let b_val = player.get_datum(&ref_list[i]).clone();
-                    let diff = subtract_datums(a_val, b_val, player)?;
-                    result[i] = player.alloc_datum(diff);
-                }
-                Ok(Datum::Point(result))
-            } else {
-                Err(ScriptError::new(format!(
-                    "Invalid list length for subtract_datums: {}",
-                    ref_list.len()
-                )))
-            }
+        (Datum::Point(a, af), Datum::List(_, ref_list, _)) => {
+            let (bv, bf) = list_to_point_vals(player, ref_list)?;
+            let (vals, flags) = inline_binop_2(*a, *af, bv, bf, |x, y| x - y);
+            Ok(Datum::Point(vals, flags))
         }
-        (Datum::List(_, ref_list, _), Datum::Point(b)) => {
-            if ref_list.len() == 2 {
-                let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-                for i in 0..2 {
-                    let a_val = player.get_datum(&ref_list[i]).clone();
-                    let b_val = player.get_datum(&b[i]).clone();
-                    let diff = subtract_datums(a_val, b_val, player)?;
-                    result[i] = player.alloc_datum(diff);
-                }
-                Ok(Datum::Point(result))
-            } else {
-                Err(ScriptError::new(format!(
-                    "Invalid list length for subtract_datums: {}",
-                    ref_list.len()
-                )))
-            }
+        (Datum::List(_, ref_list, _), Datum::Point(b, bf)) => {
+            let (av, af) = list_to_point_vals(player, ref_list)?;
+            let (vals, flags) = inline_binop_2(av, af, *b, *bf, |x, y| x - y);
+            Ok(Datum::Point(vals, flags))
         }
-        (Datum::Int(a), Datum::Point(b)) => {
-            let a_ref = player.alloc_datum(Datum::Int(*a));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let diff = subtract_datums(a_val, b_val, player)?;
-                result[i] = player.alloc_datum(diff);
-            }
-            Ok(Datum::Point(result))
+        (Datum::Int(a), Datum::Point(b, bf)) => {
+            let (vals, flags) = inline_scalar_2(*b, *bf, *a as f64, false, |b, a| a - b);
+            Ok(Datum::Point(vals, flags))
         }
         (Datum::ColorRef(a), Datum::ColorRef(b)) => match (a, b) {
             (ColorRef::PaletteIndex(a), ColorRef::PaletteIndex(b)) => {
@@ -463,11 +422,9 @@ pub fn multiply_datums(
         | (Datum::Float(_), Datum::Void) => Datum::Float(0.0),
         (Datum::Vector(_), Datum::Void)
         | (Datum::Void, Datum::Vector(_)) => Datum::Vector([0.0, 0.0, 0.0]),
-        (Datum::Point(_), Datum::Void)
-        | (Datum::Void, Datum::Point(_)) => {
-            let zero_x = player.alloc_datum(Datum::Int(0));
-            let zero_y = player.alloc_datum(Datum::Int(0));
-            Datum::Point([zero_x, zero_y])
+        (Datum::Point(..), Datum::Void)
+        | (Datum::Void, Datum::Point(..)) => {
+            Datum::Point([0.0, 0.0], 0)
         }
         (Datum::Int(left), Datum::Int(right)) => Datum::Int(left * right),
         (Datum::Int(left), Datum::Float(right)) => Datum::Float((*left as f64) * right),
@@ -521,124 +478,37 @@ pub fn multiply_datums(
                 _ => Datum::ColorRef(c.clone()),
             }
         }
-        (Datum::Rect(a), Datum::Int(right)) => {
-            let right_ref = player.alloc_datum(Datum::Int(*right));
-            let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..4 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Rect(result)
+        (Datum::Rect(a, af), Datum::Int(right)) => {
+            let (vals, flags) = inline_scalar_4(*a, *af, *right as f64, false, |x, y| x * y);
+            Datum::Rect(vals, flags)
         }
-        (Datum::Rect(a), Datum::Float(right)) => {
-            let right_ref = player.alloc_datum(Datum::Float(*right));
-            let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..4 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Rect(result)
+        (Datum::Rect(a, af), Datum::Float(right)) => {
+            let (vals, flags) = inline_scalar_4(*a, *af, *right, true, |x, y| x * y);
+            Datum::Rect(vals, flags)
         }
-        (Datum::Float(left), Datum::Rect(b)) => {
-            let left_ref = player.alloc_datum(Datum::Float(*left));
-            let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..4 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Rect(result)
+        (Datum::Float(left), Datum::Rect(b, bf)) => {
+            let (vals, flags) = inline_scalar_4(*b, *bf, *left, true, |x, y| y * x);
+            Datum::Rect(vals, flags)
         }
-        (Datum::Point(arr), Datum::Int(scalar)) => {
-            let scalar_ref = player.alloc_datum(Datum::Int(*scalar));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let val = player.get_datum(&arr[i]).clone();
-                let scalar_val = player.get_datum(&scalar_ref).clone();
-                let product = multiply_datums(
-                    player.alloc_datum(val),
-                    player.alloc_datum(scalar_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(product);
-            }
-            Datum::Point(result)
+        (Datum::Point(a, af), Datum::Int(scalar)) => {
+            let (vals, flags) = inline_scalar_2(*a, *af, *scalar as f64, false, |x, y| x * y);
+            Datum::Point(vals, flags)
         }
-        (Datum::Point(arr), Datum::Float(scalar)) => {
-            let scalar_ref = player.alloc_datum(Datum::Float(*scalar));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let val = player.get_datum(&arr[i]).clone();
-                let scalar_val = player.get_datum(&scalar_ref).clone();
-                let product = multiply_datums(
-                    player.alloc_datum(val),
-                    player.alloc_datum(scalar_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(product);
-            }
-            Datum::Point(result)
+        (Datum::Point(a, af), Datum::Float(scalar)) => {
+            let (vals, flags) = inline_scalar_2(*a, *af, *scalar, true, |x, y| x * y);
+            Datum::Point(vals, flags)
         }
-        (Datum::Float(left), Datum::Point(b)) => {
-            let left_ref = player.alloc_datum(Datum::Float(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
+        (Datum::Float(left), Datum::Point(b, bf)) => {
+            let (vals, flags) = inline_scalar_2(*b, *bf, *left, true, |x, y| y * x);
+            Datum::Point(vals, flags)
         }
-        (Datum::Int(left), Datum::Point(b)) => {
-            let left_ref = player.alloc_datum(Datum::Int(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
+        (Datum::Int(left), Datum::Point(b, bf)) => {
+            let (vals, flags) = inline_scalar_2(*b, *bf, *left as f64, false, |x, y| y * x);
+            Datum::Point(vals, flags)
         }
-        (Datum::Point(left_arr), Datum::Point(right_arr)) => {
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let left_val = player.get_datum(&left_arr[i]).clone();
-                let right_val = player.get_datum(&right_arr[i]).clone();
-                let product = multiply_datums(
-                    player.alloc_datum(left_val),
-                    player.alloc_datum(right_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(product);
-            }
-            Datum::Point(result)
+        (Datum::Point(a, af), Datum::Point(b, bf)) => {
+            let (vals, flags) = inline_binop_2(*a, *af, *b, *bf, |x, y| x * y);
+            Datum::Point(vals, flags)
         }
         (Datum::List(_, list, _), Datum::Float(right)) => {
             let mut ref_list = VecDeque::new();
@@ -674,155 +544,68 @@ pub fn multiply_datums(
             let right_float = right.parse::<f64>().unwrap_or(0.0);
             Datum::Float((*left as f64) * right_float)
         }
-        // Point multiplication
-        (Datum::Point(a), Datum::Int(right)) => {
-            let right_ref = player.alloc_datum(Datum::Int(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
+        (Datum::Point(a, af), Datum::List(_, list, _)) if list.len() == 2 => {
+            let (bv, bf) = list_to_point_vals(player, list)?;
+            let (vals, flags) = inline_binop_2(*a, *af, bv, bf, |x, y| x * y);
+            Datum::Point(vals, flags)
         }
-        (Datum::Point(a), Datum::Float(right)) => {
-            let right_ref = player.alloc_datum(Datum::Float(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
+        (Datum::List(_, list, _), Datum::Point(b, bf)) if list.len() == 2 => {
+            let (av, af) = list_to_point_vals(player, list)?;
+            let (vals, flags) = inline_binop_2(av, af, *b, *bf, |x, y| x * y);
+            Datum::Point(vals, flags)
         }
-        (Datum::Int(left), Datum::Point(b)) => {
-            let left_ref = player.alloc_datum(Datum::Int(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
-        }
-        (Datum::Float(left), Datum::Point(b)) => {
-            let left_ref = player.alloc_datum(Datum::Float(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
-        }
-        (Datum::Point(p), Datum::List(_, list, _)) if list.len() == 2 => {
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&p[i]).clone();
-                let b_val = player.get_datum(&list[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
-        }
-        (Datum::List(_, list, _), Datum::Point(p)) if list.len() == 2 => {
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&list[i]).clone();
-                let b_val = player.get_datum(&p[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Point(result)
-        }
-        // List (2 elements) as Point multiplication
+        // List (2 elements) as Point multiplication — result stays as List
         (Datum::List(_, list, _), Datum::Int(right)) if list.len() == 2 => {
-            let right_ref = player.alloc_datum(Datum::Int(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&list[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
+            let mut ref_list = VecDeque::with_capacity(2);
+            for item in list {
+                let d = player.get_datum(item).clone();
+                let result_datum = match &d {
+                    Datum::Int(n) => Datum::Int(n * right),
+                    Datum::Float(n) => Datum::Float(n * *right as f64),
+                    _ => return Err(ScriptError::new("List element must be numeric".to_string())),
+                };
+                ref_list.push_back(player.alloc_datum(result_datum));
             }
-            Datum::List(DatumType::List, VecDeque::from(result.to_vec()), false)
+            Datum::List(DatumType::List, ref_list, false)
         }
         (Datum::List(_, list, _), Datum::Float(right)) if list.len() == 2 => {
-            let right_ref = player.alloc_datum(Datum::Float(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&list[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
+            let mut ref_list = VecDeque::with_capacity(2);
+            for item in list {
+                let d = player.get_datum(item).clone();
+                let result_datum = match &d {
+                    Datum::Int(n) => Datum::Float(*n as f64 * right),
+                    Datum::Float(n) => Datum::Float(n * right),
+                    _ => return Err(ScriptError::new("List element must be numeric".to_string())),
+                };
+                ref_list.push_back(player.alloc_datum(result_datum));
             }
-            Datum::List(DatumType::List, VecDeque::from(result.to_vec()), false)
+            Datum::List(DatumType::List, ref_list, false)
         }
         (Datum::Int(left), Datum::List(_, list, _)) if list.len() == 2 => {
-            let left_ref = player.alloc_datum(Datum::Int(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&list[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
+            let mut ref_list = VecDeque::with_capacity(2);
+            for item in list {
+                let d = player.get_datum(item).clone();
+                let result_datum = match &d {
+                    Datum::Int(n) => Datum::Int(left * n),
+                    Datum::Float(n) => Datum::Float(*left as f64 * n),
+                    _ => return Err(ScriptError::new("List element must be numeric".to_string())),
+                };
+                ref_list.push_back(player.alloc_datum(result_datum));
             }
-            Datum::List(DatumType::List, VecDeque::from(result.to_vec()), false)
+            Datum::List(DatumType::List, ref_list, false)
         }
         (Datum::Float(left), Datum::List(_, list, _)) if list.len() == 2 => {
-            let left_ref = player.alloc_datum(Datum::Float(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&list[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
+            let mut ref_list = VecDeque::with_capacity(2);
+            for item in list {
+                let d = player.get_datum(item).clone();
+                let result_datum = match &d {
+                    Datum::Int(n) => Datum::Float(left * *n as f64),
+                    Datum::Float(n) => Datum::Float(left * n),
+                    _ => return Err(ScriptError::new("List element must be numeric".to_string())),
+                };
+                ref_list.push_back(player.alloc_datum(result_datum));
             }
-            Datum::List(DatumType::List, VecDeque::from(result.to_vec()), false)
+            Datum::List(DatumType::List, ref_list, false)
         }
 
         // Transform3d * Vector = apply transform to point
@@ -884,109 +667,60 @@ pub fn divide_datums(
         // Vector / scalar
         (Datum::Vector(v), Datum::Int(s)) => { let s = *s as f64; if s == 0.0 { Datum::Vector([0.0, 0.0, 0.0]) } else { Datum::Vector([v[0] / s, v[1] / s, v[2] / s]) } }
         (Datum::Vector(v), Datum::Float(s)) => if *s == 0.0 { Datum::Vector([0.0, 0.0, 0.0]) } else { Datum::Vector([v[0] / s, v[1] / s, v[2] / s]) },
-        (Datum::Point(a), Datum::Int(right)) => {
-            let right_ref = player.alloc_datum(Datum::Int(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let quot = divide_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(quot);
-            }
-            Datum::Point(result)
+        (Datum::Point(a, af), Datum::Int(right)) => {
+            // Int / Int = Int (truncating), preserving int type per-component
+            let d = if *right == 0 { 1 } else { *right };
+            let vals = [a[0] / d as f64, a[1] / d as f64];
+            // For int/int division, result components that were int stay int (truncated)
+            let result_vals = [
+                if Datum::inline_is_float(*af, 0) { vals[0] } else { (a[0] as i32 / d) as f64 },
+                if Datum::inline_is_float(*af, 1) { vals[1] } else { (a[1] as i32 / d) as f64 },
+            ];
+            Datum::Point(result_vals, *af)
         }
-        (Datum::Point(a), Datum::Float(right)) => {
-            let right_ref = player.alloc_datum(Datum::Float(*right));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let quot = divide_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(quot);
-            }
-            Datum::Point(result)
+        (Datum::Point(a, af), Datum::Float(right)) => {
+            let d = if *right == 0.0 { 1.0 } else { *right };
+            let (vals, flags) = inline_scalar_2(*a, *af, d, true, |x, y| x / y);
+            Datum::Point(vals, flags)
         }
-        (Datum::Float(left), Datum::Point(b)) => {
-            let left_ref = player.alloc_datum(Datum::Float(*left));
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let quot = divide_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(quot);
-            }
-            Datum::Point(result)
+        (Datum::Float(left), Datum::Point(b, bf)) => {
+            let vals = [
+                if b[0] == 0.0 { 0.0 } else { left / b[0] },
+                if b[1] == 0.0 { 0.0 } else { left / b[1] },
+            ];
+            Datum::Point(vals, 0b11) // float / anything = float
         }
-        (Datum::Point(a), Datum::Point(b)) => {
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let quot = divide_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(quot);
-            }
-            Datum::Point(result)
+        (Datum::Point(a, af), Datum::Point(b, bf)) => {
+            let vals = [
+                if b[0] == 0.0 { 0.0 } else { a[0] / b[0] },
+                if b[1] == 0.0 { 0.0 } else { a[1] / b[1] },
+            ];
+            let flags = *af | *bf;
+            Datum::Point(vals, flags)
         }
-        // Point / List: element-wise division (Director treats 2-element lists as points)
-        (Datum::Point(a), Datum::List(_, ref_list, _)) if ref_list.len() == 2 => {
-            let mut result: [DatumRef; 2] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..2 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&ref_list[i]).clone();
-                let quot = divide_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(quot);
-            }
-            Datum::Point(result)
+        (Datum::Point(a, af), Datum::List(_, ref_list, _)) if ref_list.len() == 2 => {
+            let (bv, bf) = list_to_point_vals(player, ref_list)?;
+            let vals = [
+                if bv[0] == 0.0 { 0.0 } else { a[0] / bv[0] },
+                if bv[1] == 0.0 { 0.0 } else { a[1] / bv[1] },
+            ];
+            let flags = *af | bf;
+            Datum::Point(vals, flags)
         }
-        (Datum::Rect(a), Datum::Int(right)) => {
-            let right_ref = player.alloc_datum(Datum::Int(*right));
-            let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..4 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let quot = divide_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(quot);
-            }
-            Datum::Rect(result)
+        (Datum::Rect(a, af), Datum::Int(right)) => {
+            let d = if *right == 0 { 1 } else { *right };
+            let result_vals = [
+                if Datum::inline_is_float(*af, 0) { a[0] / d as f64 } else { (a[0] as i32 / d) as f64 },
+                if Datum::inline_is_float(*af, 1) { a[1] / d as f64 } else { (a[1] as i32 / d) as f64 },
+                if Datum::inline_is_float(*af, 2) { a[2] / d as f64 } else { (a[2] as i32 / d) as f64 },
+                if Datum::inline_is_float(*af, 3) { a[3] / d as f64 } else { (a[3] as i32 / d) as f64 },
+            ];
+            Datum::Rect(result_vals, *af)
         }
-        (Datum::Rect(a), Datum::Float(right)) => {
-            let right_ref = player.alloc_datum(Datum::Float(*right));
-            let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..4 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
-                let quot = divide_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(quot);
-            }
-            Datum::Rect(result)
+        (Datum::Rect(a, af), Datum::Float(right)) => {
+            let d = if *right == 0.0 { 1.0 } else { *right };
+            let (vals, flags) = inline_scalar_4(*a, *af, d, true, |x, y| x / y);
+            Datum::Rect(vals, flags)
         }
         (Datum::Int(left), Datum::String(right)) => {
             let right_val = right

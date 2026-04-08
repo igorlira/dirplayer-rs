@@ -1117,19 +1117,8 @@ impl DirPlayer {
                         ));
                     }
                 }
-                Datum::Point(arr) => {
-                    let nc: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
-                    if nc > 0 {
-                        growing_containers.push((format!("OLD Point #{} (rc={}) +{} new", cid, rc, nc), nc));
-                        for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } }
-                    }
-                }
-                Datum::Rect(arr) => {
-                    let nc: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
-                    if nc > 0 {
-                        growing_containers.push((format!("OLD Rect #{} (rc={}) +{} new", cid, rc, nc), nc));
-                        for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } }
-                    }
+                Datum::Point(..) | Datum::Rect(..) => {
+                    // Inline storage - no DatumRef children to track
                 }
                 _ => {}
             }
@@ -1154,15 +1143,9 @@ impl DirPlayer {
                     }
                     c
                 }
-                Datum::Point(arr) => {
-                    let c: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
-                    if c > 0 { for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } } }
-                    c
-                }
-                Datum::Rect(arr) => {
-                    let c: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
-                    if c > 0 { for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } } }
-                    c
+                Datum::Point(..) | Datum::Rect(..) => {
+                    // Inline storage - no DatumRef children to track
+                    0
                 }
                 _ => 0,
             };
@@ -1412,9 +1395,7 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::Int(frame_tempo as i32)))
             },
             "mouseLoc" => {
-                let x_ref = self.alloc_datum(Datum::Int(self.mouse_loc.0));
-                let y_ref = self.alloc_datum(Datum::Int(self.mouse_loc.1));
-                Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
+                Ok(self.alloc_datum(Datum::Point([self.mouse_loc.0 as f64, self.mouse_loc.1 as f64], 0)))
             },
             "mouseH" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
             "mouseV" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
@@ -1550,9 +1531,7 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::PropList(props, false)))
             },
             "clickLoc" => {
-                let x_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.0));
-                let y_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.1));
-                Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
+                Ok(self.alloc_datum(Datum::Point([self.movie.click_loc.0 as f64, self.movie.click_loc.1 as f64], 0)))
             },
             "markerList" => {
                 let labels: Vec<_> = self.movie.score.frame_labels
@@ -1620,9 +1599,7 @@ impl DirPlayer {
         match prop {
             "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
             "mouseLoc" => {
-                let x_ref = self.alloc_datum(Datum::Int(self.mouse_loc.0));
-                let y_ref = self.alloc_datum(Datum::Int(self.mouse_loc.1));
-                Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
+                Ok(self.alloc_datum(Datum::Point([self.mouse_loc.0 as f64, self.mouse_loc.1 as f64], 0)))
             }
             _ => Err(ScriptError::new(format!("Unknown _mouse prop {}", prop))),
         }
@@ -1633,9 +1610,9 @@ impl DirPlayer {
             "mouseLoc" => {
                 let value = self.get_datum(value_ref).clone();
                 match value {
-                    Datum::Point(refs) => {
-                        let x = self.get_datum(&refs[0]).int_value()?;
-                        let y = self.get_datum(&refs[1]).int_value()?;
+                    Datum::Point(vals, _flags) => {
+                        let x = vals[0] as i32;
+                        let y = vals[1] as i32;
                         self.mouse_loc = (x, y);
                         // Game is programmatically warping the mouse — this is the FPS mouselook pattern.
                         // Only request pointer lock if cursor is hidden AND 3D content is active.

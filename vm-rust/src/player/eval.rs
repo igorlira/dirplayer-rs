@@ -181,7 +181,12 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             let w_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect w".to_string()))?)?;
             let h_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect h".to_string()))?)?;
             reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Rect([x_ref, y_ref, w_ref, h_ref])))
+                let x_datum = player.get_datum(&x_ref);
+                let y_datum = player.get_datum(&y_ref);
+                let w_datum = player.get_datum(&w_ref);
+                let h_datum = player.get_datum(&h_ref);
+                let rect = Datum::build_rect(x_datum, y_datum, w_datum, h_datum)?;
+                Ok(player.alloc_datum(rect))
             })
         }
         Rule::rgb_num_color => {
@@ -240,7 +245,10 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point x".to_string()))?)?;
             let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point y".to_string()))?)?;
             reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                let x_datum = player.get_datum(&x_ref);
+                let y_datum = player.get_datum(&y_ref);
+                let point = Datum::build_point(x_datum, y_datum)?;
+                Ok(player.alloc_datum(point))
             })
         }
         Rule::empty_list => reserve_player_mut(|player| {
@@ -1356,25 +1364,29 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                         PropListUtils::get_at(pairs, &index_ref, &player.allocator)
                     }
                     // Point indexed by number: 1=x, 2=y
-                    Datum::Point(point_arr) => {
+                    Datum::Point(vals, flags) => {
                         let index_num = index_datum.int_value()?;
                         if index_num < 1 || index_num > 2 {
                             Err(ScriptError::new(format!(
                                 "Point index {} out of bounds (must be 1 or 2)", index_num
                             )))
                         } else {
-                            Ok(point_arr[(index_num - 1) as usize].clone())
+                            let i = (index_num - 1) as usize;
+                            let component = Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i));
+                            Ok(player.alloc_datum(component))
                         }
                     }
                     // Rect indexed by number: 1-4
-                    Datum::Rect(rect_arr) => {
+                    Datum::Rect(vals, flags) => {
                         let index_num = index_datum.int_value()?;
                         if index_num < 1 || index_num > 4 {
                             Err(ScriptError::new(format!(
                                 "Rect index {} out of bounds (must be 1-4)", index_num
                             )))
                         } else {
-                            Ok(rect_arr[(index_num - 1) as usize].clone())
+                            let i = (index_num - 1) as usize;
+                            let component = Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i));
+                            Ok(player.alloc_datum(component))
                         }
                     }
                     // String indexed by number: return nth character
@@ -1421,16 +1433,21 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 return Err(ScriptError::new("RectLiteral must have 1 tuple of 4 elements".to_string()));
             }
             let (x_expr, y_expr, w_expr, h_expr) = &values[0];
-            
+
             // Evaluate each component expression
-            let x_datum = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
-            let y_datum = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
-            let w_datum = Box::pin(eval_lingo_expr_ast_runtime(w_expr)).await?;
-            let h_datum = Box::pin(eval_lingo_expr_ast_runtime(h_expr)).await?;
-            
-            // Create the Rect datum with DatumRef components
+            let x_ref = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
+            let y_ref = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
+            let w_ref = Box::pin(eval_lingo_expr_ast_runtime(w_expr)).await?;
+            let h_ref = Box::pin(eval_lingo_expr_ast_runtime(h_expr)).await?;
+
+            // Create the Rect datum with inline components
             reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Rect([x_datum, y_datum, w_datum, h_datum])))
+                let x_d = player.get_datum(&x_ref);
+                let y_d = player.get_datum(&y_ref);
+                let w_d = player.get_datum(&w_ref);
+                let h_d = player.get_datum(&h_ref);
+                let rect = Datum::build_rect(x_d, y_d, w_d, h_d)?;
+                Ok(player.alloc_datum(rect))
             })
         }
         LingoExpr::PointLiteral(values) => {
@@ -1438,14 +1455,17 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 return Err(ScriptError::new("PointLiteral must have 1 tuple of 2 elements".to_string()));
             }
             let (x_expr, y_expr) = &values[0];
-            
+
             // Evaluate each component expression
-            let x_datum = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
-            let y_datum = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
-            
-            // Create the Point datum with DatumRef components
+            let x_ref = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
+            let y_ref = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
+
+            // Create the Point datum with inline components
             reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Point([x_datum, y_datum])))
+                let x_d = player.get_datum(&x_ref);
+                let y_d = player.get_datum(&y_ref);
+                let point = Datum::build_point(x_d, y_d)?;
+                Ok(player.alloc_datum(point))
             })
         }
         LingoExpr::MemberRef(member_expr, cast_lib_expr) => {
@@ -1572,7 +1592,7 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                                 PropListUtils::set_at(player, &list_ref, &index_ref, &right_datum, &formatted_key)?;
                                 Ok(right_datum)
                             }
-                            Datum::Point(_) => {
+                            Datum::Point(..) => {
                                 let index_num = index_datum.int_value()?;
                                 let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
                                 if adjusted >= 2 {
@@ -1580,11 +1600,14 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                                         "Point index {} out of bounds", index_num
                                     )));
                                 }
-                                let point = player.get_datum_mut(&list_ref).to_point_mut()?;
-                                point[adjusted] = right_datum.clone();
+                                let right_val = player.get_datum(&right_datum);
+                                let (val, is_float) = Datum::datum_to_inline_component(right_val)?;
+                                let (point_vals, point_flags) = player.get_datum_mut(&list_ref).to_point_inline_mut()?;
+                                point_vals[adjusted] = val;
+                                Datum::inline_set_float(point_flags, adjusted, is_float);
                                 Ok(right_datum)
                             }
-                            Datum::Rect(_) => {
+                            Datum::Rect(..) => {
                                 let index_num = index_datum.int_value()?;
                                 let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
                                 if adjusted >= 4 {
@@ -1592,8 +1615,11 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                                         "Rect index {} out of bounds", index_num
                                     )));
                                 }
-                                let rect = player.get_datum_mut(&list_ref).to_rect_mut()?;
-                                rect[adjusted] = right_datum.clone();
+                                let right_val = player.get_datum(&right_datum);
+                                let (val, is_float) = Datum::datum_to_inline_component(right_val)?;
+                                let (rect_vals, rect_flags) = player.get_datum_mut(&list_ref).to_rect_inline_mut()?;
+                                rect_vals[adjusted] = val;
+                                Datum::inline_set_float(rect_flags, adjusted, is_float);
                                 Ok(right_datum)
                             }
                             _ => Err(ScriptError::new(format!(

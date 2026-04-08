@@ -1550,15 +1550,8 @@ impl Bitmap {
         let original_dst_rect: Option<IntRect> = param_list
             .get("original_dst_rect")
             .and_then(|datum| {
-                if let Datum::Rect(rect_refs) = datum {
-                    reserve_player_mut(|player| {
-                        let left = player.get_datum(&rect_refs[0]).int_value().ok()?;
-                        let top = player.get_datum(&rect_refs[1]).int_value().ok()?;
-                        let right = player.get_datum(&rect_refs[2]).int_value().ok()?;
-                        let bottom = player.get_datum(&rect_refs[3]).int_value().ok()?;
-
-                        Some(IntRect::from(left, top, right, bottom))
-                    })
+                if let Datum::Rect(vals, _flags) = datum {
+                    Some(IntRect::from(vals[0] as i32, vals[1] as i32, vals[2] as i32, vals[3] as i32))
                 } else {
                     None
                 }
@@ -1573,13 +1566,8 @@ impl Bitmap {
         let mask_offset = param_list
             .get("maskOffset")
             .and_then(|x| {
-                if let Datum::Point(refs) = x {
-                    let ox = reserve_player_mut(|player| player.get_datum(&refs[0]).int_value().ok());
-                    let oy = reserve_player_mut(|player| player.get_datum(&refs[1]).int_value().ok());
-                    match (ox, oy) {
-                        (Some(x), Some(y)) => Some((x, y)),
-                        _ => None,
-                    }
+                if let Datum::Point(vals, _flags) = x {
+                    Some((vals[0] as i32, vals[1] as i32))
                 } else {
                     None
                 }

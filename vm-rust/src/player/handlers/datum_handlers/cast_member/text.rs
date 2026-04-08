@@ -77,9 +77,9 @@ impl TextMemberHandlers {
                 )))
             }
             "locToCharPos" => {
-                let point = player.get_datum(&args[0]).to_point()?;
-                let x = player.get_datum(&point[0]).int_value()?;
-                let y = player.get_datum(&point[1]).int_value()?;
+                let (pt_vals, _flags) = player.get_datum(&args[0]).to_point_inline()?;
+                let x = pt_vals[0] as i32;
+                let y = pt_vals[1] as i32;
 
                 let params = DrawTextParams {
                     font: &player.font_manager.get_system_font().unwrap(),
@@ -271,12 +271,7 @@ impl TextMemberHandlers {
                         }
                     }
                 }
-                Ok(Datum::Rect([
-                    player.alloc_datum(Datum::Int(0)),
-                    player.alloc_datum(Datum::Int(0)),
-                    player.alloc_datum(Datum::Int(box_width as i32)),
-                    player.alloc_datum(Datum::Int(box_height as i32))
-                ]))
+                Ok(Datum::Rect([0.0, 0.0, box_width as f64, box_height as f64], 0))
             }
             "height" => {
                 // For #adjust box type, always calculate from text measurement.
@@ -1296,13 +1291,13 @@ impl TextMemberHandlers {
             ),
             "rect" => borrow_member_mut(
                 member_ref,
-                |player| {
-                    let rect = value.to_rect()?;
+                |_player| {
+                    let (vals, _flags) = value.to_rect_inline()?;
 
-                    let r1 = player.get_datum(&rect[1]).int_value()? as i16;
-                    let r0 = player.get_datum(&rect[0]).int_value()? as i16;
-                    let r3 = player.get_datum(&rect[3]).int_value()? as i16;
-                    let r2 = player.get_datum(&rect[2]).int_value()? as i16;
+                    let r1 = vals[1] as i16;
+                    let r0 = vals[0] as i16;
+                    let r3 = vals[3] as i16;
+                    let r2 = vals[2] as i16;
 
                     Ok((r1, r0, r3, r2))
                 },

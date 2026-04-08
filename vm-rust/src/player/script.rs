@@ -705,9 +705,7 @@ pub fn get_obj_prop(
                         }
                     };
 
-                    let start_ref = player.alloc_datum(Datum::Int(char_start));
-                    let end_ref = player.alloc_datum(Datum::Int(char_end));
-                    Ok(player.alloc_datum(Datum::Point([start_ref, end_ref])))
+                    Ok(player.alloc_datum(Datum::Point([char_start as f64, char_end as f64], 0)))
                 }
                 "charSpacing" => {
                     // Read charSpacing from the source member's styled spans, walking the source chain

@@ -318,11 +318,14 @@ impl PropListDatumHandlers {
                                 )?;
                                 Ok(DatumRef::Void)
                             }
-                            Datum::Point(_) => {
+                            Datum::Point(..) => {
                                 // Point: index 1 = locH (x), index 2 = locV (y)
                                 if adjusted_index < 2 {
-                                    let point = player.get_datum_mut(&list_ref).to_point_mut()?;
-                                    let _ = std::mem::replace(&mut point[adjusted_index], value_ref.clone());
+                                    let new_val = player.get_datum(value_ref).clone();
+                                    let (component_val, is_float) = Datum::datum_to_inline_component(&new_val)?;
+                                    let (vals, flags) = player.get_datum_mut(&list_ref).to_point_inline_mut()?;
+                                    vals[adjusted_index] = component_val;
+                                    Datum::inline_set_float(flags, adjusted_index, is_float);
                                     Ok(DatumRef::Void)
                                 } else {
                                     Err(ScriptError::new(format!(
@@ -331,11 +334,14 @@ impl PropListDatumHandlers {
                                     )))
                                 }
                             }
-                            Datum::Rect(_) => {
+                            Datum::Rect(..) => {
                                 // Rect: index 1-4
                                 if adjusted_index < 4 {
-                                    let rect = player.get_datum_mut(&list_ref).to_rect_mut()?;
-                                    let _ = std::mem::replace(&mut rect[adjusted_index], value_ref.clone());
+                                    let new_val = player.get_datum(value_ref).clone();
+                                    let (component_val, is_float) = Datum::datum_to_inline_component(&new_val)?;
+                                    let (vals, flags) = player.get_datum_mut(&list_ref).to_rect_inline_mut()?;
+                                    vals[adjusted_index] = component_val;
+                                    Datum::inline_set_float(flags, adjusted_index, is_float);
                                     Ok(DatumRef::Void)
                                 } else {
                                     Err(ScriptError::new(format!(
@@ -945,11 +951,11 @@ impl PropListDatumHandlers {
                             PropListUtils::get_by_key(&inner_pairs, index_ref, &player.allocator)?
                         }
                         // Point: index 1 = locH (x), index 2 = locV (y)
-                        Datum::Point(point_arr) => {
+                        Datum::Point(vals, flags) => {
                             let index = player.get_datum(index_ref).int_value()?;
                             let actual_index = if index >= 1 { (index - 1) as usize } else { 0 };
                             if actual_index < 2 {
-                                point_arr[actual_index].clone()
+                                player.alloc_datum(Datum::inline_component_to_datum(vals[actual_index], Datum::inline_is_float(*flags, actual_index)))
                             } else {
                                 return Err(ScriptError::new(format!(
                                     "Point index out of bounds: {}", index
@@ -957,11 +963,11 @@ impl PropListDatumHandlers {
                             }
                         }
                         // Rect: index 1-4
-                        Datum::Rect(rect_arr) => {
+                        Datum::Rect(vals, flags) => {
                             let index = player.get_datum(index_ref).int_value()?;
                             let actual_index = if index >= 1 { (index - 1) as usize } else { 0 };
                             if actual_index < 4 {
-                                rect_arr[actual_index].clone()
+                                player.alloc_datum(Datum::inline_component_to_datum(vals[actual_index], Datum::inline_is_float(*flags, actual_index)))
                             } else {
                                 return Err(ScriptError::new(format!(
                                     "Rect index out of bounds: {}", index

@@ -196,26 +196,8 @@ impl ArithmeticsBytecodeHandler {
             let result_datum = match value {
                 Datum::Int(n) => Datum::Int(-n),
                 Datum::Float(n) => Datum::Float(-n),
-                Datum::Point(arr) => {
-                    let x_val = player.get_datum(&arr[0]).clone();
-                    let y_val = player.get_datum(&arr[1]).clone();
-
-                    let x_ref = match x_val {
-                        Datum::Int(n) => player.alloc_datum(Datum::Int(-n)),
-                        Datum::Float(n) => player.alloc_datum(Datum::Float(-n)),
-                        _ => return Err(ScriptError::new(
-                            "Point component must be Int or Float".to_string(),
-                        )),
-                    };
-
-                    let y_ref = match y_val {
-                        Datum::Int(n) => player.alloc_datum(Datum::Int(-n)),
-                        Datum::Float(n) => player.alloc_datum(Datum::Float(-n)),
-                        _ => return Err(ScriptError::new(
-                            "Point component must be Int or Float".to_string(),
-                        )),
-                    };
-                    Datum::Point([x_ref, y_ref])
+                Datum::Point(vals, flags) => {
+                    Datum::Point([-vals[0], -vals[1]], flags)
                 }
                 Datum::Vector(v) => {
                     Datum::Vector([-v[0], -v[1], -v[2]])

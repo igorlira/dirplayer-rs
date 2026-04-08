@@ -2900,13 +2900,11 @@ pub fn sprite_get_prop(
         "spriteNum" | "spriteNumber" => Ok(Datum::Int(
             sprite.map_or(sprite_id as i32, |x| x.number as i32),
         )),
-        "loc" => reserve_player_mut(|player| {
+        "loc" => {
             let sprite = get_sprite_in_context(player, sprite_id);
             let (x, y) = sprite.map_or((0, 0), |sprite| (sprite.loc_h, sprite.loc_v));
-            let x_ref = player.alloc_datum(Datum::Int(x));
-            let y_ref = player.alloc_datum(Datum::Int(y));
-            Ok(Datum::Point([x_ref, y_ref]))
-        }),
+            Ok(Datum::Point([x as f64, y as f64], 0))
+        },
         "width" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.width) as i32)),
         "height" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.height) as i32)),
         "blend" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.blend) as i32)),
@@ -2929,12 +2927,7 @@ pub fn sprite_get_prop(
         }
         "rect" => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
-            Ok(Datum::Rect([
-                player.alloc_datum(Datum::Int(rect.0)),
-                player.alloc_datum(Datum::Int(rect.1)),
-                player.alloc_datum(Datum::Int(rect.2)),
-                player.alloc_datum(Datum::Int(rect.3)),
-            ]))
+            Ok(Datum::Rect([rect.0 as f64, rect.1 as f64, rect.2 as f64, rect.3 as f64], 0))
         }
         "color" => Ok(Datum::ColorRef(
             sprite.map_or(ColorRef::PaletteIndex(255), |sprite| sprite.color.clone()),
@@ -3135,18 +3128,10 @@ pub fn sprite_get_prop(
         "flashRect" | "defaultRect" => {
             let w = sprite.map_or(0, |s| s.width);
             let h = sprite.map_or(0, |s| s.height);
-            Ok(Datum::Rect([
-                player.alloc_datum(Datum::Int(0)),
-                player.alloc_datum(Datum::Int(0)),
-                player.alloc_datum(Datum::Int(w)),
-                player.alloc_datum(Datum::Int(h)),
-            ]))
+            Ok(Datum::Rect([0.0, 0.0, w as f64, h as f64], 0))
         }
         "originPoint" | "viewPoint" => {
-            Ok(Datum::Point([
-                player.alloc_datum(Datum::Int(0)),
-                player.alloc_datum(Datum::Int(0)),
-            ]))
+            Ok(Datum::Point([0.0, 0.0], 0))
         }
         "bytesStreamed" | "bufferSize" | "streamSize" => Ok(Datum::Int(0)),
         "scale" => Ok(Datum::Float(100.0)),
@@ -3640,14 +3625,10 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |_| value.clone(),  // Pass the value through so we can use it in the sprite closure
             |sprite, value| -> Result<(), ScriptError> {
                 match value {
-                    Datum::Point(arr) => {
-                        reserve_player_mut(|player| {
-                            let x = player.get_datum(&arr[0]).int_value()?;
-                            let y = player.get_datum(&arr[1]).int_value()?;
-                            sprite.loc_h = x;
-                            sprite.loc_v = y;
-                            Ok(())
-                        })
+                    Datum::Point(vals, _) => {
+                        sprite.loc_h = vals[0] as i32;
+                        sprite.loc_v = vals[1] as i32;
+                        Ok(())
                     }
                     // Director auto-coerces a 2-element list to a point for loc
                     Datum::List(_, list, _) if list.len() == 2 => {
@@ -3693,12 +3674,12 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 },
                 |sprite, reg_point| {
                     let rect_values = match value {
-                        Datum::Rect(ref arr) => {
+                        Datum::Rect(ref vals, _) => {
                             Some([
-                                player.get_datum(&arr[0]).int_value()?,
-                                player.get_datum(&arr[1]).int_value()?,
-                                player.get_datum(&arr[2]).int_value()?,
-                                player.get_datum(&arr[3]).int_value()?,
+                                vals[0] as i32,
+                                vals[1] as i32,
+                                vals[2] as i32,
+                                vals[3] as i32,
                             ])
                         }
                         Datum::List(_, ref items, _) if items.len() == 4 => {
@@ -3709,9 +3690,9 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                                 player.get_datum(&items[3]).int_value()?,
                             ])
                         }
-                        Datum::Point(ref pt) => {
-                            let x = player.get_datum(&pt[0]).int_value()?;
-                            let y = player.get_datum(&pt[1]).int_value()?;
+                        Datum::Point(ref vals, _) => {
+                            let x = vals[0] as i32;
+                            let y = vals[1] as i32;
                             Some([x, y, x + sprite.width, y + sprite.height])
                         }
                         _ => None,
@@ -3790,9 +3771,9 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                         let mut points = Vec::new();
                         for point_ref in list {
                             let point_datum = player.get_datum(point_ref);
-                            let point_arr = point_datum.to_point()?;
-                            let x = player.get_datum(&point_arr[0]).int_value()?;
-                            let y = player.get_datum(&point_arr[1]).int_value()?;
+                            let (vals, _flags) = point_datum.to_point_inline()?;
+                            let x = vals[0] as i32;
+                            let y = vals[1] as i32;
                             points.push((x, y));
                         }
                         Ok(points)

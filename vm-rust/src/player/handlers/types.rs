@@ -114,23 +114,18 @@ impl TypeUtils {
                 false,
                 formatted_key.clone(),
             )?,
-            Datum::Rect(arr) => {
+            Datum::Rect(vals, flags) => {
                 let index = prop_key.int_value()?; // 1..4
-                let idx = index - 1;
+                let idx = (index - 1) as usize;
 
-                if !(0..4).contains(&idx) {
+                if idx >= 4 {
                     return Err(ScriptError::new(format!(
                         "Rect index {} out of bounds (must be 1-4)",
                         index
                     )));
                 }
 
-                let val = player.get_datum(&arr[idx as usize]).float_value()?;
-                if val.fract() == 0.0 {
-                    player.alloc_datum(Datum::Int(val as i32))
-                } else {
-                    player.alloc_datum(Datum::Float(val))
-                }
+                player.alloc_datum(Datum::inline_component_to_datum(vals[idx], Datum::inline_is_float(*flags, idx)))
             }
             Datum::List(_, list, _) => {
                 let position = prop_key.int_value()?;
@@ -140,12 +135,12 @@ impl TypeUtils {
                 }
                 list[index as usize].clone()
             }
-            Datum::Point(arr) => {
+            Datum::Point(vals, flags) => {
                 let index = prop_key.int_value()?;
 
-                let (idx, label) = match index {
-                    1 => (0usize, "x"),
-                    2 => (1usize, "y"),
+                let idx = match index {
+                    1 => 0usize,
+                    2 => 1usize,
                     _ => {
                         return Err(ScriptError::new(format!(
                             "Invalid sub-prop position for point: {}",
@@ -154,12 +149,7 @@ impl TypeUtils {
                     }
                 };
 
-                let val = player.get_datum(&arr[idx]).float_value()?;
-                if val.fract() == 0.0 {
-                    player.alloc_datum(Datum::Int(val as i32))
-                } else {
-                    player.alloc_datum(Datum::Float(val))
-                }
+                player.alloc_datum(Datum::inline_component_to_datum(vals[idx], Datum::inline_is_float(*flags, idx)))
             }
             Datum::ScriptInstanceRef(instance_ref) => {
                 // Numeric index
@@ -321,8 +311,11 @@ impl TypeUtils {
                 if index >= 4 {
                     return Err(ScriptError::new(format!("Rect index out of bounds: {position}")));
                 }
-                let rect = player.get_datum_mut(datum_ref).to_rect_mut()?;
-                rect[index] = value_ref.clone();
+                let new_val = player.get_datum(value_ref).clone();
+                let (component_val, is_float) = Datum::datum_to_inline_component(&new_val)?;
+                let (vals, flags) = player.get_datum_mut(datum_ref).to_rect_inline_mut()?;
+                vals[index] = component_val;
+                Datum::inline_set_float(flags, index, is_float);
                 Ok(())
             }
             _ => {
@@ -612,26 +605,8 @@ impl TypeHandlers {
 
             let x = player.get_datum(&args[0]).clone();
             let y = player.get_datum(&args[1]).clone();
-
-            let x_ref = match x {
-                Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
-                Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
-                other => return Err(ScriptError::new(format!(
-                    "Point component must be numeric, got {}",
-                    other.type_str()
-                ))),
-            };
-
-            let y_ref = match y {
-                Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
-                Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
-                other => return Err(ScriptError::new(format!(
-                    "Point component must be numeric, got {}",
-                    other.type_str()
-                ))),
-            };
-
-            Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+            let point = Datum::build_point(&x, &y)?;
+            Ok(player.alloc_datum(point))
         })
     }
 
@@ -641,44 +616,27 @@ impl TypeHandlers {
                 return Err(ScriptError::new("rect() requires 2 or 4 arguments".to_string()));
             }
 
-            // Helper (normal function, NOT a closure)
-            fn preserve_numeric(
-                player: &mut DirPlayer,
-                dref: &DatumRef,
-            ) -> Result<DatumRef, ScriptError> {
-                let d = player.get_datum(dref).clone();
-
-                match d {
-                    Datum::Int(n) => Ok(player.alloc_datum(Datum::Int(n))),
-                    Datum::Float(f) => Ok(player.alloc_datum(Datum::Float(f))),
-                    other => Err(ScriptError::new(format!(
-                        "Rect component must be numeric, got {}",
-                        other.type_str()
-                    ))),
-                }
-            }
-
             // Case 1: rect(left, top, right, bottom)
             if args.len() == 4 && player.get_datum(&args[0]).is_number() {
-                let left   = preserve_numeric(player, &args[0])?;
-                let top    = preserve_numeric(player, &args[1])?;
-                let right  = preserve_numeric(player, &args[2])?;
-                let bottom = preserve_numeric(player, &args[3])?;
-
-                return Ok(player.alloc_datum(Datum::Rect([left, top, right, bottom])));
+                let l = player.get_datum(&args[0]).clone();
+                let t = player.get_datum(&args[1]).clone();
+                let r = player.get_datum(&args[2]).clone();
+                let b = player.get_datum(&args[3]).clone();
+                let rect = Datum::build_rect(&l, &t, &r, &b)?;
+                return Ok(player.alloc_datum(rect));
             }
 
             // Case 2: rect(Point, Point)
             if args.len() == 2 {
-                let p1 = player.get_datum(&args[0]).to_point()?.clone();
-                let p2 = player.get_datum(&args[1]).to_point()?.clone();
+                let (p1, f1) = player.get_datum(&args[0]).to_point_inline()?;
+                let (p2, f2) = player.get_datum(&args[1]).to_point_inline()?;
 
-                let left   = preserve_numeric(player, &p1[0])?;
-                let top    = preserve_numeric(player, &p1[1])?;
-                let right  = preserve_numeric(player, &p2[0])?;
-                let bottom = preserve_numeric(player, &p2[1])?;
+                let flags = (if Datum::inline_is_float(f1, 0) { 1u8 } else { 0 })
+                    | (if Datum::inline_is_float(f1, 1) { 2u8 } else { 0 })
+                    | (if Datum::inline_is_float(f2, 0) { 4u8 } else { 0 })
+                    | (if Datum::inline_is_float(f2, 1) { 8u8 } else { 0 });
 
-                return Ok(player.alloc_datum(Datum::Rect([left, top, right, bottom])));
+                return Ok(player.alloc_datum(Datum::Rect([p1[0], p1[1], p2[0], p2[1]], flags)));
             }
 
             Err(ScriptError::new("Invalid rect() arguments".to_string()))
@@ -991,19 +949,11 @@ impl TypeHandlers {
                 return Err(ScriptError::new("Union requires 2 arguments".to_string()));
             }
 
-            let left_refs = player.get_datum(&args[0]).to_rect()?;
-            let right_refs = player.get_datum(&args[1]).to_rect()?;
+            let (left_vals, _lf) = player.get_datum(&args[0]).to_rect_inline()?;
+            let (right_vals, _rf) = player.get_datum(&args[1]).to_rect_inline()?;
 
-            let rect_to_tuple = |rect: [DatumRef; 4]| -> Result<(i32, i32, i32, i32), ScriptError> {
-                let l = Datum::to_f64(player, &rect[0])? as i32;
-                let t = Datum::to_f64(player, &rect[1])? as i32;
-                let r = Datum::to_f64(player, &rect[2])? as i32;
-                let b = Datum::to_f64(player, &rect[3])? as i32;
-                Ok((l, t, r, b))
-            };
-
-            let left_tuple = rect_to_tuple(left_refs)?;
-            let right_tuple = rect_to_tuple(right_refs)?;
+            let left_tuple = (left_vals[0] as i32, left_vals[1] as i32, left_vals[2] as i32, left_vals[3] as i32);
+            let right_tuple = (right_vals[0] as i32, right_vals[1] as i32, right_vals[2] as i32, right_vals[3] as i32);
 
             let (l, t, r, b) = RectUtils::union(left_tuple, right_tuple);
             let rect = IntRect { left: l, top: t, right: r, bottom: b };
@@ -1282,21 +1232,11 @@ impl TypeHandlers {
                 return Err(ScriptError::new("Intersect requires 2 arguments".to_string()));
             }
 
-            let left_refs = player.get_datum(&args[0]).to_rect()?;
-            let right_refs = player.get_datum(&args[1]).to_rect()?;
+            let (left_vals, _lf) = player.get_datum(&args[0]).to_rect_inline()?;
+            let (right_vals, _rf) = player.get_datum(&args[1]).to_rect_inline()?;
 
-            let left = (
-                player.get_datum(&left_refs[0]).int_value()?,
-                player.get_datum(&left_refs[1]).int_value()?,
-                player.get_datum(&left_refs[2]).int_value()?,
-                player.get_datum(&left_refs[3]).int_value()?,
-            );
-            let right = (
-                player.get_datum(&right_refs[0]).int_value()?,
-                player.get_datum(&right_refs[1]).int_value()?,
-                player.get_datum(&right_refs[2]).int_value()?,
-                player.get_datum(&right_refs[3]).int_value()?,
-            );
+            let left = (left_vals[0] as i32, left_vals[1] as i32, left_vals[2] as i32, left_vals[3] as i32);
+            let right = (right_vals[0] as i32, right_vals[1] as i32, right_vals[2] as i32, right_vals[3] as i32);
 
             let (l, t, r, b) = RectUtils::intersect(left, right);
             let rect = IntRect { left: l, top: t, right: r, bottom: b };

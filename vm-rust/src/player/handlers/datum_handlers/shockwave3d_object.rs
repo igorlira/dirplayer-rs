@@ -105,18 +105,14 @@ impl Shockwave3dObjectDatumHandlers {
                     },
                     "loc" => {
                         let ov = overlay.unwrap_or_default();
-                        let x = player.alloc_datum(Datum::Float(ov.loc[0]));
-                        let y = player.alloc_datum(Datum::Float(ov.loc[1]));
-                        Ok(player.alloc_datum(Datum::Point([x, y])))
+                        Ok(player.alloc_datum(Datum::Point([ov.loc[0], ov.loc[1]], 0b11)))
                     },
                     "blend" => Ok(player.alloc_datum(Datum::Float(overlay.map(|o| o.blend).unwrap_or(100.0)))),
                     "scale" => Ok(player.alloc_datum(Datum::Float(overlay.map(|o| o.scale).unwrap_or(1.0)))),
                     "rotation" => Ok(player.alloc_datum(Datum::Float(overlay.map(|o| o.rotation).unwrap_or(0.0)))),
                     "regPoint" => {
                         let ov = overlay.unwrap_or_default();
-                        let x = player.alloc_datum(Datum::Float(ov.reg_point[0]));
-                        let y = player.alloc_datum(Datum::Float(ov.reg_point[1]));
-                        Ok(player.alloc_datum(Datum::Point([x, y])))
+                        Ok(player.alloc_datum(Datum::Point([ov.reg_point[0], ov.reg_point[1]], 0b11)))
                     },
                     _ => Ok(player.alloc_datum(Datum::Void)),
                 })
@@ -937,17 +933,13 @@ impl Shockwave3dObjectDatumHandlers {
                     // Pre-extract values that need player borrows (for Point datums)
                     let (loc_vals, reg_vals) = match prop_name {
                         "loc" => {
-                            if let Datum::Point(p) = value {
-                                let x = player.get_datum(&p[0]).to_float().unwrap_or(0.0);
-                                let y = player.get_datum(&p[1]).to_float().unwrap_or(0.0);
-                                (Some([x, y]), None)
+                            if let Datum::Point(p, _f) = value {
+                                (Some([p[0], p[1]]), None)
                             } else { (None, None) }
                         }
                         "regPoint" => {
-                            if let Datum::Point(p) = value {
-                                let x = player.get_datum(&p[0]).to_float().unwrap_or(0.0);
-                                let y = player.get_datum(&p[1]).to_float().unwrap_or(0.0);
-                                (None, Some([x, y]))
+                            if let Datum::Point(p, _f) = value {
+                                (None, Some([p[0], p[1]]))
                             } else { (None, None) }
                         }
                         _ => (None, None),
@@ -1777,10 +1769,8 @@ impl Shockwave3dObjectDatumHandlers {
                     if !args.is_empty() {
                         // Get screen point from argument
                         let (sx, sy) = match player.get_datum(&args[0]) {
-                            Datum::Point(refs) => {
-                                let x = player.get_datum(&refs[0]).int_value().unwrap_or(0) as f32;
-                                let y = player.get_datum(&refs[1]).int_value().unwrap_or(0) as f32;
-                                (x, y)
+                            Datum::Point(vals, _flags) => {
+                                (vals[0] as f32, vals[1] as f32)
                             }
                             _ => (0.0, 0.0),
                         };
@@ -1838,10 +1828,8 @@ impl Shockwave3dObjectDatumHandlers {
                     // modelsUnderLoc(point {, maxModels, #simple|#detailed})
                     if !args.is_empty() {
                         let (sx, sy) = match player.get_datum(&args[0]) {
-                            Datum::Point(refs) => {
-                                let x = player.get_datum(&refs[0]).int_value().unwrap_or(0) as f32;
-                                let y = player.get_datum(&refs[1]).int_value().unwrap_or(0) as f32;
-                                (x, y)
+                            Datum::Point(vals, _flags) => {
+                                (vals[0] as f32, vals[1] as f32)
                             }
                             _ => (0.0, 0.0),
                         };
@@ -1969,10 +1957,8 @@ impl Shockwave3dObjectDatumHandlers {
                 "screenToWorld" => {
                     if !args.is_empty() {
                         let (sx, sy) = match player.get_datum(&args[0]) {
-                            Datum::Point(refs) => {
-                                let x = player.get_datum(&refs[0]).int_value().unwrap_or(0) as f32;
-                                let y = player.get_datum(&refs[1]).int_value().unwrap_or(0) as f32;
-                                (x, y)
+                            Datum::Point(vals, _flags) => {
+                                (vals[0] as f32, vals[1] as f32)
                             }
                             _ => (0.0, 0.0),
                         };
@@ -2023,9 +2009,7 @@ impl Shockwave3dObjectDatumHandlers {
                         } else { (0.0, 0.0) }
                     } else { (0.0, 0.0) };
 
-                    let x = player.alloc_datum(Datum::Float(sx as f64));
-                    let y = player.alloc_datum(Datum::Float(sy as f64));
-                    Ok(player.alloc_datum(Datum::Point([x, y])))
+                    Ok(player.alloc_datum(Datum::Point([sx as f64, sy as f64], 0b11)))
                 },
                 "renderDirect" | "renderToTexture" => {
                     // camera.renderDirect(texture) / camera.renderToTexture(texture)
@@ -2063,10 +2047,8 @@ impl Shockwave3dObjectDatumHandlers {
                     } else { String::new() };
                     let loc = if args.len() > 1 {
                         match player.get_datum(&args[1]) {
-                            Datum::Point(p) => {
-                                let x = player.get_datum(&p[0]).to_float().unwrap_or(0.0);
-                                let y = player.get_datum(&p[1]).to_float().unwrap_or(0.0);
-                                [x, y]
+                            Datum::Point(vals, _flags) => {
+                                [vals[0], vals[1]]
                             }
                             _ => [0.0, 0.0],
                         }
@@ -3135,9 +3117,7 @@ impl Shockwave3dObjectDatumHandlers {
                     // NDC to sprite space: x: [-1,1] -> [0, vw], y: [1,-1] -> [0, vh]
                     let sx = ((ndc_x + 1.0) * 0.5 * vw) as i32;
                     let sy = ((1.0 - ndc_y) * 0.5 * vh) as i32;
-                    let px = player.alloc_datum(Datum::Int(sx));
-                    let py = player.alloc_datum(Datum::Int(sy));
-                    Ok(player.alloc_datum(Datum::Point([px, py])))
+                    Ok(player.alloc_datum(Datum::Point([sx as f64, sy as f64], 0)))
                 },
                 "spriteSpaceToWorldSpace" => {
                     // Unproject a 2D sprite-space point to world-space position on projection plane
@@ -3156,12 +3136,9 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                     };
                     let (sx, sy) = {
-                        let arg = player.get_datum(&args[0]).clone();
-                        match arg {
-                            Datum::Point(refs) => {
-                                let x = player.get_datum(&refs[0]).int_value().unwrap_or(0) as f32;
-                                let y = player.get_datum(&refs[1]).int_value().unwrap_or(0) as f32;
-                                (x, y)
+                        match player.get_datum(&args[0]) {
+                            Datum::Point(vals, _flags) => {
+                                (vals[0] as f32, vals[1] as f32)
                             }
                             _ => (0.0, 0.0),
                         }
@@ -4182,11 +4159,7 @@ impl Shockwave3dObjectDatumHandlers {
             "visible" => Ok(player.alloc_datum(Datum::Int(1))),
             "rect" => {
                 // Camera viewport rect (normalized: 0,0,1,1 = full viewport)
-                let l = player.alloc_datum(Datum::Float(0.0));
-                let t = player.alloc_datum(Datum::Float(0.0));
-                let r = player.alloc_datum(Datum::Float(1.0));
-                let b = player.alloc_datum(Datum::Float(1.0));
-                Ok(player.alloc_datum(Datum::Rect([l, t, r, b])))
+                Ok(player.alloc_datum(Datum::Rect([0.0, 0.0, 1.0, 1.0], 0b1111)))
             },
             "fog.enabled" => Ok(player.alloc_datum(Datum::Int(0))),
             "fog.near" => Ok(player.alloc_datum(Datum::Float(1.0))),

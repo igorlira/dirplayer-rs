@@ -87,8 +87,30 @@ pub fn datum_equals(
             let l_slice: Vec<_> = l.iter().cloned().collect();
             match other {
                 List(_, r, _) => { let r_slice: Vec<_> = r.iter().cloned().collect(); seq_equals(&l_slice, &r_slice, allocator)? },
-                Point(point) => seq_equals(&l_slice, point, allocator)?, // Director treats 2-element lists and points interchangeably
-                Rect(rect) => seq_equals(&l_slice, rect, allocator)?, // Director treats 4-element lists and rects interchangeably
+                Point(vals, flags) => {
+                    // Director treats 2-element lists and points interchangeably
+                    if l_slice.len() != 2 { false }
+                    else {
+                        let lx = allocator.get_datum(&l_slice[0]);
+                        let ly = allocator.get_datum(&l_slice[1]);
+                        let px = Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(*flags, 0));
+                        let py = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
+                        datum_equals(lx, &px, allocator)? && datum_equals(ly, &py, allocator)?
+                    }
+                }
+                Rect(vals, flags) => {
+                    // Director treats 4-element lists and rects interchangeably
+                    if l_slice.len() != 4 { false }
+                    else {
+                        let mut eq = true;
+                        for i in 0..4 {
+                            let li = allocator.get_datum(&l_slice[i]);
+                            let ri = Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i));
+                            if !datum_equals(li, &ri, allocator)? { eq = false; break; }
+                        }
+                        eq
+                    }
+                }
                 _ => false
             }
         }),
@@ -155,14 +177,36 @@ pub fn datum_equals(
             _ => false
         }),
 
-        (Rect(a), o) | (o, Rect(a)) => Ok(match o {
-            Rect(b) => seq_equals(a, b, allocator)?,
+        (Rect(a_vals, a_flags), o) | (o, Rect(a_vals, a_flags)) => Ok(match o {
+            Rect(b_vals, b_flags) => {
+                let mut eq = true;
+                for i in 0..4 {
+                    let ai = Datum::inline_component_to_datum(a_vals[i], Datum::inline_is_float(*a_flags, i));
+                    let bi = Datum::inline_component_to_datum(b_vals[i], Datum::inline_is_float(*b_flags, i));
+                    if !datum_equals(&ai, &bi, allocator)? { eq = false; break; }
+                }
+                eq
+            }
             _ => false
         }),
 
-        (Point(a), o) | (o, Point(a)) => Ok(match o {
-            Point(b) => seq_equals(a, b, allocator)?,
-            List(_, list, _) if list.len() == 2 => { let list_slice: Vec<_> = list.iter().cloned().collect(); seq_equals(a, &list_slice, allocator)? }, // Director treats 2-element lists and points interchangeably
+        (Point(a_vals, a_flags), o) | (o, Point(a_vals, a_flags)) => Ok(match o {
+            Point(b_vals, b_flags) => {
+                let ax = Datum::inline_component_to_datum(a_vals[0], Datum::inline_is_float(*a_flags, 0));
+                let ay = Datum::inline_component_to_datum(a_vals[1], Datum::inline_is_float(*a_flags, 1));
+                let bx = Datum::inline_component_to_datum(b_vals[0], Datum::inline_is_float(*b_flags, 0));
+                let by = Datum::inline_component_to_datum(b_vals[1], Datum::inline_is_float(*b_flags, 1));
+                datum_equals(&ax, &bx, allocator)? && datum_equals(&ay, &by, allocator)?
+            }
+            List(_, list, _) if list.len() == 2 => {
+                // Director treats 2-element lists and points interchangeably
+                let ax = Datum::inline_component_to_datum(a_vals[0], Datum::inline_is_float(*a_flags, 0));
+                let ay = Datum::inline_component_to_datum(a_vals[1], Datum::inline_is_float(*a_flags, 1));
+                let list_slice: Vec<_> = list.iter().cloned().collect();
+                let lx = allocator.get_datum(&list_slice[0]);
+                let ly = allocator.get_datum(&list_slice[1]);
+                datum_equals(&ax, lx, allocator)? && datum_equals(&ay, ly, allocator)?
+            }
             _ => false
         }),
 
@@ -305,11 +349,11 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
         }
 
         // Point comparisons
-        (Datum::Point(left), Datum::Point(right)) => {
-            let left_x = allocator.get_datum(&left[0]).int_value()?;
-            let left_y = allocator.get_datum(&left[1]).int_value()?;
-            let right_x = allocator.get_datum(&right[0]).int_value()?;
-            let right_y = allocator.get_datum(&right[1]).int_value()?;
+        (Datum::Point(left_vals, _), Datum::Point(right_vals, _)) => {
+            let left_x = left_vals[0] as i32;
+            let left_y = left_vals[1] as i32;
+            let right_x = right_vals[0] as i32;
+            let right_y = right_vals[1] as i32;
             Ok(left_x > right_x && left_y > right_y)
         }
 
@@ -349,11 +393,11 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         (Datum::Void, Datum::Float(_)) => Ok(true),
         
         // Point comparisons
-        (Datum::Point(left), Datum::Point(right)) => {
-            let left_x = allocator.get_datum(&left[0]).int_value()?;
-            let left_y = allocator.get_datum(&left[1]).int_value()?;
-            let right_x = allocator.get_datum(&right[0]).int_value()?;
-            let right_y = allocator.get_datum(&right[1]).int_value()?;
+        (Datum::Point(left_vals, _), Datum::Point(right_vals, _)) => {
+            let left_x = left_vals[0] as i32;
+            let left_y = left_vals[1] as i32;
+            let right_x = right_vals[0] as i32;
+            let right_y = right_vals[1] as i32;
             Ok(left_x < right_x && left_y < right_y)
         }
 
@@ -401,17 +445,11 @@ pub fn datum_is_zero(datum: &Datum, datums: &DatumAllocator) -> Result<bool, Scr
         Datum::Void => true,
         Datum::ScriptInstanceRef(_) => false,
         Datum::Null => true,
-        Datum::Point(arr) => {
-            let x = datums.get_datum(&arr[0]).int_value()?;
-            let y = datums.get_datum(&arr[1]).int_value()?;
-            x == 0 && y == 0
+        Datum::Point(vals, _) => {
+            vals[0] as i32 == 0 && vals[1] as i32 == 0
         }
-        Datum::Rect(arr) => {
-            let l = datums.get_datum(&arr[0]).int_value()?;
-            let t = datums.get_datum(&arr[1]).int_value()?;
-            let r = datums.get_datum(&arr[2]).int_value()?;
-            let b = datums.get_datum(&arr[3]).int_value()?;
-            l == 0 && t == 0 && r == 0 && b == 0
+        Datum::Rect(vals, _) => {
+            vals[0] as i32 == 0 && vals[1] as i32 == 0 && vals[2] as i32 == 0 && vals[3] as i32 == 0
         }
         _ => {
             warn!("datum_is_zero not supported for type: {}", datum.type_str());
