@@ -1,12 +1,10 @@
 use async_std::channel::Receiver;
 use log::{warn, debug};
-use std::collections::HashSet;
 
 use crate::{
     director::lingo::datum::{Datum, VarRef},
     player::{
         handlers::datum_handlers::player_call_datum_handler, player_is_playing, reserve_player_mut,
-        Score,
     },
 };
 
@@ -539,40 +537,23 @@ pub async fn player_dispatch_event_beginsprite(
 
             // Collect filmloop sprites
             let active_filmloops = player.get_active_filmloop_scores();
-            for (member_ref, filmloop_score) in active_filmloops {
-                // Get the filmloop's current frame
-                let filmloop_current_frame = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
-                    Some(member) => {
-                        if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                            film_loop.current_frame
-                        } else {
-                            continue; // Not a filmloop, skip
-                        }
+            for (member_ref, filmloop_current_frame, filmloop_score) in active_filmloops {
+                for channel_number in filmloop_score.active_channel_numbers_for_frame(filmloop_current_frame) {
+                    let Some(channel) = filmloop_score.channels.get(channel_number) else {
+                        continue;
+                    };
+                    if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered {
+                        continue;
                     }
-                    None => continue, // Member not found, skip
-                };
+                    if channel.sprite.script_instance_list.iter().any(|script_ref| {
+                        player
+                            .allocator
+                            .get_script_instance_entry(script_ref.id())
+                            .map_or(true, |entry| entry.script_instance.begin_sprite_called)
+                    }) {
+                        continue;
+                    }
 
-                let active_filmloop_channels: HashSet<u32> = filmloop_score.sprite_spans
-                    .iter()
-                    .filter(|span| Score::is_span_in_frame(span, filmloop_current_frame))
-                    .map(|span| span.channel_number as u32)
-                    .collect();
-
-                let filtered_filmloop_channels: Vec<_> = filmloop_score.channels.iter()
-                    .filter(|channel| !channel.sprite.script_instance_list.is_empty())
-                    .filter(|channel| channel.sprite.entered)
-                    .filter(|channel| active_filmloop_channels.contains(&(channel.number as u32)))
-                    .filter(|channel| {
-                        channel.sprite.script_instance_list.iter().all(|script_ref| {
-                            player
-                                .allocator
-                                .get_script_instance_entry(script_ref.id())
-                                .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
-                        })
-                    })
-                    .collect();
-
-                for channel in filtered_filmloop_channels {
                     let instances = channel.sprite.script_instance_list.clone();
 
                     // Filmloop sprites go into sprite_instances (they don't have frame behaviors)
@@ -800,28 +781,12 @@ pub async fn dispatch_event_to_all_behaviors(
 
         // Collect filmloop sprites
         let active_filmloops = player.get_active_filmloop_scores();
-        for (member_ref, filmloop_score) in active_filmloops {
-            // Get the filmloop's current frame
-            let filmloop_current_frame = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
-                Some(member) => {
-                    if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                        film_loop.current_frame
-                    } else {
-                        continue; // Not a filmloop, skip
-                    }
-                }
-                None => continue, // Member not found, skip
-            };
-
-            let active_filmloop_channels: HashSet<u32> = filmloop_score.sprite_spans
-                .iter()
-                .filter(|span| Score::is_span_in_frame(span, filmloop_current_frame))
-                .map(|span| span.channel_number as u32)
-                .collect();
-
-            for channel in filmloop_score.channels.iter() {
-                if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered ||
-                    !active_filmloop_channels.contains(&(channel.number as u32)) {
+        for (member_ref, filmloop_current_frame, filmloop_score) in active_filmloops {
+            for channel_number in filmloop_score.active_channel_numbers_for_frame(filmloop_current_frame) {
+                let Some(channel) = filmloop_score.channels.get(channel_number) else {
+                    continue;
+                };
+                if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered {
                     continue;
                 }
                 let behaviors = channel.sprite.script_instance_list.clone();

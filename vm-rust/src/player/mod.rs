@@ -732,10 +732,10 @@ impl DirPlayer {
     }
 
     /// Get all active filmloop scores with their member references.
-    /// Returns a vector of tuples containing (member_ref, score_ref).
+    /// Returns a vector of tuples containing (member_ref, current_frame, score_ref).
     /// Only includes filmloops that are currently visible on stage.
     /// Deduplicates filmloops - each unique filmloop is only returned once even if used in multiple sprites.
-    pub fn get_active_filmloop_scores(&self) -> Vec<(CastMemberRef, &score::Score)> {
+    pub fn get_active_filmloop_scores(&self) -> Vec<(CastMemberRef, u32, &score::Score)> {
         let mut active_filmloops = Vec::new();
         let mut seen_members = std::collections::HashSet::new();
 
@@ -763,7 +763,11 @@ impl DirPlayer {
             if member_type == cast_member::CastMemberTypeId::FilmLoop {
                 if let Some(member) = self.movie.cast_manager.find_member_by_ref(&member_ref) {
                     if let cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                        active_filmloops.push((member_ref.clone(), &film_loop.score));
+                        active_filmloops.push((
+                            member_ref.clone(),
+                            film_loop.current_frame,
+                            &film_loop.score,
+                        ));
                     }
                 }
             }

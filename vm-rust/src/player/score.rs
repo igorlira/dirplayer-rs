@@ -243,7 +243,7 @@ impl Score {
         self.invalidate_render_channel_cache();
     }
 
-    fn active_channel_numbers_for_frame(&self, frame_num: u32) -> Vec<usize> {
+    pub fn active_channel_numbers_for_frame(&self, frame_num: u32) -> Vec<usize> {
         if let Some(cached) = self.active_channels_cache.borrow().get(&frame_num) {
             return cached.clone();
         }

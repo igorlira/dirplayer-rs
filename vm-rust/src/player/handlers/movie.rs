@@ -533,7 +533,7 @@ impl MovieHandlers {
 
             // Also collect receivers from filmloop scores
             let active_filmloops = player.get_active_filmloop_scores();
-            for (_, filmloop_score) in active_filmloops {
+            for (_, _, filmloop_score) in active_filmloops {
                 let filmloop_receivers = filmloop_score.get_active_script_instance_list();
                 receivers.extend(filmloop_receivers);
             }
