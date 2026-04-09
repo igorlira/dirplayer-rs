@@ -283,6 +283,7 @@ pub struct DirPlayer {
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub stage_dirty: bool, // Set when any sprite property changes; cleared after render
+    pub preview_dirty: bool, // Set when preview member/settings change; cleared after preview render
     pub has_frame_changed_in_go: bool,
     pub go_same_frame: bool,
     pub go_direction: u8,
@@ -457,6 +458,7 @@ impl DirPlayer {
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             stage_dirty: true,
+            preview_dirty: true,
             has_frame_changed_in_go: false,
             go_same_frame: false,
             go_direction: 0,

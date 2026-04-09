@@ -695,33 +695,28 @@ fn render_filmloop_from_channel_data(
                     .map(|(channel_idx, (frame_idx, data))| (frame_idx, channel_idx, data))
                     .collect();
 
-                // Calculate total frames from multiple sources:
-                // 1. channel_initialization_data max frame index
-                let init_data_max = film_loop_member.score.channel_initialization_data
-                    .iter()
-                    .map(|(frame_idx, _, _)| *frame_idx + 1)
-                    .max()
-                    .unwrap_or(1);
+                // Use cached total_frames or compute and cache it
+                let total_frames = film_loop_member.cached_total_frames.unwrap_or_else(|| {
+                    let init_data_max = film_loop_member.score.channel_initialization_data
+                        .iter()
+                        .map(|(frame_idx, _, _)| *frame_idx + 1)
+                        .max()
+                        .unwrap_or(1);
+                    let span_max = film_loop_member.score.sprite_spans
+                        .iter()
+                        .map(|span| span.end_frame)
+                        .max()
+                        .unwrap_or(1);
+                    let keyframes_max = film_loop_member.score.keyframes_cache.values()
+                        .filter_map(|channel_kf| channel_kf.path.as_ref())
+                        .flat_map(|path_kf| path_kf.keyframes.iter())
+                        .map(|kf| kf.frame)
+                        .max()
+                        .unwrap_or(1);
+                    init_data_max.max(span_max).max(keyframes_max)
+                });
 
-                // 2. sprite_spans end frames
-                let span_max = film_loop_member.score.sprite_spans
-                    .iter()
-                    .map(|span| span.end_frame)
-                    .max()
-                    .unwrap_or(1);
-
-                // 3. path keyframes max frame
-                let keyframes_max = film_loop_member.score.keyframes_cache.values()
-                    .filter_map(|channel_kf| channel_kf.path.as_ref())
-                    .flat_map(|path_kf| path_kf.keyframes.iter())
-                    .map(|kf| kf.frame)
-                    .max()
-                    .unwrap_or(1);
-
-                // Use the maximum of all sources
-                let total_frames = init_data_max.max(span_max).max(keyframes_max);
-
-                // Clone keyframes cache for path interpolation
+                // Arc clone is O(1) - just a reference count bump
                 let keyframes_cache = film_loop_member.score.keyframes_cache.clone();
 
                 (frame, data, total_frames, keyframes_cache)
@@ -1427,19 +1422,14 @@ pub fn render_score_to_bitmap_with_offset(
 
         match &member.member_type {
             CastMemberType::Bitmap(bitmap_member) => {
-                let sprite_rect = {
-                    let sprite =
-                        get_score_sprite(&player.movie, score_source, channel_num).unwrap();
-                    let rect = get_concrete_sprite_rect(player, sprite);
-
-                    rect
-                };
+                let sprite =
+                    get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                let sprite_rect = get_concrete_sprite_rect(player, sprite);
                 let logical_rect = sprite_rect.clone();
 
                 // For ink 9 (Mask), find the mask bitmap BEFORE mutable borrow of bitmap_manager
-                let sprite_for_mask = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
-                let ink9_mask = if sprite_for_mask.ink == 9 {
-                    sprite_for_mask.member.as_ref().and_then(|mref| {
+                let ink9_mask = if sprite.ink == 9 {
+                    sprite.member.as_ref().and_then(|mref| {
                         let mask_ref = CastMemberRef {
                             cast_lib: mref.cast_lib,
                             cast_member: mref.cast_member + 1,
@@ -1466,7 +1456,6 @@ pub fn render_score_to_bitmap_with_offset(
                     continue;
                 }
                 let src_bitmap = sprite_bitmap.unwrap();
-                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                 let mask = if should_matte_sprite(sprite.ink as u32) {
                     if src_bitmap.matte.is_none() {
                         src_bitmap.create_matte(&palettes);
@@ -1538,7 +1527,7 @@ pub fn render_score_to_bitmap_with_offset(
                     is_text_rendering: false,
                     rotation: sprite.rotation,
                     skew: sprite.skew,
-                    sprite: Some(&sprite.clone()),
+                    sprite: Some(sprite),
                     mask_offset: (0, 0),
                     original_dst_rect: Some(logical_rect),
                     ink9_mask_bitmap: ink9_mask.as_ref(),
@@ -2402,7 +2391,7 @@ pub fn render_score_to_bitmap_with_offset(
                             is_text_rendering: false,
                             rotation: sprite.rotation,
                             skew: sprite.skew,
-                            sprite: Some(&sprite.clone()),
+                            sprite: Some(sprite),
                             mask_offset: (0, 0),
                     original_dst_rect: Some(dst_rect.clone()),
                     ink9_mask_bitmap: None,
@@ -2969,6 +2958,9 @@ pub fn player_set_preview_member_ref(cast_lib: i32, cast_num: i32) -> Result<(),
             }));
         }
     });
+    reserve_player_mut(|player| {
+        player.preview_dirty = true;
+    });
     Ok(())
 }
 
@@ -2979,6 +2971,9 @@ pub fn player_set_preview_font_size(size: u16) -> Result<(), JsValue> {
         if let Some(dynamic) = renderer_lock {
             dynamic.set_preview_font_size(if size > 0 { Some(size) } else { None });
         }
+    });
+    reserve_player_mut(|player| {
+        player.preview_dirty = true;
     });
     Ok(())
 }
@@ -3245,10 +3240,15 @@ async fn run_draw_loop() {
             last_frame_ms = Local::now().timestamp_millis();
             with_renderer_mut(|renderer_lock| {
                 if let Some(renderer) = renderer_lock {
-                    if !was_frame_drawn_recently(frame_interval) {
+                    if player.stage_dirty && !was_frame_drawn_recently(frame_interval) {
                         renderer.draw_frame(&mut player);
+                        player.stage_dirty = false;
+                        mark_frame_drawn();
                     }
-                    renderer.draw_preview_frame(&mut player);
+                    if player.preview_dirty {
+                        renderer.draw_preview_frame(&mut player);
+                        player.preview_dirty = false;
+                    }
                 }
             });
         }

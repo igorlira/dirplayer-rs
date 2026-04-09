@@ -1,4 +1,4 @@
-use std::{cell::RefCell, cmp::max};
+use std::{cell::RefCell, cmp::max, sync::Arc};
 
 use itertools::Itertools;
 use log::debug;
@@ -105,7 +105,7 @@ pub struct Score {
     pub palette_channel_data: Vec<(u32, i16, i16)>,
     pub frame_labels: Vec<FrameLabel>,
     pub sound_channel_triggered: HashMap<u16, u32>,
-    pub keyframes_cache: HashMap<u16, ChannelKeyframes>,
+    pub keyframes_cache: Arc<HashMap<u16, ChannelKeyframes>>,
     /// Sprite detail behaviors indexed by spriteListIdx (D6+)
     pub sprite_details: HashMap<u32, crate::director::chunks::score::SpriteDetailInfo>,
     /// Track the last frame where we cleared sound triggers (to prevent double-clearing)
@@ -220,7 +220,7 @@ impl Score {
             palette_channel_data: vec![],
             sprite_spans: vec![],
             sound_channel_triggered: HashMap::new(),
-            keyframes_cache: HashMap::new(),
+            keyframes_cache: Arc::new(HashMap::new()),
             sprite_details: HashMap::new(),
             last_sound_clear_frame: None,
             needs_per_frame_updates: false,
@@ -2439,10 +2439,10 @@ impl Score {
         self.sound_channel_data = score_chunk.frame_data.sound_channel_data.clone();
         self.tempo_channel_data = score_chunk.frame_data.tempo_channel_data.clone();
         self.palette_channel_data = score_chunk.frame_data.palette_channel_data.clone();
-        self.keyframes_cache = build_all_keyframes_cache(
+        self.keyframes_cache = Arc::new(build_all_keyframes_cache(
             &score_chunk.frame_data.frame_channel_data,
             &score_chunk.frame_intervals
-        );
+        ));
 
         for (primary, secondary) in &score_chunk.frame_intervals {
             let is_frame_script_or_sprite_script =

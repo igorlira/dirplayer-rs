@@ -571,6 +571,8 @@ pub struct FilmLoopMember {
     /// The bounding rectangle encompassing all sprites in the filmloop.
     /// Used to translate sprite coordinates when rendering.
     pub initial_rect: super::geometry::IntRect,
+    /// Cached total frame count (computed once from channel_initialization_data, sprite_spans, and keyframes).
+    pub cached_total_frames: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -3870,12 +3872,24 @@ impl CastMember {
                         score_chunk.frame_data.frame_channel_data.len()
                     );
 
+                    let total_frames = {
+                        let init_max = score.channel_initialization_data.iter()
+                            .map(|(f, _, _)| *f + 1).max().unwrap_or(1);
+                        let span_max = score.sprite_spans.iter()
+                            .map(|s| s.end_frame).max().unwrap_or(1);
+                        let kf_max = score.keyframes_cache.values()
+                            .filter_map(|kf| kf.path.as_ref())
+                            .flat_map(|p| p.keyframes.iter())
+                            .map(|kf| kf.frame).max().unwrap_or(1);
+                        init_max.max(span_max).max(kf_max)
+                    };
                     CastMemberType::FilmLoop(FilmLoopMember {
                         info: film_loop_info.clone(),
                         score_chunk: score_chunk.clone(),
                         score,
                         current_frame: 1, // Start at frame 1
                         initial_rect,
+                        cached_total_frames: Some(total_frames),
                     })
                 } else {
                     warn!("FilmLoop {} has no valid score chunk, creating empty film loop", number);
@@ -3895,6 +3909,7 @@ impl CastMember {
                         score: Score::empty(),
                         current_frame: 1,
                         initial_rect: super::geometry::IntRect { left: 0, top: 0, right: 0, bottom: 0 },
+                        cached_total_frames: None,
                     })
                 }
             }
