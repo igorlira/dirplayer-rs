@@ -3451,6 +3451,8 @@ pub async fn run_single_frame() -> (bool, bool) {
                     }
                 }
             }
+            // Filmloop frame changes require a redraw
+            player.stage_dirty = true;
         });
     }
 

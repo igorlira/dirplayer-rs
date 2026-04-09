@@ -3240,10 +3240,9 @@ async fn run_draw_loop() {
             last_frame_ms = Local::now().timestamp_millis();
             with_renderer_mut(|renderer_lock| {
                 if let Some(renderer) = renderer_lock {
-                    if player.stage_dirty && !was_frame_drawn_recently(frame_interval) {
+                    if (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
                         renderer.draw_frame(&mut player);
                         player.stage_dirty = false;
-                        mark_frame_drawn();
                     }
                     if player.preview_dirty {
                         renderer.draw_preview_frame(&mut player);
