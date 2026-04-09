@@ -4391,15 +4391,95 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let bitmap_width = bitmap_member.info.width as i32;
             let bitmap_height = bitmap_member.info.height as i32;
 
-            // Always use sprite dimensions for rendering. The bitmap is stretched
-            // to fit (ScummVM: createWidget uses getBbox which returns _width/_height).
-            // The stretch flag only affects whether setCast resets dimensions on
-            // member change, not the rendering itself.
-            let (sprite_width, sprite_height) = if sprite.width > 0 && sprite.height > 0 {
-                (sprite.width, sprite.height)
+            // Determine the actual dimensions to use for the sprite rectangle.
+            //
+            // Priority:
+            //  1. has_size_tweened  → tween is authoritative, use sprite dims
+            //  2. bitmap_size_owned_by_sprite → bitmap member changed, sprite dims
+            //     are stale from the previous member, use bitmap dims
+            //  3. has_size_changed  → Score or Lingo explicitly set dimensions,
+            //     trust them (the old simple behaviour that covers the majority)
+            //  4. Neither flag set  → dimensions are inherited/default and may be
+            //     an approximate bounding box. Apply heuristics to decide.
+
+            let (sprite_width, sprite_height, _size_path) = if sprite.has_size_tweened {
+                (sprite.width, sprite.height, "TWEENED")
+            } else if sprite.bitmap_size_owned_by_sprite
+                && bitmap_width >= 10 && bitmap_height >= 10 {
+                (bitmap_width, bitmap_height, "BITMAP_OWNED")
+            } else if sprite.has_size_changed {
+                // Score or Lingo explicitly set dimensions — but Score can still
+                // store approximate bounding box values. Detect bbox: sprite dims
+                // differ from bitmap AND are not an exact proportional scale.
+                // An exact proportional scale (e.g. 2× in both axes) is intentional;
+                // any non-proportional difference means the Score approximated.
+                let is_bbox = if bitmap_width >= 10 && bitmap_height >= 10
+                    && sprite.width > 0 && sprite.height > 0
+                    && (sprite.width != bitmap_width || sprite.height != bitmap_height)
+                    // Only consider bbox if sprite isn't significantly smaller than
+                    // bitmap in either dimension. A sprite shrunk below 80% of the
+                    // bitmap is an intentional resize, not a Score bounding box.
+                    && 5 * sprite.width >= 4 * bitmap_width
+                    && 5 * sprite.height >= 4 * bitmap_height
+                {
+                    sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64
+                } else {
+                    false
+                };
+                if is_bbox {
+                    (bitmap_width, bitmap_height, "EXPLICIT_BBOX")
+                } else if sprite.width > 0 && sprite.height > 0 {
+                    (sprite.width, sprite.height, "EXPLICIT_SPRITE")
+                } else {
+                    (bitmap_width, bitmap_height, "EXPLICIT_FALLBACK")
+                }
             } else {
-                (bitmap_width, bitmap_height)
+                // No explicit size set — apply heuristics.
+                let aspect_ratio_matches = if bitmap_width > 0 && bitmap_height > 0
+                    && sprite.width > 0 && sprite.height > 0
+                {
+                    let scale_x = sprite.width as f32 / bitmap_width as f32;
+                    let scale_y = sprite.height as f32 / bitmap_height as f32;
+                    let ratio = if scale_x > scale_y { scale_x / scale_y } else { scale_y / scale_x };
+                    ratio <= 1.1
+                } else {
+                    true
+                };
+
+                let intentionally_stretched = sprite.width > 0 && sprite.height > 0
+                    && bitmap_width > 0 && bitmap_height > 0
+                    && sprite.width > bitmap_width * 3 / 2
+                    && sprite.height > bitmap_height * 3 / 2
+                    && {
+                        let a = sprite.width as i64 * bitmap_height as i64;
+                        let b = sprite.height as i64 * bitmap_width as i64;
+                        2 * a < 5 * b && 2 * b < 5 * a
+                    };
+
+                if !aspect_ratio_matches && bitmap_width >= 10 && bitmap_height >= 10 {
+                    if intentionally_stretched {
+                        (sprite.width, sprite.height, "H_STRETCHED")
+                    } else {
+                        (bitmap_width, bitmap_height, "H_ASPECT_MISMATCH")
+                    }
+                } else if (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
+                    && bitmap_width >= 10 && bitmap_height >= 10 {
+                    (bitmap_width, bitmap_height, "H_BITMAP_LARGER")
+                } else if (sprite.width != bitmap_width || sprite.height != bitmap_height)
+                    && (sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64)
+                    && bitmap_width >= 10 && bitmap_height >= 10 {
+                    (bitmap_width, bitmap_height, "H_NON_PROPORTIONAL")
+                } else if sprite.width > 0 && sprite.height > 0 {
+                    (sprite.width, sprite.height, "H_DEFAULT_SPRITE")
+                } else {
+                    (bitmap_width, bitmap_height, "H_DEFAULT_BITMAP")
+                }
             };
+            debug!("[BITMAP_RECT] sprite#{} path={} result={}x{} sprite={}x{} bitmap={}x{} flags(tweened={} owned={} changed={})",
+                sprite.number, _size_path, sprite_width, sprite_height,
+                sprite.width, sprite.height, bitmap_width, bitmap_height,
+                sprite.has_size_tweened, sprite.bitmap_size_owned_by_sprite, sprite.has_size_changed);
+
             // If centerRegPoint is enabled, set reg point to bitmap center.
             // Use bitmap coordinates here so the subsequent scaling step
             // correctly converts to sprite coordinates (sprite_width/2).
@@ -4409,7 +4489,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             }
 
             // Step 1: Calculate scaled registration offset
-            // The registration point is scaled proportionally to sprite dimensions.
+            // The registration point needs to be scaled proportionally when sprite is stretched.
             let scaled_reg_x = if bitmap_width > 0 {
                 ((reg_x as i32 * sprite_width) as f32 / bitmap_width as f32).round() as i32
             } else {
