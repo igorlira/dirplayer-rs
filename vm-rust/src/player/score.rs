@@ -4038,7 +4038,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 // Invalidate the cached scriptInstanceList so the next
                 // getter call rebuilds it from the updated Vec.
                 player.remove_script_instance_list_cache(sprite_id);
-                player.invalidate_behavior_channel_cache();
+                player.refresh_stage_behavior_channel_cache_entry(sprite_id);
                 let value_ref = player.alloc_datum(Datum::Int(sprite_id as i32));
                 for instance_ref in instance_refs {
                     script_set_prop(
@@ -4170,7 +4170,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         }
         if prop_name.eq_ignore_ascii_case("puppet") {
             reserve_player_mut(|player| {
-                player.invalidate_behavior_channel_cache();
+                player.refresh_stage_behavior_channel_cache_entry(sprite_id);
             });
         }
         if prop_name.eq_ignore_ascii_case("member")

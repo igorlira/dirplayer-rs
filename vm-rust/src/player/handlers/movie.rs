@@ -429,7 +429,7 @@ impl MovieHandlers {
                     sprite.member = None;
                     sprite.visible = true;
                     player.movie.score.invalidate_render_channel_cache();
-                    player.invalidate_behavior_channel_cache();
+                    player.refresh_stage_behavior_channel_cache_entry(sprite_number as i16);
                     player.invalidate_active_stage_filmloop_cache();
                     return Ok(DatumRef::Void);
                 }
@@ -438,7 +438,7 @@ impl MovieHandlers {
             let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
             sprite.puppet = is_puppet;
             player.movie.score.invalidate_render_channel_cache();
-            player.invalidate_behavior_channel_cache();
+            player.refresh_stage_behavior_channel_cache_entry(sprite_number as i16);
             player.invalidate_active_stage_filmloop_cache();
             Ok(DatumRef::Void)
         })

@@ -1097,7 +1097,7 @@ impl DirPlayer {
             let generation = self.script_instance_list_generation.entry(sprite_id).or_insert(0);
             *generation = generation.wrapping_add(1);
             self.script_instance_list_ids_cache.remove(&sprite_id);
-            self.invalidate_behavior_channel_cache();
+            self.refresh_stage_behavior_channel_cache_entry(sprite_id);
         }
     }
 
@@ -1160,6 +1160,36 @@ impl DirPlayer {
             .is_some_and(|cached_ref| {
                 matches!(self.get_datum(cached_ref), Datum::List(_, items, _) if !items.is_empty())
             })
+    }
+
+    pub fn refresh_stage_behavior_channel_cache_entry(&mut self, sprite_id: i16) {
+        let channel_number = sprite_id as usize;
+        let should_include = self
+            .movie
+            .score
+            .channels
+            .get(channel_number)
+            .is_some_and(|channel| {
+                (channel.sprite.entered || channel.sprite.puppet)
+                    && self.sprite_has_script_instance_ids(
+                        sprite_id,
+                        &channel.sprite.script_instance_list,
+                    )
+            });
+
+        let Some((_, _, channels)) = self.active_stage_behavior_channels_cache.as_mut() else {
+            return;
+        };
+
+        match channels.binary_search(&channel_number) {
+            Ok(index) if !should_include => {
+                channels.remove(index);
+            }
+            Err(index) if should_include => {
+                channels.insert(index, channel_number);
+            }
+            _ => {}
+        }
     }
 
     pub fn active_stage_behavior_channels(&mut self) -> Vec<usize> {
