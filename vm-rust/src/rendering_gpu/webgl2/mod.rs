@@ -465,6 +465,7 @@ impl WebGL2Renderer {
                 self.shader_manager.clear_active();
             }
         }
+
     }
 
     /// Draw the custom cursor sprite at the mouse position.
@@ -2106,6 +2107,7 @@ impl WebGL2Renderer {
                             sprite_rect.right, sprite_rect.top + actual_h,
                         );
                     }
+
                     cached.texture.clone()
                 } else {
                     // Render text to a bitmap and upload as texture
@@ -3581,12 +3583,14 @@ impl WebGL2Renderer {
         // EXCEPTION: For 32-bit bitmaps with use_alpha=true, we use the embedded alpha channel
         // instead of computing a matte (matching drawing.rs lines 1268-1269)
         if Self::should_matte_sprite(ink) {
-            let palettes = player.movie.cast_manager.palettes();
-            if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(image_ref) {
-                // Don't create matte for 32-bit bitmaps with embedded alpha
-                // Use original_bit_depth since bit_depth can change during execution
-                let use_embedded_alpha = bitmap.original_bit_depth == 32 && bitmap.use_alpha;
-                if bitmap.matte.is_none() && !use_embedded_alpha {
+            // Check if matte needs creating with immutable borrow first,
+            // to avoid bumping bitmap version unnecessarily (get_bitmap_mut increments version)
+            let needs_matte = player.bitmap_manager.get_bitmap(image_ref)
+                .map(|b| b.matte.is_none() && !(b.original_bit_depth == 32 && b.use_alpha))
+                .unwrap_or(false);
+            if needs_matte {
+                let palettes = player.movie.cast_manager.palettes();
+                if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(image_ref) {
                     bitmap.create_matte(&palettes);
                 }
             }
