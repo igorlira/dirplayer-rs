@@ -694,40 +694,30 @@ impl DirPlayer {
             .end_sprites(ScoreRef::Stage, self.movie.current_frame, next_frame).await;
         all_ended_sprite_nums.extend(ended_sprite_nums.iter().map(|&x| (ScoreRef::Stage, x)));
 
-        for channel in self.movie.score.channels.iter() {
-            let member_ref = channel.sprite.member.as_ref();
-            let member_type = member_ref
-                .and_then(|x| self.movie.cast_manager.find_member_by_ref(&x))
-                .map(|x| x.member_type.member_type_id());
+        let active_filmloops = self.active_stage_filmloop_member_refs();
+        for member_ref in active_filmloops {
+            let score_ref = ScoreRef::FilmLoop(member_ref.clone());
+            let film_loop = match self
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+                .and_then(|m| m.member_type.as_film_loop_mut())
+            {
+                Some(fl) => fl,
+                None => continue,
+            };
 
-            match member_type {
-                Some(CastMemberTypeId::FilmLoop) => {
-                    let score_ref = ScoreRef::FilmLoop(member_ref.unwrap().clone());
-                    let film_loop = match self
-                        .movie
-                        .cast_manager
-                        .find_mut_member_by_ref(member_ref.unwrap())
-                        .and_then(|m| m.member_type.as_film_loop_mut())
-                    {
-                        Some(fl) => fl,
-                        None => continue,
-                    };
+            let filmloop_current_frame = film_loop.current_frame;
+            let filmloop_next_frame = filmloop_current_frame + 1;
 
-                    // Calculate filmloop's next frame
-                    let filmloop_current_frame = film_loop.current_frame;
-                    let filmloop_next_frame = filmloop_current_frame + 1;
-
-                    let ended_sprite_nums = film_loop
-                        .score
-                        .end_sprites(score_ref.clone(), filmloop_current_frame, filmloop_next_frame).await;
-                    all_ended_sprite_nums.extend(
-                        ended_sprite_nums
-                            .iter()
-                            .map(|&x| (score_ref.clone(), x)),
-                    );
-                }
-                _ => {}
-            }
+            let ended_sprite_nums = film_loop
+                .score
+                .end_sprites(score_ref.clone(), filmloop_current_frame, filmloop_next_frame).await;
+            all_ended_sprite_nums.extend(
+                ended_sprite_nums
+                    .iter()
+                    .map(|&x| (score_ref.clone(), x)),
+            );
         }
         // for sprite_num in ended_sprite_nums.iter() {
         //   let sprite = self.movie.score.get_sprite_mut(*sprite_num as i16);
@@ -2264,7 +2254,6 @@ impl DirPlayer {
                 vec![]
             };
             
-            // Mark ended sprites as exited
             if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                 if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                     for sprite_num in ended_sprites {
@@ -2272,26 +2261,8 @@ impl DirPlayer {
                             sprite.exited = true;
                         }
                     }
-                }
-            }
-            
-            // Update frame number
-            if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                     film_loop.current_frame = new_frame;
-                }
-            }
-            
-            // Begin new sprites
-            if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                     film_loop.score.begin_sprites(score_ref.clone(), new_frame);
-                }
-            }
-            
-            // CRITICAL FIX: Apply keyframe/tween data for the new frame
-            if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                     film_loop.score.apply_tween_modifiers(new_frame);
                 }
             }
