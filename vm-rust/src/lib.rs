@@ -20,6 +20,7 @@ pub mod director;
 
 use player::{
     cast_lib::{cast_member_ref, CastMemberRef},
+    cast_member::CastMemberType,
     commands::{player_dispatch, PlayerVMCommand},
     datum_ref::DatumId,
     eval::eval_lingo_command,
@@ -326,6 +327,21 @@ pub fn player_get_sprite_at(x: f64, y: f64) -> i32 {
         get_sprite_at(player, x as i32, y as i32, false)
             .map(|n| n as i32)
             .unwrap_or(0)
+    })
+}
+
+/// Check if a sprite is an editable field member (for mobile keyboard focus)
+#[wasm_bindgen]
+pub fn is_sprite_editable_field(sprite_id: i32) -> bool {
+    reserve_player_ref(|player| {
+        let sprite = player.movie.score.get_sprite(sprite_id as i16);
+        let member = sprite
+            .and_then(|s| s.member.as_ref())
+            .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
+        member.map_or(false, |m| match &m.member_type {
+            CastMemberType::Field(f) => f.editable,
+            _ => false,
+        })
     })
 }
 

@@ -979,6 +979,9 @@ impl DirPlayer {
         // String constants
         let return_datum = self.alloc_datum(Datum::String("\r".to_string()));
         self.globals.insert("RETURN".to_string(), return_datum);
+
+        let enter_datum = self.alloc_datum(Datum::String("\x03".to_string()));
+        self.globals.insert("ENTER".to_string(), enter_datum);
         
         let quote_datum = self.alloc_datum(Datum::String("\"".to_string()));
         self.globals.insert("QUOTE".to_string(), quote_datum);
