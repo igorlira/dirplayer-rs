@@ -480,7 +480,7 @@ pub async fn player_dispatch_event_beginsprite(
     handler_name: &str,
     args: &Vec<DatumRef>
 ) -> Result<Vec<(ScoreRef, u32)>, ScriptError> {
-    let (mut sprite_instances, mut frame_instances, all_channels) =
+    let (sprite_instances, frame_instances, all_channels) =
         reserve_player_mut(|player| {
             let mut sprite_instances: Vec<(ScoreRef, usize, ScriptInstanceRef)> = Vec::new();
             let mut frame_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
@@ -489,35 +489,52 @@ pub async fn player_dispatch_event_beginsprite(
             // Collect stage sprites - include all entered sprites with behaviors,
             // not just those in sprite_spans. Sprites initialized from channel_initialization_data
             // (D6+ path) also need beginSprite dispatched.
-            let filtered_channels: Vec<_> = player.movie.score.channels.iter()
-                .filter(|channel| !channel.sprite.script_instance_list.is_empty())
-                .filter(|channel| channel.sprite.entered)
-                .filter(|channel| {
-                    channel.sprite.script_instance_list.iter().all(|script_ref| {
-                        player
-                            .allocator
-                            .get_script_instance_entry(script_ref.id())
-                            .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
+            for channel_number in player.active_stage_behavior_channels() {
+                let Some((number, entered, fallback)) = player
+                    .movie
+                    .score
+                    .channels
+                    .get(channel_number)
+                    .map(|channel| {
+                        (
+                            channel.number,
+                            channel.sprite.entered,
+                            channel.sprite.script_instance_list.clone(),
+                        )
                     })
-                })
-                .collect();
+                else {
+                    continue;
+                };
 
-            for channel in filtered_channels {
-                let instances = channel.sprite.script_instance_list.clone();
+                if !entered {
+                    continue;
+                }
 
-                if channel.number == 0 {
+                let instances = player.get_sprite_script_instance_ids(number as i16, fallback.as_slice());
+                if instances.is_empty() || instances.iter().any(|script_ref| {
+                    player
+                        .allocator
+                        .get_script_instance_entry(script_ref.id())
+                        .map_or(true, |entry| entry.script_instance.begin_sprite_called)
+                }) {
+                    continue;
+                }
+
+                if number == 0 {
                     // Frame behavior (channel 0)
                     frame_instances.extend(
-                        instances.into_iter().map(|inst| (channel.number, inst))
+                        instances.into_iter().map(|inst| (number, inst))
                     );
                 } else {
                     // Sprite behaviors (channel > 0) - include ScoreRef::Stage
                     sprite_instances.extend(
-                        instances.into_iter().map(|inst| (ScoreRef::Stage, channel.number, inst))
+                        instances
+                            .into_iter()
+                            .map(|inst| (ScoreRef::Stage, number, inst))
                     );
                 }
 
-                all_channels.push((ScoreRef::Stage, channel.number as u32));
+                all_channels.push((ScoreRef::Stage, number as u32));
             }
 
             // Collect filmloop sprites
@@ -742,65 +759,42 @@ pub async fn dispatch_event_to_all_behaviors(
         return;
     }
     // Include ScoreRef to track which score context each sprite belongs to
-    let (sprite_behaviors, frame_behaviors) = reserve_player_mut(|player| {
+    let (sprite_behaviors, _frame_behaviors) = reserve_player_mut(|player| {
         let mut sprites: Vec<(ScoreRef, usize, Vec<ScriptInstanceRef>)> = Vec::new();
         let mut frames = Vec::new();
 
-        // Collect stage sprites - include all entered sprites with behaviors,
-        // not just those in sprite_spans. Sprites initialized from channel_initialization_data
-        // (D6+ path) also need event dispatch.
-        if handler_name == "exitFrame" || handler_name == "beginSprite" {
-            let mut total_channels = 0;
-            let mut with_behaviors = 0;
-            let mut entered_with_behaviors = 0;
-            for channel in player.movie.score.channels.iter() {
-                total_channels += 1;
-                let has_internal = !channel.sprite.script_instance_list.is_empty();
-                let has_cached = player.script_instance_list_cache.contains_key(&(channel.number as i16));
-                if has_internal || has_cached {
-                    with_behaviors += 1;
-                    if channel.sprite.entered || channel.sprite.puppet {
-                        entered_with_behaviors += 1;
-                    }
-                }
-            }
-        }
-        let stage_channel_snapshots: Vec<(usize, bool, bool, Vec<ScriptInstanceRef>)> = player
-            .movie
-            .score
-            .channels
-            .iter()
-            .map(|channel| {
-                (
-                    channel.number,
-                    channel.sprite.entered,
-                    channel.sprite.puppet,
-                    channel.sprite.script_instance_list.clone(),
-                )
-            })
-            .collect();
-
-        for (channel_number, entered, puppet, fallback) in stage_channel_snapshots {
-            let sprite_num = channel_number as i16;
-            // Check both the sprite's internal list AND the cached scriptInstanceList
-            // (behaviors added via sprite.scriptInstanceList.add() only exist in the cache)
-            let has_internal = !fallback.is_empty();
-            let has_cached = player.script_instance_list_cache.contains_key(&sprite_num);
-
-            if !has_internal && !has_cached {
+        for channel_number in player.active_stage_behavior_channels() {
+            let Some((number, entered, puppet, fallback)) = player
+                .movie
+                .score
+                .channels
+                .get(channel_number)
+                .map(|channel| {
+                    (
+                        channel.number,
+                        channel.sprite.entered,
+                        channel.sprite.puppet,
+                        channel.sprite.script_instance_list.clone(),
+                    )
+                })
+            else {
                 continue;
-            }
+            };
+
             if !entered && !puppet {
                 continue;
             }
 
             let behaviors =
-                player.get_sprite_script_instance_ids(sprite_num, fallback.as_slice());
+                player.get_sprite_script_instance_ids(number as i16, fallback.as_slice());
+            if behaviors.is_empty() {
+                continue;
+            }
 
-            if channel_number > 0 {
-                sprites.push((ScoreRef::Stage, channel_number, behaviors));
-            } else if channel_number == 0 {
-                frames.push((channel_number, behaviors));  // Store tuple with channel number
+            if number > 0 {
+                sprites.push((ScoreRef::Stage, number, behaviors));
+            } else if number == 0 {
+                frames.push((number, behaviors));  // Store tuple with channel number
             }
         }
 

@@ -303,6 +303,7 @@ pub struct DirPlayer {
     /// Prevents the event loop from dispatching external events during the transition.
     pub is_in_transition: bool,
     pub actor_list_generation: u64,
+    pub behavior_channel_cache_generation: u64,
     pub rng: rand::rngs::SmallRng,
     /// Cache of allocated scriptInstanceList datums per sprite.
     /// Ensures that `sprite.scriptInstanceList.add(x)` modifies the live list
@@ -314,6 +315,8 @@ pub struct DirPlayer {
     pub script_instance_list_generation: FxHashMap<i16, u64>,
     /// Parsed script instance ids keyed by sprite and cache generation.
     pub script_instance_list_ids_cache: FxHashMap<i16, (u64, Vec<ScriptInstanceRef>)>,
+    /// Cached stage channels with active behaviors for the current frame.
+    pub active_stage_behavior_channels_cache: Option<(u32, u64, Vec<usize>)>,
     /// Set by `sprite_get_prop` when a property returns a pre-allocated DatumRef
     /// (e.g. cached scriptInstanceList). Callers should check this before
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
@@ -464,10 +467,12 @@ impl DirPlayer {
             pending_goto_net_movie: None,
             is_in_transition: false,
             actor_list_generation: 0,
+            behavior_channel_cache_generation: 0,
             script_instance_list_cache: FxHashMap::default(),
             script_instance_list_cache_owner: FxHashMap::default(),
             script_instance_list_generation: FxHashMap::default(),
             script_instance_list_ids_cache: FxHashMap::default(),
+            active_stage_behavior_channels_cache: None,
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
@@ -670,6 +675,8 @@ impl DirPlayer {
                 _ => {}
             }
         }
+
+        self.invalidate_behavior_channel_cache();
     }
 
     pub async fn end_all_sprites(&mut self) -> Vec<(ScoreRef, u32)> {
@@ -720,6 +727,7 @@ impl DirPlayer {
         //   let sprite = self.movie.score.get_sprite_mut(*sprite_num as i16);
         //   sprite.exited = true;
         // }
+        self.invalidate_behavior_channel_cache();
         all_ended_sprite_nums
     }
 
@@ -1091,6 +1099,7 @@ impl DirPlayer {
         self.script_instance_list_cache_owner.clear();
         self.script_instance_list_generation.clear();
         self.script_instance_list_ids_cache.clear();
+        self.invalidate_behavior_channel_cache();
     }
 
     pub fn note_script_instance_list_mutation(&mut self, datum_ref: &DatumRef) {
@@ -1102,7 +1111,14 @@ impl DirPlayer {
             let generation = self.script_instance_list_generation.entry(sprite_id).or_insert(0);
             *generation = generation.wrapping_add(1);
             self.script_instance_list_ids_cache.remove(&sprite_id);
+            self.invalidate_behavior_channel_cache();
         }
+    }
+
+    pub fn invalidate_behavior_channel_cache(&mut self) {
+        self.behavior_channel_cache_generation =
+            self.behavior_channel_cache_generation.wrapping_add(1);
+        self.active_stage_behavior_channels_cache = None;
     }
 
     pub fn get_sprite_script_instance_ids(
@@ -1152,6 +1168,38 @@ impl DirPlayer {
             .is_some_and(|cached_ref| {
                 matches!(self.get_datum(cached_ref), Datum::List(_, items, _) if !items.is_empty())
             })
+    }
+
+    pub fn active_stage_behavior_channels(&mut self) -> Vec<usize> {
+        let frame_num = self.movie.current_frame;
+        let generation = self.behavior_channel_cache_generation;
+
+        if let Some((cached_frame, cached_generation, channels)) =
+            &self.active_stage_behavior_channels_cache
+        {
+            if *cached_frame == frame_num && *cached_generation == generation {
+                return channels.clone();
+            }
+        }
+
+        let channels: Vec<usize> = self
+            .movie
+            .score
+            .channels
+            .iter()
+            .filter(|channel| channel.sprite.entered || channel.sprite.puppet)
+            .filter(|channel| {
+                self.sprite_has_script_instance_ids(
+                    channel.number as i16,
+                    &channel.sprite.script_instance_list,
+                )
+            })
+            .map(|channel| channel.number)
+            .collect();
+
+        self.active_stage_behavior_channels_cache =
+            Some((frame_num, generation, channels.clone()));
+        channels
     }
 
     pub fn note_actor_list_mutation(&mut self, datum_ref: &DatumRef) {
@@ -2159,7 +2207,11 @@ impl DirPlayer {
             
             changed_filmloops.push((member_ref, old_frame, new_frame));
         }
-        
+
+        if !changed_filmloops.is_empty() {
+            self.invalidate_behavior_channel_cache();
+        }
+
         changed_filmloops
     }
 
@@ -2848,25 +2900,37 @@ async fn run_movie_init_sequence() {
 
     // Collect behaviors that need initialization
     let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
-        player
-            .movie
-            .score
-            .channels
-            .iter()
-            .flat_map(|ch| {
-                let sprite_num = ch.sprite.number as u32;
-                ch.sprite.script_instance_list
-                    .iter()
-                    .filter(|behavior_ref| {
-                        if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
-                            !entry.script_instance.begin_sprite_called
-                        } else {
-                            false
-                        }
-                    })
-                    .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
-            })
-            .collect()
+        let mut behaviors = Vec::new();
+        for channel_number in player.active_stage_behavior_channels() {
+            let Some((sprite_num, fallback)) = player
+                .movie
+                .score
+                .channels
+                .get(channel_number)
+                .map(|channel| {
+                    (
+                        channel.sprite.number as u32,
+                        channel.sprite.script_instance_list.clone(),
+                    )
+                })
+            else {
+                continue;
+            };
+
+            for behavior_ref in player.get_sprite_script_instance_ids(
+                sprite_num as i16,
+                fallback.as_slice(),
+            ) {
+                if player
+                    .allocator
+                    .get_script_instance_entry(behavior_ref.id())
+                    .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
+                {
+                    behaviors.push((behavior_ref, sprite_num));
+                }
+            }
+        }
+        behaviors
     });
 
     for (behavior_ref, sprite_num) in &behaviors_to_init {
@@ -3405,25 +3469,37 @@ pub async fn run_single_frame() -> (bool, bool) {
 
     // Collect behaviors that need initialization
     let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
-        player
-            .movie
-            .score
-            .channels
-            .iter()
-            .flat_map(|ch| {
-                let sprite_num = ch.sprite.number as u32;
-                ch.sprite.script_instance_list
-                    .iter()
-                    .filter(|behavior_ref| {
-                        if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
-                            !entry.script_instance.begin_sprite_called
-                        } else {
-                            false
-                        }
-                    })
-                    .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
-            })
-            .collect()
+        let mut behaviors = Vec::new();
+        for channel_number in player.active_stage_behavior_channels() {
+            let Some((sprite_num, fallback)) = player
+                .movie
+                .score
+                .channels
+                .get(channel_number)
+                .map(|channel| {
+                    (
+                        channel.sprite.number as u32,
+                        channel.sprite.script_instance_list.clone(),
+                    )
+                })
+            else {
+                continue;
+            };
+
+            for behavior_ref in player.get_sprite_script_instance_ids(
+                sprite_num as i16,
+                fallback.as_slice(),
+            ) {
+                if player
+                    .allocator
+                    .get_script_instance_entry(behavior_ref.id())
+                    .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
+                {
+                    behaviors.push((behavior_ref, sprite_num));
+                }
+            }
+        }
+        behaviors
     });
 
     // Initialize behavior default properties

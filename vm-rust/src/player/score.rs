@@ -1,4 +1,4 @@
-use std::cmp::max;
+use std::{cell::RefCell, cmp::max};
 
 use itertools::Itertools;
 use log::debug;
@@ -118,6 +118,12 @@ pub struct Score {
     pub channels_with_frame_interval_spans: HashSet<u32>,
     /// Total frame count (used for auto-looping back to frame 1 when past last frame)
     pub frame_count: Option<u32>,
+    /// Active non-puppet channel numbers derived from sprite_spans, cached per frame.
+    pub active_channels_cache: RefCell<HashMap<u32, Vec<usize>>>,
+    /// Sorted render order cache for the last requested frame and runtime state generation.
+    pub sorted_channels_cache: RefCell<Option<(u32, u64, Vec<usize>)>>,
+    /// Incremented when runtime sprite state changes in a way that affects render inclusion/order.
+    pub render_channel_cache_generation: u64,
 }
 
 fn get_sprite_rect(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
@@ -220,7 +226,40 @@ impl Score {
             needs_per_frame_updates: false,
             channels_with_frame_interval_spans: HashSet::new(),
             frame_count: None,
+            active_channels_cache: RefCell::new(HashMap::new()),
+            sorted_channels_cache: RefCell::new(None),
+            render_channel_cache_generation: 0,
         }
+    }
+
+    pub fn invalidate_render_channel_cache(&mut self) {
+        self.render_channel_cache_generation =
+            self.render_channel_cache_generation.wrapping_add(1);
+        self.sorted_channels_cache.replace(None);
+    }
+
+    pub fn invalidate_span_channel_cache(&mut self) {
+        self.active_channels_cache.borrow_mut().clear();
+        self.invalidate_render_channel_cache();
+    }
+
+    fn active_channel_numbers_for_frame(&self, frame_num: u32) -> Vec<usize> {
+        if let Some(cached) = self.active_channels_cache.borrow().get(&frame_num) {
+            return cached.clone();
+        }
+
+        let mut active_channels: Vec<usize> = self
+            .sprite_spans
+            .iter()
+            .filter(|span| Self::is_span_in_frame(span, frame_num))
+            .map(|span| span.channel_number as usize)
+            .collect();
+        active_channels.sort_unstable();
+        active_channels.dedup();
+        self.active_channels_cache
+            .borrow_mut()
+            .insert(frame_num, active_channels.clone());
+        active_channels
     }
 
     pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreBehaviorReference> {
@@ -2331,6 +2370,8 @@ impl Score {
                 }
             }
         }
+
+        self.invalidate_render_channel_cache();
     }
 
     pub async fn end_sprites(&mut self, score_ref: ScoreRef, prev_frame: u32, next_frame: u32) -> Vec<u32> {
@@ -2368,6 +2409,7 @@ impl Score {
             }
         }
 
+        self.invalidate_render_channel_cache();
         JsApi::dispatch_score_changed();
     }
 
@@ -2399,6 +2441,7 @@ impl Score {
         // Clear previous sprite_spans so they don't accumulate across movie transitions
         self.sprite_spans.clear();
         self.sprite_details.clear();
+        self.invalidate_span_channel_cache();
 
         self.channel_initialization_data = score_chunk.frame_data.frame_channel_data.clone();
         self.sound_channel_data = score_chunk.frame_data.sound_channel_data.clone();
@@ -2760,46 +2803,61 @@ impl Score {
             }
         }
 
+        self.invalidate_render_channel_cache();
         JsApi::dispatch_score_changed();
     }
 
     pub fn get_sorted_channels(&self, frame_num: u32) -> Vec<&SpriteChannel> {
-        // Build set of active channel numbers for the specified frame
-        let active_channels: std::collections::HashSet<u32> = self
-            .sprite_spans
-            .iter()
-            .filter(|span| Self::is_span_in_frame(span, frame_num))
-            .map(|span| span.channel_number)
-            .collect();
+        let generation = self.render_channel_cache_generation;
+        if let Some((cached_frame, cached_generation, cached_indices)) =
+            self.sorted_channels_cache.borrow().as_ref()
+        {
+            if *cached_frame == frame_num && *cached_generation == generation {
+                return cached_indices
+                    .iter()
+                    .filter_map(|index| self.channels.get(*index))
+                    .collect();
+            }
+        }
 
-        return self
-            .channels
+        let mut channel_indices = self.active_channel_numbers_for_frame(frame_num);
+        let mut seen = channel_indices.iter().copied().collect::<HashSet<usize>>();
+        for channel in &self.channels {
+            if channel.number != 0 && channel.sprite.puppet && seen.insert(channel.number) {
+                channel_indices.push(channel.number);
+            }
+        }
+
+        channel_indices.retain(|index| {
+            self.channels.get(*index).is_some_and(|channel| {
+                channel.number != 0
+                    && channel
+                        .sprite
+                        .member
+                        .as_ref()
+                        .is_some_and(|member| member.is_valid())
+                    && channel.sprite.visible
+            })
+        });
+
+        channel_indices.sort_by(|a, b| {
+            let a_channel = &self.channels[*a];
+            let b_channel = &self.channels[*b];
+            let res = a_channel.sprite.loc_z.cmp(&b_channel.sprite.loc_z);
+            if res == std::cmp::Ordering::Equal {
+                a_channel.number.cmp(&b_channel.number)
+            } else {
+                res
+            }
+        });
+
+        self.sorted_channels_cache
+            .replace(Some((frame_num, generation, channel_indices.clone())));
+
+        channel_indices
             .iter()
-            .filter(|x| {
-                // Skip channel 0 (frame behaviors)
-                if x.number == 0 {
-                    return false;
-                }
-                // Render if: in active span OR is puppeted
-                let is_active = active_channels.contains(&(x.number as u32)) || x.sprite.puppet;
-                if !is_active {
-                    return false;
-                }
-                x.sprite.member.is_some()
-                    && x.sprite.member.as_ref().unwrap().is_valid()
-                    && x.sprite.visible
-            })
-            .sorted_by(|a, b| {
-                // Sort by loc_z ascending (lower values first, drawn first/behind)
-                // Sprites with higher loc_z are drawn later and appear on top
-                let res = a.sprite.loc_z.cmp(&b.sprite.loc_z);
-                if res == std::cmp::Ordering::Equal {
-                    a.number.cmp(&b.number)
-                } else {
-                    res
-                }
-            })
-            .collect_vec();
+            .filter_map(|index| self.channels.get(*index))
+            .collect()
     }
 
     pub fn get_active_script_instance_list(&self) -> Vec<ScriptInstanceRef> {
@@ -3734,6 +3792,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 // Invalidate the cached scriptInstanceList so the next
                 // getter call rebuilds it from the updated Vec.
                 player.remove_script_instance_list_cache(sprite_id);
+                player.invalidate_behavior_channel_cache();
                 let value_ref = player.alloc_datum(Datum::Int(sprite_id as i32));
                 for instance_ref in instance_refs {
                     script_set_prop(
@@ -3851,6 +3910,23 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
     };
     if result.is_ok() {
+        let affects_render_order = prop_name.eq_ignore_ascii_case("visible")
+            || prop_name.eq_ignore_ascii_case("visibility")
+            || prop_name.eq_ignore_ascii_case("locZ")
+            || prop_name.eq_ignore_ascii_case("member")
+            || prop_name.eq_ignore_ascii_case("memberNum")
+            || prop_name.eq_ignore_ascii_case("castNum")
+            || prop_name.eq_ignore_ascii_case("puppet");
+        if affects_render_order {
+            reserve_player_mut(|player| {
+                player.movie.score.invalidate_render_channel_cache();
+            });
+        }
+        if prop_name.eq_ignore_ascii_case("puppet") {
+            reserve_player_mut(|player| {
+                player.invalidate_behavior_channel_cache();
+            });
+        }
         JsApi::dispatch_channel_changed(sprite_id);
     }
     result

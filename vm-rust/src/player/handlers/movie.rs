@@ -270,27 +270,37 @@ impl MovieHandlers {
                 // 2. Send beginSprite: Frame behaviors -> Sprite behaviors
                 // Collect behaviors that need initialization
                 let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
-                    player
-                        .movie
-                        .score
-                        .channels
-                        .iter()
-                        .flat_map(|ch| {
-                            let sprite_num = ch.sprite.number as u32;
-                            ch.sprite.script_instance_list
-                                .iter()
-                                .filter(|behavior_ref| {
-                                    // ONLY initialize behaviors that haven't had beginSprite called
-                                    // This means they're NEW this frame
-                                    if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
-                                        !entry.script_instance.begin_sprite_called
-                                    } else {
-                                        false
-                                    }
-                                })
-                                .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
-                        })
-                        .collect()
+                    let mut behaviors = Vec::new();
+                    for channel_number in player.active_stage_behavior_channels() {
+                        let Some((sprite_num, fallback)) = player
+                            .movie
+                            .score
+                            .channels
+                            .get(channel_number)
+                            .map(|channel| {
+                                (
+                                    channel.sprite.number as u32,
+                                    channel.sprite.script_instance_list.clone(),
+                                )
+                            })
+                        else {
+                            continue;
+                        };
+
+                        for behavior_ref in player.get_sprite_script_instance_ids(
+                            sprite_num as i16,
+                            fallback.as_slice(),
+                        ) {
+                            if player
+                                .allocator
+                                .get_script_instance_entry(behavior_ref.id())
+                                .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
+                            {
+                                behaviors.push((behavior_ref, sprite_num));
+                            }
+                        }
+                    }
+                    behaviors
                 });
 
                 // Initialize behavior default properties
@@ -418,12 +428,16 @@ impl MovieHandlers {
                     sprite.puppet = false;
                     sprite.member = None;
                     sprite.visible = true;
+                    player.movie.score.invalidate_render_channel_cache();
+                    player.invalidate_behavior_channel_cache();
                     return Ok(DatumRef::Void);
                 }
             }
 
             let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
             sprite.puppet = is_puppet;
+            player.movie.score.invalidate_render_channel_cache();
+            player.invalidate_behavior_channel_cache();
             Ok(DatumRef::Void)
         })
     }
