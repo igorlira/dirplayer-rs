@@ -4416,11 +4416,25 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 let is_bbox = if bitmap_width >= 10 && bitmap_height >= 10
                     && sprite.width > 0 && sprite.height > 0
                     && (sprite.width != bitmap_width || sprite.height != bitmap_height)
-                    // Only consider bbox if sprite isn't significantly smaller than
-                    // bitmap in either dimension. A sprite shrunk below 80% of the
-                    // bitmap is an intentional resize, not a Score bounding box.
-                    && 5 * sprite.width >= 4 * bitmap_width
-                    && 5 * sprite.height >= 4 * bitmap_height
+                    // Intentional crop: one dim nearly matches bitmap (≤3px)
+                    // while the other is deliberately shrunk (<90%). Use sprite dims.
+                    && !((sprite.width - bitmap_width).abs() <= 3
+                         && 10 * sprite.height < 9 * bitmap_height)
+                    && !((sprite.height - bitmap_height).abs() <= 3
+                         && 10 * sprite.width < 9 * bitmap_width)
+                    // Skip bbox detection when BOTH dims are scaled up beyond 190%,
+                    // the scale factors are within 2.5× of each other, AND the
+                    // bitmap itself is roughly square (aspect ≤ 2:1). A non-square
+                    // bitmap scaled to a different aspect is still a bbox.
+                    && !(10 * sprite.width >= 19 * bitmap_width
+                         && 10 * sprite.height >= 19 * bitmap_height
+                         && {
+                             let a = sprite.width as i64 * bitmap_height as i64;
+                             let b = sprite.height as i64 * bitmap_width as i64;
+                             5 * a.min(b) >= 2 * a.max(b)
+                         }
+                         && bitmap_width <= bitmap_height * 2
+                         && bitmap_height <= bitmap_width * 2)
                 {
                     sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64
                 } else {
