@@ -4173,7 +4173,10 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 player.refresh_stage_behavior_channel_cache_entry(sprite_id);
             });
         }
-        if prop_name.eq_ignore_ascii_case("member")
+        if prop_name.eq_ignore_ascii_case("visible")
+            || prop_name.eq_ignore_ascii_case("visibility")
+            || prop_name.eq_ignore_ascii_case("puppet")
+            || prop_name.eq_ignore_ascii_case("member")
             || prop_name.eq_ignore_ascii_case("memberNum")
             || prop_name.eq_ignore_ascii_case("castNum")
         {

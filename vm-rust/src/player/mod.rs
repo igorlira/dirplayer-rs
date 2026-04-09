@@ -71,7 +71,7 @@ use async_std::{
     task::spawn_local,
 };
 use cast_manager::CastPreloadReason;
-use cast_member::{CastMemberType, CastMemberTypeId};
+use cast_member::CastMemberType;
 use datum_ref::DatumRef;
 use fxhash::FxHashMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
@@ -318,8 +318,8 @@ pub struct DirPlayer {
     pub script_instance_list_ids_cache: FxHashMap<i16, (u64, Vec<ScriptInstanceRef>)>,
     /// Cached stage channels with active behaviors for the current frame.
     pub active_stage_behavior_channels_cache: Option<(u32, u64, Vec<usize>)>,
-    /// Cached active filmloop members currently present on the stage.
-    pub active_stage_filmloop_members_cache: Option<(u64, Vec<CastMemberRef>)>,
+    /// Cached visible filmloop members currently present on the stage for a frame.
+    pub active_stage_filmloop_members_cache: Option<(u32, u64, Vec<CastMemberRef>)>,
     /// Set by `sprite_get_prop` when a property returns a pre-allocated DatumRef
     /// (e.g. cached scriptInstanceList). Callers should check this before
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
@@ -641,48 +641,28 @@ impl DirPlayer {
             }
             self.clear_script_instance_list_caches();
         }
-        
-        // Track which film loop members we've already processed to avoid calling
-        // begin_sprites multiple times for the same film loop (when multiple channels
-        // use the same film loop member)
-        let mut processed_film_loops: std::collections::HashSet<CastMemberRef> = std::collections::HashSet::new();
 
-        for channel in self.movie.score.channels.iter() {
-            let member_ref = channel.sprite.member.as_ref();
-            let member_type = member_ref
-                .and_then(|x| self.movie.cast_manager.find_member_by_ref(&x))
-                .map(|x| x.member_type.member_type_id());
-
-            match member_type {
-                Some(CastMemberTypeId::FilmLoop) => {
-                    let member_ref_clone = member_ref.unwrap().clone();
-
-                    // Skip if we've already processed this film loop member
-                    if processed_film_loops.contains(&member_ref_clone) {
-                        continue;
-                    }
-                    processed_film_loops.insert(member_ref_clone.clone());
-
-                    let film_loop = match self
-                        .movie
-                        .cast_manager
-                        .find_mut_member_by_ref(member_ref.unwrap())
-                        .and_then(|m| m.member_type.as_film_loop_mut())
-                    {
-                        Some(fl) => fl,
-                        None => continue,
-                    };
-                    // Use filmloop's own current_frame instead of movie's current_frame
-                    let current_frame = film_loop.current_frame;
-                    film_loop.score.begin_sprites(ScoreRef::FilmLoop(member_ref_clone), current_frame);
-                    film_loop.score.apply_tween_modifiers(current_frame);
-                }
-                _ => {}
-            }
+        self.invalidate_active_stage_filmloop_cache();
+        let active_filmloops = self.active_stage_filmloop_member_refs();
+        for member_ref in active_filmloops {
+            let film_loop = match self
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+                .and_then(|m| m.member_type.as_film_loop_mut())
+            {
+                Some(fl) => fl,
+                None => continue,
+            };
+            // Use filmloop's own current_frame instead of movie's current_frame
+            let current_frame = film_loop.current_frame;
+            film_loop
+                .score
+                .begin_sprites(ScoreRef::FilmLoop(member_ref.clone()), current_frame);
+            film_loop.score.apply_tween_modifiers(current_frame);
         }
 
         self.invalidate_behavior_channel_cache();
-        self.invalidate_active_stage_filmloop_cache();
     }
 
     pub async fn end_all_sprites(&mut self) -> Vec<(ScoreRef, u32)> {
@@ -1215,20 +1195,41 @@ impl DirPlayer {
     }
 
     pub fn active_stage_filmloop_member_refs(&mut self) -> Vec<CastMemberRef> {
+        let frame_num = self.movie.current_frame;
         let generation = self.active_stage_filmloop_cache_generation;
-        if let Some((cached_generation, member_refs)) = &self.active_stage_filmloop_members_cache {
-            if *cached_generation == generation {
+        if let Some((cached_frame, cached_generation, member_refs)) =
+            &self.active_stage_filmloop_members_cache
+        {
+            if *cached_frame == frame_num && *cached_generation == generation {
                 return member_refs.clone();
+            }
+        }
+
+        let mut channel_numbers = self.movie.score.active_channel_numbers_for_frame(frame_num);
+        let mut seen_channels = channel_numbers
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        for channel in self.movie.score.channels.iter() {
+            if channel.number != 0
+                && channel.sprite.puppet
+                && channel.sprite.visible
+                && seen_channels.insert(channel.number)
+            {
+                channel_numbers.push(channel.number);
             }
         }
 
         let mut member_refs = Vec::new();
         let mut seen_members = std::collections::HashSet::new();
-        for channel in self.movie.score.channels.iter() {
-            if !channel.sprite.entered || channel.sprite.exited {
+        for channel_number in channel_numbers {
+            let Some(channel) = self.movie.score.channels.get(channel_number) else {
+                continue;
+            };
+
+            if channel.number == 0 || !channel.sprite.visible {
                 continue;
             }
-
             let Some(member_ref) = channel.sprite.member.as_ref() else {
                 continue;
             };
@@ -1250,7 +1251,7 @@ impl DirPlayer {
         }
 
         self.active_stage_filmloop_members_cache =
-            Some((generation, member_refs.clone()));
+            Some((frame_num, generation, member_refs.clone()));
         member_refs
     }
 
@@ -2170,28 +2171,9 @@ impl DirPlayer {
     pub async fn update_filmloop_frames(&mut self) -> Vec<(CastMemberRef, u32, u32)> {
         let mut changed_filmloops = Vec::new();
 
-        // First, collect unique filmloop member refs from active sprites.
-        // Use `visible` filter (not `entered && !exited`) because filmloop sprites
-        // may not have entered/exited flags set properly in all game states
-        // (e.g., during `go to the frame` loops).
-        let unique_filmloop_refs: Vec<CastMemberRef> = {
-            let mut seen = std::collections::HashSet::new();
-            self.movie
-                .score
-                .channels
-                .iter()
-                .filter(|channel| channel.sprite.visible && channel.sprite.member.is_some())
-                .filter_map(|channel| channel.sprite.member.clone())
-                .filter(|member_ref| {
-                    // Only include each unique member_ref once
-                    let key = (member_ref.cast_lib, member_ref.cast_member);
-                    seen.insert(key)
-                })
-                .collect()
-        };
-
         // Collect active filmloop refs with their current and next frames
-        let active_filmloops: Vec<(CastMemberRef, u32, u32)> = unique_filmloop_refs
+        let active_filmloops: Vec<(CastMemberRef, u32, u32)> = self
+            .active_stage_filmloop_member_refs()
             .into_iter()
             .filter_map(|member_ref| {
                 self.movie
@@ -2201,22 +2183,7 @@ impl DirPlayer {
                         if let CastMemberType::FilmLoop(film_loop) = &m.member_type {
                             let current = film_loop.current_frame;
 
-                            // Calculate frame_count considering multiple sources:
-                            let span_max = film_loop.score.sprite_spans.iter()
-                                .map(|span| span.end_frame)
-                                .max()
-                                .unwrap_or(1);
-                            let init_data_max = film_loop.score.channel_initialization_data.iter()
-                                .map(|(frame_idx, _, _)| frame_idx + 1)
-                                .max()
-                                .unwrap_or(1);
-                            let keyframes_max = film_loop.score.keyframes_cache.values()
-                                .filter_map(|channel_kf| channel_kf.path.as_ref())
-                                .flat_map(|path_kf| path_kf.keyframes.iter())
-                                .map(|kf| kf.frame)
-                                .max()
-                                .unwrap_or(1);
-                            let frame_count = span_max.max(init_data_max).max(keyframes_max);
+                            let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
 
                             let next = current + 1;
                             let should_loop = (film_loop.info.loops & 0x20) == 0;
@@ -2257,9 +2224,8 @@ impl DirPlayer {
             if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                 if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                     for sprite_num in ended_sprites {
-                        if let sprite = film_loop.score.get_sprite_mut(sprite_num as i16) {
-                            sprite.exited = true;
-                        }
+                        let sprite = film_loop.score.get_sprite_mut(sprite_num as i16);
+                        sprite.exited = true;
                     }
                     film_loop.current_frame = new_frame;
                     film_loop.score.begin_sprites(score_ref.clone(), new_frame);
@@ -2279,51 +2245,12 @@ impl DirPlayer {
 
     /// Just advance frame counters - actual sprite management happens in update_filmloop_frames
     fn advance_filmloop_frames(&mut self) {
-        // Note: We don't require entered && !exited here because filmloop sprites
-        // may not have those flags set properly. Instead, we advance any filmloop
-        // sprite that has a valid member and is visible.
-        let active_filmloop_refs: Vec<CastMemberRef> = self
-            .movie
-            .score
-            .channels
-            .iter()
-            .filter(|channel| channel.sprite.visible && channel.sprite.member.is_some())
-            .filter_map(|channel| channel.sprite.member.clone())
-            .filter(|member_ref| {
-                self.movie
-                    .cast_manager
-                    .find_member_by_ref(member_ref)
-                    .map(|m| m.member_type.member_type_id() == CastMemberTypeId::FilmLoop)
-                    .unwrap_or(false)
-            })
-            .collect();
+        let active_filmloop_refs = self.active_stage_filmloop_member_refs();
 
         for member_ref in active_filmloop_refs {
             if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                 if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                    // Calculate frame_count considering multiple sources:
-                    // 1. sprite_spans end frames
-                    let span_max = film_loop.score.sprite_spans.iter()
-                        .map(|span| span.end_frame)
-                        .max()
-                        .unwrap_or(1);
-
-                    // 2. channel_initialization_data max frame (0-based, so +1)
-                    let init_data_max = film_loop.score.channel_initialization_data.iter()
-                        .map(|(frame_idx, _, _)| frame_idx + 1)
-                        .max()
-                        .unwrap_or(1);
-
-                    // 3. path keyframes max frame from keyframes_cache
-                    let keyframes_max = film_loop.score.keyframes_cache.values()
-                        .filter_map(|channel_kf| channel_kf.path.as_ref())
-                        .flat_map(|path_kf| path_kf.keyframes.iter())
-                        .map(|kf| kf.frame)
-                        .max()
-                        .unwrap_or(1);
-
-                    // Use the maximum of all sources
-                    let frame_count = span_max.max(init_data_max).max(keyframes_max);
+                    let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
 
                     let old_frame = film_loop.current_frame;
                     film_loop.current_frame += 1;
