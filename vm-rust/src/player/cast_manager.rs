@@ -5,7 +5,6 @@ use std::{
 };
 
 use fxhash::FxHashMap;
-use itertools::Itertools;
 use log::{debug, warn};
 use url::Url;
 
@@ -34,6 +33,7 @@ use super::{
 pub struct CastManager {
     pub casts: Vec<CastLib>,
     pub movie_script_cache: RefCell<Option<Vec<Rc<Script>>>>,
+    pub member_name_cache: RefCell<Option<FxHashMap<String, CastMemberRef>>>,
     pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
     /// Version counter incremented when palette cache is invalidated.
     /// Used by renderers to know when to clear texture caches.
@@ -53,6 +53,7 @@ impl CastManager {
         CastManager {
             casts: Vec::new(),
             movie_script_cache: RefCell::new(None),
+            member_name_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
         }
@@ -121,6 +122,7 @@ impl CastManager {
             casts.push(cast);
         }
         self.casts = casts;
+        self.invalidate_member_name_cache();
         self.preload_casts(
             CastPreloadReason::MovieLoaded,
             net_manager,
@@ -233,6 +235,7 @@ impl CastManager {
                 }
             }
         }
+        self.invalidate_member_name_cache();
     }
 
     pub fn get_cast(&self, number: u32) -> Result<&CastLib, ScriptError> {
@@ -313,15 +316,37 @@ impl CastManager {
     }
 
     pub fn find_member_ref_by_name(&self, name: &str) -> Option<CastMemberRef> {
-        for cast in &self.casts {
-            if let Some(member) = cast.find_member_by_name(name) {
-                return Some(CastMemberRef {
-                    cast_lib: cast.number as i32,
-                    cast_member: member.number as i32,
-                });
+        if self.member_name_cache.borrow().is_none() {
+            let mut cache = FxHashMap::default();
+            for cast in &self.casts {
+                let mut best_matches: FxHashMap<String, CastMemberRef> = FxHashMap::default();
+                for member in cast.members.values() {
+                    let key = member.name.to_ascii_lowercase();
+                    let member_ref = CastMemberRef {
+                        cast_lib: cast.number as i32,
+                        cast_member: member.number as i32,
+                    };
+
+                    match best_matches.get(&key) {
+                        Some(existing) if existing.cast_member <= member_ref.cast_member => {}
+                        _ => {
+                            best_matches.insert(key, member_ref);
+                        }
+                    }
+                }
+
+                for (key, member_ref) in best_matches {
+                    cache.entry(key).or_insert(member_ref);
+                }
             }
+            self.member_name_cache.replace(Some(cache));
         }
-        None
+
+        let lookup_name = name.to_ascii_lowercase();
+        self.member_name_cache
+            .borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(&lookup_name).cloned())
     }
 
     pub fn find_member_ref_by_identifiers(
@@ -570,12 +595,17 @@ impl CastManager {
         }
         let cast = self.get_cast_mut(member_ref.cast_lib as u32);
         cast.remove_member(member_ref.cast_member as u32);
+        self.invalidate_member_name_cache();
         Ok(())
     }
 
     pub fn clear_movie_script_cache(&mut self) {
         let mut cache = self.movie_script_cache.borrow_mut();
         *cache = None;
+    }
+
+    pub fn invalidate_member_name_cache(&self) {
+        self.member_name_cache.replace(None);
     }
 
     pub fn get_movie_scripts(&self) -> Ref<Option<Vec<Rc<Script>>>> {

@@ -721,6 +721,7 @@ impl TypeHandlers {
                     &s,
                     &mut player.bitmap_manager,
                 )?;
+                player.movie.cast_manager.invalidate_member_name_cache();
                 Ok(player.alloc_datum(Datum::CastMember(member_ref)))
             }),
             DatumType::ScriptRef => {

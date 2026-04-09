@@ -435,6 +435,7 @@ impl CastMemberRefHandlers {
                 .cast_manager
                 .get_cast_mut(dest_ref.cast_lib as u32);
             dest_cast.insert_member(dest_ref.cast_member as u32, new_member);
+            player.movie.cast_manager.invalidate_member_name_cache();
 
             Ok(player.alloc_datum(Datum::CastMember(dest_ref)))
         })
@@ -1040,6 +1041,15 @@ impl CastMemberRefHandlers {
             Ok(())
         };
         if result.is_ok() {
+            if prop == "name" {
+                reserve_player_mut(|player| {
+                    player.movie.cast_manager.invalidate_member_name_cache();
+                });
+                JsApi::on_cast_member_name_changed(Self::get_cast_slot_number(
+                    cast_member_ref.cast_lib as u32,
+                    cast_member_ref.cast_member as u32,
+                ));
+            }
             JsApi::dispatch_cast_member_changed(cast_member_ref.to_owned());
         }
         result

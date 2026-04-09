@@ -304,6 +304,7 @@ impl CastLib {
             let player_mut = &mut PLAYER_OPT.as_mut().unwrap();
 
             player_mut.movie.cast_manager.clear_movie_script_cache();
+            player_mut.movie.cast_manager.invalidate_member_name_cache();
             player_mut.movie.cast_manager.load_fonts_into_manager(&mut player_mut.font_manager);
         };
     }
