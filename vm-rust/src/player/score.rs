@@ -2158,26 +2158,18 @@ impl Score {
     }
 
     pub fn apply_tween_modifiers(&mut self, frame: u32) {
-        // Build a set of active channels for this frame
-        let active_channels: std::collections::HashSet<u32> = self
-            .sprite_spans
-            .iter()
-            .filter(|span| Self::is_span_in_frame(span, frame))
-            .map(|span| span.channel_number)
-            .collect();
+        let active_channels = self.active_channel_numbers_for_frame(frame);
 
-        for channel in self.channels.iter_mut() {
+        for channel_number in active_channels {
+            let Some(channel) = self.channels.get_mut(channel_number) else {
+                continue;
+            };
             let sprite = &mut channel.sprite;
             let sprite_num = sprite.number as u16;
 
             // In Director, puppeted sprites are controlled by Lingo and
             // score tweens do NOT apply to them.
             if sprite.puppet {
-                continue;
-            }
-
-            // Skip if sprite isn't in an active span at this frame
-            if !active_channels.contains(&(sprite_num as u32)) {
                 continue;
             }
 
