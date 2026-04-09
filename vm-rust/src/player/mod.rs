@@ -1234,6 +1234,35 @@ impl DirPlayer {
         member_refs
     }
 
+    pub fn active_stage_script_instance_ids(&mut self) -> Vec<ScriptInstanceRef> {
+        let mut channel_numbers = self.active_stage_behavior_channels();
+        let frame_channel_is_active = self
+            .movie
+            .score
+            .active_channel_numbers_for_frame(self.movie.current_frame)
+            .contains(&0);
+        if frame_channel_is_active && !channel_numbers.contains(&0) {
+            channel_numbers.push(0);
+        }
+
+        let mut receivers = Vec::new();
+        for channel_number in channel_numbers {
+            let Some(fallback) = self
+                .movie
+                .score
+                .channels
+                .get(channel_number)
+                .map(|channel| channel.sprite.script_instance_list.clone())
+            else {
+                continue;
+            };
+            receivers.extend(
+                self.get_sprite_script_instance_ids(channel_number as i16, fallback.as_slice()),
+            );
+        }
+        receivers
+    }
+
     pub fn note_actor_list_mutation(&mut self, datum_ref: &DatumRef) {
         if self.globals.get("actorList").is_some_and(|actor_list_ref| actor_list_ref == datum_ref) {
             self.actor_list_generation = self.actor_list_generation.wrapping_add(1);
@@ -2374,7 +2403,7 @@ pub async fn player_call_global_handler(
 ) -> Result<DatumRef, ScriptError> {
     let receiver_handler = unsafe {
         // let player_opt = PLAYER_LOCK.try_read().unwrap();
-        let player = PLAYER_OPT.as_ref().unwrap();
+        let player = PLAYER_OPT.as_mut().unwrap();
 
         let mut receiver_handler = None;
 
@@ -2398,9 +2427,7 @@ pub async fn player_call_global_handler(
 
             if receiver_handler.is_none() {
                 receiver_handler = player
-                    .movie
-                    .score
-                    .get_active_script_instance_list()
+                    .active_stage_script_instance_ids()
                     .iter()
                     .find_map(|instance_receiver_ref| {
                         let script_instance =

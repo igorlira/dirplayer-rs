@@ -1,4 +1,5 @@
 use async_std::channel::Receiver;
+use itertools::Itertools;
 use log::{warn, debug};
 
 use crate::{
@@ -343,7 +344,7 @@ pub async fn player_invoke_global_event(
 
     let active_instance_scripts = reserve_player_mut(|player| {
         let mut active_instance_scripts: Vec<ScriptInstanceRef> = vec![];
-        active_instance_scripts.extend(player.movie.score.get_active_script_instance_list());
+        active_instance_scripts.extend(player.active_stage_script_instance_ids());
         for global in player.get_hydrated_globals().values() {
             match global {
                 Datum::VarRef(VarRef::ScriptInstance(script_instance_ref)) => {
@@ -657,13 +658,11 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
                 }
             };
 
-            for channel in score.channels.iter() {
-                // Skip if channel is not active in current frame (for sprite channels)
-                if !sprite_nums.contains(&(channel.number as u32)) {
+            for channel_number in sprite_nums.iter().copied().unique() {
+                let Some(channel) = score.channels.get(channel_number as usize) else {
                     continue;
-                }
+                };
 
-                // Skip channels with no sprite instances
                 if channel.sprite.script_instance_list.is_empty() {
                     continue;
                 }
@@ -674,10 +673,8 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
                 );
 
                 if channel.number > 0 {
-                    // Sprite channels (only those active in current frame)
                     sprite_tuple.push(entry);
                 } else {
-                    // Frame channel (number == 0, always included)
                     frame_tuple.push(entry);
                 }
             }

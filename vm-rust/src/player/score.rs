@@ -2860,13 +2860,19 @@ impl Score {
             .collect()
     }
 
-    pub fn get_active_script_instance_list(&self) -> Vec<ScriptInstanceRef> {
-        let total: usize = self.channels.iter().map(|c| c.sprite.script_instance_list.len()).sum();
+    pub fn get_active_script_instance_list_for_frame(&self, frame_num: u32) -> Vec<ScriptInstanceRef> {
+        let active_channels = self.active_channel_numbers_for_frame(frame_num);
+        let total: usize = active_channels
+            .iter()
+            .filter_map(|channel_num| self.channels.get(*channel_num))
+            .map(|channel| channel.sprite.script_instance_list.len())
+            .sum();
         let mut instance_list = Vec::with_capacity(total);
-        for channel in &self.channels {
-            for instance_ref in &channel.sprite.script_instance_list {
-                instance_list.push(instance_ref.clone());
-            }
+        for channel_num in active_channels {
+            let Some(channel) = self.channels.get(channel_num) else {
+                continue;
+            };
+            instance_list.extend(channel.sprite.script_instance_list.iter().cloned());
         }
         instance_list
     }

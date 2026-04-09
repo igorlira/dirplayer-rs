@@ -518,24 +518,11 @@ impl MovieHandlers {
             let remaining_args = &args[1..].to_vec();
 
             // Collect receivers from stage score
-            let mut receivers: Vec<ScriptInstanceRef> = Vec::new();
-            let stage_channel_snapshots: Vec<(i16, Vec<ScriptInstanceRef>)> = player
-                .movie
-                .score
-                .channels
-                .iter()
-                .map(|channel| (channel.number as i16, channel.sprite.script_instance_list.clone()))
-                .collect();
-            for (sprite_num, fallback) in stage_channel_snapshots {
-                receivers.extend(player.get_sprite_script_instance_ids(
-                    sprite_num,
-                    fallback.as_slice(),
-                ));
-            }
+            let mut receivers: Vec<ScriptInstanceRef> = player.active_stage_script_instance_ids();
 
             // Also collect receivers from filmloop scores
             let active_filmloops = player.get_active_filmloop_scores();
-            for (member_ref, _) in active_filmloops {
+            for (member_ref, filmloop_frame) in active_filmloops {
                 if let Some(filmloop_score) = player
                     .movie
                     .cast_manager
@@ -547,7 +534,8 @@ impl MovieHandlers {
                         _ => None,
                     })
                 {
-                    let filmloop_receivers = filmloop_score.get_active_script_instance_list();
+                    let filmloop_receivers =
+                        filmloop_score.get_active_script_instance_list_for_frame(filmloop_frame);
                     receivers.extend(filmloop_receivers);
                 }
             }
