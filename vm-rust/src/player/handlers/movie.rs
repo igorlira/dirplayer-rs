@@ -1,6 +1,4 @@
-use log::{debug, error, warn};
-
-use std::collections::VecDeque;
+use log::{debug, error};
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
@@ -12,7 +10,7 @@ use crate::{
         handlers::datum_handlers::script_instance::ScriptInstanceUtils,
         DatumRef, ScriptError, ScriptErrorCode, get_score_sprite_mut, MovieFrameTarget,
         events::{
-            player_invoke_event_to_instances, player_invoke_static_event, player_wait_available,
+            player_invoke_static_event, player_wait_available,
             dispatch_event_to_all_behaviors, player_dispatch_event_beginsprite,
             dispatch_system_event_to_timeouts, player_invoke_targeted_event
         },
@@ -446,23 +444,11 @@ impl MovieHandlers {
             let remaining_args = &args[2..].to_vec();
             let sprite = player.movie.score.get_sprite(sprite_num as i16)
                 .ok_or_else(|| ScriptError::new(format!("sendSprite: sprite {} not found", sprite_num)))?;
-            // Check cached scriptInstanceList first (includes behaviors added via .add())
-            let receivers = if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite_num as i16)).cloned() {
-                let datum = player.get_datum(&cached_ref).clone();
-                if let Datum::List(_, item_refs, _) = datum {
-                    let mut ids = vec![];
-                    for item_ref in &item_refs {
-                        if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
-                            ids.push(id.clone());
-                        }
-                    }
-                    ids
-                } else {
-                    sprite.script_instance_list.clone()
-                }
-            } else {
-                sprite.script_instance_list.clone()
-            };
+            let fallback = sprite.script_instance_list.clone();
+            let receivers = player.get_sprite_script_instance_ids(
+                sprite_num as i16,
+                fallback.as_slice(),
+            );
             Ok((message.clone(), remaining_args.clone(), receivers))
         })?;
 
@@ -516,24 +502,19 @@ impl MovieHandlers {
             let remaining_args = &args[1..].to_vec();
 
             // Collect receivers from stage score
-            // Check cached scriptInstanceList for each channel (includes behaviors added via .add())
             let mut receivers: Vec<ScriptInstanceRef> = Vec::new();
-            for channel in player.movie.score.channels.iter() {
-                let sprite_num = channel.number as i16;
-                if let Some(cached_ref) = player.script_instance_list_cache.get(&sprite_num).cloned() {
-                    let datum = player.get_datum(&cached_ref).clone();
-                    if let Datum::List(_, item_refs, _) = datum {
-                        for item_ref in &item_refs {
-                            if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
-                                receivers.push(id.clone());
-                            }
-                        }
-                        continue;
-                    }
-                }
-                for instance_ref in &channel.sprite.script_instance_list {
-                    receivers.push(instance_ref.clone());
-                }
+            let stage_channel_snapshots: Vec<(i16, Vec<ScriptInstanceRef>)> = player
+                .movie
+                .score
+                .channels
+                .iter()
+                .map(|channel| (channel.number as i16, channel.sprite.script_instance_list.clone()))
+                .collect();
+            for (sprite_num, fallback) in stage_channel_snapshots {
+                receivers.extend(player.get_sprite_script_instance_ids(
+                    sprite_num,
+                    fallback.as_slice(),
+                ));
             }
 
             // Also collect receivers from filmloop scores
@@ -766,26 +747,11 @@ impl MovieHandlers {
         });
 
         // 1. Send stepFrame to actorList
-        let actor_list_snapshot = reserve_player_ref(|player| {
-            let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-            let actor_list_datum = player.get_datum(&actor_list_ref);
-            match actor_list_datum {
-                Datum::List(_, items, _) => {
-                    items.clone()
-                },
-                _ => VecDeque::new(),
-            }
-        });
+        let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
+            reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
 
         for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-            let still_active = reserve_player_ref(|player| {
-                let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-                let actor_list_datum = player.get_datum(&actor_list_ref);
-                match actor_list_datum {
-                    Datum::List(_, items, _) => items.contains(&actor_ref),
-                    _ => false,
-                }
-            });
+            let still_active = active_actor_ids.contains(&actor_ref.unwrap());
 
             if still_active {
                 let result =
@@ -804,6 +770,21 @@ impl MovieHandlers {
                         player.is_in_frame_update = false;
                     });
                     return Err(err);
+                }
+
+                let refreshed_active_ids = reserve_player_ref(|player| {
+                    if player.actor_list_generation != actor_list_generation {
+                        Some(player.actor_list_active_ids())
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some((next_active_actor_ids, next_actor_list_generation)) =
+                    refreshed_active_ids
+                {
+                    active_actor_ids = next_active_actor_ids;
+                    actor_list_generation = next_actor_list_generation;
                 }
             }
         }

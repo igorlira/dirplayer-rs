@@ -53,7 +53,7 @@ pub mod testing;
 pub mod testing_browser;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -302,11 +302,18 @@ pub struct DirPlayer {
     /// True while a net movie transition is in progress.
     /// Prevents the event loop from dispatching external events during the transition.
     pub is_in_transition: bool,
+    pub actor_list_generation: u64,
     pub rng: rand::rngs::SmallRng,
     /// Cache of allocated scriptInstanceList datums per sprite.
     /// Ensures that `sprite.scriptInstanceList.add(x)` modifies the live list
     /// rather than a copy. Keyed by sprite number.
     pub script_instance_list_cache: FxHashMap<i16, DatumRef>,
+    /// Reverse lookup from cached scriptInstanceList datum id to sprite number.
+    pub script_instance_list_cache_owner: FxHashMap<usize, i16>,
+    /// Mutation generation per cached scriptInstanceList.
+    pub script_instance_list_generation: FxHashMap<i16, u64>,
+    /// Parsed script instance ids keyed by sprite and cache generation.
+    pub script_instance_list_ids_cache: FxHashMap<i16, (u64, Vec<ScriptInstanceRef>)>,
     /// Set by `sprite_get_prop` when a property returns a pre-allocated DatumRef
     /// (e.g. cached scriptInstanceList). Callers should check this before
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
@@ -456,7 +463,11 @@ impl DirPlayer {
             delay_until: None,
             pending_goto_net_movie: None,
             is_in_transition: false,
+            actor_list_generation: 0,
             script_instance_list_cache: FxHashMap::default(),
+            script_instance_list_cache_owner: FxHashMap::default(),
+            script_instance_list_generation: FxHashMap::default(),
+            script_instance_list_ids_cache: FxHashMap::default(),
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
@@ -618,7 +629,7 @@ impl DirPlayer {
                 channel.sprite.entered = false;
                 channel.sprite.script_instance_list.clear();
             }
-            self.script_instance_list_cache.clear();
+            self.clear_script_instance_list_caches();
         }
         
         // Track which film loop members we've already processed to avoid calling
@@ -958,7 +969,7 @@ impl DirPlayer {
         // netManager.clear();
         debug!("Resetting score");
         self.movie.score.reset();
-        self.script_instance_list_cache.clear();
+        self.clear_script_instance_list_caches();
         self.movie.current_frame = 1;
         // TODO cancel breakpoints
         self.current_breakpoint = None;
@@ -986,6 +997,7 @@ impl DirPlayer {
         // Initialize the actorList as a global variable
         let actor_list_datum = self.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
         self.globals.insert("actorList".to_string(), actor_list_datum);
+        self.actor_list_generation = 0;
 
         // Mathematical constant
         let pi_datum = self.alloc_datum(Datum::Float(std::f64::consts::PI));
@@ -1029,18 +1041,16 @@ impl DirPlayer {
     /// Call this before reading script_instance_list on sprites that may have been
     /// modified via .add() on the cached Datum::List.
     pub fn sync_script_instance_list(&mut self, sprite_id: i16) {
-        if let Some(cached_ref) = self.script_instance_list_cache.get(&sprite_id).cloned() {
-            let datum = self.get_datum(&cached_ref).clone();
-            if let Datum::List(_, ref items, _) = datum {
-                let mut synced_ids = vec![];
-                for item_ref in items {
-                    if let Datum::ScriptInstanceRef(id) = self.get_datum(item_ref) {
-                        synced_ids.push(id.clone());
-                    }
-                }
-                let sprite = self.movie.score.get_sprite_mut(sprite_id);
-                sprite.script_instance_list = synced_ids;
-            }
+        if self.script_instance_list_cache.contains_key(&sprite_id) {
+            let existing_ids = self
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .map(|sprite| sprite.script_instance_list.clone())
+                .unwrap_or_default();
+            let synced_ids = self.get_sprite_script_instance_ids(sprite_id, &existing_ids);
+            let sprite = self.movie.score.get_sprite_mut(sprite_id);
+            sprite.script_instance_list = synced_ids;
         }
     }
 
@@ -1049,6 +1059,135 @@ impl DirPlayer {
         let sprite_ids: Vec<i16> = self.script_instance_list_cache.keys().cloned().collect();
         for sprite_id in sprite_ids {
             self.sync_script_instance_list(sprite_id);
+        }
+    }
+
+    pub fn cache_script_instance_list(
+        &mut self,
+        sprite_id: i16,
+        list_ref: DatumRef,
+        initial_ids: Vec<ScriptInstanceRef>,
+    ) {
+        self.remove_script_instance_list_cache(sprite_id);
+        let generation = *self.script_instance_list_generation.entry(sprite_id).or_insert(0);
+        self.script_instance_list_cache_owner
+            .insert(list_ref.unwrap(), sprite_id);
+        self.script_instance_list_cache
+            .insert(sprite_id, list_ref);
+        self.script_instance_list_ids_cache
+            .insert(sprite_id, (generation, initial_ids));
+    }
+
+    pub fn remove_script_instance_list_cache(&mut self, sprite_id: i16) {
+        if let Some(cached_ref) = self.script_instance_list_cache.remove(&sprite_id) {
+            self.script_instance_list_cache_owner.remove(&cached_ref.unwrap());
+        }
+        self.script_instance_list_generation.remove(&sprite_id);
+        self.script_instance_list_ids_cache.remove(&sprite_id);
+    }
+
+    pub fn clear_script_instance_list_caches(&mut self) {
+        self.script_instance_list_cache.clear();
+        self.script_instance_list_cache_owner.clear();
+        self.script_instance_list_generation.clear();
+        self.script_instance_list_ids_cache.clear();
+    }
+
+    pub fn note_script_instance_list_mutation(&mut self, datum_ref: &DatumRef) {
+        if let Some(sprite_id) = self
+            .script_instance_list_cache_owner
+            .get(&datum_ref.unwrap())
+            .copied()
+        {
+            let generation = self.script_instance_list_generation.entry(sprite_id).or_insert(0);
+            *generation = generation.wrapping_add(1);
+            self.script_instance_list_ids_cache.remove(&sprite_id);
+        }
+    }
+
+    pub fn get_sprite_script_instance_ids(
+        &mut self,
+        sprite_id: i16,
+        fallback: &[ScriptInstanceRef],
+    ) -> Vec<ScriptInstanceRef> {
+        let Some(cached_ref) = self.script_instance_list_cache.get(&sprite_id).cloned() else {
+            return fallback.to_vec();
+        };
+
+        let generation = *self.script_instance_list_generation.get(&sprite_id).unwrap_or(&0);
+        if let Some((cached_generation, ids)) = self.script_instance_list_ids_cache.get(&sprite_id)
+        {
+            if *cached_generation == generation {
+                return ids.clone();
+            }
+        }
+
+        let ids = match self.get_datum(&cached_ref) {
+            Datum::List(_, item_refs, _) => item_refs
+                .iter()
+                .filter_map(|item_ref| match self.get_datum(item_ref) {
+                    Datum::ScriptInstanceRef(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => fallback.to_vec(),
+        };
+
+        self.script_instance_list_ids_cache
+            .insert(sprite_id, (generation, ids.clone()));
+        ids
+    }
+
+    pub fn sprite_has_script_instance_ids(
+        &self,
+        sprite_id: i16,
+        fallback: &[ScriptInstanceRef],
+    ) -> bool {
+        if !fallback.is_empty() {
+            return true;
+        }
+
+        self.script_instance_list_cache
+            .get(&sprite_id)
+            .is_some_and(|cached_ref| {
+                matches!(self.get_datum(cached_ref), Datum::List(_, items, _) if !items.is_empty())
+            })
+    }
+
+    pub fn note_actor_list_mutation(&mut self, datum_ref: &DatumRef) {
+        if self.globals.get("actorList").is_some_and(|actor_list_ref| actor_list_ref == datum_ref) {
+            self.actor_list_generation = self.actor_list_generation.wrapping_add(1);
+        }
+    }
+
+    pub fn actor_list_stepframe_snapshot(&self) -> (VecDeque<DatumRef>, HashSet<usize>, u64) {
+        let actor_list_ref = self
+            .globals
+            .get("actorList")
+            .cloned()
+            .unwrap_or(DatumRef::Void);
+        match self.get_datum(&actor_list_ref) {
+            Datum::List(_, items, _) => {
+                let snapshot = items.clone();
+                let active_ids = items.iter().map(|actor_ref| actor_ref.unwrap()).collect();
+                (snapshot, active_ids, self.actor_list_generation)
+            }
+            _ => (VecDeque::new(), HashSet::new(), self.actor_list_generation),
+        }
+    }
+
+    pub fn actor_list_active_ids(&self) -> (HashSet<usize>, u64) {
+        let actor_list_ref = self
+            .globals
+            .get("actorList")
+            .cloned()
+            .unwrap_or(DatumRef::Void);
+        match self.get_datum(&actor_list_ref) {
+            Datum::List(_, items, _) => (
+                items.iter().map(|actor_ref| actor_ref.unwrap()).collect(),
+                self.actor_list_generation,
+            ),
+            _ => (HashSet::new(), self.actor_list_generation),
         }
     }
 
@@ -1727,6 +1866,7 @@ impl DirPlayer {
                         let new_actor_list =
                             self.alloc_datum(Datum::List(list_type, list_items, sorted));
                         self.globals.insert("actorList".to_string(), new_actor_list);
+                        self.actor_list_generation = self.actor_list_generation.wrapping_add(1);
                         Ok(())
                     }
                     _ => Err(ScriptError::new("actorList must be a list".to_string())),
@@ -2803,26 +2943,11 @@ async fn run_movie_init_sequence() {
     player_wait_available().await;
 
     // stepFrame to actorList
-    let actor_list_snapshot = reserve_player_ref(|player| {
-        let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-        let actor_list_datum = player.get_datum(&actor_list_ref);
-        match actor_list_datum {
-            Datum::List(_, items, _) => {
-                items.clone()
-            },
-            _ => VecDeque::new(),
-        }
-    });
+    let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
+        reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
 
     for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-        let still_active = reserve_player_ref(|player| {
-            let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-            let actor_list_datum = player.get_datum(&actor_list_ref);
-            match actor_list_datum {
-                Datum::List(_, items, _) => items.contains(&actor_ref),
-                _ => false,
-            }
-        });
+        let still_active = active_actor_ids.contains(&actor_ref.unwrap());
 
         if still_active {
             let result =
@@ -2841,6 +2966,20 @@ async fn run_movie_init_sequence() {
                     player.is_in_frame_update = false;
                 });
                 return;
+            }
+
+            let refreshed_active_ids = reserve_player_ref(|player| {
+                if player.actor_list_generation != actor_list_generation {
+                    Some(player.actor_list_active_ids())
+                } else {
+                    None
+                }
+            });
+
+            if let Some((next_active_actor_ids, next_actor_list_generation)) = refreshed_active_ids
+            {
+                active_actor_ids = next_active_actor_ids;
+                actor_list_generation = next_actor_list_generation;
             }
         }
     }
@@ -2938,7 +3077,7 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     // 3. Load the new movie data (preserving globals and allocator)
     reserve_player_mut(|player| {
         player.movie.score.reset();
-        player.script_instance_list_cache.clear();
+        player.clear_script_instance_list_caches();
         player.movie.frame_script_instance = None;
         player.movie.frame_script_member = None;
         player.movie.current_frame = 1;

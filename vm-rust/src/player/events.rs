@@ -66,28 +66,17 @@ pub fn player_dispatch_event_to_sprite(
     args: &Vec<DatumRef>,
     sprite_num: u16,
 ) {
-    let instance_ids = reserve_player_ref(|player| {
+    let instance_ids = reserve_player_mut(|player| {
         // Check the cache first — it may contain extra instances added
         // via scriptInstanceList.add() (e.g. goal parent scripts).
-        if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite_num as i16)).cloned() {
-            let datum = player.get_datum(&cached_ref).clone();
-            if let Datum::List(_, item_refs, _) = datum {
-                let mut ids = vec![];
-                for item_ref in &item_refs {
-                    if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
-                        ids.push(id.clone());
-                    }
-                }
-                return Some(ids);
-            }
-        }
-        let sprite = player.movie.score.get_sprite(sprite_num as i16);
-        if let Some(sprite) = sprite {
-            let instance_ids = sprite.script_instance_list.clone();
-            Some(instance_ids)
-        } else {
-            None
-        }
+        let fallback = player
+            .movie
+            .score
+            .get_sprite(sprite_num as i16)
+            .map(|sprite| sprite.script_instance_list.clone());
+        fallback.map(|fallback| {
+            player.get_sprite_script_instance_ids(sprite_num as i16, fallback.as_slice())
+        })
     });
     if instance_ids.is_none() {
         return;
@@ -107,26 +96,18 @@ pub async fn player_dispatch_event_to_sprite_targeted(
     args: &Vec<DatumRef>,
     sprite_num: u16,
 ) {
-    let instance_ids = reserve_player_ref(|player| {
+    let instance_ids = reserve_player_mut(|player| {
         // Check the cache first — it may contain extra instances added
         // via scriptInstanceList.add() (e.g. goal parent scripts).
-        if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite_num as i16)).cloned() {
-            let datum = player.get_datum(&cached_ref).clone();
-            if let Datum::List(_, item_refs, _) = datum {
-                let mut ids = vec![];
-                for item_ref in &item_refs {
-                    if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
-                        ids.push(id.clone());
-                    }
-                }
-                return Some(ids);
-            }
-        }
-        player
+        
+        let fallback = player
             .movie
             .score
             .get_sprite(sprite_num as i16)
-            .map(|sprite| sprite.script_instance_list.clone())
+            .map(|sprite| sprite.script_instance_list.clone());
+        fallback.map(|fallback| {
+            player.get_sprite_script_instance_ids(sprite_num as i16, fallback.as_slice())
+        })
     });
     let Some(instance_ids) = instance_ids else {
         return;
@@ -784,42 +765,42 @@ pub async fn dispatch_event_to_all_behaviors(
                 }
             }
         }
-        for channel in player.movie.score.channels.iter() {
-            let sprite_num = channel.number as i16;
+        let stage_channel_snapshots: Vec<(usize, bool, bool, Vec<ScriptInstanceRef>)> = player
+            .movie
+            .score
+            .channels
+            .iter()
+            .map(|channel| {
+                (
+                    channel.number,
+                    channel.sprite.entered,
+                    channel.sprite.puppet,
+                    channel.sprite.script_instance_list.clone(),
+                )
+            })
+            .collect();
+
+        for (channel_number, entered, puppet, fallback) in stage_channel_snapshots {
+            let sprite_num = channel_number as i16;
             // Check both the sprite's internal list AND the cached scriptInstanceList
             // (behaviors added via sprite.scriptInstanceList.add() only exist in the cache)
-            let has_internal = !channel.sprite.script_instance_list.is_empty();
+            let has_internal = !fallback.is_empty();
             let has_cached = player.script_instance_list_cache.contains_key(&sprite_num);
 
             if !has_internal && !has_cached {
                 continue;
             }
-            if !channel.sprite.entered && !channel.sprite.puppet {
+            if !entered && !puppet {
                 continue;
             }
 
-            // Prefer cached list (it includes .add()-ed behaviors)
-            let behaviors = if let Some(cached_ref) = player.script_instance_list_cache.get(&sprite_num).cloned() {
-                let datum = player.get_datum(&cached_ref).clone();
-                if let Datum::List(_, item_refs, _) = datum {
-                    let mut ids = vec![];
-                    for item_ref in &item_refs {
-                        if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
-                            ids.push(id.clone());
-                        }
-                    }
-                    ids
-                } else {
-                    channel.sprite.script_instance_list.clone()
-                }
-            } else {
-                channel.sprite.script_instance_list.clone()
-            };
+            let behaviors =
+                player.get_sprite_script_instance_ids(sprite_num, fallback.as_slice());
 
-            if channel.number > 0 {
-                sprites.push((ScoreRef::Stage, channel.number, behaviors));
-            } else if channel.number == 0 {
-                frames.push((channel.number, behaviors));  // Store tuple with channel number
+            if channel_number > 0 {
+                sprites.push((ScoreRef::Stage, channel_number, behaviors));
+            } else if channel_number == 0 {
+                frames.push((channel_number, behaviors));  // Store tuple with channel number
             }
         }
 

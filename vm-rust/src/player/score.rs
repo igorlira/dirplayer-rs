@@ -516,7 +516,7 @@ impl Score {
                 // Invalidate the cached scriptInstanceList so stale ScriptInstanceRefs
                 // don't prevent deallocation of old script instances.
                 if did_reset {
-                    player.script_instance_list_cache.remove(&(sprite_num as i16));
+                    player.remove_script_instance_list_cache(sprite_num as i16);
                 }
             });
         }
@@ -2974,29 +2974,16 @@ pub fn sprite_get_prop(
                 // instead of allocating a new one (which would create
                 // a separate copy that .add() wouldn't sync back).
                 player.last_sprite_prop_ref = Some(cached_ref.clone());
-                let datum = player.get_datum(&cached_ref).clone();
-                // Sync cached list back to sprite's script_instance_list Vec
-                // so that if the cache is later cleared, the Vec has the data.
-                if let Datum::List(_, ref items, _) = datum {
-                    let mut synced_ids = vec![];
-                    for item_ref in items {
-                        if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
-                            synced_ids.push(id.clone());
-                        }
-                    }
-                    let sprite = player.movie.score.get_sprite_mut(sprite_id);
-                    sprite.script_instance_list = synced_ids;
-                }
-                Ok(datum)
+                Ok(player.get_datum(&cached_ref).clone())
             } else {
-                let instance_ids = sprite.map_or(vec![], |x| x.script_instance_list.clone());
-                let instance_ids: VecDeque<DatumRef> = instance_ids
+                let initial_ids = sprite.map_or(vec![], |x| x.script_instance_list.clone());
+                let instance_ids: VecDeque<DatumRef> = initial_ids
                     .iter()
                     .map(|x| player.alloc_datum(Datum::ScriptInstanceRef(x.clone())))
                     .collect();
                 let list = Datum::List(DatumType::List, instance_ids, false);
                 let list_ref = player.alloc_datum(list.clone());
-                player.script_instance_list_cache.insert(sprite_id, list_ref.clone());
+                player.cache_script_instance_list(sprite_id, list_ref.clone(), initial_ids);
                 player.last_sprite_prop_ref = Some(list_ref);
                 Ok(list)
             }
@@ -3011,8 +2998,13 @@ pub fn sprite_get_prop(
             })
         }))),
         "scriptNum" => {
-            let script_num = sprite
-                .and_then(|sprite| sprite.script_instance_list.first())
+            let fallback = sprite.map_or(vec![], |sprite| sprite.script_instance_list.clone());
+            let script_ids = player.get_sprite_script_instance_ids(
+                sprite_id,
+                fallback.as_slice(),
+            );
+            let script_num = script_ids
+                .first()
                 .map(|script_instance_ref| {
                     player.allocator.get_script_instance(&script_instance_ref)
                 })
@@ -3741,7 +3733,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             reserve_player_mut(|player| {
                 // Invalidate the cached scriptInstanceList so the next
                 // getter call rebuilds it from the updated Vec.
-                player.script_instance_list_cache.remove(&sprite_id);
+                player.remove_script_instance_list_cache(sprite_id);
                 let value_ref = player.alloc_datum(Datum::Int(sprite_id as i32));
                 for instance_ref in instance_refs {
                     script_set_prop(
@@ -3966,20 +3958,15 @@ pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: 
 
 pub fn is_active_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
     // Per Director docs, an "active sprite" has a sprite script (behavior) OR cast member script.
-    if sprite.script_instance_list.len() > 0 {
+    if player.sprite_has_script_instance_ids(
+        sprite.number as i16,
+        sprite.script_instance_list.as_slice(),
+    ) {
         return true;
     }
     // Also check the cached scriptInstanceList — behaviors added via
     // sprite.scriptInstanceList.add() only update the cached Datum::List,
     // not the sprite's internal script_instance_list Vec.
-    if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite.number as i16)) {
-        let datum = player.get_datum(cached_ref);
-        if let Datum::List(_, items, _) = datum {
-            if !items.is_empty() {
-                return true;
-            }
-        }
-    }
     if let Some(member_ref) = sprite.member.as_ref() {
         if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
             if member.get_member_script_ref().is_some() || member.get_script_id().is_some() {

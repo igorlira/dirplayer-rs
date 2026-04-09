@@ -120,6 +120,8 @@ impl ListDatumHandlers {
                 }
                 list_vec.push_back(item_ref.clone());
             }
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -330,6 +332,8 @@ impl ListDatumHandlers {
                     let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
                     list_vec.push_back(prop_list);
                 }
+                player.note_actor_list_mutation(datum);
+                player.note_script_instance_list_mutation(datum);
                 return Ok(DatumRef::Void);
             }
 
@@ -347,6 +351,8 @@ impl ListDatumHandlers {
             } else {
                 list_vec.push_back(item.clone());
             }
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -378,6 +384,8 @@ impl ListDatumHandlers {
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             if let Some(index) = index {
                 list_vec.remove(index);
+                player.note_actor_list_mutation(datum);
+                player.note_script_instance_list_mutation(datum);
             }
             Ok(player.alloc_datum(datum_bool(index.is_some())))
         })
@@ -390,6 +398,8 @@ impl ListDatumHandlers {
             if position <= list_vec.len() as i32 {
                 let index = (position - 1) as usize;
                 list_vec.remove(index);
+                player.note_actor_list_mutation(datum);
+                player.note_script_instance_list_mutation(datum);
                 Ok(DatumRef::Void)
             } else {
                 Err(ScriptError::new("Index out of bounds".to_string()))
@@ -401,6 +411,8 @@ impl ListDatumHandlers {
         reserve_player_mut(|player| {
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.clear();
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -424,6 +436,8 @@ impl ListDatumHandlers {
 
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.insert(position as usize, item_ref.clone());
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -438,6 +452,8 @@ impl ListDatumHandlers {
             let item = &args[0];
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.push_back(item.clone());
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -467,6 +483,8 @@ impl ListDatumHandlers {
             list_vec.clear();
             list_vec.extend(sorted_list);
             *is_sorted = true;
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
 
             Ok(DatumRef::Void)
         })

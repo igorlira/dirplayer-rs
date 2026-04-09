@@ -1634,7 +1634,7 @@ impl BuiltInHandlerManager {
 
 fn get_datum_script_instance_ids(
     value_ref: &DatumRef,
-    player: &DirPlayer,
+    player: &mut DirPlayer,
 ) -> Result<Vec<ScriptInstanceRef>, ScriptError> {
     let value = player.get_datum(value_ref);
     let mut instance_refs = vec![];
@@ -1643,23 +1643,13 @@ fn get_datum_script_instance_ids(
             instance_refs.push(instance_id.clone());
         }
         Datum::SpriteRef(sprite_id) => {
-            // Check cached scriptInstanceList first (includes behaviors added via .add())
-            if let Some(cached_ref) = player.script_instance_list_cache.get(sprite_id).cloned() {
-                let datum = player.get_datum(&cached_ref).clone();
-                if let Datum::List(_, item_refs, _) = datum {
-                    for item_ref in &item_refs {
-                        if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
-                            instance_refs.push(id.clone());
-                        }
-                    }
-                } else {
-                    let sprite = player.movie.score.get_sprite(*sprite_id).unwrap();
-                    instance_refs.extend(sprite.script_instance_list.clone());
-                }
-            } else {
-                let sprite = player.movie.score.get_sprite(*sprite_id).unwrap();
-                instance_refs.extend(sprite.script_instance_list.clone());
-            }
+            let fallback = player
+                .movie
+                .score
+                .get_sprite(*sprite_id)
+                .map(|sprite| sprite.script_instance_list.clone())
+                .unwrap_or_default();
+            instance_refs.extend(player.get_sprite_script_instance_ids(*sprite_id, fallback.as_slice()));
         }
         Datum::Int(_) => {}
         _ => {

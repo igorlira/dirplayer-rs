@@ -234,27 +234,31 @@ pub fn script_get_prop(
     } else if prop_name.eq_ignore_ascii_case("spriteNum") {
         // spriteNum is a built-in property for behaviors — if not explicitly set,
         // look up which sprite channel this instance belongs to.
-        // Check script_instance_list first
-        for channel in &player.movie.score.channels {
-            if channel.sprite.script_instance_list.iter().any(|si| si.id() == script_instance_ref.id()) {
-                let datum_ref = player.alloc_datum(Datum::Int(channel.sprite.number as i32));
+        // Resolve sprite ownership from the live/cached scriptInstanceList.
+        let stage_channel_snapshots: Vec<(i16, i32, Vec<ScriptInstanceRef>)> = player
+            .movie
+            .score
+            .channels
+            .iter()
+            .map(|channel| {
+                (
+                    channel.sprite.number as i16,
+                    channel.sprite.number as i32,
+                    channel.sprite.script_instance_list.clone(),
+                )
+            })
+            .collect();
+        for (sprite_id, channel_number, fallback) in stage_channel_snapshots {
+            let instance_ids = player.get_sprite_script_instance_ids(
+                sprite_id,
+                fallback.as_slice(),
+            );
+            if instance_ids.iter().any(|si| si.id() == script_instance_ref.id()) {
+                let datum_ref = player.alloc_datum(Datum::Int(channel_number));
                 return Ok(datum_ref);
             }
         }
         // Also check the cache — behaviors may be in cache but not in script_instance_list Vec
-        for (&sprite_id, cached_ref) in &player.script_instance_list_cache {
-            let datum = player.get_datum(cached_ref);
-            if let Datum::List(_, items, _) = datum {
-                for item_ref in items {
-                    if let Datum::ScriptInstanceRef(id) = player.get_datum(&item_ref) {
-                        if id.id() == script_instance_ref.id() {
-                            let datum_ref = player.alloc_datum(Datum::Int(sprite_id as i32));
-                            return Ok(datum_ref);
-                        }
-                    }
-                }
-            }
-        }
         Ok(player.alloc_datum(Datum::Int(0)))
     } else {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);

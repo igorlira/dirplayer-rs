@@ -397,11 +397,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let sprite_with_behaviors = reserve_player_ref(|player| {
                 if player.mouse_down_sprite > 0 {
                     let sprite = player.movie.score.get_sprite(player.mouse_down_sprite);
-                    let has_behaviors = sprite.map_or(false, |s| !s.script_instance_list.is_empty())
-                        || player.script_instance_list_cache.get(&player.mouse_down_sprite)
-                            .map_or(false, |cached_ref| {
-                                matches!(player.get_datum(cached_ref), Datum::List(_, items, _) if !items.is_empty())
-                            });
+                    let has_behaviors = sprite.map_or(false, |s| {
+                        player.sprite_has_script_instance_ids(
+                            player.mouse_down_sprite,
+                            s.script_instance_list.as_slice(),
+                        )
+                    });
                     if has_behaviors {
                         return Some(player.mouse_down_sprite as u16);
                     }
