@@ -304,6 +304,7 @@ pub struct DirPlayer {
     pub is_in_transition: bool,
     pub actor_list_generation: u64,
     pub behavior_channel_cache_generation: u64,
+    pub active_stage_filmloop_cache_generation: u64,
     pub rng: rand::rngs::SmallRng,
     /// Cache of allocated scriptInstanceList datums per sprite.
     /// Ensures that `sprite.scriptInstanceList.add(x)` modifies the live list
@@ -317,6 +318,8 @@ pub struct DirPlayer {
     pub script_instance_list_ids_cache: FxHashMap<i16, (u64, Vec<ScriptInstanceRef>)>,
     /// Cached stage channels with active behaviors for the current frame.
     pub active_stage_behavior_channels_cache: Option<(u32, u64, Vec<usize>)>,
+    /// Cached active filmloop members currently present on the stage.
+    pub active_stage_filmloop_members_cache: Option<(u64, Vec<CastMemberRef>)>,
     /// Set by `sprite_get_prop` when a property returns a pre-allocated DatumRef
     /// (e.g. cached scriptInstanceList). Callers should check this before
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
@@ -468,11 +471,13 @@ impl DirPlayer {
             is_in_transition: false,
             actor_list_generation: 0,
             behavior_channel_cache_generation: 0,
+            active_stage_filmloop_cache_generation: 0,
             script_instance_list_cache: FxHashMap::default(),
             script_instance_list_cache_owner: FxHashMap::default(),
             script_instance_list_generation: FxHashMap::default(),
             script_instance_list_ids_cache: FxHashMap::default(),
             active_stage_behavior_channels_cache: None,
+            active_stage_filmloop_members_cache: None,
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
@@ -677,6 +682,7 @@ impl DirPlayer {
         }
 
         self.invalidate_behavior_channel_cache();
+        self.invalidate_active_stage_filmloop_cache();
     }
 
     pub async fn end_all_sprites(&mut self) -> Vec<(ScoreRef, u32)> {
@@ -728,47 +734,22 @@ impl DirPlayer {
         //   sprite.exited = true;
         // }
         self.invalidate_behavior_channel_cache();
+        self.invalidate_active_stage_filmloop_cache();
         all_ended_sprite_nums
     }
 
     /// Get all active filmloop scores with their member references.
-    /// Returns a vector of tuples containing (member_ref, current_frame, score_ref).
+    /// Returns a vector of tuples containing (member_ref, current_frame).
     /// Only includes filmloops that are currently visible on stage.
     /// Deduplicates filmloops - each unique filmloop is only returned once even if used in multiple sprites.
-    pub fn get_active_filmloop_scores(&self) -> Vec<(CastMemberRef, u32, &score::Score)> {
-        let mut active_filmloops = Vec::new();
-        let mut seen_members = std::collections::HashSet::new();
+    pub fn get_active_filmloop_scores(&mut self) -> Vec<(CastMemberRef, u32)> {
+        let member_refs = self.active_stage_filmloop_member_refs();
+        let mut active_filmloops = Vec::with_capacity(member_refs.len());
 
-        for channel in self.movie.score.channels.iter() {
-            // Skip if sprite is not active/entered
-            if !channel.sprite.entered || channel.sprite.exited {
-                continue;
-            }
-
-            let member_ref = match channel.sprite.member.as_ref() {
-                Some(r) => r,
-                None => continue,
-            };
-
-            // Skip if we've already seen this filmloop member
-            if !seen_members.insert(member_ref.clone()) {
-                continue;
-            }
-
-            let member_type = match self.movie.cast_manager.find_member_by_ref(&member_ref) {
-                Some(member) => member.member_type.member_type_id(),
-                None => continue,
-            };
-
-            if member_type == cast_member::CastMemberTypeId::FilmLoop {
-                if let Some(member) = self.movie.cast_manager.find_member_by_ref(&member_ref) {
-                    if let cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                        active_filmloops.push((
-                            member_ref.clone(),
-                            film_loop.current_frame,
-                            &film_loop.score,
-                        ));
-                    }
+        for member_ref in member_refs {
+            if let Some(member) = self.movie.cast_manager.find_member_by_ref(&member_ref) {
+                if let cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
+                    active_filmloops.push((member_ref, film_loop.current_frame));
                 }
             }
         }
@@ -982,6 +963,7 @@ impl DirPlayer {
         debug!("Resetting score");
         self.movie.score.reset();
         self.clear_script_instance_list_caches();
+        self.invalidate_active_stage_filmloop_cache();
         self.movie.current_frame = 1;
         // TODO cancel breakpoints
         self.current_breakpoint = None;
@@ -1125,6 +1107,12 @@ impl DirPlayer {
         self.active_stage_behavior_channels_cache = None;
     }
 
+    pub fn invalidate_active_stage_filmloop_cache(&mut self) {
+        self.active_stage_filmloop_cache_generation =
+            self.active_stage_filmloop_cache_generation.wrapping_add(1);
+        self.active_stage_filmloop_members_cache = None;
+    }
+
     pub fn get_sprite_script_instance_ids(
         &mut self,
         sprite_id: i16,
@@ -1204,6 +1192,46 @@ impl DirPlayer {
         self.active_stage_behavior_channels_cache =
             Some((frame_num, generation, channels.clone()));
         channels
+    }
+
+    pub fn active_stage_filmloop_member_refs(&mut self) -> Vec<CastMemberRef> {
+        let generation = self.active_stage_filmloop_cache_generation;
+        if let Some((cached_generation, member_refs)) = &self.active_stage_filmloop_members_cache {
+            if *cached_generation == generation {
+                return member_refs.clone();
+            }
+        }
+
+        let mut member_refs = Vec::new();
+        let mut seen_members = std::collections::HashSet::new();
+        for channel in self.movie.score.channels.iter() {
+            if !channel.sprite.entered || channel.sprite.exited {
+                continue;
+            }
+
+            let Some(member_ref) = channel.sprite.member.as_ref() else {
+                continue;
+            };
+
+            if !seen_members.insert(member_ref.clone()) {
+                continue;
+            }
+
+            let is_filmloop = self
+                .movie
+                .cast_manager
+                .find_member_by_ref(member_ref)
+                .is_some_and(|member| {
+                    member.member_type.member_type_id() == cast_member::CastMemberTypeId::FilmLoop
+                });
+            if is_filmloop {
+                member_refs.push(member_ref.clone());
+            }
+        }
+
+        self.active_stage_filmloop_members_cache =
+            Some((generation, member_refs.clone()));
+        member_refs
     }
 
     pub fn note_actor_list_mutation(&mut self, datum_ref: &DatumRef) {

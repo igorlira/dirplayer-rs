@@ -430,6 +430,7 @@ impl MovieHandlers {
                     sprite.visible = true;
                     player.movie.score.invalidate_render_channel_cache();
                     player.invalidate_behavior_channel_cache();
+                    player.invalidate_active_stage_filmloop_cache();
                     return Ok(DatumRef::Void);
                 }
             }
@@ -438,6 +439,7 @@ impl MovieHandlers {
             sprite.puppet = is_puppet;
             player.movie.score.invalidate_render_channel_cache();
             player.invalidate_behavior_channel_cache();
+            player.invalidate_active_stage_filmloop_cache();
             Ok(DatumRef::Void)
         })
     }
@@ -533,9 +535,21 @@ impl MovieHandlers {
 
             // Also collect receivers from filmloop scores
             let active_filmloops = player.get_active_filmloop_scores();
-            for (_, _, filmloop_score) in active_filmloops {
-                let filmloop_receivers = filmloop_score.get_active_script_instance_list();
-                receivers.extend(filmloop_receivers);
+            for (member_ref, _) in active_filmloops {
+                if let Some(filmloop_score) = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .and_then(|member| match &member.member_type {
+                        crate::player::cast_member::CastMemberType::FilmLoop(film_loop) => {
+                            Some(&film_loop.score)
+                        }
+                        _ => None,
+                    })
+                {
+                    let filmloop_receivers = filmloop_score.get_active_script_instance_list();
+                    receivers.extend(filmloop_receivers);
+                }
             }
 
             Ok((message.clone(), remaining_args.clone(), receivers))

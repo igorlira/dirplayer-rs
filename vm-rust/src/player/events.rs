@@ -537,7 +537,20 @@ pub async fn player_dispatch_event_beginsprite(
 
             // Collect filmloop sprites
             let active_filmloops = player.get_active_filmloop_scores();
-            for (member_ref, filmloop_current_frame, filmloop_score) in active_filmloops {
+            for (member_ref, filmloop_current_frame) in active_filmloops {
+                let Some(filmloop_score) = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .and_then(|member| match &member.member_type {
+                        super::cast_member::CastMemberType::FilmLoop(film_loop) => {
+                            Some(&film_loop.score)
+                        }
+                        _ => None,
+                    })
+                else {
+                    continue;
+                };
                 for channel_number in filmloop_score.active_channel_numbers_for_frame(filmloop_current_frame) {
                     let Some(channel) = filmloop_score.channels.get(channel_number) else {
                         continue;
@@ -781,7 +794,20 @@ pub async fn dispatch_event_to_all_behaviors(
 
         // Collect filmloop sprites
         let active_filmloops = player.get_active_filmloop_scores();
-        for (member_ref, filmloop_current_frame, filmloop_score) in active_filmloops {
+        for (member_ref, filmloop_current_frame) in active_filmloops {
+            let Some(filmloop_score) = player
+                .movie
+                .cast_manager
+                .find_member_by_ref(&member_ref)
+                .and_then(|member| match &member.member_type {
+                    super::cast_member::CastMemberType::FilmLoop(film_loop) => {
+                        Some(&film_loop.score)
+                    }
+                    _ => None,
+                })
+            else {
+                continue;
+            };
             for channel_number in filmloop_score.active_channel_numbers_for_frame(filmloop_current_frame) {
                 let Some(channel) = filmloop_score.channels.get(channel_number) else {
                     continue;

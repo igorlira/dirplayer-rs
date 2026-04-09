@@ -4175,6 +4175,14 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 player.invalidate_behavior_channel_cache();
             });
         }
+        if prop_name.eq_ignore_ascii_case("member")
+            || prop_name.eq_ignore_ascii_case("memberNum")
+            || prop_name.eq_ignore_ascii_case("castNum")
+        {
+            reserve_player_mut(|player| {
+                player.invalidate_active_stage_filmloop_cache();
+            });
+        }
         JsApi::dispatch_channel_changed(sprite_id);
     }
     result
