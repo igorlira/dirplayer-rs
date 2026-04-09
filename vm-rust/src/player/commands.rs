@@ -25,6 +25,7 @@ use super::{
     },
     font::player_load_system_font,
     keyboard_events::{player_key_down, player_key_up},
+    handlers::datum_handlers::player_call_datum_handler,
     player_alloc_datum, player_call_script_handler, player_dispatch_global_event,
     player_is_playing, reserve_player_mut, reserve_player_ref,
     score::{concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at},
@@ -277,6 +278,23 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let mouse_down_script_active = reserve_player_ref(|player| {
                 has_executable_callback(&player.movie.mouse_down_script)
             });
+            // Flush actorList stepFrame so cached rollover state (e.g. oMouseSquare)
+            // is fresh before the mouseDown handler reads it. On mobile/touch there's
+            // no prior mouse_move, so stepFrame hasn't run at the tap position yet.
+            // mouse_loc is already set synchronously by the JS-side mouse_down() call.
+            {
+                let actor_snapshot = reserve_player_ref(|player| {
+                    player.actor_list_stepframe_snapshot()
+                });
+                for (_idx, actor_ref) in actor_snapshot.0.iter().enumerate() {
+                    if actor_snapshot.1.contains(&actor_ref.unwrap()) {
+                        let _ = player_call_datum_handler(
+                            actor_ref, &"stepFrame".to_string(), &vec![],
+                        ).await;
+                    }
+                }
+            }
+
             if mouse_down_script_active {
                 reserve_player_mut(|player| {
                     let now = Local::now().timestamp_millis().abs();

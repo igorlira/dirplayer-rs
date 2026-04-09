@@ -114,7 +114,6 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     const y = e.clientY - rect.top;
 
     if (pickingMode) {
-      // Always forward mouse_move so the renderer can track the cursor for hover highlight
       if (name === "move") {
         mouse_move(x, y);
       }
@@ -130,33 +129,23 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
 
     switch (name) {
       case "move":
-        // When pointer is locked, skip — handled by document-level listener
         if (!document.pointerLockElement) {
           mouse_move(x, y);
         }
         break;
       case "down":
-        // Check if tapped sprite is an editable field BEFORE dispatching mouse_down
-        // (must happen synchronously in the user gesture for mobile keyboard to show)
         {
           const spriteId = player_get_sprite_at(x, y);
           const isEditable = spriteId > 0 && is_sprite_editable_field(spriteId);
           mouse_down(x, y);
           if (isEditable) {
-            // Prevent the browser from focusing the stage div (tabIndex=0)
-            // after our programmatic focus — otherwise it steals focus back
-            // and the mobile keyboard immediately hides.
             e.preventDefault();
-            // Focus hidden input to trigger mobile virtual keyboard
             hiddenInputRef.current?.focus();
-          } else {
-            // Blur to dismiss mobile keyboard when tapping non-editable area
+          } else if (document.activeElement === hiddenInputRef.current) {
             hiddenInputRef.current?.blur();
-            // Return focus to stage div for regular keyboard input
             (e.currentTarget as HTMLElement).focus();
           }
         }
-        // Request pointer lock if the game wants it (cursor=200)
         if (wants_pointer_lock() && !document.pointerLockElement) {
           const target = e.currentTarget as HTMLElement;
           const canvas = target.querySelector("canvas");
@@ -174,7 +163,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   return (
     <div className={styles.container} ref={onContainerRef}>
       <div
-        style={{ transform: scale !== 1 ? `scale(${scale})` : undefined, cursor: pickingMode ? 'crosshair' : undefined }}
+        style={{ transform: scale !== 1 ? `scale(${scale})` : undefined, cursor: pickingMode ? 'crosshair' : undefined, touchAction: 'manipulation' }}
         tabIndex={0}
         id="stage_canvas_container"
         onPointerMove={(e) => onMouseEvent('move', e)}
