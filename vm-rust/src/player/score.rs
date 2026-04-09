@@ -3232,7 +3232,305 @@ where
     })
 }
 
+fn resolve_sprite_member_assignment(
+    player: &DirPlayer,
+    value: &Datum,
+) -> Result<(Option<CastMemberRef>, Option<(i32, i32)>, bool), ScriptError> {
+    let mem_ref = if let Datum::CastMember(cast_member) = value {
+        Some(cast_member.clone())
+    } else if value.is_string() {
+        let name = value.string_value()?;
+        player.movie.cast_manager.find_member_ref_by_name(&name)
+    } else if value.is_number() {
+        player
+            .movie
+            .cast_manager
+            .find_member_ref_by_number(value.int_value()? as u32)
+    } else {
+        None
+    };
+
+    let (intrinsic_size, is_film_loop) = mem_ref
+        .as_ref()
+        .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))
+        .map(|m| {
+            let size = match &m.member_type {
+                CastMemberType::Bitmap(bitmap) => {
+                    Some((bitmap.info.width as i32, bitmap.info.height as i32))
+                }
+                CastMemberType::Shape(shape) => {
+                    Some((shape.shape_info.width() as i32, shape.shape_info.height() as i32))
+                }
+                CastMemberType::VectorShape(vs) => {
+                    Some((vs.width().ceil() as i32, vs.height().ceil() as i32))
+                }
+                CastMemberType::Flash(flash) => flash.flash_info.as_ref().map(|fi| {
+                    let (l, t, r, b) = fi.flash_rect;
+                    ((r - l) as i32, (b - t) as i32)
+                }),
+                _ => None,
+            };
+            let is_film_loop = matches!(&m.member_type, CastMemberType::FilmLoop(_));
+            (size, is_film_loop)
+        })
+        .unwrap_or((None, false));
+
+    Ok((mem_ref, intrinsic_size, is_film_loop))
+}
+
+fn sprite_set_prop_is_noop(
+    sprite_id: i16,
+    prop_name: &str,
+    value: &Datum,
+) -> Result<bool, ScriptError> {
+    reserve_player_ref(|player| {
+        let Some(sprite) = player.movie.score.get_sprite(sprite_id) else {
+            return Ok(false);
+        };
+
+        match prop_name {
+            "visible" | "visibility" => Ok(sprite.visible == value.to_bool()?),
+            "stretch" => Ok(sprite.stretch == value.int_value()?),
+            "locH" => Ok(sprite.loc_h == value.int_value()?),
+            "locV" => Ok(sprite.loc_v == value.int_value()?),
+            "locZ" => {
+                if matches!(value, Datum::Void) {
+                    Ok(true)
+                } else {
+                    Ok(sprite.loc_z == value.int_value()?)
+                }
+            }
+            "width" => {
+                let width = value.int_value()?;
+                Ok(sprite.width == width && sprite.has_size_changed)
+            }
+            "height" => {
+                let height = value.int_value()?;
+                Ok(sprite.height == height && sprite.has_size_changed)
+            }
+            "left" => {
+                let (left, _, _, _) = get_sprite_rect_in_context(player, sprite_id);
+                Ok(left == value.int_value()?)
+            }
+            "top" => {
+                let (_, top, _, _) = get_sprite_rect_in_context(player, sprite_id);
+                Ok(top == value.int_value()?)
+            }
+            "right" => {
+                let (left, _, _, _) = get_sprite_rect_in_context(player, sprite_id);
+                let width = value.int_value()? - left;
+                Ok(sprite.width == width && sprite.has_size_changed)
+            }
+            "bottom" => {
+                let (_, top, _, _) = get_sprite_rect_in_context(player, sprite_id);
+                let height = value.int_value()? - top;
+                Ok(sprite.height == height && sprite.has_size_changed)
+            }
+            "ink" => Ok(sprite.ink == value.int_value()?),
+            "blend" => Ok(sprite.blend == value.int_value()?),
+            "rotation" => {
+                let rotation = if value.is_number() {
+                    value.to_float()?
+                } else {
+                    0.0
+                };
+                Ok(sprite.rotation == rotation)
+            }
+            "skew" => {
+                let skew = if value.is_number() {
+                    value.to_float()?
+                } else {
+                    0.0
+                };
+                Ok(sprite.skew == skew)
+            }
+            "flipH" => {
+                let flip_h = if value.is_number() {
+                    value.to_bool()?
+                } else {
+                    false
+                };
+                Ok(sprite.flip_h == flip_h)
+            }
+            "flipV" => {
+                let flip_v = if value.is_number() {
+                    value.to_bool()?
+                } else {
+                    false
+                };
+                Ok(sprite.flip_v == flip_v)
+            }
+            "backColor" | "backcolor" => {
+                let back_color = value.int_value()?;
+                Ok(
+                    sprite.back_color == back_color
+                        && sprite.bg_color == ColorRef::PaletteIndex(back_color as u8)
+                        && sprite.has_back_color,
+                )
+            }
+            "bgColor" => {
+                let bg_color = value.to_color_ref()?.to_owned();
+                Ok(
+                    sprite.bg_color == bg_color
+                        && sprite.back_color
+                            == bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32
+                        && sprite.has_back_color,
+                )
+            }
+            "foreColor" | "forecolor" => {
+                let fore_color = value.int_value()?;
+                Ok(
+                    sprite.fore_color == fore_color
+                        && sprite.color == ColorRef::PaletteIndex(fore_color as u8)
+                        && sprite.has_fore_color,
+                )
+            }
+            "color" => {
+                let color = value.to_color_ref()?.to_owned();
+                Ok(
+                    sprite.color == color
+                        && sprite.fore_color == color.to_index(&SYSTEM_WIN_PALETTE) as i32
+                        && sprite.has_fore_color,
+                )
+            }
+            "member" => {
+                let (mem_ref, _, _) = resolve_sprite_member_assignment(player, value)?;
+                Ok(sprite.member == mem_ref)
+            }
+            "memberNum" => {
+                let value = value.int_value()?;
+                let actual_member_num = if value > 65535 {
+                    (value as u32 & 0xFFFF) as i32
+                } else {
+                    value
+                };
+                let new_member_ref = match &sprite.member {
+                    Some(member_ref) => cast_member_ref(member_ref.cast_lib, actual_member_num),
+                    None => CastMemberRefHandlers::member_ref_from_slot_number(value as u32),
+                };
+                Ok(sprite.member.as_ref() == Some(&new_member_ref))
+            }
+            "castNum" => {
+                let new_member_ref =
+                    CastMemberRefHandlers::member_ref_from_slot_number(value.int_value()? as u32);
+                Ok(sprite.member.as_ref() == Some(&new_member_ref))
+            }
+            "loc" => match value {
+                Datum::Point(vals, _) => {
+                    Ok(sprite.loc_h == vals[0] as i32 && sprite.loc_v == vals[1] as i32)
+                }
+                Datum::List(_, list, _) if list.len() == 2 => {
+                    let x = player.get_datum(&list[0]).int_value()?;
+                    let y = player.get_datum(&list[1]).int_value()?;
+                    Ok(sprite.loc_h == x && sprite.loc_v == y)
+                }
+                Datum::Void => Ok(true),
+                _ => Err(ScriptError::new(format!(
+                    "loc must be a Point (received {})",
+                    value.type_str()
+                ))),
+            },
+            "rect" => {
+                let rect_values = match value {
+                    Datum::Rect(vals, _) => Some([
+                        vals[0] as i32,
+                        vals[1] as i32,
+                        vals[2] as i32,
+                        vals[3] as i32,
+                    ]),
+                    Datum::List(_, items, _) if items.len() == 4 => Some([
+                        player.get_datum(&items[0]).int_value()?,
+                        player.get_datum(&items[1]).int_value()?,
+                        player.get_datum(&items[2]).int_value()?,
+                        player.get_datum(&items[3]).int_value()?,
+                    ]),
+                    Datum::Point(vals, _) => {
+                        let x = vals[0] as i32;
+                        let y = vals[1] as i32;
+                        Some([x, y, x + sprite.width, y + sprite.height])
+                    }
+                    _ => None,
+                };
+
+                let member_ref = sprite.member.as_ref();
+                let cast_member =
+                    member_ref.and_then(|x| player.movie.cast_manager.find_member_by_ref(x));
+                let reg_point = cast_member
+                    .map(|x| match &x.member_type {
+                        CastMemberType::Bitmap(bitmap) => bitmap.reg_point,
+                        CastMemberType::FilmLoop(film_loop) => {
+                            let w = film_loop.initial_rect.width();
+                            let h = film_loop.initial_rect.height();
+                            ((w / 2) as i16, (h / 2) as i16)
+                        }
+                        CastMemberType::Flash(flash) => flash.reg_point,
+                        _ => (0, 0),
+                    })
+                    .unwrap_or((0, 0));
+
+                match rect_values {
+                    Some([left, top, right, bottom]) => Ok(
+                        sprite.loc_h == left + reg_point.0 as i32
+                            && sprite.loc_v == top + reg_point.1 as i32
+                            && sprite.width == right - left
+                            && sprite.height == bottom - top,
+                    ),
+                    None => Err(ScriptError::new(format!(
+                        "rect must be a rect (got {})",
+                        value.type_str()
+                    ))),
+                }
+            }
+            "scriptInstanceList" => {
+                let ref_list = value.to_list()?;
+                if ref_list.len() != sprite.script_instance_list.len() {
+                    return Ok(false);
+                }
+                for (ref_id, existing_ref) in ref_list.iter().zip(sprite.script_instance_list.iter()) {
+                    let datum = player.get_datum(ref_id);
+                    let Datum::ScriptInstanceRef(instance_ref) = datum else {
+                        return Err(ScriptError::new(
+                            "Cannot set non-script to scriptInstanceList".to_string(),
+                        ));
+                    };
+                    if instance_ref.id() != existing_ref.id() {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            "editable" => Ok(sprite.editable == value.to_bool()?),
+            "quad" => {
+                let list = value
+                    .to_list()
+                    .map_err(|_| ScriptError::new("quad must be a list".to_string()))?;
+                if list.len() != 4 {
+                    return Err(ScriptError::new(
+                        "quad must be a list of 4 points".to_string(),
+                    ));
+                }
+                let mut points = Vec::new();
+                for point_ref in list {
+                    let point_datum = player.get_datum(point_ref);
+                    let (vals, _flags) = point_datum.to_point_inline()?;
+                    points.push((vals[0] as i32, vals[1] as i32));
+                }
+                Ok(sprite.quad == Some([points[0], points[1], points[2], points[3]]))
+            }
+            "puppet" => Ok(sprite.puppet == value.to_bool()?),
+            "moveableSprite" | "moveable" => Ok(sprite.moveable == value.to_bool()?),
+            "constraint" => Ok(sprite.constraint == value.int_value()?),
+            "trails" => Ok(sprite.trails == value.to_bool()?),
+            _ => Ok(false),
+        }
+    })
+}
+
 pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<(), ScriptError> {
+    if sprite_set_prop_is_noop(sprite_id, prop_name, &value)? {
+        return Ok(());
+    }
+
     reserve_player_mut(|player| { player.stage_dirty = true; });
     let result = match prop_name {
         "visible" | "visibility" => borrow_sprite_mut(
@@ -3480,57 +3778,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         // Member properties
         "member" => borrow_sprite_mut(
             sprite_id,
-            |player| {
-                // Resolve member reference
-                let mem_ref = if let Datum::CastMember(cast_member) = &value {
-                    Some(cast_member.clone())
-                } else if value.is_string() {
-                    let name = value.string_value()?;
-                    let found = player
-                        .movie
-                        .cast_manager
-                        .find_member_ref_by_name(&name);
-                    found
-                } else if value.is_number() {
-                    player
-                        .movie
-                        .cast_manager
-                        .find_member_ref_by_number(value.int_value()? as u32)
-                } else {
-                    None
-                };
-
-                // Extract intrinsic size ONLY for Bitmap / Shape
-                // Also check if the member is a film loop
-                let (intrinsic_size, is_film_loop) = mem_ref
-                    .as_ref()
-                    .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))
-                    .map(|m| {
-                        let size = match &m.member_type {
-                            CastMemberType::Bitmap(bitmap) => {
-                                Some((bitmap.info.width as i32, bitmap.info.height as i32))
-                            }
-                            CastMemberType::Shape(shape) => {
-                                Some((shape.shape_info.width() as i32, shape.shape_info.height() as i32))
-                            }
-                            CastMemberType::VectorShape(vs) => {
-                                Some((vs.width().ceil() as i32, vs.height().ceil() as i32))
-                            }
-                            CastMemberType::Flash(flash) => {
-                                flash.flash_info.as_ref().map(|fi| {
-                                    let (l, t, r, b) = fi.flash_rect;
-                                    ((r - l) as i32, (b - t) as i32)
-                                })
-                            }
-                            _ => None,
-                        };
-                        let is_film_loop = matches!(&m.member_type, CastMemberType::FilmLoop(_));
-                        (size, is_film_loop)
-                    })
-                    .unwrap_or((None, false));
-
-                Ok((mem_ref, intrinsic_size, is_film_loop))
-            },
+            |player| resolve_sprite_member_assignment(player, &value),
             |sprite, value| {
                 let (mem_ref, intrinsic_size, is_film_loop) = value?;
 
