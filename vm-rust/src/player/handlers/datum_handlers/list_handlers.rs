@@ -383,7 +383,13 @@ impl ListDatumHandlers {
         reserve_player_mut(|player| {
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             if let Some(index) = index {
-                list_vec.remove(index);
+                if index == 0 {
+                    list_vec.pop_front();
+                } else if index == list_vec.len() - 1 {
+                    list_vec.pop_back();
+                } else {
+                    list_vec.remove(index);
+                }
                 player.note_actor_list_mutation(datum);
                 player.note_script_instance_list_mutation(datum);
             }
@@ -397,7 +403,15 @@ impl ListDatumHandlers {
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             if position <= list_vec.len() as i32 {
                 let index = (position - 1) as usize;
-                list_vec.remove(index);
+                // Use pop_front/pop_back for endpoints — O(1) on VecDeque
+                // vs O(n) for remove() which shifts elements.
+                if index == 0 {
+                    list_vec.pop_front();
+                } else if index == list_vec.len() - 1 {
+                    list_vec.pop_back();
+                } else {
+                    list_vec.remove(index);
+                }
                 player.note_actor_list_mutation(datum);
                 player.note_script_instance_list_mutation(datum);
                 Ok(DatumRef::Void)
