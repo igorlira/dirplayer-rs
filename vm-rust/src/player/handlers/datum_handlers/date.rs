@@ -45,8 +45,9 @@ impl DateDatumHandlers {
             let handler_name_lower = handler_name.to_lowercase();
             match handler_name_lower.as_str() {
                 "gettime" => {
-                    let time = js_date.get_time() as i32;
-                    Ok(player.alloc_datum(Datum::Int(time)))
+                    // Return as Float — current epoch ms (~1.7e12) overflows i32.
+                    // f64 holds integer ms exactly up to 2^53, well past the year 285,000.
+                    Ok(player.alloc_datum(Datum::Float(date_obj.timestamp_ms as f64)))
                 }
                 "settime" => {
                     if args.is_empty() {
@@ -54,7 +55,8 @@ impl DateDatumHandlers {
                             "setTime requires a time argument".to_string(),
                         ));
                     }
-                    let time = player.get_datum(&args[0]).int_value()? as i64;
+                    // Accept Float (from getTime + offset arithmetic) or Int.
+                    let time = player.get_datum(&args[0]).float_value()? as i64;
                     let date_obj = player.date_objects.get_mut(&date_id).ok_or_else(|| {
                         ScriptError::new(format!("Date object {} not found", date_id))
                     })?;

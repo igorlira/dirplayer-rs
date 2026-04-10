@@ -105,7 +105,16 @@ pub async fn fetch_net_task(
                 opts.body(Some(&JsValue::from_str(post_data)));
             }
 
-            // Set content type for form data
+            // Set Content-Type to form-urlencoded so servers populate
+            // $_POST (PHP) / request.form (others). Without this, fetch()
+            // defaults string bodies to text/plain, which most server-side
+            // form parsers ignore.
+            let headers = web_sys::Headers::new().unwrap();
+            headers
+                .set("Content-Type", "application/x-www-form-urlencoded")
+                .unwrap();
+            opts.headers(&headers);
+
             web_sys::Request::new_with_str_and_init(&url_string.as_str(), &opts).unwrap()
         }
     };
