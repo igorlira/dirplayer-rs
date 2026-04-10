@@ -774,8 +774,8 @@ impl HavokPhysicsMemberHandlers {
             true
         };
 
-        // Read model's initial transform + mesh bounding box + vertices from W3D scene
-        let (initial_position, mesh_half_extents, mesh_vertices) = {
+        // Read model's initial transform + mesh bounding box + vertices/faces from W3D scene
+        let (initial_position, mesh_half_extents, mesh_vertices, mesh_faces) = {
             let member = player
                 .movie
                 .cast_manager
@@ -797,37 +797,52 @@ impl HavokPhysicsMemberHandlers {
                         .map(|t| [t[12] as f64, t[13] as f64, t[14] as f64])
                         .unwrap_or([0.0; 3]);
 
-                    // Compute bounding box from CLOD mesh data for the model's resource
+                    // Collect vertices + triangle indices from every CLOD submesh,
+                    // offsetting face indices so they remain valid in the merged buffer.
                     let node = w3d.parsed_scene.as_ref()
                         .and_then(|s| s.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&model_name)));
                     let res_name = node.map(|n| {
                         if !n.model_resource_name.is_empty() { &n.model_resource_name }
                         else { &n.resource_name }
                     });
-                    let (half_ext, verts) = res_name
+                    let (half_ext, verts, faces) = res_name
                         .and_then(|rn| w3d.parsed_scene.as_ref().and_then(|s| s.clod_meshes.get(rn.as_str())))
                         .map(|meshes| {
                             let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
-                            let mut all_verts = Vec::new();
+                            let mut all_verts: Vec<[f64; 3]> = Vec::new();
+                            let mut all_faces: Vec<[u32; 3]> = Vec::new();
                             for mesh in meshes {
+                                let offset = all_verts.len() as u32;
                                 for p in &mesh.positions {
                                     for i in 0..3 { mn[i] = mn[i].min(p[i]); mx[i] = mx[i].max(p[i]); }
                                     all_verts.push([p[0] as f64, p[1] as f64, p[2] as f64]);
                                 }
+                                for f in &mesh.faces {
+                                    all_faces.push([f[0] + offset, f[1] + offset, f[2] + offset]);
+                                }
                             }
                             let he = [(mx[0]-mn[0]) as f64 / 2.0, (mx[1]-mn[1]) as f64 / 2.0, (mx[2]-mn[2]) as f64 / 2.0];
-                            (he, all_verts)
+                            (he, all_verts, all_faces)
                         })
-                        .unwrap_or(([10.0, 10.0, 10.0], Vec::new()));
+                        .unwrap_or(([10.0, 10.0, 10.0], Vec::new(), Vec::new()));
 
-                    (pos, half_ext, verts)
+                    (pos, half_ext, verts, faces)
                 } else {
-                    ([0.0; 3], [10.0, 10.0, 10.0], Vec::new())
+                    ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new())
                 }
             } else {
-                ([0.0; 3], [10.0, 10.0, 10.0], Vec::new())
+                ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new())
             }
         };
+
+        // Compute unit inertia from the actual mesh geometry.
+        // This matches Havok's InertialTensorComputer pipeline (PPC 0x5d3c0).
+        // Fall back to an AABB-box approximation if the mesh is unavailable or degenerate.
+        let unit_inertia = crate::player::handlers::datum_handlers::cast_member::havok_physics
+            ::compute_polyhedron_unit_inertia(&mesh_vertices, &mesh_faces)
+            .map(|(ui, _com, _vol)| ui)
+            .unwrap_or_else(|| crate::player::handlers::datum_handlers::cast_member::havok_physics
+                ::box_unit_inertia(mesh_half_extents));
 
         let member = player
             .movie
@@ -842,6 +857,15 @@ impl HavokPhysicsMemberHandlers {
         let mut rb = HavokRigidBody::new_movable(&model_name, mass, is_convex);
         rb.position = initial_position;
         rb.inertia_half_extents = mesh_half_extents;
+        rb.unit_inertia_tensor = unit_inertia;
+        // Apply mass → finalise inertia / inverseInertia (PPC setMass 0x4c930)
+        crate::player::handlers::datum_handlers::cast_member::havok_physics::recompute_body_inertia(
+            mass,
+            rb.unit_inertia_tensor,
+            &mut rb.inertia_tensor,
+            &mut rb.inverse_inertia_tensor,
+            &mut rb.inverse_mass,
+        );
 
         havok.state.rigid_bodies.push(rb);
 

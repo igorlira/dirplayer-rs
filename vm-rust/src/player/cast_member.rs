@@ -1169,14 +1169,19 @@ pub struct HavokRigidBody {
 
 impl HavokRigidBody {
     pub fn new_movable(name: &str, mass: f64, is_convex: bool) -> Self {
-        // Default box inertia: I = m/12 * diag(dy²+dz², dx²+dz², dx²+dy²) with 200x default scale
-        let he = 10.0_f64; // default half-extent
-        let d = 2.0 * he;
-        let m12 = mass / 12.0;
-        let unit_diag = d * d + d * d; // simplified: all axes equal
+        // Placeholder isotropic box inertia for a 20×20×20 AABB.
+        // Callers that know the real mesh geometry must overwrite
+        // `unit_inertia_tensor` and then call `recompute_body_inertia`
+        // — see `make_movable_rigid_body` which runs the Mirtich
+        // polyhedron integrator (PPC InertialTensorComputer 0x5d3c0).
+        let d = 20.0_f64;
+        let f = 1.0 / 12.0;
+        let unit_diag = f * (d*d + d*d); // (dy²+dz²)/12 with dx=dy=dz
         let unit_i = [unit_diag, 0.0, 0.0, 0.0, unit_diag, 0.0, 0.0, 0.0, unit_diag];
         let i_tensor = [unit_i[0]*mass, 0.0, 0.0, 0.0, unit_i[4]*mass, 0.0, 0.0, 0.0, unit_i[8]*mass];
-        let inv_i = if mass > 0.0 { [1.0/(i_tensor[0]), 0.0, 0.0, 0.0, 1.0/(i_tensor[4]), 0.0, 0.0, 0.0, 1.0/(i_tensor[8])] } else { [0.0; 9] };
+        let inv_i = if mass > 0.0 && unit_diag > 0.0 {
+            [1.0/i_tensor[0], 0.0, 0.0, 0.0, 1.0/i_tensor[4], 0.0, 0.0, 0.0, 1.0/i_tensor[8]]
+        } else { [0.0; 9] };
         Self {
             name: name.to_string(),
             position: [0.0; 3],

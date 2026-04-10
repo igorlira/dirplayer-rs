@@ -239,11 +239,14 @@ impl HavokObjectDatumHandlers {
                 "mass" => {
                     let new_mass = value.to_float()?;
                     rb.mass = new_mass;
-                    // Recompute inertia from mass + half extents (from C# RigidBody.SetMass)
+                    // PPC setMass (0x4c930): I = unit_inertia * mass; then invert.
+                    // unit_inertia_tensor was populated from the mesh at body creation time.
                     crate::player::handlers::datum_handlers::cast_member::havok_physics::recompute_body_inertia(
-                        new_mass, rb.inertia_half_extents,
-                        &mut rb.unit_inertia_tensor, &mut rb.inertia_tensor,
-                        &mut rb.inverse_inertia_tensor, &mut rb.inverse_mass,
+                        new_mass,
+                        rb.unit_inertia_tensor,
+                        &mut rb.inertia_tensor,
+                        &mut rb.inverse_inertia_tensor,
+                        &mut rb.inverse_mass,
                     );
                 }
                 "restitution" => { rb.restitution = value.to_float()?; }

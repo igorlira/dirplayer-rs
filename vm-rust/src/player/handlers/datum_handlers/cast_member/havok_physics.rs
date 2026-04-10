@@ -210,12 +210,17 @@ pub fn parallel_axis(inertia: Mat3, mass: f64, offset: V3) -> Mat3 {
     ]
 }
 
-/// Recompute inertia tensor and inverse from mass and half-extents.
-/// Called when mass changes. From PPC: setMass__Q25Havok9RigidBodyFf (0x4c930)
+/// Recompute inertia tensor and inverse from a precomputed unit inertia + mass.
+/// From PPC setMass__Q25Havok9RigidBodyFf (0x4c930):
+///   mass      → 0xB8
+///   inverseMass = 1/mass → 0xBC
+///   inertia   = unit_inertia * mass → 0xC0..0xEC
+///   inverseInertia = inertia^-1     → 0xF0..0x11C
+/// The unit inertia tensor lives on the body at 0x128 and is populated
+/// at body-creation time by InertialTensorComputer (see compute_polyhedron_unit_inertia).
 pub fn recompute_body_inertia(
     mass: f64,
-    half_extents: [f64; 3],
-    unit_inertia: &mut [f64; 9],
+    unit_inertia: [f64; 9],
     inertia: &mut [f64; 9],
     inverse_inertia: &mut [f64; 9],
     inverse_mass: &mut f64,
@@ -227,14 +232,149 @@ pub fn recompute_body_inertia(
         return;
     }
     *inverse_mass = 1.0 / mass;
+    *inertia = mat3_scale_f(unit_inertia, mass);
+    *inverse_inertia = mat3_inverse(*inertia);
+}
+
+/// Build a default isotropic unit inertia tensor from an AABB half-extents,
+/// used as a fallback when no mesh is available.
+/// Matches the box formula: I_xx = (dy²+dz²)/12, I_yy = (dx²+dz²)/12, I_zz = (dx²+dy²)/12.
+pub fn box_unit_inertia(half_extents: [f64; 3]) -> [f64; 9] {
     let dx = 2.0 * half_extents[0];
     let dy = 2.0 * half_extents[1];
     let dz = 2.0 * half_extents[2];
-    // Unit inertia (mass-independent)
     let f = 1.0 / 12.0;
-    *unit_inertia = [f*(dy*dy+dz*dz), 0.0, 0.0, 0.0, f*(dx*dx+dz*dz), 0.0, 0.0, 0.0, f*(dx*dx+dy*dy)];
-    *inertia = mat3_scale_f(*unit_inertia, mass);
-    *inverse_inertia = mat3_inverse(*inertia);
+    [
+        f*(dy*dy + dz*dz), 0.0, 0.0,
+        0.0, f*(dx*dx + dz*dz), 0.0,
+        0.0, 0.0, f*(dx*dx + dy*dy),
+    ]
+}
+
+/// Compute unit inertia tensor, center-of-mass, and volume from a closed
+/// triangle mesh via Mirtich's divergence-theorem moment integration.
+///
+/// Ports Havok's InertialTensorComputer from the PPC disassembly:
+///   - computeInertialTensorM (0x5d3c0): primitive → polyhedron → moments → tensor
+///   - compVolumeIntegrals    (0x5d6f0): accumulates signed volume + 1st/2nd moments
+///   - compFaceIntegrals      (0x5da30): per-face Green's-theorem polygon integration
+///   - computeInertialTensor  (0x5d500): converts moments → symmetric inertia tensor
+///
+/// The returned tensor is mass-independent: `inertia = unit_inertia * mass` at
+/// `setMass` time (PPC 0x4c930). Matches the reference algorithm in
+/// `HavokReference/InertiaComputation.cs::PolyhedronInertia`.
+///
+/// Handles reversed winding by using `|vol|` and propagating sign into the moments.
+/// Returns `None` for degenerate/empty/zero-volume meshes.
+pub fn compute_polyhedron_unit_inertia(
+    positions: &[[f64; 3]],
+    faces: &[[u32; 3]],
+) -> Option<([f64; 9], [f64; 3], f64)> {
+    if positions.len() < 3 || faces.is_empty() {
+        return None;
+    }
+
+    let mut vol = 0.0f64;
+    let mut fx = 0.0f64; let mut fy = 0.0f64; let mut fz = 0.0f64;
+    let mut sxx = 0.0f64; let mut syy = 0.0f64; let mut szz = 0.0f64;
+    let mut sxy = 0.0f64; let mut sxz = 0.0f64; let mut syz = 0.0f64;
+
+    for face in faces {
+        let i0 = face[0] as usize;
+        let i1 = face[1] as usize;
+        let i2 = face[2] as usize;
+        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+            continue;
+        }
+        let a = positions[i0];
+        let b = positions[i1];
+        let c = positions[i2];
+
+        // Signed tetrahedron volume = (1/6) * a · (b × c)
+        let tri_vol = (
+            a[0] * (b[1]*c[2] - b[2]*c[1])
+          + a[1] * (b[2]*c[0] - b[0]*c[2])
+          + a[2] * (b[0]*c[1] - b[1]*c[0])
+        ) / 6.0;
+        vol += tri_vol;
+
+        // First moments via centroid rule: centroid of tetrahedron (0,a,b,c) is (a+b+c)/4.
+        let cx4 = (a[0] + b[0] + c[0]) * 0.25;
+        let cy4 = (a[1] + b[1] + c[1]) * 0.25;
+        let cz4 = (a[2] + b[2] + c[2]) * 0.25;
+        fx += tri_vol * cx4;
+        fy += tri_vol * cy4;
+        fz += tri_vol * cz4;
+
+        // Second moments via area-weighted normal (2*area*normal = (b-a)×(c-a)).
+        let ex = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
+        let ey = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
+        let cross = [
+            ex[1]*ey[2] - ex[2]*ey[1],
+            ex[2]*ey[0] - ex[0]*ey[2],
+            ex[0]*ey[1] - ex[1]*ey[0],
+        ];
+
+        let ax=a[0]; let ay=a[1]; let az=a[2];
+        let bx=b[0]; let by=b[1]; let bz=b[2];
+        let cx=c[0]; let cy=c[1]; let cz=c[2];
+
+        // Moment polynomial coefficients from the polyhedron integral tables
+        // used by Havok's compFaceIntegrals (PPC flt_D1C60..D1C40).
+        let xx = ax*ax + bx*bx + cx*cx + ax*bx + ax*cx + bx*cx;
+        let yy = ay*ay + by*by + cy*cy + ay*by + ay*cy + by*cy;
+        let zz = az*az + bz*bz + cz*cz + az*bz + az*cz + bz*cz;
+        sxx += cross[0] * xx / 60.0;
+        syy += cross[1] * yy / 60.0;
+        szz += cross[2] * zz / 60.0;
+
+        let xy = 2.0*(ax*ay + bx*by + cx*cy) + ax*by + ay*bx + ax*cy + cx*ay + bx*cy + by*cx;
+        let xz = 2.0*(ax*az + bx*bz + cx*cz) + ax*bz + az*bx + ax*cz + cx*az + bx*cz + bz*cx;
+        let yz = 2.0*(ay*az + by*bz + cy*cz) + ay*bz + az*by + ay*cz + cy*az + by*cz + bz*cy;
+        sxy += cross[0] * xy / 120.0;
+        sxz += cross[1] * xz / 120.0;
+        syz += cross[2] * yz / 120.0;
+    }
+
+    let vol_abs = vol.abs();
+    if vol_abs < 1e-10 {
+        return None;
+    }
+    // Flip moment signs if winding produced negative volume so COM + inertia are correct.
+    let sign = if vol > 0.0 { 1.0 } else { -1.0 };
+    let vol = vol_abs;
+    let (fx, fy, fz) = (fx*sign, fy*sign, fz*sign);
+    let (sxx, syy, szz) = (sxx*sign, syy*sign, szz*sign);
+    let (sxy, sxz, syz) = (sxy*sign, sxz*sign, syz*sign);
+
+    let cm_x = fx / vol;
+    let cm_y = fy / vol;
+    let cm_z = fz / vol;
+
+    // Unit inertia = (inertia)/mass. With uniform density ρ = mass/vol,
+    //   I_xx / mass = (Syy + Szz) / vol, etc.
+    // Then subtract parallel-axis contribution to shift to the mesh COM.
+    let inv_vol = 1.0 / vol;
+    let mut ixx = (syy + szz) * inv_vol;
+    let mut iyy = (sxx + szz) * inv_vol;
+    let mut izz = (sxx + syy) * inv_vol;
+    let mut ixy = -sxy * inv_vol;
+    let mut ixz = -sxz * inv_vol;
+    let mut iyz = -syz * inv_vol;
+
+    ixx -= cm_y*cm_y + cm_z*cm_z;
+    iyy -= cm_x*cm_x + cm_z*cm_z;
+    izz -= cm_x*cm_x + cm_y*cm_y;
+    ixy += cm_x * cm_y;
+    ixz += cm_x * cm_z;
+    iyz += cm_y * cm_z;
+
+    let unit_inertia = [
+        ixx, ixy, ixz,
+        ixy, iyy, iyz,
+        ixz, iyz, izz,
+    ];
+    Some((unit_inertia, [cm_x, cm_y, cm_z], vol))
 }
 
 // ============================================================
