@@ -686,7 +686,42 @@ impl MovieHandlers {
         })
     }
 
-    pub fn go_to_net_page(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn go_to_net_page(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.is_empty() {
+            return Ok(DatumRef::Void);
+        }
+        let (url, target) = reserve_player_ref(|player| {
+            let url = player.get_datum(&args[0]).string_value()?;
+            let target = if args.len() > 1 {
+                player
+                    .get_datum(&args[1])
+                    .string_value()
+                    .unwrap_or_else(|_| "_blank".to_string())
+            } else {
+                "_blank".to_string()
+            };
+            Ok::<(String, String), ScriptError>((url, target))
+        })?;
+
+        if let Some(code) = url.strip_prefix("javascript:") {
+            // Defer via setTimeout(...,0) so the current WASM call stack
+            // fully unwinds before the host-page JS runs. Synchronous
+            // callbacks from the host back into WASM (e.g. openMixer
+            // touching a wasm_bindgen closure) otherwise trip the
+            // "closure invoked recursively or after being dropped" guard.
+            let escaped = code.replace('\\', "\\\\").replace('\'', "\\'");
+            let wrapper = format!(
+                "setTimeout(function(){{try{{eval('{}');}}catch(e){{console.warn('gotoNetPage eval:',e);}}}},0);",
+                escaped
+            );
+            if let Err(e) = js_sys::eval(&wrapper) {
+                log::warn!("gotoNetPage: schedule eval failed: {:?}", e);
+            }
+        } else if let Some(window) = web_sys::window() {
+            if let Err(e) = window.open_with_url_and_target(&url, &target) {
+                log::warn!("gotoNetPage: window.open failed: {:?}", e);
+            }
+        }
         Ok(DatumRef::Void)
     }
 
