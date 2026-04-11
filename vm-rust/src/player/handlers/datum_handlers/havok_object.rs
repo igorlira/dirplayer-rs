@@ -99,7 +99,14 @@ impl HavokObjectDatumHandlers {
         let result = match prop {
             "name" => Datum::String(rb.name.clone()),
             "position" => Datum::Vector(rb.position),
-            "centerOfMass" | "centerofmass" => Datum::Vector(rb.center_of_mass),
+            "centerOfMass" | "centerofmass" => {
+                // Havok Lingo docs: "offset from the models origin to the rigid
+                // body's center of mass." Returns the unrotated local offset.
+                // Under our convention where rb.position is the reference position
+                // (visual origin that tracks COM velocity), the world COM equals
+                // rb.position + com_local, so the getter returns com_local as-is.
+                Datum::Vector(rb.center_of_mass)
+            }
             "rotation" => {
                 let axis = rb.rotation_axis;
                 let angle = rb.rotation_angle;
@@ -280,17 +287,17 @@ impl HavokObjectDatumHandlers {
                 .map(|rb| (rb.position, rb.orientation, rb.center_of_mass))
         } else { None };
 
-        // Sync rigid body position+rotation to W3D model transform (quaternion-based)
+        // Sync rigid body position+rotation to W3D model transform (quaternion-based).
+        // Goes through set_node_transform so the Lingo-visible persistent datum
+        // is also updated, not just node_transforms.
         if let Some((pos, orientation, com)) = sync_data {
+            let t = crate::player::handlers::datum_handlers::cast_member::havok_physics::build_sync_transform(
+                pos, orientation, com,
+            );
             let w3d_ref = CastMemberRef { cast_lib: w3d_cast_lib, cast_member: w3d_cast_member };
-            if let Some(w3d_member) = player.movie.cast_manager.find_mut_member_by_ref(&w3d_ref) {
-                if let Some(w3d) = w3d_member.member_type.as_shockwave3d_mut() {
-                    let t = crate::player::handlers::datum_handlers::cast_member::havok_physics::build_sync_transform(
-                        pos, orientation, com,
-                    );
-                    w3d.runtime_state.node_transforms.insert(rb_name.to_string(), t);
-                }
-            }
+            crate::player::handlers::datum_handlers::shockwave3d_object::set_node_transform(
+                player, &w3d_ref, rb_name, t,
+            );
         }
 
         Ok(())

@@ -656,16 +656,19 @@ impl HavokPhysicsMemberHandlers {
 
         // Clear forces (already done in step_native, but ensure clean state)
 
-        // Drop havok borrow, sync to W3D
+        // Drop havok borrow, sync to W3D. Use set_node_transform so that both
+        // the renderer's node_transforms AND the cached persistent Transform3d
+        // datum (read by Lingo via pCar.getModel().transform) are updated.
+        // Without this, Lingo sees a stale initial transform and wheel.ls's
+        // `pCar.getModel().transform.inverse() * pRealWorldPos` produces garbage
+        // local points → wrong torque lever arms → car flips.
         drop(member);
         let w3d_ref = CastMemberRef { cast_lib: w3d_cast_lib, cast_member: w3d_cast_member };
-        if let Some(w3d_member) = player.movie.cast_manager.find_mut_member_by_ref(&w3d_ref) {
-            if let Some(w3d) = w3d_member.member_type.as_shockwave3d_mut() {
-                for (name, t) in &sync_data {
-                    if t.iter().any(|v| !v.is_finite()) { continue; }
-                    w3d.runtime_state.node_transforms.insert(name.clone(), *t);
-                }
-            }
+        for (name, t) in &sync_data {
+            if t.iter().any(|v| !v.is_finite()) { continue; }
+            crate::player::handlers::datum_handlers::shockwave3d_object::set_node_transform(
+                player, &w3d_ref, name, *t,
+            );
         }
 
         Ok(DatumRef::Void)
@@ -836,13 +839,58 @@ impl HavokPhysicsMemberHandlers {
         };
 
         // Compute unit inertia from the actual mesh geometry.
-        // This matches Havok's InertialTensorComputer pipeline (PPC 0x5d3c0).
+        // This matches Havok's InertialTensorComputer pipeline (PPC 0x5d3c0):
+        // Tonon polyhedron tet-decomposition over the mesh triangles.
         // Fall back to an AABB-box approximation if the mesh is unavailable or degenerate.
-        let unit_inertia = crate::player::handlers::datum_handlers::cast_member::havok_physics
+        let poly_unit_inertia = crate::player::handlers::datum_handlers::cast_member::havok_physics
             ::compute_polyhedron_unit_inertia(&mesh_vertices, &mesh_faces)
             .map(|(ui, _com, _vol)| ui)
             .unwrap_or_else(|| crate::player::handlers::datum_handlers::cast_member::havok_physics
                 ::box_unit_inertia(mesh_half_extents));
+
+        // EMPIRICAL INERTIA SCALING — per-axis, see log parity analysis.
+        //
+        // Director's Havok produces per-axis effective inertias that are
+        // NOT simply the polyhedron Mirtich result. We calibrate each axis
+        // against Director's observed behaviour:
+        //
+        //   Pitch (X-axis):
+        //     Director first-drive-frame ang_x = -0.0243
+        //     Our polyhedron-only ang_x = -0.2047
+        //     Ratio: 8.43 → scale pitch by 8.43
+        //
+        //   Yaw (Z-axis):
+        //     Director max sustained |ang_z| during a hard left turn = 1.56
+        //     Our scaled-by-8.43 max = 0.60 (car turns with 2× the radius)
+        //     Ratio: 2.6 → yaw is over-constrained by 2.6 if we use the same
+        //     8.43 scale. Scale yaw only by 8.43 / 2.6 = 3.24 so the yaw axis
+        //     response matches Director's observed turning radius.
+        //
+        //   Roll (Y-axis):
+        //     No direct Director measurement yet. Using the pitch factor 8.43
+        //     (same as pitch) gives a roll inertia of 228 — 8.4× the box
+        //     formula 27.08. Not boat-like but not overly stiff either. Keep
+        //     this until we have a specific Director measurement to refine.
+        //
+        // The per-axis scaling is physically odd (a real polyhedron doesn't
+        // scale differently per axis) but empirically matches Director. It
+        // likely reflects a Havok wrapper / primitive-specific fast path we
+        // haven't fully decoded.
+        let mut unit_inertia: [f64; 9] = poly_unit_inertia;
+        unit_inertia[0] *= 8.43;   // pitch  (X)
+        unit_inertia[4] *= 8.43;   // roll   (Y)
+        unit_inertia[8] *= 3.24;   // yaw    (Z) — matches Director turn radius
+        // off-diagonal elements kept at polyhedron values (all 0 for box).
+
+        // Diagnostic: log mesh + computed unit inertia so we can verify it matches
+        // Director. For a 15×30×10 box we expect diag (702, 228, 304).
+        web_sys::console::log_1(&format!(
+            "[HAVOK-RB '{}'] verts={} faces={} he=({:.1},{:.1},{:.1}) unit_I_diag=({:.2},{:.2},{:.2}) pitch*8.43 roll*8.43 yaw*3.24",
+            model_name,
+            mesh_vertices.len(), mesh_faces.len(),
+            mesh_half_extents[0], mesh_half_extents[1], mesh_half_extents[2],
+            unit_inertia[0], unit_inertia[4], unit_inertia[8],
+        ).into());
 
         let member = player
             .movie

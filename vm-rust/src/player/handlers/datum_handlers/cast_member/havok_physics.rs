@@ -274,6 +274,41 @@ pub fn compute_polyhedron_unit_inertia(
         return None;
     }
 
+    // Pre-center on AABB for numerical stability — keeps the final
+    // parallel-axis cancellation in single-digit magnitudes instead of millions.
+    let mut mn = [f64::MAX; 3];
+    let mut mx = [f64::MIN; 3];
+    for p in positions {
+        for i in 0..3 {
+            if p[i] < mn[i] { mn[i] = p[i]; }
+            if p[i] > mx[i] { mx[i] = p[i]; }
+        }
+    }
+    let offset = [
+        0.5 * (mn[0] + mx[0]),
+        0.5 * (mn[1] + mx[1]),
+        0.5 * (mn[2] + mx[2]),
+    ];
+
+    // Tetrahedron decomposition to origin. For each triangle (a, b, c), form the
+    // signed tetrahedron (origin, a, b, c). Signed volumes and moment integrals
+    // are summed across the whole mesh; because neighbouring faces' tets share
+    // origin edges, the contributions telescope to give the exact volume integral
+    // over the enclosed solid.
+    //
+    // Per-tet formulas (Lien & Kajiya 1984 / Tonon 2004, with v0=origin):
+    //   V_tet            = (1/6) * a · (b × c)
+    //   ∫x² dV over tet  = (V_tet / 10) * (a_x² + b_x² + c_x² + a_x*b_x + a_x*c_x + b_x*c_x)
+    //   ∫xy dV over tet  = (V_tet / 20) *
+    //         (2*(a_x*a_y + b_x*b_y + c_x*c_y)
+    //          + a_x*b_y + b_x*a_y + a_x*c_y + c_x*a_y + b_x*c_y + c_x*b_y)
+    //
+    // NOTE: an earlier attempt mixed Mirtich's surface-integral scaling
+    // (cross-product area weights with a degree-3 polynomial) with Tonon's
+    // degree-2 polynomial, producing zero for axis-aligned boxes because
+    // cross[i] is zero on faces perpendicular to axis i. The C# reference
+    // `InertiaComputation.PolyhedronInertia` has the same latent bug — it is
+    // never exercised by `Program.cs`, which hardcodes `UnitInertiaTensor`.
     let mut vol = 0.0f64;
     let mut fx = 0.0f64; let mut fy = 0.0f64; let mut fz = 0.0f64;
     let mut sxx = 0.0f64; let mut syy = 0.0f64; let mut szz = 0.0f64;
@@ -286,74 +321,70 @@ pub fn compute_polyhedron_unit_inertia(
         if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
             continue;
         }
-        let a = positions[i0];
-        let b = positions[i1];
-        let c = positions[i2];
+        let a = [positions[i0][0]-offset[0], positions[i0][1]-offset[1], positions[i0][2]-offset[2]];
+        let b = [positions[i1][0]-offset[0], positions[i1][1]-offset[1], positions[i1][2]-offset[2]];
+        let c = [positions[i2][0]-offset[0], positions[i2][1]-offset[1], positions[i2][2]-offset[2]];
 
-        // Signed tetrahedron volume = (1/6) * a · (b × c)
-        let tri_vol = (
+        // Signed tetrahedron volume: (1/6) * a · (b × c)
+        let v_tet = (
             a[0] * (b[1]*c[2] - b[2]*c[1])
           + a[1] * (b[2]*c[0] - b[0]*c[2])
           + a[2] * (b[0]*c[1] - b[1]*c[0])
         ) / 6.0;
-        vol += tri_vol;
+        vol += v_tet;
 
-        // First moments via centroid rule: centroid of tetrahedron (0,a,b,c) is (a+b+c)/4.
+        // First moment contribution: V_tet * centroid, with origin vertex contributing 0.
         let cx4 = (a[0] + b[0] + c[0]) * 0.25;
         let cy4 = (a[1] + b[1] + c[1]) * 0.25;
         let cz4 = (a[2] + b[2] + c[2]) * 0.25;
-        fx += tri_vol * cx4;
-        fy += tri_vol * cy4;
-        fz += tri_vol * cz4;
-
-        // Second moments via area-weighted normal (2*area*normal = (b-a)×(c-a)).
-        let ex = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
-        let ey = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
-        let cross = [
-            ex[1]*ey[2] - ex[2]*ey[1],
-            ex[2]*ey[0] - ex[0]*ey[2],
-            ex[0]*ey[1] - ex[1]*ey[0],
-        ];
+        fx += v_tet * cx4;
+        fy += v_tet * cy4;
+        fz += v_tet * cz4;
 
         let ax=a[0]; let ay=a[1]; let az=a[2];
         let bx=b[0]; let by=b[1]; let bz=b[2];
         let cx=c[0]; let cy=c[1]; let cz=c[2];
 
-        // Moment polynomial coefficients from the polyhedron integral tables
-        // used by Havok's compFaceIntegrals (PPC flt_D1C60..D1C40).
-        let xx = ax*ax + bx*bx + cx*cx + ax*bx + ax*cx + bx*cx;
-        let yy = ay*ay + by*by + cy*cy + ay*by + ay*cy + by*cy;
-        let zz = az*az + bz*bz + cz*cz + az*bz + az*cz + bz*cz;
-        sxx += cross[0] * xx / 60.0;
-        syy += cross[1] * yy / 60.0;
-        szz += cross[2] * zz / 60.0;
+        // Second moments — diagonal (∫x² dV, etc.), coefficient V_tet / 10.
+        let xx_p = ax*ax + bx*bx + cx*cx + ax*bx + ax*cx + bx*cx;
+        let yy_p = ay*ay + by*by + cy*cy + ay*by + ay*cy + by*cy;
+        let zz_p = az*az + bz*bz + cz*cz + az*bz + az*cz + bz*cz;
+        sxx += v_tet * xx_p * 0.1;
+        syy += v_tet * yy_p * 0.1;
+        szz += v_tet * zz_p * 0.1;
 
-        let xy = 2.0*(ax*ay + bx*by + cx*cy) + ax*by + ay*bx + ax*cy + cx*ay + bx*cy + by*cx;
-        let xz = 2.0*(ax*az + bx*bz + cx*cz) + ax*bz + az*bx + ax*cz + cx*az + bx*cz + bz*cx;
-        let yz = 2.0*(ay*az + by*bz + cy*cz) + ay*bz + az*by + ay*cz + cy*az + by*cz + bz*cy;
-        sxy += cross[0] * xy / 120.0;
-        sxz += cross[1] * xz / 120.0;
-        syz += cross[2] * yz / 120.0;
+        // Products of inertia — ∫xy dV, etc., coefficient V_tet / 20.
+        let xy_p = 2.0*(ax*ay + bx*by + cx*cy)
+                 + ax*by + bx*ay + ax*cy + cx*ay + bx*cy + cx*by;
+        let xz_p = 2.0*(ax*az + bx*bz + cx*cz)
+                 + ax*bz + bx*az + ax*cz + cx*az + bx*cz + cx*bz;
+        let yz_p = 2.0*(ay*az + by*bz + cy*cz)
+                 + ay*bz + by*az + ay*cz + cy*az + by*cz + cy*bz;
+        sxy += v_tet * xy_p * 0.05;
+        sxz += v_tet * xz_p * 0.05;
+        syz += v_tet * yz_p * 0.05;
     }
 
     let vol_abs = vol.abs();
     if vol_abs < 1e-10 {
         return None;
     }
-    // Flip moment signs if winding produced negative volume so COM + inertia are correct.
+    // If the mesh winding is reversed (vol<0), flip every accumulated moment too
+    // so the signs stay consistent. This also lets us keep vol positive below.
     let sign = if vol > 0.0 { 1.0 } else { -1.0 };
     let vol = vol_abs;
     let (fx, fy, fz) = (fx*sign, fy*sign, fz*sign);
     let (sxx, syy, szz) = (sxx*sign, syy*sign, szz*sign);
     let (sxy, sxz, syz) = (sxy*sign, sxz*sign, syz*sign);
 
+    // COM in the centered frame (small, so parallel-axis is numerically stable).
     let cm_x = fx / vol;
     let cm_y = fy / vol;
     let cm_z = fz / vol;
 
-    // Unit inertia = (inertia)/mass. With uniform density ρ = mass/vol,
-    //   I_xx / mass = (Syy + Szz) / vol, etc.
-    // Then subtract parallel-axis contribution to shift to the mesh COM.
+    // Per-unit-mass inertia tensor about the centered origin. For density = 1/vol:
+    //   I_xx = ∫(y²+z²) dV / M = (syy + szz) / vol
+    //   I_xy = -∫xy dV / M     = -sxy / vol
     let inv_vol = 1.0 / vol;
     let mut ixx = (syy + szz) * inv_vol;
     let mut iyy = (sxx + szz) * inv_vol;
@@ -362,6 +393,7 @@ pub fn compute_polyhedron_unit_inertia(
     let mut ixz = -sxz * inv_vol;
     let mut iyz = -syz * inv_vol;
 
+    // Parallel-axis shift from the centered origin to the mesh COM.
     ixx -= cm_y*cm_y + cm_z*cm_z;
     iyy -= cm_x*cm_x + cm_z*cm_z;
     izz -= cm_x*cm_x + cm_y*cm_y;
@@ -369,12 +401,15 @@ pub fn compute_polyhedron_unit_inertia(
     ixz += cm_x * cm_z;
     iyz += cm_y * cm_z;
 
+    // Return COM back in the caller's coordinate frame.
+    let com = [cm_x + offset[0], cm_y + offset[1], cm_z + offset[2]];
+
     let unit_inertia = [
         ixx, ixy, ixz,
         ixy, iyy, iyz,
         ixz, iyz, izz,
     ];
-    Some((unit_inertia, [cm_x, cm_y, cm_z], vol))
+    Some((unit_inertia, com, vol))
 }
 
 // ============================================================
@@ -1015,26 +1050,45 @@ fn apply_angular_dashpots(state: &mut HavokPhysicsState, dt: f64) {
 // ============================================================
 
 /// Forward Euler integration for a single body.
-/// From x86: sub_10014DA0
+/// From x86: sub_10014DA0 — confirmed by disassembly to do:
+///   pos += lin_vel * dt
+///   q_new = q + 0.5 * [0, omega] * q * dt  (normalized)
+///   lin_vel += force * invMass * dt
+///   omega += I_inv * torque * dt
 fn integrate_body(rb: &mut crate::player::cast_member::HavokRigidBody, dt: f64) {
     if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { return; }
 
     // Phase 1: Position: pos += vel * dt
     for i in 0..3 { rb.position[i] += rb.linear_velocity[i] * dt; }
 
-    // Phase 2: Quaternion integration
-    // q_dot = 0.5 * [0, omega] * q, then q += q_dot * dt, renormalize
+    // Phase 2: Quaternion integration with Baumgarte drift-correction.
+    //
+    // Plain `q += 0.5·ω·q·dt` + post-normalize lets |q| drift slightly during
+    // integration and only pulls it back at the very end. Over many substeps
+    // this can couple small rotational errors into the next substep's angular
+    // velocity update via the body transform and produce slow divergence.
+    //
+    // Havok's convertDerivativeToArray (PPC 0x4b870, around 0x4ba84-0x4babc)
+    // adds a Baumgarte-style `k·(1-|q|²)·q` correction term into the quaternion
+    // derivative itself, so each substep's integration drives |q| back toward
+    // unity in addition to the post-normalize. Port that here.
+    //
+    // The correction coefficient `k` is a free parameter; k=1 gives critical
+    // correction at the substep rate, which is what Havok appears to use.
     let ox = rb.angular_velocity[0];
     let oy = rb.angular_velocity[1];
     let oz = rb.angular_velocity[2];
     let omega_q: Quat = [0.0, ox, oy, oz];
     let qdot = quat_mul(omega_q, rb.orientation);
-    let half_dt = 0.5 * dt;
+    let q = rb.orientation;
+    let q_norm_sq = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];
+    let drift_k: f64 = 1.0;
+    let drift = drift_k * (1.0 - q_norm_sq);
     rb.orientation = quat_normalize([
-        rb.orientation[0] + qdot[0] * half_dt,
-        rb.orientation[1] + qdot[1] * half_dt,
-        rb.orientation[2] + qdot[2] * half_dt,
-        rb.orientation[3] + qdot[3] * half_dt,
+        q[0] + (qdot[0] * 0.5 + drift * q[0]) * dt,
+        q[1] + (qdot[1] * 0.5 + drift * q[1]) * dt,
+        q[2] + (qdot[2] * 0.5 + drift * q[2]) * dt,
+        q[3] + (qdot[3] * 0.5 + drift * q[3]) * dt,
     ]);
 
     // Phase 3: Linear velocity: vel += (F/m) * dt
@@ -1105,11 +1159,13 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     let sub_dt = time_increment / n_subs as f64;
 
     // Game forces (from applyForceAtPoint) are one-frame-delayed impulse-like forces.
-    // They are computed by the game script in frame N and applied during frame N+1's step.
-    // Dividing by N² empirically matches Director's behavior:
-    //   - Spring force ~9700 / 49 = ~198 per substep vs gravity ~232 per substep
-    //   - Net is slightly negative → car slowly settles to equilibrium
-    //   - Matches Director's vel_z ≈ -1.1 at equilibrium
+    // Dividing by N² (=49) empirically matches Director's linear equilibrium:
+    //   - Spring force ~9700 / 49 ≈ gravity per substep
+    //   - Matches Director's vel_z ≈ -2.87 at rest
+    //
+    // The PPC RE suggests Havok applies forces at substep 1 only (= /N scaling),
+    // but tested both /N and /N² and /49 gives the correct overall dynamics.
+    // Keep empirical /49.
     let force_scale = (n_subs * n_subs) as f64;
     let saved_forces: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
         .map(|rb| (rb.force, rb.torque)).collect();
@@ -1133,21 +1189,21 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
         rb.torque = [0.0; 3];
     }
 
-    // Damp and clamp angular velocity.
-    // Director data: on ramps pitch=-0.5845, normal driving pitch~0.001, yaw~0.
-    // Our collision system creates unstable oscillating torques on landing,
-    // so we need tighter yaw control while allowing pitch for terrain following.
+    // Numerical angular damping — not a clamp.
+    //
+    // Simple isotropic per-frame decay. Attempts at per-axis body-frame
+    // damping (pitch/roll/yaw tuned individually) made turning worse in
+    // user testing — probably because killing roll response during a turn
+    // breaks the natural lean-into-the-turn dynamic the springs rely on.
+    //
+    // Mirrors Havok's `applyDamping` helper at PPC 0x4cf00 (x86 `sub_10013770`).
+    const ANGULAR_DRIFT_DAMP: f64 = 0.05;
+    let ang_factor = 1.0 - ANGULAR_DRIFT_DAMP;
     for rb in &mut state.rigid_bodies {
         if rb.pinned || !rb.active { continue; }
-        // Pitch/roll: moderate damping, allow terrain following
-        rb.angular_velocity[0] *= 0.9;
-        rb.angular_velocity[1] *= 0.9;
-        rb.angular_velocity[0] = rb.angular_velocity[0].clamp(-0.6, 0.6);
-        rb.angular_velocity[1] = rb.angular_velocity[1].clamp(-0.6, 0.6);
-        // Yaw: tight control — steering creates small yaw (~0.05),
-        // collision creates unstable oscillation that must be suppressed.
-        rb.angular_velocity[2] *= 0.90;
-        rb.angular_velocity[2] = rb.angular_velocity[2].clamp(-0.3, 0.3);
+        rb.angular_velocity[0] *= ang_factor;
+        rb.angular_velocity[1] *= ang_factor;
+        rb.angular_velocity[2] *= ang_factor;
     }
 
     // Update derived state (rotation_axis/angle from quaternion for Lingo readback)
@@ -1311,18 +1367,41 @@ pub fn quat_to_yaw(q: Quat) -> f64 {
     siny_cosp.atan2(cosy_cosp)
 }
 
-pub fn build_sync_transform(pos: V3, orientation: Quat, com: V3) -> [f32; 16] {
-    // Use yaw-only rotation for W3D sync.
-    // The game's Lingo scripts expect a pure Z-rotation transform.
-    // Extract yaw from the quaternion and build a simple rotation matrix.
-    let yaw = quat_to_yaw(orientation);
-    let (sy, cy) = (yaw.sin() as f32, yaw.cos() as f32);
+pub fn build_sync_transform(pos: V3, orientation: Quat, com_local: V3) -> [f32; 16] {
+    // Rotation around the center of mass, not around the visual origin.
+    //
+    // Convention: `pos` is the "reference position" — the visual origin's world
+    // location under NO rotation. The physical COM world position is
+    // `pos + com_local` (with com_local stored in body-local space). When the
+    // body rotates, the COM should stay fixed (pure rotation preserves COM) and
+    // the visual origin should orbit around it.
+    //
+    // For a wheel at local position v, the correct world position is:
+    //   world_wheel = R * (v - com_local) + com_world
+    //               = R*v - R*com_local + pos + com_local
+    //               = R*v + pos + (I - R) * com_local
+    //
+    // So the 4x4 transform used by the W3D scene graph has the rotation R and
+    // translation `pos + (I - R) * com_local`. Without this correction, wheel
+    // child nodes rotate around the visual origin instead of the COM, the game's
+    // actAsSpring damping sees wrong wheel velocities, and pitch/roll grow
+    // unbounded during driving.
+    let m = quat_to_mat3(orientation);
 
-    // COM offset (the old code ignored COM, keep that behavior for compatibility)
+    // R * com_local
+    let rx = m[0]*com_local[0] + m[1]*com_local[1] + m[2]*com_local[2];
+    let ry = m[3]*com_local[0] + m[4]*com_local[1] + m[5]*com_local[2];
+    let rz = m[6]*com_local[0] + m[7]*com_local[1] + m[8]*com_local[2];
+
+    // translation = pos + com_local - R*com_local
+    let tx = pos[0] + com_local[0] - rx;
+    let ty = pos[1] + com_local[1] - ry;
+    let tz = pos[2] + com_local[2] - rz;
+
     [
-        cy,  sy,  0.0, 0.0,
-        -sy, cy,  0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        pos[0] as f32, pos[1] as f32, pos[2] as f32, 1.0,
+        m[0] as f32, m[3] as f32, m[6] as f32, 0.0,
+        m[1] as f32, m[4] as f32, m[7] as f32, 0.0,
+        m[2] as f32, m[5] as f32, m[8] as f32, 0.0,
+        tx as f32, ty as f32, tz as f32, 1.0,
     ]
 }

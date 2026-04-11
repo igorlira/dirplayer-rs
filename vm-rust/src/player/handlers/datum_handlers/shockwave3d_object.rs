@@ -4698,7 +4698,7 @@ fn get_or_init_node_transform(
     current
 }
 
-fn set_node_transform(
+pub fn set_node_transform(
     player: &mut crate::player::DirPlayer,
     member_ref: &crate::player::cast_lib::CastMemberRef,
     node_name: &str,
