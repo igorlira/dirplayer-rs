@@ -682,6 +682,28 @@ impl Shockwave3dMemberHandlers {
                 let (r, g, b) = text3d_state.as_ref().map(|s| s.diffuse_color).unwrap_or((0, 0, 0));
                 Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)))
             }
+            "directionalPreset" | "directionalpreset" => {
+                // Read current preset from runtime state (default 2 = #topCenter)
+                let preset = {
+                    let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref);
+                    member.and_then(|m| m.member_type.as_shockwave3d())
+                        .map(|w3d| w3d.runtime_state.directional_preset)
+                        .unwrap_or(2)
+                };
+                let symbol = match preset {
+                    1 => "topLeft",
+                    2 => "topCenter",
+                    3 => "topRight",
+                    4 => "middleLeft",
+                    5 => "middleCenter",
+                    6 => "middleRight",
+                    7 => "bottomLeft",
+                    8 => "bottomCenter",
+                    9 => "bottomRight",
+                    _ => "None",
+                };
+                Ok(Datum::Symbol(symbol.to_string()))
+            }
 
             _ => {
                 web_sys::console::log_1(&format!("[W3D] Unknown Shockwave3D property: {}", prop).into());
@@ -772,6 +794,50 @@ impl Shockwave3dMemberHandlers {
                         }
                         if let Some(state) = w3d.text3d_state.as_ref() {
                             Self::apply_text3d_display_face(&mut w3d.runtime_state, state.display_face);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            "directionalPreset" | "directionalpreset" => {
+                // Parse the symbol into preset 0..9 (0 = #None, 2 = #topCenter default).
+                let preset: u32 = match value {
+                    Datum::Symbol(s) => match s.trim_start_matches('#').to_ascii_lowercase().as_str() {
+                        "topleft" => 1,
+                        "topcenter" => 2,
+                        "topright" => 3,
+                        "middleleft" => 4,
+                        "middlecenter" => 5,
+                        "middleright" => 6,
+                        "bottomleft" => 7,
+                        "bottomcenter" => 8,
+                        "bottomright" => 9,
+                        "none" => 0,
+                        _ => 0,
+                    },
+                    Datum::Int(i) => (*i as u32).min(9),
+                    _ => 0,
+                };
+
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        w3d.runtime_state.directional_preset = preset;
+
+                        // Compute the light-node transform for this preset.
+                        // preset=0 (#None) keeps whatever the scene already has.
+                        if preset >= 1 && preset <= 9 {
+                            let t = crate::player::cast_member::TextMember::directional_preset_to_transform(preset);
+
+                            // Update the scene's DefaultDirectional light node transform (authoritative)
+                            // and also the runtime_state.node_transforms so the renderer picks it up.
+                            if let Some(scene) = w3d.scene_mut() {
+                                if let Some(light_node) = scene.nodes.iter_mut()
+                                    .find(|n| n.name.eq_ignore_ascii_case("DefaultDirectional"))
+                                {
+                                    light_node.transform = t;
+                                }
+                            }
+                            w3d.runtime_state.node_transforms.insert("DefaultDirectional".to_string(), t);
                         }
                     }
                 }
@@ -1543,13 +1609,15 @@ impl Shockwave3dMemberHandlers {
                                                     (p, n, uv, f)
                                                 },
                                                 "sphere" => {
-                                                    // Simple UV sphere (8 segments, 6 rings)
+                                                    // UV sphere matching Director's default tessellation
                                                     let segments = 8u32;
                                                     let rings = 6u32;
                                                     let mut p = Vec::new();
                                                     let mut n = Vec::new();
                                                     let mut uv_data = Vec::new();
                                                     let mut f = Vec::new();
+                                                    // UV scale 4× tiles the 2×2 checker into a dense grid matching Director
+                                                    let uv_scale = 1.0f32;
                                                     for j in 0..=rings {
                                                         let v = j as f32 / rings as f32;
                                                         let phi = v * std::f32::consts::PI;
@@ -1559,9 +1627,12 @@ impl Shockwave3dMemberHandlers {
                                                             let x = phi.sin() * theta.cos();
                                                             let y = phi.cos();
                                                             let z = phi.sin() * theta.sin();
+                                                            // let x = phi.sin() * theta.cos();
+                                                            // let y = phi.sin() * theta.sin();
+                                                            // let z = phi.cos();
                                                             p.push([x * 0.5, y * 0.5, z * 0.5]);
                                                             n.push([x, y, z]);
-                                                            uv_data.push([u, v]);
+                                                            uv_data.push([u * uv_scale, v * uv_scale]);
                                                         }
                                                     }
                                                     for j in 0..rings {
@@ -1631,19 +1702,39 @@ impl Shockwave3dMemberHandlers {
                                             let num_faces = if total_faces > 0 { total_faces } else { mesh_num_faces };
                                             let mut mesh_info = ClodMeshInfo::default();
                                             mesh_info.num_faces = num_faces;
+                                            // Store primitive type so dimension setters can regenerate
+                                            let prim_type = if !new_res_type.is_empty() {
+                                                Some(new_res_type.clone())
+                                            } else { None };
+                                            // Create a default shader + material for the
+                                            // new resource so the renderer can bind it
+                                            // (Director shows a red/white checkerboard on
+                                            // untextured primitives).
+                                            let shader_name = format!("{}_Shader", obj_name);
+                                            let material_name = format!("{}_Material", obj_name);
+                                            scene.materials.push(W3dMaterial {
+                                                name: material_name.clone(),
+                                                ..Default::default()
+                                            });
+                                            scene.shaders.push(W3dShader {
+                                                name: shader_name.clone(),
+                                                material_name: material_name.clone(),
+                                                ..Default::default()
+                                            });
+                                            let num_meshes = meshes.len().max(1);
                                             scene.model_resources.insert(obj_name.clone(), ModelResourceInfo {
                                                 name: obj_name.clone(),
                                                 mesh_infos: vec![mesh_info],
-                                                max_resolution: 0,
-                                                shading_count: 0,
-                                                shader_bindings: vec![],
-                                                pos_iq: 0.0, norm_iq: 0.0, normal_crease: 0.0,
-                                                tc_iq: 0.0, diff_iq: 0.0, spec_iq: 0.0,
-                                                has_distal_edge_merge: false,
-                                                has_neighbor_mesh: false,
-                                                uv_gen_mode: None,
-                                                sync_table: None,
-                                                distal_edge_merges: None,
+                                                shader_bindings: vec![ModelShaderBinding {
+                                                    name: shader_name,
+                                                    mesh_bindings: vec![String::new(); num_meshes],
+                                                }],
+                                                primitive_type: prim_type,
+                                                primitive_width: 1.0,
+                                                primitive_length: 1.0,
+                                                primitive_height: 1.0,
+                                                primitive_radius: 1.0,
+                                                ..Default::default()
                                             });
 
                                             // Store generated mesh geometry so the renderer can upload it

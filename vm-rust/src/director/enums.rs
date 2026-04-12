@@ -661,27 +661,64 @@ impl Shockwave3dInfo {
             }
         }
 
-        // Re-parse colors in proper order: diffuse, bg, ambient, directional
-        // The hex shows: 0x12 diffuse(FF,FF,FF), 0x12 bg(FD,FD,FD), 0x12 ambient(00,00,00), 0x12 directional(FF,FF,FF)
-        // Let's re-scan just for colors
-        let mut colors: Vec<(u8, u8, u8)> = Vec::new();
+        // Re-parse: scan ALL typed records sequentially and log them for debugging.
+        // Expected order after the basic fields: strings, vectors (camera), colors.
+        // Color order: diffuse, bg, ambient, directional (per hex dump analysis).
+        let mut all_strings: Vec<String> = Vec::new();
+        let mut all_vectors: Vec<(f32, f32, f32)> = Vec::new();
+        let mut all_colors: Vec<(u8, u8, u8)> = Vec::new();
+        let mut records: Vec<String> = Vec::new();
         scan = o + 0x57;
-        while scan + 16 <= bytes.len() {
+        while scan + 4 <= bytes.len() {
             let marker = u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]);
-            if marker == 0x12 {
-                scan += 4;
-                let r = u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]) as u8;
-                let g = u32::from_be_bytes([bytes[scan+4], bytes[scan+5], bytes[scan+6], bytes[scan+7]]) as u8;
-                let b = u32::from_be_bytes([bytes[scan+8], bytes[scan+9], bytes[scan+10], bytes[scan+11]]) as u8;
-                colors.push((r, g, b));
-                scan += 12;
-            } else {
-                scan += 4;
+            match marker {
+                0x03 => {
+                    scan += 4;
+                    if scan + 4 > bytes.len() { break; }
+                    let slen = u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]) as usize;
+                    scan += 4;
+                    if scan + slen > bytes.len() { break; }
+                    let s: String = bytes[scan..scan+slen].iter().map(|&b| b as char).collect();
+                    records.push(format!("STR \"{}\"", s));
+                    all_strings.push(s);
+                    scan += slen;
+                }
+                0x16 => {
+                    scan += 4;
+                    if scan + 16 > bytes.len() { break; }
+                    let f1 = f32::from_bits(u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]));
+                    let f2 = f32::from_bits(u32::from_be_bytes([bytes[scan+4], bytes[scan+5], bytes[scan+6], bytes[scan+7]]));
+                    let f3 = f32::from_bits(u32::from_be_bytes([bytes[scan+8], bytes[scan+9], bytes[scan+10], bytes[scan+11]]));
+                    scan += 16;
+                    records.push(format!("VEC ({:.2},{:.2},{:.2})", f1, f2, f3));
+                    all_vectors.push((f1, f2, f3));
+                }
+                0x12 => {
+                    scan += 4;
+                    if scan + 12 > bytes.len() { break; }
+                    let r = u32::from_be_bytes([bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3]]) as u8;
+                    let g = u32::from_be_bytes([bytes[scan+4], bytes[scan+5], bytes[scan+6], bytes[scan+7]]) as u8;
+                    let b = u32::from_be_bytes([bytes[scan+8], bytes[scan+9], bytes[scan+10], bytes[scan+11]]) as u8;
+                    records.push(format!("CLR ({},{},{})", r, g, b));
+                    all_colors.push((r, g, b));
+                    scan += 12;
+                }
+                _ => {
+                    // Log unknown markers with their raw bytes to detect misalignment
+                    let raw = if scan + 8 <= bytes.len() {
+                        format!("{:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}",
+                            bytes[scan], bytes[scan+1], bytes[scan+2], bytes[scan+3],
+                            bytes[scan+4], bytes[scan+5], bytes[scan+6], bytes[scan+7])
+                    } else { format!("{:08X}", marker) };
+                    records.push(format!("??? marker=0x{:08X} raw={}", marker, raw));
+                    scan += 4;
+                }
             }
         }
+
         // colors[0]=diffuse, colors[1]=bg, colors[2]=ambient, colors[3]=directional
-        let bg_color = colors.get(1).copied();
-        let ambient_color = colors.get(2).copied();
+        let bg_color = all_colors.get(1).copied();
+        let ambient_color = all_colors.get(2).copied();
 
         Some(Shockwave3dInfo {
             loops, duration, direct_to_stage, animation_enabled, preload,

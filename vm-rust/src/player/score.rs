@@ -3184,6 +3184,47 @@ pub fn sprite_get_prop(
         "bytesStreamed" | "bufferSize" | "streamSize" => Ok(Datum::Int(0)),
         "scale" => Ok(Datum::Float(100.0)),
         "editable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.editable))),
+        "scriptList" | "scriptlist" => {
+            // Returns a list of [memberRef, propertiesString] for each behavior
+            // attached to this sprite. Used by trigger behaviors (Mouse Left etc.)
+            // for event routing.
+            use crate::director::lingo::datum::DatumType;
+            let behaviors: Vec<(crate::player::cast_lib::CastMemberRef, String)> = sprite
+                .map(|s| {
+                    reserve_player_mut(|player| {
+                        s.script_instance_list.iter().filter_map(|beh_ref| {
+                            let inst = player.allocator.get_script_instance_opt(beh_ref)?;
+                            let member_ref = inst.script.clone();
+                            // Serialize properties as "[#name: value, ...]"
+                            let mut parts: Vec<String> = Vec::new();
+                            for (key, val_ref) in &inst.properties {
+                                let val = player.get_datum(val_ref);
+                                let val_str = match val {
+                                    Datum::Int(i) => i.to_string(),
+                                    Datum::Float(f) => format!("{:.4}", f),
+                                    Datum::String(s) => format!("\"{}\"", s),
+                                    Datum::Symbol(s) => format!("#{}", s),
+                                    Datum::Void => "VOID".to_string(),
+                                    _ => "VOID".to_string(),
+                                };
+                                parts.push(format!("#{}: {}", key.as_str(), val_str));
+                            }
+                            let props_str = format!("[{}]", parts.join(", "));
+                            Some((member_ref, props_str))
+                        }).collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_default();
+
+            let items: VecDeque<DatumRef> = behaviors.into_iter().map(|(member_ref, props_str)| {
+                let member_datum = player.alloc_datum(Datum::CastMember(member_ref));
+                let props_datum = player.alloc_datum(Datum::String(props_str));
+                let inner = VecDeque::from([member_datum, props_datum]);
+                player.alloc_datum(Datum::List(DatumType::List, inner, false))
+            }).collect();
+
+            Ok(Datum::List(DatumType::List, items, false))
+        }
         prop_name => {
             let datum_ref = sprite.and_then(|sprite| {
                 reserve_player_mut(|player| {

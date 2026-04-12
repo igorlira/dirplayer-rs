@@ -862,6 +862,103 @@ impl SpriteDatumHandlers {
                 warn!("Flash sprite method '{}' called but not yet implemented", handler_name);
                 Ok(DatumRef::Void)
             }
+            "setscriptlist" => {
+                // sprite.setScriptList(list)
+                // list = [[memberRef, "propString"], [memberRef, "propString"], ...]
+                // Creates new behavior instances from member refs and serialised
+                // property lists, then replaces the sprite's script_instance_list.
+                use super::script::ScriptDatumHandlers;
+                use crate::player::ci_string::CiString;
+
+                reserve_player_mut(|player| {
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    if args.is_empty() {
+                        return Err(ScriptError::new("setScriptList requires 1 argument".to_string()));
+                    }
+
+                    let outer = player.get_datum(&args[0]).to_list()?
+                        .iter().cloned().collect::<Vec<_>>();
+
+                    // Collect (member_ref, props_str) pairs under the borrow
+                    let mut pairs: Vec<(crate::player::cast_lib::CastMemberRef, String)> = Vec::new();
+                    for pair_ref in &outer {
+                        let pair = player.get_datum(pair_ref).to_list()?
+                            .iter().cloned().collect::<Vec<_>>();
+                        if pair.len() < 2 { continue; }
+                        let member_ref = match player.get_datum(&pair[0]) {
+                            Datum::CastMember(r) => r.clone(),
+                            _ => continue,
+                        };
+                        let props_str = player.get_datum(&pair[1]).string_value().unwrap_or_default();
+                        pairs.push((member_ref, props_str));
+                    }
+                    Ok((sprite_num, pairs))
+                }).and_then(|(sprite_num, pairs)| {
+                    // Create instances outside the player borrow using the existing
+                    // ScriptDatumHandlers::create_script_instance helper.
+                    let mut new_instances: Vec<crate::player::script_ref::ScriptInstanceRef> = Vec::new();
+
+                    for (member_ref, props_str) in &pairs {
+                        match ScriptDatumHandlers::create_script_instance(member_ref) {
+                            Ok((instance_ref, _datum_ref)) => {
+                                // Parse the property string and set properties on the instance
+                                // via script_set_prop (standard Lingo property setter).
+                                let trimmed = props_str.trim();
+                                let inner = if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                                    &trimmed[1..trimmed.len()-1]
+                                } else {
+                                    trimmed
+                                };
+                                for part in inner.split(',') {
+                                    let part = part.trim();
+                                    if let Some((key, val)) = part.split_once(':') {
+                                        let key = key.trim().trim_start_matches('#').to_string();
+                                        let val = val.trim();
+                                        let datum_val = if let Ok(i) = val.parse::<i32>() {
+                                            Datum::Int(i)
+                                        } else if let Ok(f) = val.parse::<f64>() {
+                                            Datum::Float(f)
+                                        } else if val.starts_with('"') && val.ends_with('"') {
+                                            Datum::String(val[1..val.len()-1].to_string())
+                                        } else if val.starts_with('#') {
+                                            Datum::Symbol(val[1..].to_string())
+                                        } else {
+                                            Datum::String(val.to_string())
+                                        };
+                                        reserve_player_mut(|player| {
+                                            let val_ref = player.alloc_datum(datum_val);
+                                            let _ = crate::player::script::script_set_prop(
+                                                player,
+                                                &instance_ref,
+                                                &key,
+                                                &val_ref,
+                                                false,
+                                            );
+                                        });
+                                    }
+                                }
+                                new_instances.push(instance_ref);
+                            }
+                            Err(e) => {
+                                web_sys::console::warn_1(&format!(
+                                    "[setScriptList] Failed to create instance for member({},{}): {}",
+                                    member_ref.cast_lib, member_ref.cast_member, e.message
+                                ).into());
+                            }
+                        }
+                    }
+
+                    // Replace the sprite's behavior list
+                    reserve_player_mut(|player| {
+                        let sprite = player.movie.score.get_sprite_mut(sprite_num);
+                        sprite.script_instance_list = new_instances;
+                        player.remove_script_instance_list_cache(sprite_num);
+                        player.refresh_stage_behavior_channel_cache_entry(sprite_num);
+                    });
+
+                    Ok(DatumRef::Void)
+                })
+            }
             _ => Err(ScriptError::new_code(
                 ScriptErrorCode::HandlerNotFound,
                 format!("No sync handler {handler_name} for sprite"),

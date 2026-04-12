@@ -159,13 +159,9 @@ impl W3dFileParser {
             if !self.scene.model_resources.contains_key("defaultmodel") {
                 self.scene.model_resources.insert("defaultmodel".to_string(), ModelResourceInfo {
                     name: "defaultmodel".to_string(),
-                    mesh_infos: vec![],
-                    max_resolution: 0,
                     shading_count: 1,
-                    shader_bindings: vec![],
                     pos_iq: 1.0, norm_iq: 1.0, normal_crease: 1.0, tc_iq: 1.0, diff_iq: 1.0, spec_iq: 1.0,
-                    has_distal_edge_merge: false, has_neighbor_mesh: false,
-                    uv_gen_mode: None, sync_table: None, distal_edge_merges: None,
+                    ..Default::default()
                 });
             }
         }

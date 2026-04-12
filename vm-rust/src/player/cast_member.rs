@@ -434,12 +434,12 @@ impl TextMember {
     }
 
     /// Build a rotation matrix for the DefaultDirectional light node
-    /// from a TextInfo directionalPreset value (1-9).
+    /// from a directionalPreset value (1-9).
     ///
     /// The mesh front-face normal is (0,0,-1) and edge normals are inverted
     /// (top edge = (0,-1,0), etc.) because of face winding conventions.
     /// L (surface-to-light) must have matching signs for dot(N,L)>0.
-    fn directional_preset_to_transform(preset: u32) -> [f32; 16] {
+    pub(crate) fn directional_preset_to_transform(preset: u32) -> [f32; 16] {
         // L direction: x component from left/right, y from top/bottom, z always -1 for front face
         let (lx, ly): (f32, f32) = match preset {
             1 => (-1.0, -1.0), // topLeft
@@ -759,6 +759,11 @@ pub struct Shockwave3dRuntimeState {
     // ─── Mesh build data (for newMesh() → build() workflow) ───
     /// Per-model-resource mesh build data: resource_name -> MeshBuildData
     pub mesh_build_data: std::collections::HashMap<String, MeshBuildData>,
+
+    // ─── Directional light preset ───
+    /// member.directionalPreset value (1-9 matching topLeft..bottomRight,
+    /// 0 = #None, 2 = #topCenter = Director default).
+    pub directional_preset: u32,
 }
 
 /// Stores intermediate data for newMesh() model resources before build() is called.
@@ -914,6 +919,7 @@ impl Shockwave3dRuntimeState {
             play_rate: 1.0,
             animation_scale: 1.0,
             animation_end_time: -1.0,
+            directional_preset: 2, // Director default: #topCenter
             ..Default::default()
         };
         // Seed camera transform from 3DPR camera position/rotation.
@@ -1127,6 +1133,15 @@ impl Default for HavokCorrector {
 }
 
 #[derive(Clone, Debug)]
+pub struct RestingContact {
+    pub normal: [f64; 3],
+    pub plane_point: [f64; 3],
+    pub ground_friction: f64,
+    pub aabb_min: [f64; 3],
+    pub aabb_max: [f64; 3],
+}
+
+#[derive(Clone, Debug)]
 pub struct HavokRigidBody {
     pub name: String,
     pub position: [f64; 3],
@@ -1165,6 +1180,10 @@ pub struct HavokRigidBody {
     pub saved_orientation: [f64; 4],
     pub saved_linear_velocity: [f64; 3],
     pub saved_angular_velocity: [f64; 3],
+    /// Resting contact: surface normal, plane point, ground friction, mesh AABB.
+    /// Set on first collision with a rigid-body-owned mesh. Used each
+    /// substep to keep the body on the surface analytically.
+    pub resting_normal: Option<RestingContact>,
 }
 
 impl HavokRigidBody {
@@ -1212,6 +1231,7 @@ impl HavokRigidBody {
             saved_orientation: [1.0, 0.0, 0.0, 0.0],
             saved_linear_velocity: [0.0; 3],
             saved_angular_velocity: [0.0; 3],
+            resting_normal: None,
         }
     }
 
@@ -1246,6 +1266,7 @@ impl HavokRigidBody {
             saved_orientation: [1.0, 0.0, 0.0, 0.0],
             saved_linear_velocity: [0.0; 3],
             saved_angular_velocity: [0.0; 3],
+            resting_normal: None,
         }
     }
 }
@@ -1378,6 +1399,10 @@ pub struct HavokPhysicsState {
     pub collision_meshes: Vec<crate::player::handlers::datum_handlers::cast_member::havok_physics::CollisionMesh>,
     /// Cached collision list from last step (for Lingo collisionList property)
     pub collision_list_cache: Vec<HavokCollisionInfo>,
+    /// Whether to use the raycast-based ground constraint hack (SuperSonic-specific).
+    /// Disabled for HKE scene games where bodies are auto-created from W3D nodes,
+    /// because those scenes need proper GJK collision instead of a simple ground clamp.
+    pub use_ground_constraint: bool,
 }
 
 impl Clone for HavokPhysicsState {
@@ -1406,6 +1431,7 @@ impl Clone for HavokPhysicsState {
             ground_body_half_z: self.ground_body_half_z,
             collision_meshes: Vec::new(), // Not cloned — rebuilt on initialize
             collision_list_cache: Vec::new(),
+            use_ground_constraint: self.use_ground_constraint,
         }
     }
 }
@@ -1445,6 +1471,7 @@ impl Default for HavokPhysicsState {
             ground_body_half_z: 8.0,
             collision_meshes: Vec::new(),
             collision_list_cache: Vec::new(),
+            use_ground_constraint: true,
         }
     }
 }

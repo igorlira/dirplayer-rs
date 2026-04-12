@@ -380,6 +380,13 @@ pub struct ModelResourceInfo {
     pub uv_gen_mode: Option<u8>,
     pub sync_table: Option<Vec<Vec<u32>>>,
     pub distal_edge_merges: Option<Vec<Vec<DistalEdgeMergeRecord>>>,
+    /// Runtime primitive info — set by newModelResource(name, #box/#sphere/etc.)
+    /// When dimensions are set (mr.width, mr.radius, etc.) the mesh is regenerated.
+    pub primitive_type: Option<String>,
+    pub primitive_width: f32,
+    pub primitive_length: f32,
+    pub primitive_height: f32,
+    pub primitive_radius: f32,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -1169,6 +1169,118 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                             }
                         },
+                        "width" | "length" | "height" | "radius" => {
+                            use crate::director::chunks::w3d::types::ClodDecodedMesh;
+                            let val = value.to_float().unwrap_or(1.0) as f32;
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(res) = scene.model_resources.get_mut(&s3d_ref.name) {
+                                            match prop_name {
+                                                "width" => res.primitive_width = val,
+                                                "length" => res.primitive_length = val,
+                                                "height" => res.primitive_height = val,
+                                                "radius" => res.primitive_radius = val,
+                                                _ => {}
+                                            }
+                                        }
+                                        // Regenerate the mesh from the primitive dimensions.
+                                        // Box: scale unit cube by (width, length, height).
+                                        // Sphere: scale unit sphere by radius.
+                                        if let Some(res) = scene.model_resources.get(&s3d_ref.name) {
+                                            let ptype = res.primitive_type.as_deref().unwrap_or("");
+                                            let meshes = match ptype {
+                                                "box" => {
+                                                    // Director convention: width=X, height=Y, length=Z
+                                                    let hx = res.primitive_width / 2.0;  // X half
+                                                    let hy = res.primitive_height / 2.0; // Y half
+                                                    let hz = res.primitive_length / 2.0; // Z half
+                                                    let p = vec![
+                                                        [-hx,-hy,hz],[hx,-hy,hz],[hx,hy,hz],[-hx,hy,hz],
+                                                        [hx,-hy,-hz],[-hx,-hy,-hz],[-hx,hy,-hz],[hx,hy,-hz],
+                                                        [-hx,hy,hz],[hx,hy,hz],[hx,hy,-hz],[-hx,hy,-hz],
+                                                        [-hx,-hy,-hz],[hx,-hy,-hz],[hx,-hy,hz],[-hx,-hy,hz],
+                                                        [hx,-hy,hz],[hx,-hy,-hz],[hx,hy,-hz],[hx,hy,hz],
+                                                        [-hx,-hy,-hz],[-hx,-hy,hz],[-hx,hy,hz],[-hx,hy,-hz],
+                                                    ];
+                                                    let n = vec![
+                                                        [0.0,0.0,1.0],[0.0,0.0,1.0],[0.0,0.0,1.0],[0.0,0.0,1.0],
+                                                        [0.0,0.0,-1.0],[0.0,0.0,-1.0],[0.0,0.0,-1.0],[0.0,0.0,-1.0],
+                                                        [0.0,1.0,0.0],[0.0,1.0,0.0],[0.0,1.0,0.0],[0.0,1.0,0.0],
+                                                        [0.0,-1.0,0.0],[0.0,-1.0,0.0],[0.0,-1.0,0.0],[0.0,-1.0,0.0],
+                                                        [1.0,0.0,0.0],[1.0,0.0,0.0],[1.0,0.0,0.0],[1.0,0.0,0.0],
+                                                        [-1.0,0.0,0.0],[-1.0,0.0,0.0],[-1.0,0.0,0.0],[-1.0,0.0,0.0],
+                                                    ];
+                                                    let uv_face = vec![[0.0,1.0_f32],[1.0,1.0],[1.0,0.0],[0.0,0.0]];
+                                                    let mut uv = Vec::with_capacity(24);
+                                                    for _ in 0..6 { uv.extend_from_slice(&uv_face); }
+                                                    let f = vec![
+                                                        [0u32,1,2],[0,2,3],[4,5,6],[4,6,7],[8,9,10],[8,10,11],
+                                                        [12,13,14],[12,14,15],[16,17,18],[16,18,19],[20,21,22],[20,22,23],
+                                                    ];
+                                                    vec![ClodDecodedMesh {
+                                                        name: s3d_ref.name.clone(),
+                                                        positions: p, normals: n,
+                                                        tex_coords: vec![uv], faces: f,
+                                                        diffuse_colors: vec![], specular_colors: vec![],
+                                                        bone_indices: vec![], bone_weights: vec![],
+                                                    }]
+                                                },
+                                                "sphere" => {
+                                                    // Generate a UV sphere at the given radius.
+                                                    // Poles along Y so that after the typical
+                                                    // rotation(90,0,0) the poles end up vertical.
+                                                    let r = res.primitive_radius;
+                                                    let stacks = 12u32;
+                                                    let slices = 16u32;
+                                                    let uv_scale = 1.0f32;
+                                                    let mut pos = Vec::new();
+                                                    let mut nrm = Vec::new();
+                                                    let mut uvs = Vec::new();
+                                                    let mut faces = Vec::new();
+                                                    for i in 0..=stacks {
+                                                        let phi = std::f32::consts::PI * i as f32 / stacks as f32;
+                                                        let sp = phi.sin();
+                                                        let cp = phi.cos();
+                                                        for j in 0..=slices {
+                                                            let theta = 2.0 * std::f32::consts::PI * j as f32 / slices as f32;
+                                                            let st = theta.sin();
+                                                            let ct = theta.cos();
+                                                            let nx = cp;
+                                                            let ny = sp * ct;
+                                                            let nz = sp * st;
+                                                            pos.push([r*nx, r*ny, r*nz]);
+                                                            nrm.push([nx, ny, nz]);
+                                                            uvs.push([(j as f32 / slices as f32 - 0.05) * uv_scale, i as f32 / stacks as f32 * uv_scale]);
+                                                        }
+                                                    }
+                                                    for i in 0..stacks {
+                                                        for j in 0..slices {
+                                                            let a = i * (slices + 1) + j;
+                                                            let b = a + slices + 1;
+                                                            if i != 0 { faces.push([a, b, a + 1]); }
+                                                            if i != stacks - 1 { faces.push([a + 1, b, b + 1]); }
+                                                        }
+                                                    }
+                                                    vec![ClodDecodedMesh {
+                                                        name: s3d_ref.name.clone(),
+                                                        positions: pos, normals: nrm,
+                                                        tex_coords: vec![uvs], faces,
+                                                        diffuse_colors: vec![], specular_colors: vec![],
+                                                        bone_indices: vec![], bone_weights: vec![],
+                                                    }]
+                                                },
+                                                _ => vec![],
+                                            };
+                                            if !meshes.is_empty() {
+                                                scene.clod_meshes.insert(s3d_ref.name.clone(), meshes);
+                                                scene.mesh_content_version += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
                         _ => {},
                     });
                     Ok(())
@@ -1774,6 +1886,9 @@ impl Shockwave3dObjectDatumHandlers {
                             }
                             _ => (0.0, 0.0),
                         };
+                        debug!(
+                            "[modelUnderLoc] point=({:.0},{:.0})", sx, sy
+                        );
 
                         // Get scene for ray casting
                         let scene = {
@@ -1784,15 +1899,31 @@ impl Shockwave3dObjectDatumHandlers {
                             w3d.parsed_scene.clone()
                         };
 
+                        // Also get runtime state for camera/model transforms
+                        let runtime_state = {
+                            let member = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                                .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
+                            let w3d = member.member_type.as_shockwave3d()
+                                .ok_or_else(|| ScriptError::new("Not 3D".to_string()))?;
+                            w3d.runtime_state.clone()
+                        };
+
                         if let Some(scene) = scene {
                             use crate::director::chunks::w3d::raycast;
                             use crate::player::score::get_concrete_sprite_rect;
 
                             let view_node = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View);
                             let fov_deg = view_node.map(|n| n.fov).unwrap_or(30.0);
-                            let cam_transform = view_node.map(|n| n.transform).unwrap_or([
-                                1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0,
-                            ]);
+                            // Use runtime camera transform (set by Lingo) if available
+                            let cam_name = view_node.map(|n| n.name.as_str()).unwrap_or("DefaultView");
+                            let cam_transform = runtime_state.node_transforms
+                                .get(cam_name)
+                                .or_else(|| runtime_state.node_transforms.iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case(cam_name)).map(|(_, v)| v))
+                                .copied()
+                                .unwrap_or_else(|| view_node.map(|n| n.transform).unwrap_or([
+                                    1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0,
+                                ]));
 
                             // Find the sprite that holds this 3D member for viewport dimensions.
                             // Coordinates are sprite-relative (not stage-relative).
@@ -1810,8 +1941,32 @@ impl Shockwave3dObjectDatumHandlers {
                             let (orig_w, orig_h) = get_member_default_rect_size(player, &member_ref);
 
                             let ray = raycast::screen_to_ray_shockwave(sx, sy, width, height, orig_w, orig_h, fov_deg, &cam_transform);
-                            if let Some(hit) = raycast::raycast_scene(&ray, &scene, 100000.0) {
-                                // Return the model name as a Shockwave3dObjectRef
+                            {
+                                let model_names: Vec<String> = scene.nodes.iter()
+                                    .filter(|n| n.node_type == W3dNodeType::Model)
+                                    .map(|n| {
+                                        let res = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
+                                        let has_mesh = scene.clod_meshes.contains_key(res.as_str());
+                                        let rt_pos = runtime_state.node_transforms.get(&n.name)
+                                            .map(|t| format!("({:.0},{:.0},{:.0})", t[12], t[13], t[14]))
+                                            .unwrap_or_else(|| "no-rt".to_string());
+                                        format!("{}→{}(mesh={},pos={})", n.name, res, has_mesh, rt_pos)
+                                    }).collect();
+                                debug!(
+                                    "[modelUnderLoc] cam=({:.0},{:.0},{:.0}) fov={:.0} vp={}x{} ray_o=({:.1},{:.1},{:.1}) ray_d=({:.3},{:.3},{:.3}) models={:?}",
+                                    cam_transform[12], cam_transform[13], cam_transform[14], fov_deg, width, height,
+                                    ray.origin[0], ray.origin[1], ray.origin[2],
+                                    ray.direction[0], ray.direction[1], ray.direction[2],
+                                    model_names,
+                                );
+                            }
+                            if let Some(hit) = raycast::raycast_scene_multi(
+                                &ray, &scene, 100000.0, 1,
+                                Some(&runtime_state.node_transforms), None,
+                            ).into_iter().next() {
+                                debug!(
+                                    "[modelUnderLoc] HIT model='{}'", hit.model_name
+                                );
                                 use crate::director::lingo::datum::Shockwave3dObjectRef;
                                 return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                                     cast_lib: s3d_ref.cast_lib,
@@ -1819,6 +1974,8 @@ impl Shockwave3dObjectDatumHandlers {
                                     object_type: "model".to_string(),
                                     name: hit.model_name,
                                 })));
+                            } else {
+                               debug!("[modelUnderLoc] no hit");
                             }
                         }
                     }
@@ -4158,8 +4315,15 @@ impl Shockwave3dObjectDatumHandlers {
             "projection" => Ok(player.alloc_datum(Datum::Symbol("perspective".to_string()))),
             "visible" => Ok(player.alloc_datum(Datum::Int(1))),
             "rect" => {
-                // Camera viewport rect (normalized: 0,0,1,1 = full viewport)
-                Ok(player.alloc_datum(Datum::Rect([0.0, 0.0, 1.0, 1.0], 0b1111)))
+                // Camera viewport rect in pixel coordinates.
+                // Default = the member's defaultRect (full sprite area).
+                let r = player.movie.cast_manager.find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .map(|w3d| w3d.info.default_rect)
+                    .unwrap_or((0, 0, 320, 240));
+                Ok(player.alloc_datum(Datum::Rect([
+                    r.0 as f64, r.1 as f64, r.2 as f64, r.3 as f64
+                ], 0)))
             },
             "fog.enabled" => Ok(player.alloc_datum(Datum::Int(0))),
             "fog.near" => Ok(player.alloc_datum(Datum::Float(1.0))),
@@ -4959,6 +5123,12 @@ fn apply_point_at(
     tx: f32, ty: f32, tz: f32,
     up_x: f32, up_y: f32, up_z: f32,
 ) {
+    // Flush any dirty persistent Transform3d datums to node_transforms first.
+    // This ensures that if the caller just set transform.position = v on a
+    // persistent datum (e.g. camera.transform.position before pointAt), the
+    // position is propagated before we compute the forward direction.
+    sync_persistent_transforms(player);
+
     // Look up custom pointAtOrientation for this node (if explicitly set)
     let custom_orientation = {
         let member = player.movie.cast_manager.find_member_by_ref(member_ref);

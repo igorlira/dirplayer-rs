@@ -911,11 +911,11 @@ impl FontMemberHandlers {
                 }
             }
             let text_preview = spans.first().map(|s| &s.text[..s.text.len().min(5)]).unwrap_or("?");
-            web_sys::console::log_1(&format!(
+            debug!(
                 "[canvas-debug] text='{}' canvas={}x{} nonblack={}/{} first={}",
                 text_preview, canvas_width, canvas_height, nonblack, total_px,
                 if first_nb.is_empty() { "NONE".to_string() } else { first_nb }
-            ).into());
+            );
         }
 
         // Downscale 2x canvas (white-on-black) to 1x bitmap (black-on-white).

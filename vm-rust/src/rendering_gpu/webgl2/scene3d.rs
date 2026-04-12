@@ -181,6 +181,8 @@ pub struct Scene3dRenderer {
     blend_elapsed: f32,
     blend_weight: f32,
     blend_duration: f32,
+    /// Director's default red/white checkerboard texture (2×2, generated on first use)
+    default_checker_texture: Option<WebGlTexture>,
     /// Render-to-texture FBO (created on demand)
     rtt_fbo: Option<WebGlFramebuffer>,
     rtt_texture: Option<WebGlTexture>,
@@ -189,7 +191,31 @@ pub struct Scene3dRenderer {
     rtt_height: u32,
 }
 
+/// Director's default checkerboard texture: 2×2 pink-red / white pattern.
+const CHECKER_PIXELS: [u8; 16] = [
+    255, 255, 255, 255,   204, 102, 102, 255,  // row 0: white, pink-red
+    204, 102, 102, 255,   255, 255, 255, 255,  // row 1: pink-red, white
+];
+
 impl Scene3dRenderer {
+    /// Create the default checker texture if it doesn't exist yet.
+    fn ensure_checker_texture(&mut self, gl: &WebGl2RenderingContext) {
+        if self.default_checker_texture.is_some() { return; }
+        if let Some(tex) = gl.create_texture() {
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&tex));
+            let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                WebGl2RenderingContext::TEXTURE_2D, 0,
+                WebGl2RenderingContext::RGBA as i32, 2, 2, 0,
+                WebGl2RenderingContext::RGBA, WebGl2RenderingContext::UNSIGNED_BYTE, Some(&CHECKER_PIXELS),
+            );
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::REPEAT as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::REPEAT as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::NEAREST as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::NEAREST as i32);
+            self.default_checker_texture = Some(tex);
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             shader: None,
@@ -218,6 +244,7 @@ impl Scene3dRenderer {
             blend_elapsed: 0.0,
             blend_weight: 1.0,
             blend_duration: 0.0,
+            default_checker_texture: None,
             rtt_fbo: None,
             rtt_texture: None,
             rtt_depth: None,
@@ -1156,6 +1183,7 @@ void main() {
         self.ensure_member_data(context, member_key, scene)?;
 
         let gl = context.gl();
+        self.ensure_checker_texture(&gl);
         let shader = self.shader.as_ref().unwrap();
 
         // Render to DEFAULT framebuffer (no FBO)
@@ -1271,6 +1299,7 @@ void main() {
         self.ensure_shader(context)?;
         self.ensure_fbo(context, width, height)?;
         self.ensure_member_data(context, member_key, scene)?;
+        self.ensure_checker_texture(&context.gl());
 
         // Sync lightmap UVs: check scene CLOD mesh tex_coords[1] and upload to GPU if new
         if let Some(gpu_data) = self.member_data.get_mut(&member_key) {
@@ -1395,10 +1424,14 @@ void main() {
                 gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
             }
 
-            // Apply background color override
-            if let Some((r, g, b)) = rs.background_color {
-                gl.clear_color(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
-                gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
+            // Apply background color from member's bgColor (parsed from 3DPR).
+            // Only on the first pass (clear_fbo=true) — subsequent camera passes
+            // (overlays, arrowcam) must NOT re-clear or they wipe the main scene.
+            if clear_fbo {
+                if let Some((r, g, b)) = rs.background_color {
+                    gl.clear_color(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
+                    gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
+                }
             }
         } else {
             gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
@@ -3267,32 +3300,22 @@ void main() {
                     has_lightmap_layer = !layers.extra_layers.is_empty();
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
-                if !tex_bound {
-                    gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+                let is_prim = res_info.and_then(|r| r.primitive_type.as_ref()).is_some();
+                if !tex_bound && is_prim {
+                    // Fall back to Director's default checkerboard for primitives only
+                    if let Some(tex) = &self.default_checker_texture {
+                        gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+                        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+                        gl.uniform1i(shader.u_has_texture.as_ref(), 1);
+                        gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
+                        tex_bound = true;
+                    } else {
+                        gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+                    }
                 }
                 // IFX default: white diffuse for textured models unless useDiffuseWithTexture
                 if tex_bound && !w3d_shader.use_diffuse_with_texture {
                     gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
-                }
-                // Diagnostic: log all MainA/MainB mesh rendering (one-time per combo)
-                if model_node.name.eq_ignore_ascii_case("MainA") || model_node.name.eq_ignore_ascii_case("MainB") {
-                    use std::sync::Mutex;
-                    use std::collections::HashSet;
-                    static LOGGED_MAIN_ALL: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-                    let key = format!("{}:{}", model_node.name, mesh_idx);
-                    if let Ok(mut guard) = LOGGED_MAIN_ALL.lock() {
-                        let set = guard.get_or_insert_with(HashSet::new);
-                        if set.insert(key) {
-                            let layer_names: Vec<String> = w3d_shader.texture_layers.iter().map(|l| l.name.clone()).collect();
-                            let mat_desc = mat.map(|m| format!("diff=[{:.2},{:.2},{:.2}]", m.diffuse[0], m.diffuse[1], m.diffuse[2]))
-                                .unwrap_or_else(|| "NO_MAT".to_string());
-                            web_sys::console::log_1(&format!(
-                                "[W3D-MAIN-DIAG] model=\"{}\" mesh={} shader=\"{}\" tex_bound={} has_lightmap={} use_diff_tex={} layers={:?} {}",
-                                model_node.name, mesh_idx, w3d_shader.name, tex_bound, has_lightmap_layer,
-                                w3d_shader.use_diffuse_with_texture, layer_names, mat_desc
-                            ).into());
-                        }
-                    }
                 }
                 let first_bf = w3d_shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
@@ -3482,10 +3505,22 @@ void main() {
             }
         }
 
-        // No textured binding found — use best material without texture
+        // No textured binding found — use best material.  Apply Director's
+        // default checker only for newModelResource primitives (box/sphere/etc).
+        let is_primitive = res_info.primitive_type.is_some();
         if let Some(mat) = best_material {
             self.set_material_uniforms(gl, shader, mat);
-            gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+            if is_primitive {
+                if let Some(tex) = &self.default_checker_texture {
+                    gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+                    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+                    gl.uniform1i(shader.u_has_texture.as_ref(), 1);
+                    gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
+                    gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
+                }
+            } else {
+                gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+            }
             Self::apply_blend_mode(gl, mat.opacity, best_blend_func, force_blend);
             return true;
         }
