@@ -421,6 +421,9 @@ pub struct CollisionMesh {
     pub triangles: Vec<[u32; 3]>,
     pub aabb_min: V3,
     pub aabb_max: V3,
+    /// Index of the rigid body that owns this mesh (for friction/restitution).
+    /// None = anonymous static scenery (uses default ground material).
+    pub body_index: Option<usize>,
 }
 
 impl CollisionMesh {
@@ -476,14 +479,17 @@ pub fn find_ground_z(meshes: &[CollisionMesh], x: f64, y: f64, max_z: f64) -> Op
 
 /// Detect contacts for a body (sphere approximation) against static meshes.
 /// Returns contacts with normals pointing AWAY from the triangle surface.
+/// `tolerance` expands the effective collision distance so Havok detects
+/// contacts before actual surface penetration (matching the Xtra behaviour).
 pub fn detect_body_contacts(
-    meshes: &[CollisionMesh], pos: V3, radius: f64, body_idx: usize,
+    meshes: &[CollisionMesh], pos: V3, radius: f64, body_idx: usize, tolerance: f64,
 ) -> Vec<CollisionContact> {
+    let eff_radius = radius + tolerance;
     let mut contacts = Vec::new();
     for mesh in meshes {
-        if pos[0]+radius < mesh.aabb_min[0] || pos[0]-radius > mesh.aabb_max[0] { continue; }
-        if pos[1]+radius < mesh.aabb_min[1] || pos[1]-radius > mesh.aabb_max[1] { continue; }
-        if pos[2]+radius < mesh.aabb_min[2] || pos[2]-radius > mesh.aabb_max[2] { continue; }
+        if pos[0]+eff_radius < mesh.aabb_min[0] || pos[0]-eff_radius > mesh.aabb_max[0] { continue; }
+        if pos[1]+eff_radius < mesh.aabb_min[1] || pos[1]-eff_radius > mesh.aabb_max[1] { continue; }
+        if pos[2]+eff_radius < mesh.aabb_min[2] || pos[2]-eff_radius > mesh.aabb_max[2] { continue; }
         for tri in &mesh.triangles {
             let v0 = mesh.vertices[tri[0] as usize];
             let v1 = mesh.vertices[tri[1] as usize];
@@ -491,15 +497,15 @@ pub fn detect_body_contacts(
             let normal = v3_normalized(v3_cross(v3_sub(v1, v0), v3_sub(v2, v0)));
             if v3_len_sq(normal) < 1e-10 { continue; }
             let dist = v3_dot(v3_sub(pos, v0), normal);
-            if dist.abs() > radius { continue; }
-            if dist < -radius * 2.0 { continue; }
+            if dist.abs() > eff_radius { continue; }
+            if dist < -eff_radius * 2.0 { continue; }
             let proj = v3_sub(pos, v3_scale(normal, dist));
             if pt_in_tri_3d(proj, v0, v1, v2) {
-                let depth = radius - dist;
+                let depth = eff_radius - dist;
                 if depth > 0.0 {
                     contacts.push(CollisionContact {
                         body_a: body_idx,
-                        body_b: None, // static mesh
+                        body_b: mesh.body_index,
                         point: proj,
                         normal,
                         depth,
@@ -661,8 +667,14 @@ fn resolve_contacts(state: &mut HavokPhysicsState, contacts: &[CollisionContact]
             // Apply impulse pair
             apply_impulse_pair(state, impulse, contact);
 
-            // Apply driving impulse (penetration correction)
-            apply_driving_impulse(state, contact, tolerance);
+            // Apply driving impulse (penetration correction) only for
+            // anonymous terrain meshes.  For rigid-body-owned meshes the
+            // position correction after the resolver handles depenetration;
+            // applying driving impulse here injects energy into low-velocity
+            // bounces and causes runaway velocity growth.
+            if contact.body_b.is_none() {
+                apply_driving_impulse(state, contact, tolerance);
+            }
 
             // Check convergence
             let vn = compute_normal_rel_velocity(state, contact);
@@ -683,21 +695,35 @@ fn resolve_single_contact(state: &HavokPhysicsState, contact: &CollisionContact)
     let rb_a = &state.rigid_bodies[contact.body_a];
     let (friction, restitution) = if let Some(b_idx) = contact.body_b {
         let rb_b = &state.rigid_bodies[b_idx];
-        // Geometric mean restitution, product friction (ComplexFriction mode)
-        ((rb_a.friction * rb_b.friction), (rb_a.restitution * rb_b.restitution).sqrt())
+        // Product restitution and friction (matches Director's observed behaviour
+        // for the Properties demo: Ball2 bounce ratio ~0.70 with rest=0.75 * 1.0)
+        ((rb_a.friction * rb_b.friction), (rb_a.restitution * rb_b.restitution))
     } else {
-        ((rb_a.friction * GROUND_FRICTION), (rb_a.restitution * GROUND_RESTITUTION).sqrt())
+        ((rb_a.friction * GROUND_FRICTION), (rb_a.restitution * GROUND_RESTITUTION))
     };
 
-    let target_vn = -restitution * vn;
+    // Havok's bisection collision resolver loses a small amount of kinetic
+    // energy each bounce due to numerical integration.  Apply a 0.93× damping
+    // factor to match Director's observed bounce ratios (Properties demo Ball2:
+    // Director ratio ≈ 0.70, product restitution = 0.75, 0.75 × 0.93 ≈ 0.70).
+    const COLLISION_ENERGY_LOSS: f64 = 0.93;
+    let restitution = restitution * COLLISION_ENERGY_LOSS;
+
+    // Suppress restitution for low-speed contacts to prevent jitter at rest.
+    const REST_VEL_THRESHOLD: f64 = 10.0;
+    let is_resting = vn.abs() < REST_VEL_THRESHOLD;
+    let eff_restitution = if is_resting { 0.0 } else { restitution };
+    let target_vn = -eff_restitution * vn;
     let eff_inv_mass = compute_effective_inverse_mass(state, contact);
     if eff_inv_mass < 1e-10 { return [0.0; 3]; }
 
     let normal_impulse_mag = (target_vn - vn) / eff_inv_mass;
     let mut impulse = v3_scale(contact.normal, normal_impulse_mag);
 
-    // Friction (Coulomb cone)
-    if friction > 0.0 {
+    // Friction (Coulomb cone) — skip for resting contacts so bodies can
+    // slide on tilted surfaces under gravity without friction impulses
+    // killing their tangential velocity every frame.
+    if friction > 0.0 && !is_resting {
         let tangent_vel = v3_sub(rel_vel, v3_scale(contact.normal, vn));
         let tangent_speed = v3_len(tangent_vel);
         if tangent_speed > 1e-6 {
@@ -1158,15 +1184,39 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     let n_subs = num_sub_steps.max(1) as usize;
     let sub_dt = time_increment / n_subs as f64;
 
-    // Game forces (from applyForceAtPoint) are one-frame-delayed impulse-like forces.
-    // Dividing by N² (=49) empirically matches Director's linear equilibrium:
-    //   - Spring force ~9700 / 49 ≈ gravity per substep
-    //   - Matches Director's vel_z ≈ -2.87 at rest
+    // Game forces (from applyForceAtPoint) are applied with per-axis dividers
+    // calibrated against Director's observed behaviour. The torque dividers
+    // differ between pitch/roll and yaw, matching the empirical asymmetry we
+    // see when comparing log parity against Director.
     //
-    // The PPC RE suggests Havok applies forces at substep 1 only (= /N scaling),
-    // but tested both /N and /N² and /49 gives the correct overall dynamics.
-    // Keep empirical /49.
-    let force_scale = (n_subs * n_subs) as f64;
+    //   * Havok's integrator (sub_10014DA0) clears rb.force and rb.torque at
+    //     the end of every inner integrate step. SuperSonic runs the adaptive
+    //     integrator path that splits each substep into many inner micro-steps
+    //     so game forces only persist for the very first micro-step. The
+    //     effective attenuation is N² × (N_inner/N) with N=7 substeps.
+    //   * LINEAR dynamics match Director at force_scale=49 (/N²). Verified by
+    //     spring equilibrium and drive velocity.
+    //   * PITCH/ROLL torque matches Director at torque_scale=434 (= N²×62/7).
+    //     Verified by first-drive-frame ang_x = -0.0243 matching Director.
+    //   * YAW torque matches Director at torque_scale≈159 (= N²×3.24). This
+    //     is 2.73× less attenuation than pitch/roll. Verified by matching
+    //     Director's turn radius during a hard left turn; larger yaw dividers
+    //     collapse the turn circle to unrealistic sizes.
+    //
+    // The per-axis asymmetry means yaw-driving forces (sideways wheel friction
+    // torque) and pitch-driving forces (drive force × lever) have different
+    // effective timescales in Havok. We can't explain WHY this is without
+    // deeper RE on the integrator's force handling per axis, but empirically
+    // these values give a tight Director-parity fit.
+    //
+    // World-frame approximation: for SuperSonic the body's axes stay near world
+    // alignment (small pitch/roll angles during driving), so applying the
+    // per-axis divider in world frame is equivalent to body frame. If we
+    // ever needed to simulate a car that flips upside down the correct thing
+    // would be to rotate torque to body frame, divide per axis, rotate back.
+    let force_scale: f64 = (n_subs * n_subs) as f64;    // 49
+    let torque_scale_pitch_roll: f64 = force_scale * (62.0 / 7.0);  // 434
+    let torque_scale_yaw: f64 = force_scale * 3.24;                  // 158.76
     let saved_forces: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
         .map(|rb| (rb.force, rb.torque)).collect();
 
@@ -1175,8 +1225,16 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
         // Gravity and drag are added on top in step_single.
         for (i, rb) in state.rigid_bodies.iter_mut().enumerate() {
             if i < saved_forces.len() {
-                rb.force = [saved_forces[i].0[0]/force_scale, saved_forces[i].0[1]/force_scale, saved_forces[i].0[2]/force_scale];
-                rb.torque = [saved_forces[i].1[0]/force_scale, saved_forces[i].1[1]/force_scale, saved_forces[i].1[2]/force_scale];
+                rb.force = [
+                    saved_forces[i].0[0]/force_scale,
+                    saved_forces[i].0[1]/force_scale,
+                    saved_forces[i].0[2]/force_scale,
+                ];
+                rb.torque = [
+                    saved_forces[i].1[0]/torque_scale_pitch_roll,   // world X ≈ body pitch
+                    saved_forces[i].1[1]/torque_scale_pitch_roll,   // world Y ≈ body roll
+                    saved_forces[i].1[2]/torque_scale_yaw,          // world Z ≈ body yaw
+                ];
             }
         }
 
@@ -1245,6 +1303,13 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
         // Phase 4b: Ground constraint (resting contacts)
         apply_ground_constraints(state);
 
+        // Phase 4c: Surface contact constraint — keep bodies resting on
+        // rigid-body-owned collision meshes (tilted surfaces, ground planes).
+        // Without this, gravity's normal component pulls the body into the
+        // surface each substep, triggering bisection+impulse repeatedly
+        // instead of smooth sliding.
+        apply_surface_contacts(state, remaining);
+
         // Phase 5: Detect transient collisions (body vs static mesh)
         let contacts = detect_all_collisions(state);
         let has_collisions = !contacts.is_empty();
@@ -1263,6 +1328,48 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
             if has_collisions {
                 // Can't bisect further — resolve with impulses (PointRRResolver)
                 resolve_contacts(state, &contacts);
+
+                // Position correction: push bodies out of penetration so they
+                // don't immediately re-collide on the next substep (which would
+                // trigger a global bisection rollback including bodies that are
+                // already bouncing away).
+                for c in &contacts {
+                    // Read ground friction before mutable borrow
+                    let ground_friction = c.body_b
+                        .map(|idx| state.rigid_bodies[idx].friction)
+                        .unwrap_or(0.5);
+                    let rb = &mut state.rigid_bodies[c.body_a];
+                    if !rb.pinned && rb.inverse_mass > 0.0 && c.depth > 0.0 {
+                        let vn = rb.linear_velocity[0] * c.normal[0]
+                               + rb.linear_velocity[1] * c.normal[1]
+                               + rb.linear_velocity[2] * c.normal[2];
+                        let push = c.depth;
+                        rb.position[0] += c.normal[0] * push;
+                        rb.position[1] += c.normal[1] * push;
+                        rb.position[2] += c.normal[2] * push;
+                        if vn.abs() < 10.0 {
+                            rb.linear_velocity[0] -= vn * c.normal[0];
+                            rb.linear_velocity[1] -= vn * c.normal[1];
+                            rb.linear_velocity[2] -= vn * c.normal[2];
+                        }
+                        // Only enter resting contact for low-velocity impacts.
+                        // Bouncy contacts (high restitution) must stay in the
+                        // impulse-based collision system so they can bounce.
+                        if c.body_b.is_some() && vn.abs() < 10.0 {
+                            let (aabb_min, aabb_max) = state.collision_meshes.iter()
+                                .find(|m| m.body_index == c.body_b)
+                                .map(|m| (m.aabb_min, m.aabb_max))
+                                .unwrap_or(([f64::MIN;3], [f64::MAX;3]));
+                            rb.resting_normal = Some(crate::player::cast_member::RestingContact {
+                                normal: c.normal,
+                                plane_point: c.point,
+                                ground_friction,
+                                aabb_min,
+                                aabb_max,
+                            });
+                        }
+                    }
+                }
 
                 // Record collision list for Lingo readback
                 state.collision_list_cache.clear();
@@ -1325,22 +1432,128 @@ fn apply_ground_constraints(state: &mut HavokPhysicsState) {
     }
 }
 
+/// Surface contact constraint using analytical plane projection.
+/// No per-triangle detection — uses stored plane normal + point for stable sliding.
+/// Clears resting contact when ball leaves the mesh AABB (edge of platform).
+fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
+    let g = state.gravity;
+
+    for bi in 0..state.rigid_bodies.len() {
+        let rc = match &state.rigid_bodies[bi].resting_normal {
+            Some(rc) => rc.clone(),
+            None => continue,
+        };
+        if state.rigid_bodies[bi].pinned || !state.rigid_bodies[bi].active
+            || state.rigid_bodies[bi].inverse_mass <= 0.0 { continue; }
+
+        let he = state.rigid_bodies[bi].inertia_half_extents;
+        let body_radius = he[0].max(he[1]).max(he[2]);
+        let eff_radius = body_radius + state.tolerance;
+        let pos = state.rigid_bodies[bi].position;
+        let n = rc.normal;
+
+        // Check if ball is still within the mesh AABB (on the platform)
+        if pos[0] < rc.aabb_min[0] || pos[0] > rc.aabb_max[0]
+            || pos[1] < rc.aabb_min[1] || pos[1] > rc.aabb_max[1] {
+            // Left the platform edge — free fall
+            state.rigid_bodies[bi].resting_normal = None;
+            continue;
+        }
+
+        // Compute the Z position that keeps the ball at eff_radius from the
+        // tilted plane.  Adjusting only Z avoids the X-jitter that occurs when
+        // projecting along the tilted normal (which has an X component).
+        // Plane eq: dot(pos - pp, n) = eff_radius
+        //   (px-ppx)*nx + (py-ppy)*ny + (pz-ppz)*nz = eff_radius
+        //   pz = ppz + (eff_radius - (px-ppx)*nx - (py-ppy)*ny) / nz
+        let rb = &mut state.rigid_bodies[bi];
+        if n[2].abs() > 0.01 {
+            let target_z = rc.plane_point[2]
+                + (eff_radius - (rb.position[0]-rc.plane_point[0])*n[0]
+                              - (rb.position[1]-rc.plane_point[1])*n[1]) / n[2];
+            rb.position[2] = target_z;
+        }
+
+        // Cancel normal velocity
+        let vn = rb.linear_velocity[0]*n[0] + rb.linear_velocity[1]*n[1] + rb.linear_velocity[2]*n[2];
+        if vn < 0.0 {
+            rb.linear_velocity[0] -= vn * n[0];
+            rb.linear_velocity[1] -= vn * n[1];
+            rb.linear_velocity[2] -= vn * n[2];
+        }
+        // Cancel normal force
+        let fn_ = rb.force[0]*n[0] + rb.force[1]*n[1] + rb.force[2]*n[2];
+        if fn_ < 0.0 {
+            rb.force[0] -= fn_ * n[0];
+            rb.force[1] -= fn_ * n[1];
+            rb.force[2] -= fn_ * n[2];
+        }
+
+        // Tangential velocity
+        let tv = [
+            rb.linear_velocity[0] - vn.max(0.0)*n[0],
+            rb.linear_velocity[1] - vn.max(0.0)*n[1],
+            rb.linear_velocity[2] - vn.max(0.0)*n[2],
+        ];
+        let t_speed = v3_len(tv);
+
+        // Sliding friction with rolling cap
+        let g_n = g[0]*n[0] + g[1]*n[1] + g[2]*n[2];
+        let g_tan = v3_len([g[0]-g_n*n[0], g[1]-g_n*n[1], g[2]-g_n*n[2]]);
+        let mu = rb.friction * rc.ground_friction;
+        if mu > 0.0 && t_speed > 1e-6 {
+            let max_rolling = (2.0/7.0) * g_tan;
+            let eff_friction = (mu * g_n.abs()).min(max_rolling);
+            let friction_decel = eff_friction * dt;
+            let factor = if friction_decel >= t_speed { 0.0 } else { 1.0 - friction_decel / t_speed };
+            rb.linear_velocity[0] = n[0]*vn.max(0.0) + tv[0]*factor;
+            rb.linear_velocity[1] = n[1]*vn.max(0.0) + tv[1]*factor;
+            rb.linear_velocity[2] = n[2]*vn.max(0.0) + tv[2]*factor;
+        }
+
+        // Rolling angular velocity for ALL resting balls: ω = v/r
+        if t_speed > 1e-6 && body_radius > 0.01 {
+            let cur_tv = [
+                rb.linear_velocity[0] - vn.max(0.0)*n[0],
+                rb.linear_velocity[1] - vn.max(0.0)*n[1],
+                rb.linear_velocity[2] - vn.max(0.0)*n[2],
+            ];
+            let cur_speed = v3_len(cur_tv);
+            let vd = [tv[0]/t_speed, tv[1]/t_speed, tv[2]/t_speed];
+            rb.angular_velocity = v3_scale(v3_cross(n, vd), cur_speed / body_radius);
+        }
+    }
+}
+
 /// Detect all transient collisions (body vs static mesh walls/obstacles).
 fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
     if state.collision_meshes.is_empty() { return Vec::new(); }
 
     let mut all_contacts = Vec::new();
-    let half_z = state.ground_body_half_z;
-    let body_radius = half_z * 1.5;
 
     for bi in 0..state.rigid_bodies.len() {
         let rb = &state.rigid_bodies[bi];
         if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
+        // Skip bodies in resting contact — handled by apply_surface_contacts
+        if rb.resting_normal.is_some() { continue; }
 
-        let contacts = detect_body_contacts(&state.collision_meshes, rb.position, body_radius, bi);
+        // Use the body's actual half-extents as collision radius
+        let he = rb.inertia_half_extents;
+        let body_radius = he[0].max(he[1]).max(he[2]);
+
+        let contacts = detect_body_contacts(&state.collision_meshes, rb.position, body_radius, bi, state.tolerance);
+        // Keep only the deepest contact per body to avoid duplicate impulses
+        // from coplanar triangles (e.g. two triangles forming a box face).
+        let mut best: Option<CollisionContact> = None;
         for c in contacts {
-            // Skip ground contacts (handled by ground constraint)
-            if c.normal[2] > 0.7 { continue; }
+            // Skip upward-facing ground contacts for anonymous scenery meshes
+            // (those are handled by the ground constraint safety net).
+            if c.normal[2] > 0.7 && c.body_b.is_none() { continue; }
+            if best.as_ref().map_or(true, |b| c.depth > b.depth) {
+                best = Some(c);
+            }
+        }
+        if let Some(c) = best {
             all_contacts.push(c);
         }
     }

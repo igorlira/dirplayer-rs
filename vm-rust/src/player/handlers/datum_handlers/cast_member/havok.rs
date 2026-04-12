@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use log::debug;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType, HavokObjectRef},
@@ -489,8 +490,11 @@ impl HavokPhysicsMemberHandlers {
         havok.state.w3d_cast_member = w3d_ref.cast_member;
         havok.state.tolerance = tolerance;
         havok.state.scale = scale;
-        // Default gravity in scene units (inches with 0.0254 scale = 386.22 in/s^2)
-        havok.state.gravity = [0.0, 0.0, -386.22];
+        // Default gravity: 9.81 m/s² converted to display units via worldScale.
+        // With scale=0.0254 (inches): -9.81/0.0254 = -386.22 in/s²
+        // With scale=0.03: -9.81/0.03 = -327.0 units/s²
+        let g = if scale.abs() > 1e-10 { 9.81 / scale } else { 386.22 };
+        havok.state.gravity = [0.0, 0.0, -g];
         havok.state.sim_time = 0.0;
 
         // Load HKE meshes into native collision system (for havok_physics.rs)
@@ -523,15 +527,16 @@ impl HavokPhysicsMemberHandlers {
                     triangles: mesh.triangles.clone(),
                     aabb_min: [0.0; 3],
                     aabb_max: [0.0; 3],
+                    body_index: None,
                 };
                 cmesh.compute_aabb();
                 havok.state.collision_meshes.push(cmesh);
             }
-            web_sys::console::log_1(&format!(
+            debug!(
                 "Native Havok: loaded {} collision meshes ({} total triangles)",
                 havok.state.collision_meshes.len(),
                 havok.state.collision_meshes.iter().map(|m| m.triangles.len()).sum::<usize>()
-            ).into());
+            );
         }
 
         web_sys::console::log_1(
@@ -564,9 +569,11 @@ impl HavokPhysicsMemberHandlers {
         havok.state.springs.clear();
         havok.state.linear_dashpots.clear();
         havok.state.angular_dashpots.clear();
+        havok.state.collision_meshes.clear();
         havok.state.collision_interests.clear();
         havok.state.step_callbacks.clear();
         havok.state.disabled_collision_pairs.clear();
+        havok.state.collision_list_cache.clear();
         havok.state.sim_time = 0.0;
 
         Ok(DatumRef::Void)
@@ -618,26 +625,19 @@ impl HavokPhysicsMemberHandlers {
         super::havok_physics::step_native(&mut havok.state, time_increment, num_sub_steps);
 
         // Detect ground Z on first step if not set
+        // Derive ground Z from the scene if not set yet.
+        // If we have collision meshes, the per-body raycast in
+        // apply_ground_constraints handles it. Otherwise use the
+        // lowest fixed body as a ground plane estimate.
         if havok.state.ground_z < -1e10 {
-            // Use the first raycast hit z = 330.70 (known from Director data)
-            // TODO: compute from actual HKE mesh geometry
-            havok.state.ground_z = 330.70;
-        }
-
-        // Diagnostic logging
-        {
-            static STEP_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = STEP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n < 20 || (n % 60 == 0) {
-                for rb in &havok.state.rigid_bodies {
-                    if rb.is_fixed || rb.name.starts_with("hke_") { continue; }
-                    web_sys::console::log_1(&format!(
-                        "[HAVOK-NATIVE {}] '{}': pos=({:.1},{:.1},{:.1}) vel=({:.1},{:.1},{:.1}) spd={:.1}",
-                        n, rb.name, rb.position[0], rb.position[1], rb.position[2],
-                        rb.linear_velocity[0], rb.linear_velocity[1], rb.linear_velocity[2],
-                        (rb.linear_velocity[0]*rb.linear_velocity[0]+rb.linear_velocity[1]*rb.linear_velocity[1]+rb.linear_velocity[2]*rb.linear_velocity[2]).sqrt(),
-                    ).into());
+            let mut min_z = f64::MAX;
+            for rb in &havok.state.rigid_bodies {
+                if rb.is_fixed && rb.position[2] < min_z {
+                    min_z = rb.position[2];
                 }
+            }
+            if min_z < f64::MAX {
+                havok.state.ground_z = min_z;
             }
         }
 
@@ -776,6 +776,12 @@ impl HavokPhysicsMemberHandlers {
         } else {
             true
         };
+        // Optional 4th arg: shape type (#sphere, #box). Default = convex hull from mesh.
+        let shape_type = if args.len() > 3 {
+            player.get_datum(&args[3]).string_value().unwrap_or_default()
+        } else {
+            String::new()
+        };
 
         // Read model's initial transform + mesh bounding box + vertices/faces from W3D scene
         let (initial_position, mesh_half_extents, mesh_vertices, mesh_faces) = {
@@ -795,9 +801,34 @@ impl HavokPhysicsMemberHandlers {
             let w3d_member = player.movie.cast_manager.find_member_by_ref(&w3d_ref);
             if let Some(m) = w3d_member {
                 if let Some(w3d) = m.member_type.as_shockwave3d() {
+                    // Read position from: 1) runtime node_transforms, 2) persistent
+                    // Transform3d datum (set by Lingo but not yet synced to renderer),
+                    // 3) parsed scene node transform, 4) default [0,0,0].
                     let pos = w3d.runtime_state.node_transforms
                         .get(&model_name)
+                        .or_else(|| w3d.runtime_state.node_transforms.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(&model_name)).map(|(_, v)| v))
                         .map(|t| [t[12] as f64, t[13] as f64, t[14] as f64])
+                        .or_else(|| {
+                            // Check persistent datum (Lingo may have set transform.position
+                            // but sync_persistent_transforms hasn't run yet)
+                            w3d.runtime_state.node_transform_datums.get(&model_name)
+                                .or_else(|| w3d.runtime_state.node_transform_datums.iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case(&model_name)).map(|(_, v)| v))
+                                .and_then(|datum_ref| {
+                                    match player.get_datum(datum_ref) {
+                                        Datum::Transform3d(m) => Some([m[12], m[13], m[14]]),
+                                        _ => None,
+                                    }
+                                })
+                        })
+                        .or_else(|| {
+                            // Fallback to parsed scene node transform
+                            w3d.parsed_scene.as_ref().and_then(|s|
+                                s.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&model_name))
+                                    .map(|n| [n.transform[12] as f64, n.transform[13] as f64, n.transform[14] as f64])
+                            )
+                        })
                         .unwrap_or([0.0; 3]);
 
                     // Collect vertices + triangle indices from every CLOD submesh,
@@ -842,50 +873,32 @@ impl HavokPhysicsMemberHandlers {
         // This matches Havok's InertialTensorComputer pipeline (PPC 0x5d3c0):
         // Tonon polyhedron tet-decomposition over the mesh triangles.
         // Fall back to an AABB-box approximation if the mesh is unavailable or degenerate.
-        let poly_unit_inertia = crate::player::handlers::datum_handlers::cast_member::havok_physics
-            ::compute_polyhedron_unit_inertia(&mesh_vertices, &mesh_faces)
-            .map(|(ui, _com, _vol)| ui)
-            .unwrap_or_else(|| crate::player::handlers::datum_handlers::cast_member::havok_physics
-                ::box_unit_inertia(mesh_half_extents));
-
-        // EMPIRICAL INERTIA SCALING — per-axis, see log parity analysis.
         //
-        // Director's Havok produces per-axis effective inertias that are
-        // NOT simply the polyhedron Mirtich result. We calibrate each axis
-        // against Director's observed behaviour:
-        //
-        //   Pitch (X-axis):
-        //     Director first-drive-frame ang_x = -0.0243
-        //     Our polyhedron-only ang_x = -0.2047
-        //     Ratio: 8.43 → scale pitch by 8.43
-        //
-        //   Yaw (Z-axis):
-        //     Director max sustained |ang_z| during a hard left turn = 1.56
-        //     Our scaled-by-8.43 max = 0.60 (car turns with 2× the radius)
-        //     Ratio: 2.6 → yaw is over-constrained by 2.6 if we use the same
-        //     8.43 scale. Scale yaw only by 8.43 / 2.6 = 3.24 so the yaw axis
-        //     response matches Director's observed turning radius.
-        //
-        //   Roll (Y-axis):
-        //     No direct Director measurement yet. Using the pitch factor 8.43
-        //     (same as pitch) gives a roll inertia of 228 — 8.4× the box
-        //     formula 27.08. Not boat-like but not overly stiff either. Keep
-        //     this until we have a specific Director measurement to refine.
-        //
-        // The per-axis scaling is physically odd (a real polyhedron doesn't
-        // scale differently per axis) but empirically matches Director. It
-        // likely reflects a Havok wrapper / primitive-specific fast path we
-        // haven't fully decoded.
-        let mut unit_inertia: [f64; 9] = poly_unit_inertia;
-        unit_inertia[0] *= 8.43;   // pitch  (X)
-        unit_inertia[4] *= 8.43;   // roll   (Y)
-        unit_inertia[8] *= 3.24;   // yaw    (Z) — matches Director turn radius
-        // off-diagonal elements kept at polyhedron values (all 0 for box).
+        // Previously we applied an empirical per-axis scale (×8.43 pitch/roll,
+        // ×3.24 yaw) to compensate for an over-large angular response. After
+        // decoding Havok's integrator more carefully, we moved that
+        // compensation into the TORQUE divider in step_native (torque_scale =
+        // 434 = /N² × 62/7) which mirrors Havok's "clear force/torque after
+        // first inner integrate step" behaviour. With the divider handling
+        // angular attenuation, the inertia reverts to the mathematically
+        // correct polyhedron values here.
+        let unit_inertia = if shape_type.eq_ignore_ascii_case("sphere") {
+            // Sphere inertia: I = (2/5) * r² on all axes (isotropic)
+            let r = mesh_half_extents[0].max(mesh_half_extents[1]).max(mesh_half_extents[2]);
+            let i_diag = 0.4 * r * r;
+            [i_diag, 0.0, 0.0, 0.0, i_diag, 0.0, 0.0, 0.0, i_diag]
+        } else {
+            crate::player::handlers::datum_handlers::cast_member::havok_physics
+                ::compute_polyhedron_unit_inertia(&mesh_vertices, &mesh_faces)
+                .map(|(ui, _com, _vol)| ui)
+                .unwrap_or_else(|| crate::player::handlers::datum_handlers::cast_member::havok_physics
+                    ::box_unit_inertia(mesh_half_extents))
+        };
 
         // Diagnostic: log mesh + computed unit inertia so we can verify it matches
-        // Director. For a 15×30×10 box we expect diag (702, 228, 304).
+        // Director. For a 15×30×10 box we expect diag (83.33, 27.08, 93.75).
         web_sys::console::log_1(&format!(
-            "[HAVOK-RB '{}'] verts={} faces={} he=({:.1},{:.1},{:.1}) unit_I_diag=({:.2},{:.2},{:.2}) pitch*8.43 roll*8.43 yaw*3.24",
+            "[HAVOK-RB '{}'] verts={} faces={} he=({:.1},{:.1},{:.1}) unit_I_diag=({:.2},{:.2},{:.2}) (polyhedron, unscaled)",
             model_name,
             mesh_vertices.len(), mesh_faces.len(),
             mesh_half_extents[0], mesh_half_extents[1], mesh_half_extents[2],
@@ -937,6 +950,101 @@ impl HavokPhysicsMemberHandlers {
             true
         };
 
+        // Build a collision mesh from the W3D model geometry so physics can
+        // detect contacts against this fixed body (e.g. a ground plane created
+        // dynamically via newModelResource).
+        let collision_mesh = {
+            let member = player
+                .movie
+                .cast_manager
+                .find_member_by_ref(member_ref)
+                .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
+            let havok = match &member.member_type {
+                CastMemberType::HavokPhysics(h) => h,
+                _ => return Err(ScriptError::new("Not a Havok member".to_string())),
+            };
+            let w3d_ref = CastMemberRef {
+                cast_lib: havok.state.w3d_cast_lib,
+                cast_member: havok.state.w3d_cast_member,
+            };
+            let w3d_member = player.movie.cast_manager.find_member_by_ref(&w3d_ref);
+            w3d_member.and_then(|m| m.member_type.as_shockwave3d()).and_then(|w3d| {
+                let scene = w3d.parsed_scene.as_ref()?;
+                let node = scene.nodes.iter()
+                    .find(|n| n.name.eq_ignore_ascii_case(&model_name))?;
+                let res_name = if !node.model_resource_name.is_empty() {
+                    &node.model_resource_name
+                } else {
+                    &node.resource_name
+                };
+                let meshes = scene.clod_meshes.get(res_name.as_str())?;
+
+                // Get model transform: 1) runtime node_transforms,
+                // 2) persistent Transform3d datum (set by Lingo),
+                // 3) parsed scene node transform.
+                let xform: Option<[f32; 16]> = w3d.runtime_state.node_transforms
+                    .get(&model_name)
+                    .or_else(|| w3d.runtime_state.node_transforms.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(&model_name)).map(|(_, v)| v))
+                    .copied()
+                    .or_else(|| {
+                        w3d.runtime_state.node_transform_datums.get(&model_name)
+                            .or_else(|| w3d.runtime_state.node_transform_datums.iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case(&model_name)).map(|(_, v)| v))
+                            .and_then(|datum_ref| {
+                                match player.get_datum(datum_ref) {
+                                    Datum::Transform3d(m) => {
+                                        let mut arr = [0.0f32; 16];
+                                        for i in 0..16 { arr[i] = m[i] as f32; }
+                                        Some(arr)
+                                    },
+                                    _ => None,
+                                }
+                            })
+                    })
+                    .or_else(|| Some(node.transform));
+
+                let mut all_verts: Vec<[f64; 3]> = Vec::new();
+                let mut all_faces: Vec<[u32; 3]> = Vec::new();
+                for mesh in meshes {
+                    let offset = all_verts.len() as u32;
+                    for p in &mesh.positions {
+                        let (lx, ly, lz) = (p[0] as f64, p[1] as f64, p[2] as f64);
+                        let v = if let Some(t) = &xform {
+                            [
+                                t[0] as f64*lx + t[4] as f64*ly + t[8] as f64*lz + t[12] as f64,
+                                t[1] as f64*lx + t[5] as f64*ly + t[9] as f64*lz + t[13] as f64,
+                                t[2] as f64*lx + t[6] as f64*ly + t[10] as f64*lz + t[14] as f64,
+                            ]
+                        } else {
+                            [lx, ly, lz]
+                        };
+                        all_verts.push(v);
+                    }
+                    for f in &mesh.faces {
+                        all_faces.push([f[0] + offset, f[1] + offset, f[2] + offset]);
+                    }
+                }
+                if all_verts.is_empty() { return None; }
+                let mut cmesh = super::havok_physics::CollisionMesh {
+                    name: model_name.clone(),
+                    vertices: all_verts,
+                    triangles: all_faces,
+                    aabb_min: [0.0; 3],
+                    aabb_max: [0.0; 3],
+                    body_index: None, // set after rigid body is pushed
+                };
+                cmesh.compute_aabb();
+                debug!(
+                    "[HAVOK] makeFixedRigidBody '{}': built collision mesh {} verts, {} tris, AABB ({:.1},{:.1},{:.1})→({:.1},{:.1},{:.1})",
+                    model_name, cmesh.vertices.len(), cmesh.triangles.len(),
+                    cmesh.aabb_min[0], cmesh.aabb_min[1], cmesh.aabb_min[2],
+                    cmesh.aabb_max[0], cmesh.aabb_max[1], cmesh.aabb_max[2],
+                );
+                Some(cmesh)
+            })
+        };
+
         let member = player
             .movie
             .cast_manager
@@ -948,8 +1056,13 @@ impl HavokPhysicsMemberHandlers {
         };
 
         let rb = HavokRigidBody::new_fixed(&model_name, is_convex);
-
         havok.state.rigid_bodies.push(rb);
+        let rb_index = havok.state.rigid_bodies.len() - 1;
+
+        if let Some(mut cmesh) = collision_mesh {
+            cmesh.body_index = Some(rb_index);
+            havok.state.collision_meshes.push(cmesh);
+        }
 
         Ok(player.alloc_datum(Datum::HavokObjectRef(HavokObjectRef {
             cast_lib: member_ref.cast_lib,
