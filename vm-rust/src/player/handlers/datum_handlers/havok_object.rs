@@ -398,6 +398,8 @@ impl HavokObjectDatumHandlers {
                     if rb.inverse_mass > 0.0 {
                         rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                     }
+                    // Clear resting contact so the ball can be dragged off surfaces
+                    rb.resting_normal = None;
                 }
                 Ok(DatumRef::Void)
             }

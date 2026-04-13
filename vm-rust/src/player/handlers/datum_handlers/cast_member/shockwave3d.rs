@@ -826,7 +826,7 @@ impl Shockwave3dMemberHandlers {
                         // Compute the light-node transform for this preset.
                         // preset=0 (#None) keeps whatever the scene already has.
                         if preset >= 1 && preset <= 9 {
-                            let t = crate::player::cast_member::TextMember::directional_preset_to_transform(preset);
+                            let t = crate::player::cast_member::TextMember::directional_preset_to_transform_3d(preset);
 
                             // Update the scene's DefaultDirectional light node transform (authoritative)
                             // and also the runtime_state.node_transforms so the renderer picks it up.
@@ -1714,6 +1714,8 @@ impl Shockwave3dMemberHandlers {
                                             let material_name = format!("{}_Material", obj_name);
                                             scene.materials.push(W3dMaterial {
                                                 name: material_name.clone(),
+                                                // Director's default for new primitives: ambient = diffuse = white
+                                                ambient: [1.0, 1.0, 1.0, 1.0],
                                                 ..Default::default()
                                             });
                                             scene.shaders.push(W3dShader {

@@ -321,11 +321,11 @@ impl TextMember {
             light.color = [amb_r as f32 / 255.0, amb_g as f32 / 255.0, amb_b as f32 / 255.0];
         }
 
-        // Apply directionalPreset to light node transform
+        // Apply directionalPreset to light node transform (3D Z-up version)
         if let Some(ti) = ti {
             if ti.directional_preset > 0 && ti.directional_preset <= 9 {
                 if let Some(light_node) = scene.nodes.iter_mut().find(|n| n.name == "DefaultDirectional") {
-                    light_node.transform = Self::directional_preset_to_transform(ti.directional_preset);
+                    light_node.transform = Self::directional_preset_to_transform_3d(ti.directional_preset);
                 }
             }
         }
@@ -478,6 +478,27 @@ impl TextMember {
             z[0], z[1], z[2], 0.0,
             0.0,  0.0,  0.0,  1.0,
         ]
+    }
+
+    /// 3D directional preset: Z-up world space.
+    /// "top" = +Z, "left" = -X, light has forward component toward -Y.
+    pub(crate) fn directional_preset_to_transform_3d(preset: u32) -> [f32; 16] {
+        let (lx, lz): (f32, f32) = match preset {
+            1 => (-1.0,  1.0), 2 => ( 0.0,  1.0), 3 => ( 1.0,  1.0),
+            4 => (-1.0,  0.0), 5 => ( 0.0,  0.0), 6 => ( 1.0,  0.0),
+            7 => (-1.0, -1.0), 8 => ( 0.0, -1.0), 9 => ( 1.0, -1.0),
+            _ => return [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+        };
+        let ly: f32 = -0.75;
+        let len = (lx*lx + ly*ly + lz*lz).sqrt();
+        let l = [lx/len, ly/len, lz/len];
+        let z = [l[0], l[1], l[2]];
+        let up = if z[2].abs() < 0.9 { [0.0,0.0,1.0] } else { [0.0,1.0,0.0] };
+        let mut x = [up[1]*z[2]-up[2]*z[1], up[2]*z[0]-up[0]*z[2], up[0]*z[1]-up[1]*z[0]];
+        let xl = (x[0]*x[0]+x[1]*x[1]+x[2]*x[2]).sqrt();
+        x = [x[0]/xl, x[1]/xl, x[2]/xl];
+        let y = [z[1]*x[2]-z[2]*x[1], z[2]*x[0]-z[0]*x[2], z[0]*x[1]-z[1]*x[0]];
+        [x[0],x[1],x[2],0.0, y[0],y[1],y[2],0.0, z[0],z[1],z[2],0.0, 0.0,0.0,0.0,1.0]
     }
 
     pub fn has_html_styling(&self) -> bool {

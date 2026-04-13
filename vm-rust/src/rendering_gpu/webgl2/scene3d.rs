@@ -3838,7 +3838,7 @@ void main() {
         let mut attenuations = [0.0f32; 24]; // 8 * 3 (constant, linear, quadratic)
         let mut directions = [0.0f32; 24];   // 8 * 3 (direction for spot/directional)
         let mut spot_angles = [0.0f32; 8];   // cone angle in radians
-        let mut global_ambient = [0.2f32, 0.2, 0.2];
+        let mut global_ambient = [0.0f32, 0.0, 0.0];
         let mut num_lights = 0i32;
 
         // One-time light diagnostic
