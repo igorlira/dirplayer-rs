@@ -492,14 +492,18 @@ impl PropListDatumHandlers {
                     ))
                 }
             };
-            let position = prop_list
+            // For prop lists, getOne returns the PROPERTY (key) for a given value.
+            let found_key = prop_list
                 .iter()
-                .position(|(_, v)| {
-                    datum_equals(player.get_datum(&v), find, &player.allocator).unwrap()
+                .find(|(_, v)| {
+                    datum_equals(player.get_datum(&v), find, &player.allocator).unwrap_or(false)
                 })
-                .map(|x| x as i32);
+                .map(|(k, _)| k.clone());
 
-            Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
+            match found_key {
+                Some(key_ref) => Ok(key_ref),
+                None => Ok(player.alloc_datum(Datum::Int(0))),
+            }
         })
     }
 

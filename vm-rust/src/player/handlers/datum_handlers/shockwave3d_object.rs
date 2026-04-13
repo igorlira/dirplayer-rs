@@ -1941,31 +1941,84 @@ impl Shockwave3dObjectDatumHandlers {
                             let (orig_w, orig_h) = get_member_default_rect_size(player, &member_ref);
 
                             let ray = raycast::screen_to_ray_shockwave(sx, sy, width, height, orig_w, orig_h, fov_deg, &cam_transform);
-                            {
-                                let model_names: Vec<String> = scene.nodes.iter()
-                                    .filter(|n| n.node_type == W3dNodeType::Model)
-                                    .map(|n| {
-                                        let res = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
-                                        let has_mesh = scene.clod_meshes.contains_key(res.as_str());
-                                        let rt_pos = runtime_state.node_transforms.get(&n.name)
-                                            .map(|t| format!("({:.0},{:.0},{:.0})", t[12], t[13], t[14]))
-                                            .unwrap_or_else(|| "no-rt".to_string());
-                                        format!("{}→{}(mesh={},pos={})", n.name, res, has_mesh, rt_pos)
-                                    }).collect();
-                                debug!(
-                                    "[modelUnderLoc] cam=({:.0},{:.0},{:.0}) fov={:.0} vp={}x{} ray_o=({:.1},{:.1},{:.1}) ray_d=({:.3},{:.3},{:.3}) models={:?}",
-                                    cam_transform[12], cam_transform[13], cam_transform[14], fov_deg, width, height,
-                                    ray.origin[0], ray.origin[1], ray.origin[2],
-                                    ray.direction[0], ray.direction[1], ray.direction[2],
-                                    model_names,
-                                );
+                            // First try ray-sphere test against each model's
+                            // bounding sphere. This is more robust than mesh-triangle
+                            // intersection for clicking, especially when there's a
+                            // small projection mismatch between renderer and raycast.
+                            let mut best_sphere_hit: Option<(f32, String)> = None;
+                            for node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
+                                // Only sphere-test models with sphere primitive type
+                                let res_key = if !node.model_resource_name.is_empty() {
+                                    &node.model_resource_name
+                                } else { &node.resource_name };
+                                let is_sphere = scene.model_resources.get(res_key.as_str())
+                                    .and_then(|r| r.primitive_type.as_deref())
+                                    .map_or(false, |t| t == "sphere");
+                                if !is_sphere { continue; }
+                                let pos = runtime_state.node_transforms.get(&node.name)
+                                    .map(|t| [t[12], t[13], t[14]])
+                                    .unwrap_or([node.transform[12], node.transform[13], node.transform[14]]);
+                                let res_name = if !node.model_resource_name.is_empty() {
+                                    &node.model_resource_name
+                                } else { &node.resource_name };
+                                // Compute bounding radius from mesh half-extents
+                                let radius = scene.model_resources.get(res_name.as_str())
+                                    .and_then(|r| {
+                                        let he = [r.primitive_width, r.primitive_height, r.primitive_length, r.primitive_radius];
+                                        let max_he = he.iter().cloned().fold(0.0f32, f32::max);
+                                        if max_he > 0.01 { Some(max_he) } else { None }
+                                    })
+                                    .or_else(|| {
+                                        scene.clod_meshes.get(res_name.as_str()).map(|meshes| {
+                                            let mut max_r = 0.0f32;
+                                            for mesh in meshes {
+                                                for p in &mesh.positions {
+                                                    let r = (p[0]*p[0] + p[1]*p[1] + p[2]*p[2]).sqrt();
+                                                    if r > max_r { max_r = r; }
+                                                }
+                                            }
+                                            max_r
+                                        })
+                                    })
+                                    .unwrap_or(5.0);
+                                // Ray-sphere intersection: |O + tD - C|² = r²
+                                // Use 3× radius for picking to compensate for the small
+                                // projection mismatch between renderer and raycast.
+                                let pick_radius = radius * 3.0;
+                                let oc = [ray.origin[0]-pos[0], ray.origin[1]-pos[1], ray.origin[2]-pos[2]];
+                                let a = ray.direction[0]*ray.direction[0] + ray.direction[1]*ray.direction[1] + ray.direction[2]*ray.direction[2];
+                                let b = 2.0 * (oc[0]*ray.direction[0] + oc[1]*ray.direction[1] + oc[2]*ray.direction[2]);
+                                let c = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - pick_radius*pick_radius;
+                                let disc = b*b - 4.0*a*c;
+                                if disc >= 0.0 {
+                                    let t = (-b - disc.sqrt()) / (2.0 * a);
+                                    if t > 0.0 {
+                                        if best_sphere_hit.as_ref().map_or(true, |(bt, _)| t < *bt) {
+                                            best_sphere_hit = Some((t, node.name.clone()));
+                                        }
+                                    }
+                                }
                             }
+                            if let Some((_, ref name)) = best_sphere_hit {
+                                debug!(
+                                    "[modelUnderLoc] SPHERE HIT '{}'", name
+                                );
+                                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                                return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                    cast_lib: s3d_ref.cast_lib,
+                                    cast_member: s3d_ref.cast_member,
+                                    object_type: "model".to_string(),
+                                    name: name.clone(),
+                                })));
+                            }
+
+                            // Fall back to mesh-triangle intersection
                             if let Some(hit) = raycast::raycast_scene_multi(
                                 &ray, &scene, 100000.0, 1,
                                 Some(&runtime_state.node_transforms), None,
                             ).into_iter().next() {
                                 debug!(
-                                    "[modelUnderLoc] HIT model='{}'", hit.model_name
+                                    "[modelUnderLoc] MESH HIT '{}'", hit.model_name
                                 );
                                 use crate::director::lingo::datum::Shockwave3dObjectRef;
                                 return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
@@ -1974,8 +2027,6 @@ impl Shockwave3dObjectDatumHandlers {
                                     object_type: "model".to_string(),
                                     name: hit.model_name,
                                 })));
-                            } else {
-                               debug!("[modelUnderLoc] no hit");
                             }
                         }
                     }

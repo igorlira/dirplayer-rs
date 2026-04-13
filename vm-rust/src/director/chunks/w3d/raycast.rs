@@ -74,11 +74,14 @@ pub fn screen_to_ray_shockwave(
     fov_degrees: f32,
     camera_world_matrix: &[f32; 16],
 ) -> Ray {
-    // IFX WindowToFilm: center-origin, flip Y, project onto film plane
+    // IFX WindowToFilm: center-origin, flip Y, project onto film plane.
+    // Use the VIEWPORT height for distToProj so film coords and projection
+    // distance are in the same pixel space. The original_height was used by
+    // IFX for the member's internal resolution, but screen_x/screen_y are in
+    // viewport pixels — mixing the two scales produces wrong ray angles.
     let half_fov_rad = (fov_degrees * 0.5).to_radians();
-    // IFX uses originalHeight for distToProj (field_108)
-    let dist_to_proj = (original_height * 0.5) / half_fov_rad.tan();
-    // IFX pixelAspect = (currentWidth / currentHeight) / (originalWidth / originalHeight)
+    let dist_to_proj = (height * 0.5) / half_fov_rad.tan();
+    // Pixel aspect corrects for non-square pixels when viewport aspect ≠ original aspect
     let orig_aspect = if original_height > 0.0 { original_width / original_height } else { 1.0 };
     let pixel_aspect = if orig_aspect > 0.0 { (width / height) / orig_aspect } else { 1.0 };
 
