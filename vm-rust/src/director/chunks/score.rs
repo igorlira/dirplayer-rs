@@ -1058,15 +1058,19 @@ impl ScoreChunk {
                     .map_err(|e| format!("Failed to read sprite detail offset: {:?}", e))? as usize);
             }
 
-            // Extract entries using consecutive offset pairs
-            // The last offset serves as sentinel for sizing the previous entry
-            // So we get numEntries - 1 usable entries
-            let entry_count = num_entries.saturating_sub(1);
+            // Extract entries using consecutive offset pairs.
+            // raw_offsets has num_entries values. Each pair [i, i+1] sizes entry i.
+            // The last entry extends to the end of the data stream.
+            let entry_count = num_entries;
             let mut entries = Vec::with_capacity(entry_count);
 
             for i in 0..entry_count {
                 let entry_start = frame_data_offset + raw_offsets[i];
-                let entry_end = frame_data_offset + raw_offsets[i + 1];
+                let entry_end = if i + 1 < raw_offsets.len() {
+                    frame_data_offset + raw_offsets[i + 1]
+                } else {
+                    reader.length // last entry extends to end of stream
+                };
 
                 if entry_start > reader.length || entry_end > reader.length {
                     log::warn!(
