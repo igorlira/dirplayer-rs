@@ -2019,6 +2019,10 @@ impl WebGL2Renderer {
             (bitmap_bit_depth == 32 && (ink == 0 || ink == 8 || ink == 9)) ||
             (bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && (ink == 0))
         ) {
+            // Bitmap colorization defaults: foreColor defaults to black (0,0,0),
+            // bgColor defaults to white (255,255,255). Only apply substitution when
+            // the sprite has EXPLICITLY set (has_*_color=true) AND the value differs
+            // from the default — so a sprite with defaults doesn't tint the bitmap.
             Some((
                 fg_color_rgb != (0, 0, 0) && has_fore_color,
                 bg_color_rgb != (255, 255, 255) && has_back_color,

@@ -1992,11 +1992,33 @@ impl Bitmap {
                     }
 
                     let color_ref = src.get_pixel_color_ref(sx, sy);
-                    let (sr, sg, sb) = if let (ColorRef::PaletteIndex(i), Some(cache)) = (&color_ref, &src_palette_cache) {
+                    let (mut sr, mut sg, mut sb) = if let (ColorRef::PaletteIndex(i), Some(cache)) = (&color_ref, &src_palette_cache) {
                         cache[*i as usize]
                     } else {
                         resolve_color_ref(palettes, &color_ref, &src.palette_ref, src.original_bit_depth)
                     };
+
+                    // Bitmap ink=0 colorization: mirrors the WebGL2 shader logic.
+                    // bgColor default is white (255,255,255) → substitute white source
+                    // pixels with bg_color when has_back_color=true AND bg!=white.
+                    // foreColor default is black (0,0,0) → substitute black source
+                    // pixels with fg_color when has_fore_color=true AND fg!=black.
+                    if let Some(sp) = params.sprite {
+                        if sp.has_back_color && bg_color_resolved != (255, 255, 255)
+                            && (sr, sg, sb) == (255, 255, 255)
+                        {
+                            sr = bg_color_resolved.0;
+                            sg = bg_color_resolved.1;
+                            sb = bg_color_resolved.2;
+                        }
+                        if sp.has_fore_color && fg_color_resolved != (0, 0, 0)
+                            && (sr, sg, sb) == (0, 0, 0)
+                        {
+                            sr = fg_color_resolved.0;
+                            sg = fg_color_resolved.1;
+                            sb = fg_color_resolved.2;
+                        }
+                    }
 
                     self.set_pixel_fast(dst_x, dst_y, (sr, sg, sb), &dst_palette_cache);
                     continue;
