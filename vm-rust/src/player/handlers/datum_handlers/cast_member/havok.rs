@@ -444,8 +444,22 @@ impl HavokPhysicsMemberHandlers {
         } else {
             0.1
         };
+        // Use the HKE worldScale when no explicit scale arg is provided.
+        // SuperSonic HKE: 0.0254, HavokCarDemo HKE: 0.0125.
+        let hke_scale = {
+            let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+            member.and_then(|m| match &m.member_type {
+                CastMemberType::HavokPhysics(h) if !h.state.hke_data.is_empty() => {
+                    let hke = super::hke_parser::parse_hke(&h.state.hke_data);
+                    if hke.world_scale > 0.001 { Some(hke.world_scale as f64) } else { None }
+                }
+                _ => None,
+            })
+        };
         let scale = if args.len() > 2 {
             player.get_datum(&args[2]).to_float()?
+        } else if let Some(hs) = hke_scale {
+            hs
         } else {
             0.0254
         };
@@ -498,10 +512,44 @@ impl HavokPhysicsMemberHandlers {
         havok.state.sim_time = 0.0;
 
         // Load HKE meshes into native collision system (for havok_physics.rs)
+        // and auto-create rigid bodies for each model with HKE collision data.
+        // The real Havok Xtra creates rigid bodies during Initialize() so that
+        // scripts can look them up via rigidBody("name") without explicit
+        // makeFixedRigidBody/makeMovableRigidBody calls.
         if !havok.state.hke_data.is_empty() {
             let hke = super::hke_parser::parse_hke(&havok.state.hke_data);
+
+            // Apply HKE gravity (in Havok meters/s², convert to display units)
+            if let Some(g) = hke.gravity {
+                let inv_s = if scale.abs() > 1e-10 { 1.0 / scale } else { 1.0 };
+                havok.state.gravity = [
+                    g[0] as f64 * inv_s,
+                    g[1] as f64 * inv_s,
+                    g[2] as f64 * inv_s,
+                ];
+            }
+
+            // Apply HKE drag parameters as initial defaults
+            // (scripts can override via havok.dragParameters = [...])
+            if let Some(ref drag) = hke.drag {
+                havok.state.drag_params = [drag.linear_drag as f64, drag.angular_drag as f64];
+            }
+
+            // Disable ground constraint hack for HKE scenes with movable bodies.
+            // Those scenes handle ground contact via script hover/spring forces.
+            let has_movable = hke.bodies.iter().any(|b| b.total_mass > 0.0);
+            if has_movable {
+                havok.state.use_ground_constraint = false;
+            }
+
             let inv_scale = if scale.abs() > 1e-10 { 1.0 / scale } else { 1.0 };
             havok.state.collision_meshes.clear();
+            havok.state.rigid_bodies.clear();
+
+            // Build lookup from body name → parsed properties (mass, restitution, etc.)
+            let body_props: std::collections::HashMap<String, &super::hke_parser::HkeBodyProps> = hke.bodies.iter()
+                .map(|b| (b.name.to_lowercase(), b))
+                .collect();
 
             for mesh in &hke.meshes {
                 if mesh.vertices.is_empty() || mesh.triangles.is_empty() { continue; }
@@ -521,28 +569,77 @@ impl HavokPhysicsMemberHandlers {
                         }
                     })
                     .collect();
+
+                // Look up parsed body properties from HKE tail
+                let props = body_props.get(&mesh.name.to_lowercase());
+                let mass = props.map(|p| p.total_mass as f64).unwrap_or(0.0);
+
+                let mut rb = if mass > 0.0 {
+                    HavokRigidBody::new_movable(&mesh.name, mass, true)
+                } else {
+                    HavokRigidBody::new_fixed(&mesh.name, true)
+                };
+
+                // Apply parsed properties
+                if let Some(p) = props {
+                    if let Some(r) = p.restitution { rb.restitution = r as f64; }
+                    if let Some(f) = p.static_friction { rb.friction = f as f64; }
+                }
+
+                // Set position from W3D model transform
+                if let Some(t) = model_xform {
+                    rb.position = [t[12] as f64, t[13] as f64, t[14] as f64];
+                }
+                let rb_index = havok.state.rigid_bodies.len();
+                havok.state.rigid_bodies.push(rb);
+
+                // Only link collision mesh to movable bodies. Fixed body meshes
+                // stay unowned (body_index=None) so the ground contact filter
+                // can skip them — hover/spring scripts handle ground interaction.
+                let mesh_body_index = if mass > 0.0 { Some(rb_index) } else { None };
                 let mut cmesh = super::havok_physics::CollisionMesh {
                     name: mesh.name.clone(),
                     vertices,
                     triangles: mesh.triangles.clone(),
                     aabb_min: [0.0; 3],
                     aabb_max: [0.0; 3],
-                    body_index: None,
+                    body_index: mesh_body_index,
                 };
                 cmesh.compute_aabb();
                 havok.state.collision_meshes.push(cmesh);
             }
-            debug!(
-                "Native Havok: loaded {} collision meshes ({} total triangles)",
-                havok.state.collision_meshes.len(),
-                havok.state.collision_meshes.iter().map(|m| m.triangles.len()).sum::<usize>()
-            );
+
+            // Create rigid bodies for HKE tail entries that have no collision mesh
+            for body_def in &hke.bodies {
+                let already_exists = havok.state.rigid_bodies.iter()
+                    .any(|rb| rb.name.eq_ignore_ascii_case(&body_def.name));
+                if already_exists { continue; }
+
+                let mass = body_def.total_mass as f64;
+                let mut rb = if mass > 0.0 {
+                    HavokRigidBody::new_movable(&body_def.name, mass, true)
+                } else {
+                    HavokRigidBody::new_fixed(&body_def.name, true)
+                };
+                if let Some(r) = body_def.restitution { rb.restitution = r as f64; }
+                if let Some(f) = body_def.static_friction { rb.friction = f as f64; }
+                if let Some(t) = body_def.translation {
+                    rb.position = [t[0] as f64, t[1] as f64, t[2] as f64];
+                }
+                havok.state.rigid_bodies.push(rb);
+            }
         }
 
+        let movable_names: Vec<String> = havok.state.rigid_bodies.iter()
+            .filter(|rb| !rb.pinned && rb.mass > 0.0)
+            .map(|rb| format!("{}({:.1})", rb.name, rb.mass)).collect();
         web_sys::console::log_1(
             &format!(
-                "Havok initialized: tolerance={}, scale={}, w3d_models={}, hke_colliders={}",
-                tolerance, scale, model_names.len(), havok.state.collision_meshes.len()
+                "Havok initialized: scale={}, gravity=({:.2},{:.2},{:.2}), drag=({:.2},{:.2}), bodies={} ({} movable: {:?})",
+                scale,
+                havok.state.gravity[0], havok.state.gravity[1], havok.state.gravity[2],
+                havok.state.drag_params[0], havok.state.drag_params[1],
+                havok.state.rigid_bodies.len(), movable_names.len(), movable_names
             )
             .into(),
         );
@@ -915,6 +1012,22 @@ impl HavokPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
 
+        // Remove any auto-created body with the same name (from Initialize HKE loading)
+        // and update collision mesh body_index references
+        if let Some(old_idx) = havok.state.rigid_bodies.iter().position(|r| r.name.eq_ignore_ascii_case(&model_name)) {
+            havok.state.rigid_bodies.remove(old_idx);
+            // Shift collision mesh body_index references
+            for cmesh in &mut havok.state.collision_meshes {
+                if let Some(bi) = cmesh.body_index {
+                    if bi == old_idx {
+                        cmesh.body_index = None; // will be re-set below
+                    } else if bi > old_idx {
+                        cmesh.body_index = Some(bi - 1);
+                    }
+                }
+            }
+        }
+
         let mut rb = HavokRigidBody::new_movable(&model_name, mass, is_convex);
         rb.position = initial_position;
         rb.inertia_half_extents = mesh_half_extents;
@@ -929,6 +1042,13 @@ impl HavokPhysicsMemberHandlers {
         );
 
         havok.state.rigid_bodies.push(rb);
+        let new_rb_index = havok.state.rigid_bodies.len() - 1;
+        // Re-link collision mesh for this body
+        for cmesh in &mut havok.state.collision_meshes {
+            if cmesh.name.eq_ignore_ascii_case(&model_name) && cmesh.body_index.is_none() {
+                cmesh.body_index = Some(new_rb_index);
+            }
+        }
 
         Ok(player.alloc_datum(Datum::HavokObjectRef(HavokObjectRef {
             cast_lib: member_ref.cast_lib,
@@ -1055,6 +1175,20 @@ impl HavokPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
 
+        // Remove any auto-created body with the same name (from Initialize HKE loading)
+        if let Some(old_idx) = havok.state.rigid_bodies.iter().position(|r| r.name.eq_ignore_ascii_case(&model_name)) {
+            havok.state.rigid_bodies.remove(old_idx);
+            for cmesh in &mut havok.state.collision_meshes {
+                if let Some(bi) = cmesh.body_index {
+                    if bi == old_idx {
+                        cmesh.body_index = None;
+                    } else if bi > old_idx {
+                        cmesh.body_index = Some(bi - 1);
+                    }
+                }
+            }
+        }
+
         let rb = HavokRigidBody::new_fixed(&model_name, is_convex);
         havok.state.rigid_bodies.push(rb);
         let rb_index = havok.state.rigid_bodies.len() - 1;
@@ -1062,6 +1196,12 @@ impl HavokPhysicsMemberHandlers {
         if let Some(mut cmesh) = collision_mesh {
             cmesh.body_index = Some(rb_index);
             havok.state.collision_meshes.push(cmesh);
+        }
+        // Also re-link any existing HKE collision mesh for this body
+        for cmesh in &mut havok.state.collision_meshes {
+            if cmesh.name.eq_ignore_ascii_case(&model_name) && cmesh.body_index.is_none() {
+                cmesh.body_index = Some(rb_index);
+            }
         }
 
         Ok(player.alloc_datum(Datum::HavokObjectRef(HavokObjectRef {

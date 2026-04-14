@@ -1189,13 +1189,17 @@ impl ScoreChunk {
                             if clean.starts_with('[') {
                                 match eval_lingo_expr_static(clean.to_owned()) {
                                     Ok(proplist) => {
-                                        debug!("  ✅ Successfully parsed initializer proplist");
+                                        debug!(
+                                            "[SCORE-DETAIL] Behavior {}/{}: parsed proplist OK",
+                                            cast_lib, cast_member
+                                        );
                                         parameter.push(proplist);
                                     }
                                     Err(e) => {
-                                        log::warn!(
-                                            "Failed to parse sprite detail initializer: {}", e.message
-                                        );
+                                        web_sys::console::warn_1(&format!(
+                                            "[SCORE-DETAIL] Behavior {}/{}: parse FAILED: {} str={:?}",
+                                            cast_lib, cast_member, e.message, &clean[..clean.len().min(120)]
+                                        ).into());
                                     }
                                 }
                             } else {
@@ -1205,9 +1209,10 @@ impl ScoreChunk {
                             debug!("  ⚠️ Initializer entry is not valid UTF-8");
                         }
                     } else if initializer_idx > 0 {
-                        warn!("  ⚠️ initializer_idx {} is out of range (entries.len = {})", initializer_idx, entries.len());
-                    } else {
-                        debug!("  No initializer data (initializer_idx=0)");
+                        debug!(
+                            "[SCORE-DETAIL] Behavior {}/{}: initializer_idx {} out of range (entries={})",
+                            cast_lib, cast_member, initializer_idx, entries.len()
+                        );
                     }
                     info.behaviors.push(SpriteBehavior { cast_lib, cast_member, parameter });
                 }
@@ -1639,12 +1644,17 @@ impl ScoreChunk {
                                                                 // TODO: Replace `eval_lingo` with a parser
                                                                 match eval_lingo_expr_static(clean.to_owned()) {
                                                                     Ok(proplist) => {
-                                                                        debug!("eval_lingo_expr_static succeeded");
+                                                                        debug!(
+                                                                            "[SCORE-PARAM] Behavior {}/{}: parsed proplist OK",
+                                                                            cast_lib, cast_member
+                                                                        );
                                                                         secondary.parameter.push(proplist);
-                                                                        debug!("parameter vector now has {} items", secondary.parameter.len());
                                                                     }
                                                                     Err(e) => {
-                                                                        error!("eval_lingo_expr_static ERROR: {}", e.message);
+                                                                        web_sys::console::warn_1(&format!(
+                                                                            "[SCORE-PARAM] Behavior {}/{}: eval_lingo_expr_static FAILED: {}",
+                                                                            cast_lib, cast_member, e.message
+                                                                        ).into());
                                                                     }
                                                                 }
                                                             }

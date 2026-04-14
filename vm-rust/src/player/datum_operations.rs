@@ -435,6 +435,8 @@ pub fn multiply_datums(
         (Datum::Vector(v), Datum::Float(s)) => Datum::Vector([v[0] * s, v[1] * s, v[2] * s]),
         (Datum::Int(s), Datum::Vector(v)) => Datum::Vector([*s as f64 * v[0], *s as f64 * v[1], *s as f64 * v[2]]),
         (Datum::Float(s), Datum::Vector(v)) => Datum::Vector([s * v[0], s * v[1], s * v[2]]),
+        // Vector * Vector = dot product (Director Lingo convention)
+        (Datum::Vector(a), Datum::Vector(b)) => Datum::Float(a[0]*b[0] + a[1]*b[1] + a[2]*b[2]),
         // Color * scalar
         (Datum::ColorRef(c), Datum::Float(s)) => {
             match c {

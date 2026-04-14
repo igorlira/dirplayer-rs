@@ -377,6 +377,45 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 Ok(player.alloc_datum(Datum::String(pair.as_str().to_owned())))
             })
         }
+        Rule::handler_call => {
+            // Support common constructors in static context (e.g. vector(0, 0, -1))
+            let mut inner = pair.into_inner();
+            let handler_name = inner.next()
+                .ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?
+                .as_str().to_lowercase();
+            let mut arg_refs = vec![];
+            if let Some(args_container) = inner.next() {
+                for arg_pair in args_container.into_inner() {
+                    // Each arg_pair contains an expr; recursively evaluate
+                    let mut arg_inner = arg_pair.into_inner();
+                    if let Some(expr_pair) = arg_inner.next() {
+                        arg_refs.push(eval_lingo_pair_static(expr_pair)?);
+                    }
+                }
+            }
+            match handler_name.as_str() {
+                "vector" => {
+                    reserve_player_mut(|player| {
+                        let x = if arg_refs.len() > 0 { player.get_datum(&arg_refs[0]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let y = if arg_refs.len() > 1 { player.get_datum(&arg_refs[1]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let z = if arg_refs.len() > 2 { player.get_datum(&arg_refs[2]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        Ok(player.alloc_datum(Datum::Vector([x, y, z])))
+                    })
+                }
+                "rect" => {
+                    reserve_player_mut(|player| {
+                        let l = if arg_refs.len() > 0 { player.get_datum(&arg_refs[0]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let t = if arg_refs.len() > 1 { player.get_datum(&arg_refs[1]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let r = if arg_refs.len() > 2 { player.get_datum(&arg_refs[2]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let b = if arg_refs.len() > 3 { player.get_datum(&arg_refs[3]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        Ok(player.alloc_datum(Datum::Rect([l, t, r, b], 0)))
+                    })
+                }
+                _ => Err(ScriptError::new(format!(
+                    "Unsupported handler '{}' in static expression", handler_name
+                ))),
+            }
+        }
         _ => Err(ScriptError::new(format!(
             "Invalid static Lingo expression {:?}",
             inner_rule

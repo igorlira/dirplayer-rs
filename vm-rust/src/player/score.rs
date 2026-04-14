@@ -1238,7 +1238,10 @@ impl Score {
                     // Parameter setup
                     if !behavior_ref.parameter.is_empty() {
                         reserve_player_mut(|player| {
-                            debug!("🔧 Applying {} saved parameters", behavior_ref.parameter.len());
+                            debug!(
+                                "[BEHAVIOR-APPLY] frame_interval: applying {} params for cast {}/{}",
+                                behavior_ref.parameter.len(), behavior_ref.cast_lib, behavior_ref.cast_member
+                            );
                             for param_ref in &behavior_ref.parameter {
                                 let param_datum = player.get_datum(param_ref);
                                 debug!("  Parameter type: {:?}", param_datum.type_enum());
@@ -1268,15 +1271,46 @@ impl Score {
                                         })
                                         .collect();
 
-                                    for (prop_name, value_ref) in props_to_set {
-                                        let _ = script_set_prop(
+                                    for (prop_name, value_ref) in &props_to_set {
+                                        let val_str = match player.get_datum(value_ref) {
+                                            Datum::Int(n) => format!("{}", n),
+                                            Datum::Float(f) => format!("{:.4}", f),
+                                            Datum::String(s) => format!("{:?}", s),
+                                            Datum::Vector(v) => format!("vector({:.2},{:.2},{:.2})", v[0], v[1], v[2]),
+                                            Datum::Symbol(s) => format!("#{}", s),
+                                            other => format!("<{:?}>", other.type_enum()),
+                                        };
+                                        let result = script_set_prop(
                                             player,
                                             &actual_instance_ref,
-                                            &prop_name,
-                                            &value_ref,
+                                            prop_name,
+                                            value_ref,
                                             false,
                                         );
+                                        if let Err(e) = &result {
+                                            web_sys::console::warn_1(&format!(
+                                                "[BEHAVIOR-APPLY] FAILED {}.{} = {}: {}",
+                                                behavior_ref.cast_member, prop_name, val_str, e.message
+                                            ).into());
+                                        }
                                     }
+                                    // Log all property values for debugging
+                                    let summary: Vec<String> = props_to_set.iter().map(|(name, vref)| {
+                                        let v = match player.get_datum(vref) {
+                                            Datum::Int(n) => format!("{}", n),
+                                            Datum::Float(f) => format!("{:.4}", f),
+                                            Datum::String(s) => format!("{:?}", &s[..s.len().min(30)]),
+                                            Datum::Vector(v) => format!("v({:.1},{:.1},{:.1})", v[0], v[1], v[2]),
+                                            Datum::Symbol(s) => format!("#{}", s),
+                                            other => format!("<{:?}>", other.type_enum()),
+                                        };
+                                        format!("{}={}", name, v)
+                                    }).collect();
+                                    debug!(
+                                        "[BEHAVIOR-APPLY] cast {}/{}: [{}]",
+                                        behavior_ref.cast_lib, behavior_ref.cast_member,
+                                        summary.join(", ")
+                                    );
                                 }
                             }
                             Ok::<(), ScriptError>(())
@@ -1423,8 +1457,10 @@ impl Score {
 
                         // Apply behavior parameters from initializer data
                         if !behavior.parameter.is_empty() {
-                            debug!("🔧 [sprite_details] Applying {} saved parameters for behavior cast {}/{}", 
-                                behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
+                            web_sys::console::log_1(&format!(
+                                "[BEHAVIOR-APPLY] sprite_details: applying {} params for cast {}/{}",
+                                behavior.parameter.len(), behavior.cast_lib, behavior.cast_member
+                            ).into());
                             reserve_player_mut(|player| {
                                 for param_ref in &behavior.parameter {
                                     let param_datum = player.get_datum(param_ref);
@@ -1447,8 +1483,8 @@ impl Score {
                                                 }
                                             })
                                             .collect();
+                                        let prop_count = props_to_set.len();
                                         for (prop_name, value_ref) in props_to_set {
-                                            debug!("      [sprite_details] Setting property {} on script instance", prop_name);
                                             let result = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
@@ -1456,12 +1492,17 @@ impl Score {
                                                 &value_ref,
                                                 false,
                                             );
-                                            if let Err(e) = result {
-                                                debug!("      [sprite_details] ⚠️ Failed to set property {}: {}", prop_name, e.message);
-                                            } else {
-                                                debug!("      [sprite_details] ✅ Successfully set property {}", prop_name);
+                                            if let Err(e) = &result {
+                                                web_sys::console::warn_1(&format!(
+                                                    "[BEHAVIOR-APPLY] FAILED to set {}: {}",
+                                                    prop_name, e.message
+                                                ).into());
                                             }
                                         }
+                                        debug!(
+                                            "[BEHAVIOR-APPLY] set {} properties on cast {}/{}",
+                                            prop_count, behavior.cast_lib, behavior.cast_member
+                                        );
                                     }
                                 }
                                 Ok::<(), ScriptError>(())

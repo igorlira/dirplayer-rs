@@ -1395,6 +1395,7 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
 /// This constraint only activates when the body penetrates below the mesh surface,
 /// acting as a hard floor to prevent fall-through.
 fn apply_ground_constraints(state: &mut HavokPhysicsState) {
+    if !state.use_ground_constraint { return; }
     if state.collision_meshes.is_empty() && state.ground_z <= -1e10 { return; }
 
     let half_z = state.ground_body_half_z;
@@ -1546,8 +1547,8 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
         // from coplanar triangles (e.g. two triangles forming a box face).
         let mut best: Option<CollisionContact> = None;
         for c in contacts {
-            // Skip upward-facing ground contacts for anonymous scenery meshes
-            // (those are handled by the ground constraint safety net).
+            // Skip upward-facing ground contacts for unowned scenery meshes.
+            // These are handled by the ground constraint safety net.
             if c.normal[2] > 0.7 && c.body_b.is_none() { continue; }
             if best.as_ref().map_or(true, |b| c.depth > b.depth) {
                 best = Some(c);

@@ -277,14 +277,39 @@ impl Transform3dDatumHandlers {
 
     fn rotate(datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let (rx, ry, rz) = Self::read_xyz(player, args)?;
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => *m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
 
-            let r = euler_to_matrix(rx, ry, rz);
-            let result = if pre { mat4_mul(&r, &m) } else { mat4_mul(&m, &r) };
+            // Two forms:
+            // 1. rotate(rx, ry, rz) or rotate(vector) — Euler angles
+            // 2. rotate(point, axis, angle) — rotate around point by angle about axis
+            let is_pivot_form = args.len() >= 3
+                && matches!(player.get_datum(&args[0]), Datum::Vector(_));
+
+            let result = if is_pivot_form {
+                let pivot = match player.get_datum(&args[0]) {
+                    Datum::Vector(v) => *v,
+                    _ => [0.0; 3],
+                };
+                let axis = match player.get_datum(&args[1]) {
+                    Datum::Vector(v) => *v,
+                    _ => [0.0, 0.0, 1.0],
+                };
+                let angle_deg = player.get_datum(&args[2]).to_float()?;
+                let r = axis_angle_to_matrix(&axis, angle_deg);
+                // T(pivot) * R * T(-pivot) * M
+                let t_neg = translation_matrix(-pivot[0], -pivot[1], -pivot[2]);
+                let t_pos = translation_matrix(pivot[0], pivot[1], pivot[2]);
+                let rm = mat4_mul(&r, &mat4_mul(&t_neg, &m));
+                mat4_mul(&t_pos, &rm)
+            } else {
+                let (rx, ry, rz) = Self::read_xyz(player, args)?;
+                let r = euler_to_matrix(rx, ry, rz);
+                if pre { mat4_mul(&r, &m) } else { mat4_mul(&m, &r) }
+            };
+
             *player.get_datum_mut(datum) = Datum::Transform3d(result);
             Ok(DatumRef::Void)
         })
@@ -467,6 +492,16 @@ fn mat4_invert_affine(m: &[f64; 16]) -> [f64; 16] {
         m[1], m[5], m[9],  0.0,  // R^T col 1
         m[2], m[6], m[10], 0.0,  // R^T col 2
         itx,  ity,  itz,   1.0,
+    ]
+}
+
+/// Pure translation matrix (column-major).
+fn translation_matrix(tx: f64, ty: f64, tz: f64) -> [f64; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        tx,  ty,  tz,  1.0,
     ]
 }
 
