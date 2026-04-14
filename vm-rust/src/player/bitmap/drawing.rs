@@ -2318,9 +2318,15 @@ impl Bitmap {
                     src.get_pixel_color_with_alpha(palettes, sx, sy)
                 };
 
-                // Skip fully transparent pixels from RGBA bitmaps (e.g., filmloop compositing)
-                // This ensures transparent areas don't overwrite destination with black
-                if src.original_bit_depth == 32 && src.use_alpha && sa == 0 {
+                // Skip fully transparent pixels from RGBA bitmaps when the
+                // destination CAN'T hold alpha (would end up as opaque black).
+                // When the destination DOES hold alpha (use_alpha=true), don't
+                // skip — fall through so the ink 0 path below writes the
+                // transparent pixel verbatim, which erases stale content
+                // (required for chat buffer scrolling with shifted-slice blits).
+                if src.original_bit_depth == 32 && src.use_alpha && sa == 0
+                    && !(self.bit_depth == 32 && self.use_alpha && ink == 0 && !params.is_text_rendering)
+                {
                     continue;
                 }
 
@@ -2401,6 +2407,21 @@ impl Bitmap {
                 if src.original_bit_depth == 32 && ink == 0 && !params.is_text_rendering {
                     if !src.use_alpha {
                         sa = 255;
+                    } else if self.bit_depth == 32 && self.use_alpha {
+                        // Full RGBA verbatim copy when both src and dst have alpha.
+                        // Transparent src pixels (sa=0) erase dst content — required
+                        // for offscreen-buffer scrolling (chat history) where the
+                        // updateView blit copies a shifted slice of pOffscreenImg
+                        // into destimg and must clear stale pixels in the gaps.
+                        let idx = (dst_y as usize * self.width as usize + dst_x as usize) * 4;
+                        if idx + 3 < self.data.len() {
+                            self.data[idx] = sr;
+                            self.data[idx + 1] = sg;
+                            self.data[idx + 2] = sb;
+                            self.data[idx + 3] = sa;
+                        }
+                        self.matte = None;
+                        continue;
                     } else if sa == 0 {
                         continue;
                     }
