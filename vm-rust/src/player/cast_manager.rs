@@ -616,11 +616,6 @@ impl CastManager {
                     if let ScriptType::Movie = script_rc.script_type {
                         let handler_names: Vec<String> = script_rc.handlers.iter()
                             .map(|(name, _)| name.to_string()).collect();
-                        web_sys::console::log_1(&format!(
-                            "[MOVIE-SCRIPT] member={} handlers={:?}",
-                            script_rc.member_ref.cast_member,
-                            handler_names
-                        ).into());
                         result.push(script_rc.clone());
                     }
                 }
