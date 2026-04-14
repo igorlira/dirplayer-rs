@@ -1171,6 +1171,7 @@ pub fn measure_text(
 
 /// Measure text height with word wrapping support.
 /// Returns (max_line_width, total_height) considering word wrapping at max_width.
+/// `char_spacing` is added between every pair of characters (matches renderer's behavior).
 pub fn measure_text_wrapped(
     text: &str,
     font: &BitmapFont,
@@ -1179,6 +1180,7 @@ pub fn measure_text_wrapped(
     line_spacing: u16,
     top_spacing: i16,
     bottom_spacing: i16,
+    char_spacing: i32,
 ) -> (u16, u16) {
     let effective_line_h = if font.char_widths.is_some() {
         font.char_height.saturating_sub(1)
@@ -1190,9 +1192,15 @@ pub fn measure_text_wrapped(
     let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { effective_line_h as i16 };
     let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;
 
+    // Per-character advance including char_spacing — matches the renderer at
+    // text.rs's flush_line loop which does `x += adv + char_spacing` for every char.
+    let char_adv = |c: char| -> i32 {
+        font.get_char_advance(c as u8) as i32 + char_spacing
+    };
+
     // Split into explicit lines first
     let raw_lines: Vec<&str> = text.split(|c: char| c == '\r' || c == '\n').collect();
-    let mut visual_lines: Vec<u16> = Vec::new(); // width of each visual line
+    let mut visual_lines: Vec<i32> = Vec::new(); // width of each visual line
 
     for raw in &raw_lines {
         if raw.is_empty() {
@@ -1200,18 +1208,17 @@ pub fn measure_text_wrapped(
             continue;
         }
         if word_wrap && max_width > 0 {
-            let mut current_width: u16 = 0;
+            let max_w = max_width as i32;
+            let mut current_width: i32 = 0;
             for word in raw.split_whitespace() {
-                let word_width: u16 = word.chars()
-                    .map(|c| font.get_char_advance(c as u8))
-                    .sum();
-                let space_width = font.get_char_advance(b' ');
+                let word_width: i32 = word.chars().map(char_adv).sum();
+                let space_width = char_adv(' ');
                 let candidate = if current_width == 0 {
                     word_width
                 } else {
                     current_width + space_width + word_width
                 };
-                if candidate <= max_width || current_width == 0 {
+                if candidate <= max_w || current_width == 0 {
                     current_width = candidate;
                 } else {
                     visual_lines.push(current_width);
@@ -1220,15 +1227,13 @@ pub fn measure_text_wrapped(
             }
             visual_lines.push(current_width);
         } else {
-            let line_width: u16 = raw.chars()
-                .map(|c| font.get_char_advance(c as u8))
-                .sum();
+            let line_width: i32 = raw.chars().map(char_adv).sum();
             visual_lines.push(line_width);
         }
     }
 
     let num_lines = visual_lines.len().max(1);
-    let max_width_found = visual_lines.iter().copied().max().unwrap_or(0);
+    let max_width_found = visual_lines.iter().copied().max().unwrap_or(0).max(0) as u16;
     let first_line_h = (effective_line_h as i16).max(effective_lh);
     let height = (top_spacing + first_line_h) as u16
         + (num_lines as u16 - 1) * line_step;

@@ -3944,7 +3944,7 @@ impl WebGL2Renderer {
         if word_wrap && render_width > 0 {
             let (_, measured_h) = measure_text_wrapped(
                 text, &font, render_width, true,
-                line_spacing, top_spacing, bottom_spacing,
+                line_spacing, top_spacing, bottom_spacing, 0,
             );
             let measured_h = measured_h
                 + (2 * border) + (4 * box_drop_shadow);

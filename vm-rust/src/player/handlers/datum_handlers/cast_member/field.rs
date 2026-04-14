@@ -169,7 +169,7 @@ impl FieldMemberHandlers {
                     .ok_or_else(|| ScriptError::new("System font not available".to_string()))?;
 
                 let (_, measured_h) = if word_wrap && field_width > 0 {
-                    measure_text_wrapped(&text_clone, &font, field_width, true, fixed_line_space, top_spacing, 0)
+                    measure_text_wrapped(&text_clone, &font, field_width, true, fixed_line_space, top_spacing, 0, 0)
                 } else {
                     measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0)
                 };
@@ -303,6 +303,38 @@ impl FieldMemberHandlers {
                 }
             }
             "media" => Ok(Datum::Media(Media::Field(field.clone()))),
+            // Chunk count shortcuts — computed from text string.
+            "charCount" => {
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &field.text, StringChunkType::Char, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            "wordCount" => {
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &field.text, StringChunkType::Word, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            "paragraphCount" => {
+                // Director treats paragraphs as \r-delimited, same as lines.
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &field.text, StringChunkType::Line, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            "tabCount" => Ok(Datum::Int(0)), // Fields don't have tab stops in our model
+            // Runtime selection state (stored, no editor integration yet)
+            "selStart" => Ok(Datum::Int(field.sel_start)),
+            "selEnd" => Ok(Datum::Int(field.sel_end)),
+            // Text rendering config
+            "kerning" => Ok(datum_bool(field.kerning)),
+            "kerningThreshold" => Ok(Datum::Int(field.kerning_threshold as i32)),
+            "useHypertextStyles" => Ok(datum_bool(field.use_hypertext_styles)),
+            "antiAliasType" => Ok(Datum::Symbol(field.anti_alias_type.clone())),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for field",
                 prop
@@ -536,6 +568,54 @@ impl FieldMemberHandlers {
                         Media::Field(new_field) => field.clone_from(&new_field),
                         _ => return Err(ScriptError::new("Invalid media value for field".to_string())),
                     };
+                    Ok(())
+                },
+            ),
+            "selStart" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().sel_start = value?;
+                    Ok(())
+                },
+            ),
+            "selEnd" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().sel_end = value?;
+                    Ok(())
+                },
+            ),
+            "kerning" => borrow_member_mut(
+                member_ref,
+                |_player| value.bool_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().kerning = value?;
+                    Ok(())
+                },
+            ),
+            "kerningThreshold" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().kerning_threshold = value? as u16;
+                    Ok(())
+                },
+            ),
+            "useHypertextStyles" => borrow_member_mut(
+                member_ref,
+                |_player| value.bool_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().use_hypertext_styles = value?;
+                    Ok(())
+                },
+            ),
+            "antiAliasType" => borrow_member_mut(
+                member_ref,
+                |_player| value.string_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().anti_alias_type = value?;
                     Ok(())
                 },
             ),

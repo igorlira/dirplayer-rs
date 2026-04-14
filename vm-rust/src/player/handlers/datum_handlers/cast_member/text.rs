@@ -12,7 +12,7 @@ use crate::{
             drawing::CopyPixelsParams,
         },
         cast_lib::CastMemberRef,
-        font::{get_text_index_at_pos, get_glyph_preference, GlyphPreference, measure_text, DrawTextParams},
+        font::{get_text_index_at_pos, get_glyph_preference, GlyphPreference, measure_text, measure_text_wrapped, DrawTextParams},
         handlers::datum_handlers::{
             cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, StyledSpan, TextAlignment},
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
@@ -294,14 +294,28 @@ impl TextMemberHandlers {
                         player.font_manager.get_system_font().unwrap()
                     };
                     let is_pfr = font.char_widths.is_some();
+                    // For an #adjust box, Director returns the height of the fully
+                    // wrapped text. Pass the member's authored width as max_width
+                    // so PFR bitmap fonts wrap the same way the renderer does.
+                    let wrap_width = if text_data.width > 0 {
+                        text_data.width
+                    } else if let Some(ref info) = text_data.info {
+                        if info.width > 0 { info.width as u16 } else { 0 }
+                    } else { 0 };
                     let (_, height) = if !is_pfr {
                         let font_name = if !text_data.font.is_empty() { text_data.font.as_str() } else { "Arial" };
                         let font_size = if text_data.font_size > 0 { text_data.font_size } else { 12 };
                         FontMemberHandlers::measure_text_native(
                             &text_data.text, font_name, font_size,
                             text_data.word_wrap,
-                            if text_data.width > 0 { text_data.width as i32 } else { 0 },
+                            if wrap_width > 0 { wrap_width as i32 } else { 0 },
                             text_data.top_spacing, text_data.bottom_spacing, text_data.fixed_line_space,
+                        )
+                    } else if text_data.word_wrap && wrap_width > 0 {
+                        measure_text_wrapped(
+                            &text_data.text, &font, wrap_width, true,
+                            text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
+                            text_data.char_spacing,
                         )
                     } else {
                         measure_text(
@@ -560,16 +574,6 @@ impl TextMemberHandlers {
                 // Get dimensions - use styled spans if available for accurate measurement
                 let mut preferred_font_name: Option<String> = None;
                 let mut preferred_font_size: Option<u16> = None;
-                // Determine font name and size
-                {
-                    let span_color = text_data.html_styled_spans.first()
-                        .and_then(|s| s.style.color);
-                    web_sys::console::log_1(&format!(
-                        "[text.image] member={}:{} member.color={:?} span_color={:?} spans={}",
-                        cast_member_ref.cast_lib, cast_member_ref.cast_member,
-                        member.color, span_color, text_data.html_styled_spans.len(),
-                    ).into());
-                }
                 if !text_data.html_styled_spans.is_empty() {
                     let first_style = &text_data.html_styled_spans[0].style;
                     let font_size = first_style.font_size
@@ -636,6 +640,16 @@ impl TextMemberHandlers {
                 };
                 let is_pfr_font = font.char_widths.is_some();
 
+                // Compute the authored box width (used as max_width for word wrap).
+                // Doing this BEFORE measuring so PFR measurement can wrap correctly.
+                let explicit_box_width = if text_data.width > 0 {
+                    Some(text_data.width)
+                } else if let Some(ref info) = text_data.info {
+                    if info.width > 0 { Some(info.width as u16) } else { None }
+                } else {
+                    None
+                };
+
                 // Measure text dimensions
                 let (mut width, mut height) = if !is_pfr_font {
                     // Use Canvas2D measurement for non-PFR fonts
@@ -651,6 +665,20 @@ impl TextMemberHandlers {
                         text_data.bottom_spacing,
                         text_data.fixed_line_space,
                     )
+                } else if text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0) {
+                    // PFR font with word wrap: use measure_text_wrapped so the
+                    // measured height accounts for wrapped lines. Pass char_spacing
+                    // so measurement matches the renderer's `x += adv + char_spacing`.
+                    measure_text_wrapped(
+                        &text_data.text,
+                        &font,
+                        explicit_box_width.unwrap(),
+                        true,
+                        text_data.fixed_line_space,
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
+                        text_data.char_spacing,
+                    )
                 } else {
                     measure_text(
                         &text_data.text,
@@ -663,13 +691,6 @@ impl TextMemberHandlers {
                 };
                 let mut box_width = width;
                 let mut box_height = height;
-                let explicit_box_width = if text_data.width > 0 {
-                    Some(text_data.width)
-                } else if let Some(ref info) = text_data.info {
-                    if info.width > 0 { Some(info.width as u16) } else { None }
-                } else {
-                    None
-                };
                 if let Some(w) = explicit_box_width {
                     // For text members with an authored box width, keep wrapping constrained to that box.
                     box_width = w.max(1);
@@ -961,39 +982,6 @@ impl TextMemberHandlers {
 
                 } // end bitmap glyph else branch
 
-                // Debug: count non-transparent pixels in the rendered text image
-                {
-                    let total = (bitmap.width as usize * bitmap.height as usize) as usize;
-                    let mut opaque = 0usize;
-                    let mut any_nonblack = 0usize;
-                    for i in 0..total {
-                        let idx = i * 4;
-                        if idx + 3 < bitmap.data.len() {
-                            let a = bitmap.data[idx + 3];
-                            if a > 0 {
-                                opaque += 1;
-                                let r = bitmap.data[idx];
-                                let g = bitmap.data[idx + 1];
-                                let b = bitmap.data[idx + 2];
-                                if r > 0 || g > 0 || b > 0 {
-                                    any_nonblack += 1;
-                                }
-                            }
-                        }
-                    }
-                    web_sys::console::log_1(&format!(
-                        "[text.image] RESULT member={}:{} text='{}' size={}x{} box={}x{} opaque_px={}/{} nonblack={} use_native={} is_pfr={} font='{}' fontSize={}",
-                        cast_member_ref.cast_lib, cast_member_ref.cast_member,
-                        &text_data.text[..text_data.text.len().min(20)],
-                        bitmap.width, bitmap.height,
-                        box_width, box_height,
-                        opaque, total, any_nonblack,
-                        use_native, is_pfr_font,
-                        preferred_font_name.as_deref().unwrap_or("(none)"),
-                        preferred_font_size.unwrap_or(0),
-                    ).into());
-                }
-
                 let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
                 Ok(Datum::BitmapRef(bitmap_ref))
             }
@@ -1013,6 +1001,60 @@ impl TextMemberHandlers {
                 }
             }
             "state" => Ok(Datum::Int(4)), // 4 = loaded (all embedded members are fully loaded)
+            // Chunk count shortcuts — computed from text string.
+            // StringChunkUtils::resolve_chunk_count handles delimiter semantics.
+            "charcount" => {
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &text_data.text, StringChunkType::Char, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            "wordcount" => {
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &text_data.text, StringChunkType::Word, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            "linecount" => {
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &text_data.text, StringChunkType::Line, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            "paragraphcount" => {
+                // Director treats paragraphs as \r-delimited, same as lines.
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &text_data.text, StringChunkType::Line, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            // Runtime selection state (stored properties; no editor integration yet)
+            "selstart" => Ok(Datum::Int(text_data.sel_start)),
+            "selend" => Ok(Datum::Int(text_data.sel_end)),
+            // Previously-unstaged stored properties
+            "bottomspacing" => Ok(Datum::Int(text_data.bottom_spacing as i32)),
+            "charspacing" => Ok(Datum::Int(text_data.char_spacing)),
+            "antialiastype" => Ok(Datum::Symbol(text_data.anti_alias_type.clone())),
+            "tabcount" => Ok(Datum::Int(text_data.tab_stops.len() as i32)),
+            "tabs" => {
+                let mut items: VecDeque<DatumRef> = VecDeque::new();
+                for t in &text_data.tab_stops {
+                    let type_key = player.alloc_datum(Datum::Symbol("type".to_string()));
+                    let type_val = player.alloc_datum(Datum::Symbol(t.tab_type.clone()));
+                    let pos_key = player.alloc_datum(Datum::Symbol("position".to_string()));
+                    let pos_val = player.alloc_datum(Datum::Int(t.position));
+                    let entries: VecDeque<(DatumRef, DatumRef)> = VecDeque::from([
+                        (type_key, type_val),
+                        (pos_key, pos_val),
+                    ]);
+                    items.push_back(player.alloc_datum(Datum::PropList(entries, false)));
+                }
+                Ok(Datum::List(DatumType::List, items, false))
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for text",
                 prop
@@ -1045,6 +1087,7 @@ impl TextMemberHandlers {
                         text_member.html_styled_spans.len(),
                         &new_text[..new_text.len().min(30)],
                     );
+
 
                     // Update the plain text
                     text_member.text = new_text.clone();
@@ -1781,7 +1824,46 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "charspacing" => Ok(()),
+            "charspacing" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_text_mut().unwrap().char_spacing = value?;
+                    Ok(())
+                },
+            ),
+            "bottomspacing" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_text_mut().unwrap().bottom_spacing = value? as i16;
+                    Ok(())
+                },
+            ),
+            "selstart" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_text_mut().unwrap().sel_start = value?;
+                    Ok(())
+                },
+            ),
+            "selend" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_text_mut().unwrap().sel_end = value?;
+                    Ok(())
+                },
+            ),
+            "antialiastype" => borrow_member_mut(
+                member_ref,
+                |_player| value.string_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_text_mut().unwrap().anti_alias_type = value?;
+                    Ok(())
+                },
+            ),
             "tabs" => {
                 use crate::player::cast_member::TabStop;
                 borrow_member_mut(

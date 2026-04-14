@@ -72,6 +72,14 @@ pub struct FieldMember {
     pub hilite: bool,
     pub fore_color: Option<ColorRef>,  // From STXT formatting run color (>> 8)
     pub back_color: Option<ColorRef>,  // From FieldInfo bg RGB (& 0xff)
+    // Runtime selection state (no editor integration yet — just stored so scripts can read/write)
+    pub sel_start: i32,
+    pub sel_end: i32,
+    // Text rendering config
+    pub kerning: bool,
+    pub kerning_threshold: u16,
+    pub use_hypertext_styles: bool,
+    pub anti_alias_type: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -140,6 +148,12 @@ pub struct TextMember {
     /// Embedded 3D world for Director's "3D Text" feature (text extrusion).
     /// Lazily initialized when 3D methods (.model(), .camera(), etc.) are called.
     pub w3d: Option<Box<Shockwave3dMember>>,
+    // Runtime selection state (stored, no editor integration yet)
+    pub sel_start: i32,
+    pub sel_end: i32,
+    /// Anti-alias method: "AutoAlias", "GrayScaleAllAlias", "SubpixelAllAlias",
+    /// "GrayscaleLargerThanAlias", or "NoneAlias".
+    pub anti_alias_type: String,
 }
 
 pub struct PfrBitmap {
@@ -197,6 +211,12 @@ impl FieldMember {
             hilite: false,
             fore_color: None,
             back_color: None,
+            sel_start: 0,
+            sel_end: 0,
+            kerning: false,
+            kerning_threshold: 14,
+            use_hypertext_styles: false,
+            anti_alias_type: "AutoAlias".to_string(),
         }
     }
 
@@ -237,6 +257,12 @@ impl FieldMember {
             hilite: false,
             fore_color: None, // Set later from STXT formatting run
             back_color,
+            sel_start: 0,
+            sel_end: 0,
+            kerning: false,
+            kerning_threshold: 14,
+            use_hypertext_styles: false,
+            anti_alias_type: "AutoAlias".to_string(),
         }
     }
 }
@@ -264,6 +290,9 @@ impl TextMember {
             html_styled_spans: Vec::new(),
             info: None,
             w3d: None,
+            sel_start: 0,
+            sel_end: 0,
+            anti_alias_type: "AutoAlias".to_string(),
         }
     }
 
@@ -3149,6 +3178,9 @@ impl CastMember {
             html_styled_spans: styled_text.styled_spans,
             info: Some(text_info),
             w3d: None,
+            sel_start: 0,
+            sel_end: 0,
+            anti_alias_type: "AutoAlias".to_string(),
         };
 
         let member_name = chunk

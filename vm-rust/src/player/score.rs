@@ -4694,7 +4694,37 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.width
             };
 
-            let text_height = if info_height > 0 {
+            // For #adjust box type, Director expands/shrinks the member to fit
+            // the wrapped text. Measure here (via cache-only font lookup) to
+            // match that behaviour; info.height is only an authored default.
+            let measured_height = if text_member.box_type == "adjust" && text_width > 0 {
+                use crate::player::font::{measure_text, measure_text_wrapped, FontManager};
+                let cache_key = FontManager::cache_key(&text_member.font);
+                let font = player.font_manager.font_cache.get(&cache_key).cloned()
+                    .or_else(|| player.font_manager.get_system_font());
+                font.map(|f| {
+                    if text_member.word_wrap {
+                        measure_text_wrapped(
+                            &text_member.text, &f, text_width as u16, true,
+                            text_member.fixed_line_space,
+                            text_member.top_spacing,
+                            text_member.bottom_spacing,
+                            text_member.char_spacing,
+                        ).1 as i32
+                    } else {
+                        measure_text(
+                            &text_member.text, &f, None,
+                            text_member.fixed_line_space,
+                            text_member.top_spacing,
+                            text_member.bottom_spacing,
+                        ).1 as i32
+                    }
+                })
+            } else { None };
+
+            let text_height = if let Some(h) = measured_height.filter(|h| *h > 0) {
+                h
+            } else if info_height > 0 {
                 info_height
             } else if text_member.height > 0 {
                 text_member.height as i32
@@ -4702,7 +4732,9 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.height
             };
 
-            // Calculate draw position based on registration point from TextInfo
+            // Calculate draw position based on registration point from TextInfo.
+            // For centerRegPoint, use the current (measured) text_height so the
+            // sprite rect is centered around sprite.loc after word wrap changes.
             let (draw_x, draw_y) = if let Some(info) = &text_member.info {
                 if info.center_reg_point {
                     (sprite.loc_h - text_width / 2, sprite.loc_v - text_height / 2)

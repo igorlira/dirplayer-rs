@@ -409,8 +409,15 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
     } else {
         active_style.word_wrap
     };
-    let active_size_px = map_xmed_font_size(active_style.font_size as i32) as f32;
-    let fixed_line_space = (active_size_px * 1.2) as u16;
+    // Director's `fixedLineSpace` defaults to 0, meaning "use the font's natural
+    // line height". The renderer computes a font-based fallback (char_height) when
+    // this is 0; only populate a non-zero value if the XMED actually authored one
+    // via the paragraph info's line_spacing field.
+    let fixed_line_space: u16 = if paragraph_info.line_spacing > 0 {
+        paragraph_info.line_spacing as u16
+    } else {
+        0
+    };
 
     debug!("Using style {} from first character run: font='{}', size={}, bold={}, word_wrap={}",
                                      active_style_index, active_style.font_name, active_style.font_size,

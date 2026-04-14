@@ -472,6 +472,46 @@ impl CastMemberRefHandlers {
     ) -> Result<Datum, ScriptError> {
         debug!("Getting prop '{}' for member type {:?}", prop, member_type);
         if prop.eq_ignore_ascii_case("regPoint") {
+            // Text members with centerRegPoint use the CURRENT (measured) size for
+            // the reg point, not the stored TextInfo.reg_x/reg_y which are authored
+            // defaults that don't track wrapped-text expansion.
+            if *member_type == CastMemberTypeId::Text {
+                use crate::player::font::{measure_text, measure_text_wrapped};
+                let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+                if let CastMemberType::Text(tm) = &member.member_type {
+                    let is_center = tm.info.as_ref().map_or(false, |i| i.center_reg_point);
+                    if is_center {
+                        let authored_w = if tm.width > 0 {
+                            tm.width
+                        } else if let Some(ref info) = tm.info {
+                            info.width as u16
+                        } else { 0 };
+                        // Measure current height (same logic as member.height getter).
+                        let tm = tm.clone();
+                        let cache_key = crate::player::font::FontManager::cache_key(&tm.font);
+                        let font = player.font_manager.font_cache.get(&cache_key).cloned()
+                            .or_else(|| player.font_manager.get_system_font());
+                        let measured_h = font.as_ref().map(|f| {
+                            if tm.word_wrap && authored_w > 0 {
+                                measure_text_wrapped(
+                                    &tm.text, f, authored_w, true,
+                                    tm.fixed_line_space, tm.top_spacing, tm.bottom_spacing,
+                                    tm.char_spacing,
+                                ).1
+                            } else {
+                                measure_text(
+                                    &tm.text, f, None,
+                                    tm.fixed_line_space, tm.top_spacing, tm.bottom_spacing,
+                                ).1
+                            }
+                        }).unwrap_or(tm.height);
+                        let w = if authored_w > 0 { authored_w } else { tm.width };
+                        let h = if measured_h > 0 { measured_h } else { tm.height };
+                        return Ok(Datum::Point([(w as i32 / 2) as f64, (h as i32 / 2) as f64], 0));
+                    }
+                }
+            }
             let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
                 .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
             let rp = member.reg_point;
