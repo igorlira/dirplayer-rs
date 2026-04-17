@@ -730,20 +730,31 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                         let mut new_h = x + off_x;
                         let mut new_v = y + off_y;
 
-                        // Apply constraint bounds
-                        let constraint_num = sprite.constraint;
-                        if constraint_num > 0 {
-                            // Constrain to the bounding rect of the constraint sprite
-                            if let Some(constraint_sprite) = player.movie.score.get_sprite(constraint_num as i16) {
-                                let bounds = get_concrete_sprite_rect(player, constraint_sprite);
-                                new_h = new_h.max(bounds.left).min(bounds.right);
-                                new_v = new_v.max(bounds.top).min(bounds.bottom);
+                        // Constraint bounds only apply to Shockwave3D members.
+                        // Regular 2D sprites can be dragged freely; bounds-clamping
+                        // them caused puzzle pieces to lock to a small area.
+                        let is_3d_member = sprite.member.as_ref()
+                            .and_then(|mref| player.movie.cast_manager.find_member_by_ref(mref))
+                            .map_or(false, |m| matches!(
+                                m.member_type,
+                                CastMemberType::Shockwave3d(_)
+                            ));
+                        if is_3d_member {
+                            let sprite = player.movie.score.get_sprite(drag_sprite_num).unwrap();
+                            let constraint_num = sprite.constraint;
+                            if constraint_num > 0 {
+                                // Constrain to the bounding rect of the constraint sprite
+                                if let Some(constraint_sprite) = player.movie.score.get_sprite(constraint_num as i16) {
+                                    let bounds = get_concrete_sprite_rect(player, constraint_sprite);
+                                    new_h = new_h.max(bounds.left).min(bounds.right);
+                                    new_v = new_v.max(bounds.top).min(bounds.bottom);
+                                }
+                            } else {
+                                // Constrain to stage
+                                let stage = &player.movie.rect;
+                                new_h = new_h.max(stage.left).min(stage.right);
+                                new_v = new_v.max(stage.top).min(stage.bottom);
                             }
-                        } else {
-                            // Constrain to stage
-                            let stage = &player.movie.rect;
-                            new_h = new_h.max(stage.left).min(stage.right);
-                            new_v = new_v.max(stage.top).min(stage.bottom);
                         }
 
                         let sprite = player.movie.score.get_sprite_mut(drag_sprite_num);

@@ -709,6 +709,8 @@ impl BuiltInHandlerManager {
                     Ok(player.alloc_datum(Datum::Int(posn.max(top).min(bottom))))
                 })
             }
+            // stop/play/rewind/sound on a member or channel — no-op in web player
+            "stop" | "play" | "rewind" | "pause"  => Ok(DatumRef::Void),
             "cursor" => TypeHandlers::cursor(args),
             "externalparamcount" => MovieHandlers::external_param_count(args),
             "externalparamname" => MovieHandlers::external_param_name(args),

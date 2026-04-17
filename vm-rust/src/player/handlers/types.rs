@@ -879,11 +879,11 @@ impl TypeHandlers {
                     DatumType::CastMemberRef => {
                         // If the 4th argument is a cast member, then there's no alpha depth specified
                         palette_ref = match arg3 {
-              Datum::CastMember(m) => PaletteRef::Member(m.clone()),
-              _ => return Err(ScriptError::new(
-                format!("Invalid 4th argument type for image(): {}, expected int or palette", arg3.type_str())
-              )),
-            };
+                            Datum::CastMember(m) => PaletteRef::Member(m.clone()),
+                            _ => return Err(ScriptError::new(
+                                format!("Invalid 4th argument type for image(): {}, expected int or palette", arg3.type_str())
+                            )),
+                        };
                     }
                     _ => {
                         return Err(ScriptError::new(format!(

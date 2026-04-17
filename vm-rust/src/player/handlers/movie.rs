@@ -392,14 +392,6 @@ impl MovieHandlers {
             // ONLY set go_same_frame, NOT has_frame_changed_in_go
             reserve_player_mut(|player| {
                 player.go_same_frame = true;
-                static GC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                let c = GC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if c < 10 {
-                    web_sys::console::log_1(&format!(
-                        "[GO-SAME] frame={} dest={} call #{}",
-                        player.movie.current_frame, destination_frame, c
-                    ).into());
-                }
             });
         }
 
@@ -412,27 +404,32 @@ impl MovieHandlers {
             let is_puppet = player.get_datum(&args[1]).int_value()? == 1;
 
             if !is_puppet {
-                // When un-puppeting: if the channel has no score spans at all,
-                // clear the sprite state (member, visible, etc.).
-                // This matches Director's behavior: un-puppeting in a channel with no
-                // score data reverts to score state which is empty for dynamic/pool sprites.
-                // Without this, the Lingo clearSpritePool() iteration bug (list mutation
-                // during iteration skips ~half the sprites) leaves stuck-puppeted sprites
-                // that continue rendering in the next room.
-                let channel_has_spans = player.movie.score.sprite_spans
-                    .iter()
-                    .any(|span| span.channel_number == sprite_number as u32);
-
-                if !channel_has_spans {
-                    let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
-                    sprite.puppet = false;
-                    sprite.member = None;
-                    sprite.visible = true;
-                    player.movie.score.invalidate_render_channel_cache();
-                    player.refresh_stage_behavior_channel_cache_entry(sprite_number as i16);
-                    player.invalidate_active_stage_filmloop_cache();
-                    return Ok(DatumRef::Void);
-                }
+                // Director: unpuppeting resets the sprite's properties to those
+                // in the Score for the current frame. If the channel has no score
+                // data at this frame, the sprite reverts to empty (no member).
+                let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
+                sprite.puppet = false;
+                sprite.member = None;
+                sprite.visible = true;
+                sprite.blend = 100;
+                sprite.ink = 0;
+                sprite.loc_h = 0;
+                sprite.loc_v = 0;
+                sprite.width = 0;
+                sprite.height = 0;
+                sprite.has_fore_color = false;
+                sprite.has_back_color = false;
+                sprite.has_visible_mod = false;
+                sprite.has_blend_mod = false;
+                sprite.has_size_changed = false;
+                sprite.moveable = false;
+                sprite.entered = false;
+                sprite.exited = false;
+                sprite.script_instance_list.clear();
+                player.movie.score.invalidate_render_channel_cache();
+                player.refresh_stage_behavior_channel_cache_entry(sprite_number as i16);
+                player.invalidate_active_stage_filmloop_cache();
+                return Ok(DatumRef::Void);
             }
 
             let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
@@ -889,7 +886,13 @@ impl MovieHandlers {
 
     pub async fn update_stage(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let should_yield = reserve_player_ref(|player| {
-            Ok(player.is_yield_safe() || player.command_handler_yielding || player.in_mouse_command)
+            // Yield when: mouse handler context, command handler yielding,
+            // yield-safe state, OR mouse is currently down (covers
+            // "repeat while the stillDown" loops called from exitFrame).
+            Ok(player.is_yield_safe()
+                || player.command_handler_yielding
+                || player.in_mouse_command
+                || player.movie.mouse_down)
         })?;
 
         // Director's updateStage() forces an immediate stage redraw even from
