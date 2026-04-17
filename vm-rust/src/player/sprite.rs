@@ -88,6 +88,8 @@ pub struct Sprite {
     pub fore_color: i32,
     pub has_fore_color: bool,
     pub has_back_color: bool,
+    pub has_visible_mod: bool,
+    pub has_blend_mod: bool,
     pub has_size_tweened: bool,
     pub has_size_changed: bool,
     pub bitmap_size_owned_by_sprite: bool,
@@ -122,6 +124,18 @@ pub fn is_skew_flip(skew: f64) -> bool {
 }
 
 impl Sprite {
+    /// Blend value for rendering. When visible was explicitly set via Lingo
+    /// and the sprite is visible, blend=0 is treated as 100 (fully opaque).
+    /// The stored blend value stays unchanged for Lingo property reads.
+    #[inline]
+    pub fn effective_blend(&self) -> i32 {
+        if self.has_visible_mod && self.visible && self.blend == 0 && !self.has_blend_mod {
+            100
+        } else {
+            self.blend
+        }
+    }
+
     /// Check if this sprite has a skew flip transform
     #[inline]
     pub fn has_skew_flip(&self) -> bool {
@@ -162,6 +176,8 @@ impl Sprite {
             fore_color: 255,
             has_fore_color: false,
             has_back_color: false,
+            has_visible_mod: false,
+            has_blend_mod: false,
             has_size_tweened: false,
             has_size_changed: false,
             bitmap_size_owned_by_sprite: false,
@@ -218,6 +234,7 @@ impl Sprite {
         self.fore_color = 255;
         self.has_fore_color = false;
         self.has_back_color = false;
+        self.has_visible_mod = false;
         self.has_size_tweened = false;
         self.has_size_changed = false;
         self.bitmap_size_owned_by_sprite = false;

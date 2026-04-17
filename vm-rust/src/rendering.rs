@@ -1519,7 +1519,7 @@ pub fn render_score_to_bitmap_with_offset(
 
                 // 6) Params
                 let mut params = CopyPixelsParams {
-                    blend: sprite.blend,
+                    blend: sprite.effective_blend(),
                     ink: sprite.ink as u32,
                     color: sprite.color.clone(),
                     bg_color: sprite.bg_color.clone(),
@@ -1645,7 +1645,7 @@ pub fn render_score_to_bitmap_with_offset(
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
                     let params = CopyPixelsParams {
-                        blend: sprite.blend as i32,
+                        blend: sprite.effective_blend() as i32,
                         ink: sprite.ink as u32,
                         color: sprite.color.clone(),
                         bg_color: sprite.bg_color.clone(),
@@ -2106,7 +2106,7 @@ pub fn render_score_to_bitmap_with_offset(
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
                     let params = CopyPixelsParams {
-                        blend: sprite.blend as i32,
+                        blend: sprite.effective_blend() as i32,
                         ink: sprite.ink as u32,
                         color: sprite.color.clone(),
                         bg_color: sprite.bg_color.clone(),
@@ -2383,7 +2383,7 @@ pub fn render_score_to_bitmap_with_offset(
                         let dst_rect = sprite_rect;
 
                         let params = CopyPixelsParams {
-                            blend: sprite.blend,
+                            blend: sprite.effective_blend(),
                             ink: sprite.ink as u32,
                             color: sprite.color.clone(),
                             bg_color: sprite.bg_color.clone(),

@@ -3141,6 +3141,16 @@ impl CastMember {
             }
         }
 
+        // XMED page_height (Section 1 dword90) is Director's authored member
+        // box height. Trust it when other sources didn't provide a height —
+        // matches the Director-authored "default member dims" exactly.
+        if box_h == 0 && styled_text.page_height > 0 {
+            box_h = styled_text.page_height as u16;
+        }
+        if box_w == 0 && styled_text.width > 0 {
+            box_w = styled_text.width as u16;
+        }
+
         if box_w == 0 { box_w = 100; }
         if box_h == 0 { box_h = 20; }
 
@@ -3564,34 +3574,6 @@ impl CastMember {
                             reg_point: (0, 0),
                         }
                     }
-                }
-
-                // Otherwise, process as actual Flash
-                web_sys::console::log_1(&format!(
-                    "Flash member #{} in cast lib {}: {} children, specific_data_raw={} bytes",
-                    number, cast_lib, member_def.children.len(), chunk.specific_data_raw.len()
-                ).into());
-                for (i, child) in member_def.children.iter().enumerate() {
-                    match child {
-                        Some(c) => {
-                            let desc = match c {
-                                Chunk::Raw(d) => format!("Raw({} bytes, sig={:?})", d.len(), &d[..3.min(d.len())]),
-                                Chunk::Media(m) => format!("Media({} bytes)", m.audio_data.len()),
-                                Chunk::XMedia(x) => format!("XMedia({} bytes, sig={:?})", x.raw_data.len(), &x.raw_data[..3.min(x.raw_data.len())]),
-                                _ => format!("{:?}", std::mem::discriminant(c)),
-                            };
-                            web_sys::console::log_1(&format!("  child[{}]: {}", i, desc).into());
-                        }
-                        None => {
-                            web_sys::console::log_1(&format!("  child[{}]: None", i).into());
-                        }
-                    }
-                }
-                if chunk.specific_data_raw.len() >= 3 {
-                    web_sys::console::log_1(&format!(
-                        "  specific_data_raw first 20 bytes: {:?}",
-                        &chunk.specific_data_raw[..20.min(chunk.specific_data_raw.len())]
-                    ).into());
                 }
 
                 // Search ALL children for SWF data (not just child 0)

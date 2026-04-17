@@ -2810,12 +2810,6 @@ impl Score {
         let frame_labels_chunk = dir.frame_labels.as_ref();
         if frame_labels_chunk.is_some() {
             self.frame_labels = frame_labels_chunk.unwrap().labels.clone();
-            for label in &self.frame_labels {
-                web_sys::console::log_1(&format!(
-                    "Frame label: '{}' at frame {}",
-                    label.label, label.frame_num
-                ).into());
-            }
         }
         if let Some(score_chunk) = dir.score.as_ref() {
             self.load_from_score_chunk(score_chunk, dir.version);
@@ -3618,6 +3612,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |_| {},
             |sprite, _| {
                 sprite.visible = value.to_bool()?;
+                sprite.has_visible_mod = true;
                 Ok(())
             },
         ),
@@ -3746,6 +3741,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |player| value.int_value(),
             |sprite, value| {
                 sprite.blend = value?;
+                sprite.has_blend_mod = true;
                 Ok(())
             },
         ),
@@ -3874,16 +3870,26 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     if sprite.puppet {
                         sprite.reset_for_member_change();
                     }
-                    if let Some((w, h)) = intrinsic_size {
-                        if w > 0 && h > 0 {
-                            sprite.width = w;
-                            sprite.height = h;
-                            sprite.base_width = w;
-                            sprite.base_height = h;
+                    // FurniFactory2-style scaling guard: if the sprite's current
+                    // dimensions are exactly 2× the new member's intrinsic size,
+                    // a `1_resize` beginSprite handler (or equivalent) has
+                    // already doubled this sprite — don't snap it back to 1×
+                    // just because a hover handler swapped the member.
+                    let sprite_is_doubled = intrinsic_size
+                        .map(|(w, h)| w > 0 && h > 0
+                            && sprite.width == w * 2 && sprite.height == h * 2)
+                        .unwrap_or(false);
+                    if !sprite_is_doubled {
+                        if let Some((w, h)) = intrinsic_size {
+                            if w > 0 && h > 0 {
+                                sprite.width = w;
+                                sprite.height = h;
+                                sprite.base_width = w;
+                                sprite.base_height = h;
+                            }
                         }
+                        sprite.has_size_changed = false;
                     }
-
-                    sprite.has_size_changed = false;
                 }
 
                 // If the new member is a film loop, reset its frame and sound triggers
@@ -4082,6 +4088,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                             sprite.loc_v = top + reg_point.1 as i32;
                             sprite.width = right - left;
                             sprite.height = bottom - top;
+                            sprite.has_size_changed = true;
                             Ok(())
                         }
                         None => Err(ScriptError::new(format!("rect must be a rect (got {})", value.type_str()))),
@@ -4453,6 +4460,31 @@ pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Opti
     return None;
 }
 
+/// Version of `get_concrete_sprite_rect` that applies the stage auto-scale
+/// factor — used by the renderer so content fills drawRect when it exceeds
+/// movie.rect. Hit-testing / Lingo APIs keep using the unscaled variant so
+/// sprite state stays in movie coordinates.
+///
+/// Uses a uniform scale (min of horizontal/vertical factors) to preserve the
+/// movie's aspect ratio — drawRect asymmetry results in letterboxing rather
+/// than stretching. This lets `get_concrete_sprite_rect`'s heuristics decide
+/// the "actual" sprite rect, and the scaling here just amplifies that result
+/// consistently across bitmap/text/etc.
+pub fn get_concrete_sprite_render_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect {
+    let rect = get_concrete_sprite_rect(player, sprite);
+    let (sx, sy) = crate::player::stage::stage_scale(player);
+    if (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
+        return rect;
+    }
+    let scale = sx.min(sy);
+    IntRect::from(
+        (rect.left as f64 * scale).round() as i32,
+        (rect.top as f64 * scale).round() as i32,
+        (rect.right as f64 * scale).round() as i32,
+        (rect.bottom as f64 * scale).round() as i32,
+    )
+}
+
 pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect {
     let member = sprite
         .member
@@ -4495,15 +4527,77 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // differ from bitmap AND are not an exact proportional scale.
                 // An exact proportional scale (e.g. 2× in both axes) is intentional;
                 // any non-proportional difference means the Score approximated.
-                let is_bbox = if bitmap_width >= 10 && bitmap_height >= 10
+
+                // Special case: one dim ≈matches AND the other is significantly
+                // larger in the sprite. This is a thin/narrow bitmap whose sprite
+                // box approximates a larger area — render at native bitmap size
+                // rather than stretching. Handled before the >=10 guard so thin
+                // bitmaps (e.g. 7x182 vertical separators) get bitmap dims.
+                // Guard: the NON-matching bitmap dim must be >= 3px, else it's a
+                // stretchable pattern (e.g. 1px line) and sprite dims should win.
+                let expand_w = bitmap_height >= 3 && (sprite.width - bitmap_width).abs() <= 3
+                    && 10 * sprite.height > 11 * bitmap_height;
+                let expand_h = bitmap_width >= 3 && (sprite.height - bitmap_height).abs() <= 3
+                    && 10 * sprite.width > 11 * bitmap_width;
+
+                // Special case: one dim ≈matches with sprite STRICTLY LARGER
+                // (extends beyond bitmap) AND the other dim is shrunk in sprite.
+                // The bitmap fits inside the sprite bbox — render at native size.
+                // Note: must be STRICTLY greater — when dims match exactly, it's
+                // the existing crop pattern (handled below by crop_w/crop_h).
+                // Tight 1px threshold — being noticeably larger means a real
+                // size difference, not a small bbox approximation.
+                let extend_h_shrink_w = (sprite.height - bitmap_height).abs() <= 1
+                    && sprite.height > bitmap_height && sprite.width < bitmap_width;
+                let extend_w_shrink_h = (sprite.width - bitmap_width).abs() <= 1
+                    && sprite.width > bitmap_width && sprite.height < bitmap_height;
+
+                // True crop pattern: one dim ≈matches AND other shrunk (<90%) AND
+                // sprite mostly fits inside bitmap. Allow up to 3px overshoot in
+                // either dim. The extend rule above (1px tight) takes priority for
+                // "barely extends" cases. wide_h_shrink/tall_w_shrink below fire
+                // BEFORE crop, so moderate shrinks on wide/tall bitmaps go to bbox.
+                let inside_loose = sprite.width <= bitmap_width + 3
+                    && sprite.height <= bitmap_height + 3;
+                let crop_w = inside_loose && (sprite.width - bitmap_width).abs() <= 3
+                    && 10 * sprite.height < 9 * bitmap_height;
+                let crop_h = inside_loose && (sprite.height - bitmap_height).abs() <= 3
+                    && 10 * sprite.width < 9 * bitmap_width;
+
+                // WIDE bitmap (bw>bh) with width matching and height moderately
+                // shrunk (≥50% of bitmap) → BBOX. The sprite is approximating a
+                // smaller bbox of a wide image. Distinguished from tall-bitmap
+                // top-crop pattern by requiring bitmap_width > bitmap_height.
+                let wide_h_shrink = bitmap_width > bitmap_height
+                    && (sprite.width - bitmap_width).abs() <= 3
+                    && sprite.height < bitmap_height
+                    && 2 * sprite.height >= bitmap_height;
+                let tall_w_shrink = bitmap_height > bitmap_width
+                    && (sprite.height - bitmap_height).abs() <= 3
+                    && sprite.width < bitmap_width
+                    && 2 * sprite.width >= bitmap_width;
+
+                // Bypass the >=10 size guard when sprite is much larger than bitmap
+                // in BOTH dims (small bitmap drawn at native size inside larger bbox).
+                // Guard: bitmap must have real dims (>=2 each) — 1x1 bitmaps are
+                // always stretchable patterns/click targets, not visual elements.
+                // Also require max(bw,bh) >= 8 — very small bitmaps (4x4, 3x3)
+                // are solid color fills / patterns meant to be stretched.
+                let sprite_much_larger = sprite.width > 2 * bitmap_width
+                    && sprite.height > 2 * bitmap_height
+                    && bitmap_width >= 2 && bitmap_height >= 2
+                    && bitmap_width.max(bitmap_height) >= 8;
+                let size_ok = (bitmap_width >= 10 && bitmap_height >= 10) || sprite_much_larger;
+
+                let is_bbox = if expand_w || expand_h
+                    || extend_h_shrink_w || extend_w_shrink_h
+                    || wide_h_shrink || tall_w_shrink {
+                    true
+                } else if size_ok
                     && sprite.width > 0 && sprite.height > 0
                     && (sprite.width != bitmap_width || sprite.height != bitmap_height)
-                    // Intentional crop: one dim nearly matches bitmap (≤3px)
-                    // while the other is deliberately shrunk (<90%). Use sprite dims.
-                    && !((sprite.width - bitmap_width).abs() <= 3
-                         && 10 * sprite.height < 9 * bitmap_height)
-                    && !((sprite.height - bitmap_height).abs() <= 3
-                         && 10 * sprite.width < 9 * bitmap_width)
+                    && !crop_w
+                    && !crop_h
                     // Skip bbox detection when BOTH dims are scaled up beyond 190%,
                     // the scale factors are within 2.5× of each other, AND the
                     // bitmap itself is roughly square (aspect ≤ 2:1). A non-square
@@ -4515,8 +4609,9 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                              let b = sprite.height as i64 * bitmap_width as i64;
                              5 * a.min(b) >= 2 * a.max(b)
                          }
-                         && bitmap_width <= bitmap_height * 2
-                         && bitmap_height <= bitmap_width * 2)
+                         && 9 * bitmap_width <= 10 * bitmap_height
+                         && 9 * bitmap_height <= 10 * bitmap_width
+                         && bitmap_width >= 50 && bitmap_height >= 50)
                 {
                     sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64
                 } else {
@@ -4571,8 +4666,10 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     (bitmap_width, bitmap_height, "H_DEFAULT_BITMAP")
                 }
             };
-            debug!("[BITMAP_RECT] sprite#{} path={} result={}x{} sprite={}x{} bitmap={}x{} flags(tweened={} owned={} changed={})",
+            debug!("[BITMAP_RECT] sprite#{} path={} result={}x{} loc=({},{}) reg=({},{}) sprite={}x{} bitmap={}x{} flags(tweened={} owned={} changed={})",
                 sprite.number, _size_path, sprite_width, sprite_height,
+                sprite.loc_h, sprite.loc_v,
+                reg_x, reg_y,
                 sprite.width, sprite.height, bitmap_width, bitmap_height,
                 sprite.has_size_tweened, sprite.bitmap_size_owned_by_sprite, sprite.has_size_changed);
 
@@ -4694,15 +4791,30 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.width
             };
 
-            // For #adjust box type, Director expands/shrinks the member to fit
-            // the wrapped text. Measure here (via cache-only font lookup) to
-            // match that behaviour; info.height is only an authored default.
-            let measured_height = if text_member.box_type == "adjust" && text_width > 0 {
+            // Measure the actual text dimensions when the font is available.
+            // For #adjust box type, Director expands/shrinks to fit, so use
+            // measured directly. For other box types, use measured as a floor
+            // when it exceeds the stored size — prevents clipping when the
+            // stored height is stale or too small for the current text.
+            // Detect system font (no bitmap font in cache for this name).
+            // System fonts render via Canvas2D which has slightly larger
+            // glyph metrics — add 4px padding to height to avoid clipping.
+            let is_system_font = {
+                use crate::player::font::FontManager;
+                let cache_key = FontManager::cache_key(&text_member.font);
+                !player.font_manager.font_cache.contains_key(&cache_key)
+            };
+
+            let measured_height = if text_width > 0 {
                 use crate::player::font::{measure_text, measure_text_wrapped, FontManager};
                 let cache_key = FontManager::cache_key(&text_member.font);
-                let font = player.font_manager.font_cache.get(&cache_key).cloned()
-                    .or_else(|| player.font_manager.get_system_font());
-                font.map(|f| {
+                // Only use bitmap font if it actually exists for this font name.
+                // Don't fall back to system_font here — its char_height won't
+                // match text_member.font_size and gives a wrong measurement.
+                // For system fonts (Arial, etc.), use a font-size-based estimate
+                // since native text uses Canvas2D which we can't measure here.
+                let font = player.font_manager.font_cache.get(&cache_key).cloned();
+                let from_bitmap = font.map(|f| {
                     if text_member.word_wrap {
                         measure_text_wrapped(
                             &text_member.text, &f, text_width as u16, true,
@@ -4719,17 +4831,63 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                             text_member.bottom_spacing,
                         ).1 as i32
                     }
+                }).filter(|h| *h > 0);
+
+                from_bitmap.or_else(|| {
+                    // System-font estimate: prefer fixed_line_space (only set
+                    // when XMED has explicit line_spacing — page_height is the
+                    // member box height, NOT line spacing). Fall back to a
+                    // Director-style line height: max(font_size + 3, ceil(font_size * 1.15)).
+                    // Verified: font_size=13 → 16, font_size=24 → 28.
+                    let per_line = if text_member.fixed_line_space > 0 {
+                        text_member.fixed_line_space as i32
+                    } else if text_member.font_size > 0 {
+                        let fs = text_member.font_size as i32;
+                        let scaled = (fs * 23 + 19) / 20;  // ceil(fs * 1.15)
+                        let min_pad = fs + 3;
+                        scaled.max(min_pad)
+                    } else {
+                        return None;
+                    };
+                    let line_count = text_member.text.matches(|c| c == '\n' || c == '\r').count() as i32 + 1;
+                    Some(per_line * line_count
+                        + text_member.top_spacing as i32
+                        + text_member.bottom_spacing as i32)
                 })
             } else { None };
 
-            let text_height = if let Some(h) = measured_height.filter(|h| *h > 0) {
-                h
-            } else if info_height > 0 {
+            let stored_height = if info_height > 0 {
                 info_height
             } else if text_member.height > 0 {
                 text_member.height as i32
             } else {
                 sprite.height
+            };
+
+            // Trust stored_height (TextInfo.height / text_member.height) which
+            // now reflects XMED page_height — Director's authored member box
+            // height. Only fall back to measured when nothing else is available.
+            let text_height = if stored_height > 0 {
+                stored_height
+            } else if text_member.box_type == "adjust" {
+                // adjust: trust measured, fall back to stored
+                measured_height.unwrap_or(stored_height)
+            } else {
+                // other box types: use stored, but grow if measured is larger
+                // (prevents clipping when stored size is stale or too small)
+                match measured_height {
+                    Some(m) if m > stored_height => m,
+                    _ => stored_height,
+                }
+            };
+
+            // System fonts render via Canvas2D with slightly larger glyph
+            // metrics than the stored member box accounts for. Add 4px to
+            // the height to avoid descender / antialias clipping.
+            let text_height = if is_system_font {
+                text_height + 4
+            } else {
+                text_height
             };
 
             // Calculate draw position based on registration point from TextInfo.
@@ -4748,12 +4906,13 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             };
 
             debug!(
-                "[TEXT_RECT] sprite#{} text='{}' info={}x{} member={}x{} sprite={}x{} -> {}x{}",
+                "[TEXT_RECT] sprite#{} text='{}' info={}x{} member={}x{} sprite={}x{} is_sys_font={} -> {}x{}",
                 sprite.number,
                 &text_member.text[..text_member.text.len().min(30)],
                 info_width, info_height,
                 text_member.width, text_member.height,
                 sprite.width, sprite.height,
+                is_system_font,
                 text_width, text_height,
             );
             IntRect::from_size(draw_x, draw_y, text_width, text_height)
