@@ -224,6 +224,8 @@ pub struct DirPlayer {
     pub timeout_manager: TimeoutManager,
     pub title: String,
     pub bg_color: ColorRef,
+    pub stage_draw_rect: Option<[f64; 4]>,
+    pub center_stage: bool,
     pub keyboard_focus_sprite: i16,
     pub text_selection_start: u16,
     pub text_selection_end: u16,
@@ -407,6 +409,8 @@ impl DirPlayer {
             timeout_manager: TimeoutManager::new(),
             title: "".to_string(),
             bg_color: ColorRef::Rgb(0, 0, 0),
+            stage_draw_rect: None,
+            center_stage: true,
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
             wants_pointer_lock: false,
@@ -1930,7 +1934,8 @@ impl DirPlayer {
             "timeoutLapsed" => Ok(Datum::Int(0)),
             "soundEnabled" => Ok(Datum::Int(1)),
             "soundLevel" => Ok(Datum::Int(7)), // max volume
-            "beepOn" | "centerStage" | "fixStageSize" => Ok(Datum::Int(0)),
+            "beepOn" | "fixStageSize" => Ok(Datum::Int(0)),
+            "centerStage" => Ok(datum_bool(self.center_stage)),
             "exitLock" => Ok(datum_bool(self.movie.exit_lock)),
             "key" => Ok(Datum::String(self.keyboard_manager.key())),
             "keyPressed" => Ok(Datum::String(self.keyboard_manager.key_pressed())),
@@ -1991,7 +1996,10 @@ impl DirPlayer {
                 Ok(())
             },
             "centerStage" => {
-                // TODO
+                self.center_stage = value.int_value()? != 0;
+                crate::player::stage::apply_stage_draw_rect(self);
+                let (w, h) = crate::player::stage::stage_canvas_dims(self);
+                crate::js_api::JsApi::dispatch_stage_size_changed(w, h, self.center_stage);
                 Ok(())
             },
             "actorList" => {

@@ -3,8 +3,12 @@
 
 use super::block_reader::W3dBlockReader;
 
+const W3D_PRIMITIVES_LOG: bool = false;
+
 fn log(msg: &str) {
-    web_sys::console::log_1(&format!("[W3D] {}", msg).into());
+    if W3D_PRIMITIVES_LOG {
+        web_sys::console::log_1(&format!("[W3D-PRIMITIVES] {}", msg).into());
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -235,43 +235,36 @@ pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
 
 #[wasm_bindgen]
 pub fn mouse_down(x: f64, y: f64) {
-    // Update mouse state immediately so the mouseH/the mouseV/the stillDown
-    // reflect real state even during long-running script handlers
+    // Invert the stage auto-scale so mouseH/mouseV land in movie coordinates,
+    // matching where sprites live in Lingo-facing state. No-op when scale=1.
+    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
+    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
     reserve_player_mut(|player| {
-        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.mouse_loc = (ix, iy);
         player.movie.mouse_down = true;
     });
-    player_dispatch(PlayerVMCommand::MouseDown((
-        x.to_i32().unwrap(),
-        y.to_i32().unwrap(),
-    )));
+    player_dispatch(PlayerVMCommand::MouseDown((ix, iy)));
 }
 
 #[wasm_bindgen]
 pub fn mouse_up(x: f64, y: f64) {
-    // Update mouse state immediately so the mouseH/the mouseV/the stillDown
-    // reflect real state even during long-running script handlers
+    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
+    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
     reserve_player_mut(|player| {
-        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.mouse_loc = (ix, iy);
         player.movie.mouse_down = false;
     });
-    player_dispatch(PlayerVMCommand::MouseUp((
-        x.to_i32().unwrap(),
-        y.to_i32().unwrap(),
-    )));
+    player_dispatch(PlayerVMCommand::MouseUp((ix, iy)));
 }
 
 #[wasm_bindgen]
 pub fn mouse_move(x: f64, y: f64) {
-    // Update mouse_loc immediately so the mouseH/the mouseV reflect real
-    // position even during long-running script handlers (same pattern as key_down/key_up)
+    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
+    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
     reserve_player_mut(|player| {
-        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.mouse_loc = (ix, iy);
     });
-    player_dispatch(PlayerVMCommand::MouseMove((
-        x.to_i32().unwrap(),
-        y.to_i32().unwrap(),
-    )));
+    player_dispatch(PlayerVMCommand::MouseMove((ix, iy)));
 }
 
 /// Check if the game wants pointer lock (for FPS mouse look)
@@ -324,7 +317,8 @@ pub fn player_set_picking_mode(enabled: bool) {
 #[wasm_bindgen]
 pub fn player_get_sprite_at(x: f64, y: f64) -> i32 {
     reserve_player_ref(|player| {
-        get_sprite_at(player, x as i32, y as i32, false)
+        let (mx, my) = crate::player::stage::canvas_to_movie_coords(player, x, y);
+        get_sprite_at(player, mx as i32, my as i32, false)
             .map(|n| n as i32)
             .unwrap_or(0)
     })

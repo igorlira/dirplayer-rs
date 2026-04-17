@@ -74,12 +74,12 @@ impl CastManager {
         for index in 0..dir.cast_entries.len() {
             let cast_entry = &dir.cast_entries[index];
             let cast_def = dir.casts.iter().find(|cast| cast.id == cast_entry.id);
-            web_sys::console::log_1(&format!(
+            debug!(
                 "MCsL entry {}: name='{}' file_path='{}' id={} min={} max={} preload={} has_cast_def={}",
                 index, cast_entry.name, cast_entry.file_path, cast_entry.id,
                 cast_entry.min_member, cast_entry.max_member, cast_entry.preload_settings,
                 cast_def.is_some()
-            ).into());
+            );
 
             // A cast is external if it has a file_path in the MCsL entry,
             // regardless of whether we found a CAS* chunk (which may come

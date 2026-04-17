@@ -9,11 +9,11 @@ use super::clod_decoder::ClodMeshDecoder;
 use super::primitives;
 use super::types::*;
 
-const W3D_LOG: bool = true;
+const W3D_PARSER_LOG: bool = false;
 
 fn log(msg: &str) {
-    if W3D_LOG {
-        web_sys::console::log_1(&format!("[W3D] {}", msg).into());
+    if W3D_PARSER_LOG {
+        web_sys::console::log_1(&format!("[W3D-PARSER] {}", msg).into());
     }
 }
 
@@ -96,29 +96,6 @@ impl W3dFileParser {
         // Finalize: extract decoded CLOD meshes at full resolution (all patches applied)
         for (name, decoder) in &self.clod_decoders {
             let meshes = decoder.get_decoded_meshes_full_resolution();
-            for (mi, m) in meshes.iter().enumerate() {
-                web_sys::console::log_1(&format!(
-                    "[W3D] CLOD mesh '{}': {} verts, {} faces, {} bone_idx, {} bone_wgt (full res with patches)",
-                    name, m.positions.len(), m.faces.len(), m.bone_indices.len(), m.bone_weights.len()
-                ).into());
-                // Log bounding box to diagnose centering issues
-                if !m.positions.is_empty() {
-                    let (mut min_x, mut min_y, mut min_z) = (f32::MAX, f32::MAX, f32::MAX);
-                    let (mut max_x, mut max_y, mut max_z) = (f32::MIN, f32::MIN, f32::MIN);
-                    for p in &m.positions {
-                        min_x = min_x.min(p[0]); min_y = min_y.min(p[1]); min_z = min_z.min(p[2]);
-                        max_x = max_x.max(p[0]); max_y = max_y.max(p[1]); max_z = max_z.max(p[2]);
-                    }
-                    let cx = (min_x + max_x) / 2.0;
-                    let cy = (min_y + max_y) / 2.0;
-                    let cz = (min_z + max_z) / 2.0;
-                    web_sys::console::log_1(&format!(
-                        "[W3D] CLOD mesh '{}' sub{}: bbox=({:.1},{:.1},{:.1})→({:.1},{:.1},{:.1}) center=({:.1},{:.1},{:.1}) size=({:.1},{:.1},{:.1})",
-                        name, mi, min_x, min_y, min_z, max_x, max_y, max_z, cx, cy, cz,
-                        max_x-min_x, max_y-min_y, max_z-min_z
-                    ).into());
-                }
-            }
             self.scene.clod_meshes.insert(name.clone(), meshes);
         }
 

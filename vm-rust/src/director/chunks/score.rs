@@ -861,6 +861,13 @@ pub struct FrameIntervalPrimary {
     pub sprite_flags: u32,
     pub channel_index: u32,
     pub tween_info: TweenInfo,
+    /// Authored keyframe indices trailing the fixed 40-byte header.
+    /// Empty when no keyframes were authored for the span — the presence of
+    /// trailing u32s distinguishes a real tween from the default baseline
+    /// (`tween_info` contents are identical across every span in the score,
+    /// so they can't be used on their own to decide whether to interpolate).
+    /// Matches ScummVM's `SpriteInfo::keyFrames` (see `spriteinfo.h:51`).
+    pub key_frames: Vec<u32>,
 }
 
 impl FrameIntervalPrimary {
@@ -906,6 +913,15 @@ impl FrameIntervalPrimary {
             );
         }
         
+        // Trailing u32s (if any) are authored keyframe indices.
+        let mut key_frames = Vec::new();
+        while reader.pos + 4 <= reader.length {
+            match reader.read_u32() {
+                Ok(frame) => key_frames.push(frame),
+                Err(_) => break,
+            }
+        }
+
         Ok(FrameIntervalPrimary {
             start_frame,
             end_frame,
@@ -913,6 +929,7 @@ impl FrameIntervalPrimary {
             sprite_flags,
             channel_index,
             tween_info,
+            key_frames,
         })
     }
 }

@@ -228,7 +228,7 @@ impl FileIoXtraManager {
                             instance.is_open = true;
                         }
                         _ => {
-                            web_sys::console::log_1(&format!(
+                            web_sys::console::warn_1(&format!(
                                 "FileIO.openFile: failed to load '{}'",
                                 relative_name
                             ).into());

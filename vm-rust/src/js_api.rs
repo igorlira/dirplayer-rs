@@ -231,6 +231,7 @@ extern "C" {
     pub fn onExternalEvent(event: &str);
     pub fn onFlashMemberLoaded(cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32);
     pub fn onFlashMemberUnloaded(cast_lib: i32, cast_member: i32);
+    pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
 }
 
 pub struct JsApi {}
@@ -268,6 +269,9 @@ impl JsApi {
     }
     pub fn dispatch_flash_member_unloaded(cast_lib: i32, cast_member: i32) {
         onFlashMemberUnloaded(cast_lib, cast_member);
+    }
+    pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
+        onStageSizeChanged(width, height, center);
     }
     pub fn dispatch_movie_loaded(dir_file: &DirectorFile) {
         let test = dir_file
@@ -1686,6 +1690,7 @@ impl JsApi {
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
     pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: &[u8], _: u32, _: u32) {}
     pub fn dispatch_flash_member_unloaded(_: i32, _: i32) {}
+    pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}
     pub fn dispatch_cast_list_changed() {}
     pub fn dispatch_cast_member_list_changed(_: u32) {}
