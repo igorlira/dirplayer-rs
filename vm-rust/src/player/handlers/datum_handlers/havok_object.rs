@@ -85,6 +85,27 @@ impl HavokObjectDatumHandlers {
         rb_name: &str,
         prop: &str,
     ) -> Result<DatumRef, ScriptError> {
+        // "rotation" returns a list — needs alloc_datum for each element which
+        // requires &mut player. Handle in its own scope so the immutable borrow
+        // chain ends before allocating the list.
+        if prop == "rotation" {
+            let (axis, angle) = {
+                let member = player.movie.cast_manager.find_member_by_ref(member_ref)
+                    .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
+                let havok = match &member.member_type {
+                    CastMemberType::HavokPhysics(h) => h,
+                    _ => return Err(ScriptError::new("Not a Havok member".to_string())),
+                };
+                let rb = havok.state.rigid_bodies.iter()
+                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name)))?;
+                (rb.rotation_axis, rb.rotation_angle)
+            };
+            let axis_ref = player.alloc_datum(Datum::Vector(axis));
+            let angle_ref = player.alloc_datum(Datum::Float(angle));
+            return Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::from([axis_ref, angle_ref]), false)));
+        }
+
         // Read all needed values with an immutable borrow first
         let member = player.movie.cast_manager.find_member_by_ref(member_ref)
             .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
@@ -107,25 +128,7 @@ impl HavokObjectDatumHandlers {
                 // rb.position + com_local, so the getter returns com_local as-is.
                 Datum::Vector(rb.center_of_mass)
             }
-            "rotation" => {
-                let axis = rb.rotation_axis;
-                let angle = rb.rotation_angle;
-                let quat = rb.orientation;
-                {
-                    static RLOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                    let n = RLOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if n < 5 {
-                        web_sys::console::log_1(&format!(
-                            "[HAVOK-ROT] '{}': axis=({:.3},{:.3},{:.3}) angle={:.3} quat=({:.3},{:.3},{:.3},{:.3})",
-                            rb.name, axis[0], axis[1], axis[2], angle, quat[0], quat[1], quat[2], quat[3]
-                        ).into());
-                    }
-                }
-                // Drop borrow before alloc
-                let axis_ref = player.alloc_datum(Datum::Vector(axis));
-                let angle_ref = player.alloc_datum(Datum::Float(angle));
-                return Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::from([axis_ref, angle_ref]), false)));
-            }
+            // "rotation" handled separately at top of function (returns a list)
             "mass" => Datum::Float(rb.mass),
             "restitution" => Datum::Float(rb.restitution),
             "friction" => Datum::Float(rb.friction),
@@ -313,17 +316,6 @@ impl HavokObjectDatumHandlers {
         match handler_name {
             "applyForce" | "applyforce" => {
                 let force = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
-                {
-                    static FORCE_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                    let n = FORCE_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if n < 5 || (n % 300 == 0) {
-                        let mag = (force[0]*force[0] + force[1]*force[1] + force[2]*force[2]).sqrt();
-                        web_sys::console::log_1(&format!(
-                            "[HAVOK-FORCE] applyForce on '{}': ({:.1},{:.1},{:.1}) mag={:.1}",
-                            rb_name, force[0], force[1], force[2], mag
-                        ).into());
-                    }
-                }
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -342,18 +334,6 @@ impl HavokObjectDatumHandlers {
             "applyForceAtPoint" | "applyforceatpoint" => {
                 let force = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
                 let point = match player.get_datum(&args[1]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
-                {
-                    static FLOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                    let n = FLOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let mag = (force[0]*force[0]+force[1]*force[1]+force[2]*force[2]).sqrt();
-                    // Log every non-zero force, or every 100th call
-                    if mag > 0.001 || n < 10 || (n % 100 == 0) {
-                        web_sys::console::log_1(&format!(
-                            "[HAVOK-FAP {}] '{}': f=({:.2},{:.2},{:.2}) mag={:.2} pt=({:.1},{:.1},{:.1})",
-                            n, rb_name, force[0], force[1], force[2], mag, point[0], point[1], point[2]
-                        ).into());
-                    }
-                }
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {

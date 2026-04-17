@@ -44,15 +44,7 @@ impl ListDatumUtils {
         _datums: &DatumAllocator,
     ) -> Result<Datum, ScriptError> {
         match prop_name {
-            "count" => {
-                let c = list_vec.len() as i32;
-                if c > 100 {
-                    web_sys::console::warn_1(&format!(
-                        "[LIST-COUNT] very large list count={}", c
-                    ).into());
-                }
-                Ok(Datum::Int(c))
-            }
+            "count" => Ok(Datum::Int(list_vec.len() as i32)),
             "length" => Ok(Datum::Int(list_vec.len() as i32)),
             "ilk" => Ok(Datum::Symbol("list".to_string())),
             _ => Err(ScriptError::new(format!(

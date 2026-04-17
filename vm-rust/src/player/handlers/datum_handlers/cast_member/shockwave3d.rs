@@ -11,7 +11,16 @@ use crate::{
         reserve_player_mut,
         DatumRef, DirPlayer, ScriptError,
     },
+    console_warn,
 };
+
+const W3D_HANDLER_LOG: bool = false;
+
+fn log(msg: &str) {
+    if W3D_HANDLER_LOG {
+        web_sys::console::log_1(&format!("[W3D-HANDLER] {}", msg).into());
+    }
+}
 
 pub struct Shockwave3dMemberHandlers {}
 
@@ -320,43 +329,10 @@ impl Shockwave3dMemberHandlers {
 
         let has_pfr = glyph_data.is_some();
 
-        web_sys::console::log_1(&format!(
+        log(&format!(
             "[Text3D] text='{}' font='{}' size={} has_pfr={} spans={} w={} h={} tex_member={:?}",
             text_content, font_name, font_size, has_pfr, spans.len(), tw, th, tex_member_name
-        ).into());
-        // Log frame script assignments
-        {
-            let frame_scripts: Vec<String> = player.movie.score.sprite_spans.iter()
-                .filter(|s| s.channel_number == 0)
-                .map(|s| format!("frames {}-{}: member {}:{}", s.start_frame, s.end_frame,
-                    s.scripts.first().map(|sc| sc.cast_lib).unwrap_or(0),
-                    s.scripts.first().map(|sc| sc.cast_member).unwrap_or(0)))
-                .collect();
-            web_sys::console::log_1(&format!("[Text3D] Frame scripts: {:?}", frame_scripts).into());
-        }
-        // Log TextInfo 3TEX details if available
-        {
-            let member = player.movie.cast_manager.find_member_by_ref(member_ref);
-            if let Some(m) = member {
-                if let CastMemberType::Text(text) = &m.member_type {
-                    if let Some(ti) = &text.info {
-                        let raw_hex = if ti.raw_data.len() > 152 {
-                            ti.raw_data[152..ti.raw_data.len().min(210)].iter()
-                                .enumerate()
-                                .map(|(i, b)| {
-                                    if (i % 4) == 0 && i > 0 { format!("| {:02X}", b) } else { format!("{:02X}", b) }
-                                }).collect::<Vec<_>>().join(" ")
-                        } else { "too short".to_string() };
-                        web_sys::console::log_1(&format!(
-                            "[Text3D] TextInfo: cam_pos=({},{},{}) cam_rot=({},{},{}) raw[152..]=[{}]",
-                            ti.camera_position_x, ti.camera_position_y, ti.camera_position_z,
-                            ti.camera_rotation_x, ti.camera_rotation_y, ti.camera_rotation_z,
-                            raw_hex,
-                        ).into());
-                    }
-                }
-            }
-        }
+        ));
 
         let texture_bitmap: Option<(u32, u32, Vec<u8>)> = if let Some(ref tex_name) = tex_member_name {
             // Look up the texture cast member by name and get its RGBA data
@@ -380,19 +356,19 @@ impl Shockwave3dMemberHandlers {
                                     rgba[idx + 3] = a;
                                 }
                             }
-                            web_sys::console::log_1(&format!(
+                            log(&format!(
                                 "[Text3D] texture from member '{}': {}x{} rgba_len={}",
                                 tex_name, w, h, rgba.len()
-                            ).into());
+                            ));
                             tex_result = Some((w as u32, h as u32, rgba));
                         }
                     }
                 }
             }
             if tex_result.is_none() {
-                web_sys::console::log_1(&format!(
+                log(&format!(
                     "[Text3D] texture member '{}' not found or not a bitmap", tex_name
-                ).into());
+                ));
             }
             tex_result
         } else {
@@ -485,12 +461,6 @@ impl Shockwave3dMemberHandlers {
                     }
                 }
 
-                // Convert: replace the Text member type with Shockwave3d (one-time)
-                {
-                    static CNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                    let c = CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    web_sys::console::log_1(&format!("[Text3D] Converting Text member → Shockwave3d (count={})", c).into());
-                }
                 w3d_member.converted_from_text = true;
                 if let Some(state) = w3d_member.text3d_state.as_mut() {
                     state.tunnel_depth = depth.max(1.0);
@@ -706,7 +676,6 @@ impl Shockwave3dMemberHandlers {
             }
 
             _ => {
-                web_sys::console::log_1(&format!("[W3D] Unknown Shockwave3D property: {}", prop).into());
                 Err(ScriptError::new(format!(
                     "Cannot get Shockwave3D property '{}'", prop
                 )))
@@ -844,7 +813,6 @@ impl Shockwave3dMemberHandlers {
                 Ok(())
             }
             _ => {
-                web_sys::console::log_1(&format!("[W3D] Unknown Shockwave3D set property: {}", prop).into());
                 Err(ScriptError::new(format!(
                     "Cannot set Shockwave3D property '{}'", prop
                 )))
@@ -1216,10 +1184,10 @@ impl Shockwave3dMemberHandlers {
                                         }
 
                                         // Log ALL shaders that were just copied
-                                        web_sys::console::log_1(&format!(
+                                        log(&format!(
                                             "[CLONE-SHADERS] '{}' used_shaders={:?} used_textures={:?} shader_map={:?}",
                                             obj_name, used_shader_names, used_texture_names, shader_name_map
-                                        ).into());
+                                        ));
                                         // Model resources: namespace to prevent collisions
                                         for (res_name, res_info) in &src_model_resources {
                                             let new_name = format!("{}{}", ns, res_name);
@@ -1489,10 +1457,10 @@ impl Shockwave3dMemberHandlers {
                                                 "spot" => W3dLightType::Spot,
                                                 _ => W3dLightType::Point,
                                             });
-                                            web_sys::console::log_1(&format!(
+                                            log(&format!(
                                                 "[W3D-NEWLIGHT] name=\"{}\" type_arg=\"{}\" → {:?}",
                                                 obj_name, new_res_type, light_type
-                                            ).into());
+                                            ));
                                             scene.lights.push(W3dLight {
                                                 name: obj_name.clone(),
                                                 light_type,
@@ -1779,18 +1747,18 @@ impl Shockwave3dMemberHandlers {
                                                             rgba[idx + 3] = a;
                                                         }
                                                     }
-                                                    web_sys::console::log_1(&format!(
+                                                    log(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): {}x{} from member {}:{} '{}'",
                                                         obj_name, w, h, src_ref.cast_lib, src_ref.cast_member, m.name
-                                                    ).into());
+                                                    ));
                                                     Some((w, h, rgba))
                                                 }
                                                 _ => {
-                                                    web_sys::console::log_1(&format!(
+                                                    console_warn!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): member {}:{} '{}' is {} not Bitmap",
                                                         obj_name, src_ref.cast_lib, src_ref.cast_member,
                                                         m.name, m.member_type.type_string()
-                                                    ).into());
+                                                    );
                                                     None
                                                 }
                                             }
@@ -1807,10 +1775,10 @@ impl Shockwave3dMemberHandlers {
                                                     tex_data.extend_from_slice(&rgba);
                                                     scene.texture_images.insert(obj_name.clone(), tex_data);
                                                     scene.texture_content_version += 1;
-                                                    web_sys::console::log_1(&format!(
+                                                    log(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): stored {}x{} RGBA",
                                                         obj_name, w, h
-                                                    ).into());
+                                                    ));
                                                 }
                                             }
                                         }
@@ -1878,10 +1846,10 @@ impl Shockwave3dMemberHandlers {
                                                     let first_lt255 = rgba.chunks(4).enumerate().find(|(_, p)| p[3] < 255)
                                                         .map(|(i, p)| format!("px{}=({},{},{},{})", i, p[0], p[1], p[2], p[3]))
                                                         .unwrap_or("none".to_string());
-                                                    web_sys::console::log_1(&format!(
+                                                    log(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromImageObject): {}x{} alpha<255={}/{} alpha=0={} first_partial={}",
                                                         obj_name, w, h, alpha_lt255, total, alpha_eq0, first_lt255
-                                                    ).into());
+                                                    ));
                                                 }
                                             }
                                         }
@@ -2090,25 +2058,6 @@ impl Shockwave3dMemberHandlers {
                         }
                     };
 
-                    // Debug: log raycast info for 3d2 member
-                    {
-                        static RAY_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                        let n = RAY_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if n < 20 {
-                            let member_name = player.movie.cast_manager.find_member_by_ref(&member_ref)
-                                .map(|m| m.name.clone()).unwrap_or_default();
-                            let model_count = scene.as_ref().map(|s| s.nodes.len()).unwrap_or(0);
-                            let mesh_count = scene.as_ref().map(|s| s.clod_meshes.len() + s.raw_meshes.len()).unwrap_or(0);
-                            web_sys::console::log_1(&format!(
-                                "[RAY] modelsUnderRay on '{}' (lib={},mem={}): origin=({:.1},{:.1},{:.1}) dir=({:.2},{:.2},{:.2}) scene_nodes={} meshes={} transforms={}",
-                                member_name, member_ref.cast_lib, member_ref.cast_member,
-                                origin[0], origin[1], origin[2], direction[0], direction[1], direction[2],
-                                model_count, mesh_count,
-                                node_transforms.as_ref().map(|t| t.len()).unwrap_or(0),
-                            ).into());
-                        }
-                    }
-
                     let mut results = Vec::new();
                     if let Some(scene) = scene {
                         use crate::director::chunks::w3d::raycast::{Ray, raycast_scene_multi};
@@ -2130,19 +2079,6 @@ impl Shockwave3dMemberHandlers {
                             node_transforms.as_ref(),
                             excluded_ref,
                         );
-                        // Log hits for downward rays only (wheel rays, not camera)
-                        if direction[2] < -0.9 && origin[2] > 300.0 {
-                            static HITD_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                            let n = HITD_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if n < 10 && !hits.is_empty() {
-                                let h = &hits[0];
-                                web_sys::console::log_1(&format!(
-                                    "[WHEEL-RAY] dist={:.1} pos=({:.1},{:.1},{:.1}) model='{}' origin=({:.1},{:.1},{:.1})",
-                                    h.distance, h.position[0], h.position[1], h.position[2],
-                                    h.model_name, origin[0], origin[1], origin[2]
-                                ).into());
-                            }
-                        }
                         for hit in &hits {
                             if detailed {
                                 let model_key = player.alloc_datum(Datum::Symbol("model".to_string()));
@@ -2202,16 +2138,6 @@ impl Shockwave3dMemberHandlers {
                                     }
                                 )));
                             }
-                        }
-                    }
-                    // Debug: log hit count
-                    {
-                        static HIT_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                        let n = HIT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if n < 5 {
-                            web_sys::console::log_1(&format!(
-                                "[RAY] → {} hits", results.len()
-                            ).into());
                         }
                     }
 
@@ -2348,7 +2274,7 @@ fn render_3d_to_rgba(
     match renderer.render_to_default_framebuffer(&context, (0, 0), scene, width, height, Some(runtime_state)) {
         Ok(_) => {}
         Err(e) => {
-            web_sys::console::log_1(&format!("[W3D] render_3d_to_rgba failed: {:?}", e).into());
+            console_warn!("[W3D] render_3d_to_rgba failed: {:?}", e);
             return vec![200u8; (width * height * 4) as usize];
         }
     }

@@ -107,9 +107,9 @@ impl FlashObjectDatumHandlers {
                     convert_js_result_to_lingo_datum(player, result, &flash_ref.path, flash_ref.cast_lib, flash_ref.cast_member)
                 }
                 Err(e) => {
-                    web_sys::console::warn_1(&format!(
+                    warn!(
                         "FlashObject.call WASM ERROR {}: {:?}", method_path, e
-                    ).into());
+                    );
                     Ok(player.alloc_datum(Datum::Void))
                 }
             }

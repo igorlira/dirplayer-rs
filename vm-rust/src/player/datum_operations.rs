@@ -693,20 +693,30 @@ pub fn divide_datums(
             Datum::Point(vals, 0b11) // float / anything = float
         }
         (Datum::Point(a, af), Datum::Point(b, bf)) => {
-            let vals = [
-                if b[0] == 0.0 { 0.0 } else { a[0] / b[0] },
-                if b[1] == 0.0 { 0.0 } else { a[1] / b[1] },
-            ];
+            // Per-component int-or-float division: if either operand is float
+            // at that index, do float division; else integer truncating division.
             let flags = *af | *bf;
+            let vals = [
+                if b[0] == 0.0 { 0.0 }
+                else if Datum::inline_is_float(flags, 0) { a[0] / b[0] }
+                else { (a[0] as i32 / b[0] as i32) as f64 },
+                if b[1] == 0.0 { 0.0 }
+                else if Datum::inline_is_float(flags, 1) { a[1] / b[1] }
+                else { (a[1] as i32 / b[1] as i32) as f64 },
+            ];
             Datum::Point(vals, flags)
         }
         (Datum::Point(a, af), Datum::List(_, ref_list, _)) if ref_list.len() == 2 => {
             let (bv, bf) = list_to_point_vals(player, ref_list)?;
-            let vals = [
-                if bv[0] == 0.0 { 0.0 } else { a[0] / bv[0] },
-                if bv[1] == 0.0 { 0.0 } else { a[1] / bv[1] },
-            ];
             let flags = *af | bf;
+            let vals = [
+                if bv[0] == 0.0 { 0.0 }
+                else if Datum::inline_is_float(flags, 0) { a[0] / bv[0] }
+                else { (a[0] as i32 / bv[0] as i32) as f64 },
+                if bv[1] == 0.0 { 0.0 }
+                else if Datum::inline_is_float(flags, 1) { a[1] / bv[1] }
+                else { (a[1] as i32 / bv[1] as i32) as f64 },
+            ];
             Datum::Point(vals, flags)
         }
         (Datum::Rect(a, af), Datum::Int(right)) => {

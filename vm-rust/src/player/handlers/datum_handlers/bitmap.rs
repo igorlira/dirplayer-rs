@@ -737,37 +737,6 @@ impl BitmapDatumHandlers {
                 .get_bitmap_mut(*dst_bitmap_ref)
                 .unwrap();
 
-            // Debug: log copyPixels calls for 8-bit grayscale destinations
-            if dst_bitmap.bit_depth == 8 {
-                // Count non-white source pixels in the copy rect
-                let mut src_nonwhite = 0usize;
-                let mut src_first_nw = String::new();
-                for y in sy1.max(0)..sy2.min(src_bitmap.height as i32) {
-                    for x in sx1.max(0)..sx2.min(src_bitmap.width as i32) {
-                        let idx = (y as usize * src_bitmap.width as usize + x as usize) * 4;
-                        if idx + 3 < src_bitmap.data.len() {
-                            let r = src_bitmap.data[idx];
-                            let g = src_bitmap.data[idx+1];
-                            let b = src_bitmap.data[idx+2];
-                            let a = src_bitmap.data[idx+3];
-                            if r != 255 || g != 255 || b != 255 {
-                                src_nonwhite += 1;
-                                if src_first_nw.is_empty() {
-                                    src_first_nw = format!("({},{})=({},{},{},{})", x, y, r, g, b, a);
-                                }
-                            }
-                        }
-                    }
-                }
-                web_sys::console::log_1(&format!(
-                    "[copyPixels] src={}x{} d={} → dst={}x{} d={} gs rect=({},{},{},{}) src_nonwhite={} first={}",
-                    src_bitmap.width, src_bitmap.height, src_bitmap.bit_depth,
-                    dst_bitmap.width, dst_bitmap.height, dst_bitmap.bit_depth,
-                    sx1, sy1, sx2, sy2,
-                    src_nonwhite,
-                    if src_first_nw.is_empty() { "none".to_string() } else { src_first_nw },
-                ).into());
-            }
             dst_bitmap.copy_pixels(
                 &palettes,
                 &src_bitmap,
