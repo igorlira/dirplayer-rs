@@ -14,7 +14,18 @@ use log::debug;
 
 use super::context::WebGL2Context;
 use super::mesh3d::Mesh3dBuffers;
-use crate::director::chunks::w3d::types::*;
+use crate::{
+    director::chunks::w3d::types::*,
+    console_warn,
+};
+
+const SCENE3D_LOG: bool = false;
+
+fn log(msg: &str) {
+    if SCENE3D_LOG {
+        web_sys::console::log_1(&format!("[SCENE-3D] {}", msg).into());
+    }
+}
 
 /// GPU state for a single Shockwave3D member
 struct MemberGpuData {
@@ -934,12 +945,12 @@ void main() {
                 return Ok(());
             }
             // Scene changed — remove stale data and rebuild
-            web_sys::console::log_1(&format!(
+            log(&format!(
                 "[W3D-GPU] Rebuilding GPU data for {:?}: version {:?} → {:?} (nodes={}, clod={}, raw={}, tex={}, shaders={})",
                 key, existing.scene_version, current_version,
                 scene.nodes.len(), scene.clod_meshes.len(), scene.raw_meshes.len(),
                 scene.texture_images.len(), scene.shaders.len(),
-            ).into());
+            ));
             self.logged_members.remove(&key);
         }
         self.member_data.remove(&key);
@@ -1315,10 +1326,10 @@ void main() {
                                 if resource_name.contains("MAP") || resource_name.starts_with("map")
                                     || resource_name.starts_with("Main")
                                 {
-                                    web_sys::console::log_1(&format!(
+                                    log(&format!(
                                         "[W3D-UV2-SYNC] resource=\"{}\" mesh={} uv2_count={}",
                                         resource_name, mesh_idx, mesh.tex_coords[1].len()
-                                    ).into());
+                                    ));
                                 }
                             }
                         }
@@ -1376,21 +1387,6 @@ void main() {
         gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
         gl.uniform3f(shader.u_camera_pos.as_ref(), camera_pos[0], camera_pos[1], camera_pos[2]);
-        // Log camera info once
-        {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            static LOGGED: AtomicBool = AtomicBool::new(false);
-            if !LOGGED.swap(true, Ordering::Relaxed) {
-                web_sys::console::log_1(&format!(
-                    "[3D-VIEW] camera_pos=({:.1},{:.1},{:.1}) view_mat=[{:.3},{:.3},{:.3},{:.3}, {:.3},{:.3},{:.3},{:.3}, {:.3},{:.3},{:.3},{:.3}, {:.3},{:.3},{:.3},{:.3}]",
-                    camera_pos[0], camera_pos[1], camera_pos[2],
-                    view_matrix[0], view_matrix[1], view_matrix[2], view_matrix[3],
-                    view_matrix[4], view_matrix[5], view_matrix[6], view_matrix[7],
-                    view_matrix[8], view_matrix[9], view_matrix[10], view_matrix[11],
-                    view_matrix[12], view_matrix[13], view_matrix[14], view_matrix[15],
-                ).into());
-            }
-        }
 
         // Set up lighting (pass camera pos for headlight direction)
         self.setup_lights(gl, shader, scene, &camera_pos, runtime_state);
@@ -1447,15 +1443,6 @@ void main() {
             let detached_nodes: std::collections::HashSet<&str> = runtime_state
                 .map(|rs| rs.detached_nodes.iter().map(|s| s.as_str()).collect())
                 .unwrap_or_default();
-            // Debug: log detached nodes once
-            {
-                static DET_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                if DET_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 && !detached_nodes.is_empty() {
-                    web_sys::console::log_1(&format!(
-                        "[DETACHED] {} nodes: {:?}", detached_nodes.len(), detached_nodes
-                    ).into());
-                }
-            }
 
             // Check if active camera has a rootNode filter
             let root_node_filter: Option<String> = runtime_state.and_then(|rs| {
@@ -1492,17 +1479,17 @@ void main() {
                     let res = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
                     format!("{}→{}", n.name, res)
                 }).collect();
-                web_sys::console::log_1(&format!(
+                log(&format!(
                     "[3D] Scene {:?}: {} model_nodes={:?}, mesh_groups={:?}, textures={}",
                     member_key, model_nodes.len(), model_names, mesh_group_keys,
                     gpu_data.map(|d| d.textures.len()).unwrap_or(0)
-                ).into());
+                ));
                 // Log motion summary (count only, not per-track)
-                web_sys::console::log_1(&format!(
+                log(&format!(
                     "[3D] {} motions, skeletons={:?}",
                     scene.motions.len(),
                     scene.skeletons.iter().map(|s| format!("{}({}b)", s.name, s.bones.len())).collect::<Vec<_>>(),
-                ).into());
+                ));
             }
 
             // Evaluate motion animations each frame
@@ -1593,21 +1580,6 @@ void main() {
                     if n.name.starts_with("SB_") && n.parent_name.contains("SkyBox") { 0 } else { 1 }
                 });
 
-                // One-time log: how many models this camera pass will render
-                {
-                    static PASS_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                    let n = PASS_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if n < 10 {
-                        let visible_count = sorted_model_nodes.iter().filter(|n| {
-                            runtime_state.and_then(|rs| rs.node_visibility.get(&n.name))
-                                .copied().unwrap_or(1) != 0
-                        }).count();
-                        web_sys::console::log_1(&format!(
-                            "[W3D-PASS] camera={:?} root_filter={:?} total_models={} visible={} clear={}",
-                            self.active_camera, root_node_filter, sorted_model_nodes.len(), visible_count, clear_fbo
-                        ).into());
-                    }
-                }
                 // PASS 1: Render opaque geometry (skybox first, then scene)
                 for model_node in &sorted_model_nodes {
                     if let Some(rs) = runtime_state {
@@ -1627,10 +1599,10 @@ void main() {
                         if let Ok(mut guard) = LOGGED_OP.lock() {
                             let set = guard.get_or_insert_with(HashSet::new);
                             if set.insert(model_node.name.clone()) {
-                                web_sys::console::log_1(&format!(
+                                log(&format!(
                                     "[W3D-OPACITY] model=\"{}\" opacity={:.3} pass={}",
                                     model_node.name, opacity, if opacity < 0.999 { "transparent" } else { "opaque" }
-                                ).into());
+                                ));
                             }
                         }
                     }
@@ -2026,28 +1998,6 @@ void main() {
             };
 
             if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
-                // One-time skybox draw diagnostic
-                if model_node.name.starts_with("SB_") {
-                    use std::sync::atomic::{AtomicBool, Ordering};
-                    static LOGGED_SB: AtomicBool = AtomicBool::new(false);
-                    if !LOGGED_SB.swap(true, Ordering::Relaxed) {
-                        let shader_name = runtime_state
-                            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
-                            .cloned()
-                            .unwrap_or_else(|| model_node.shader_name.clone());
-                        let w3d_shader = Self::find_shader_ci(&scene.shaders, &shader_name);
-                        let tex_names: Vec<String> = w3d_shader.map(|s| s.texture_layers.iter().map(|l| l.name.clone()).collect()).unwrap_or_default();
-                        web_sys::console::log_1(&format!(
-                            "[W3D-SKYBOX] model=\"{}\" resource=\"{}\" mesh_count={} shader=\"{}\" tex_layers={:?} world_pos=({:.0},{:.0},{:.0}) scale=({:.0},{:.0},{:.0})",
-                            model_node.name, resource, mesh_group.len(), shader_name, tex_names,
-                            world_matrix[12], world_matrix[13], world_matrix[14],
-                            (world_matrix[0]*world_matrix[0]+world_matrix[1]*world_matrix[1]+world_matrix[2]*world_matrix[2]).sqrt(),
-                            (world_matrix[4]*world_matrix[4]+world_matrix[5]*world_matrix[5]+world_matrix[6]*world_matrix[6]).sqrt(),
-                            (world_matrix[8]*world_matrix[8]+world_matrix[9]*world_matrix[9]+world_matrix[10]*world_matrix[10]).sqrt(),
-                        ).into());
-                    }
-                }
-
                 for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
                     let bound = self.bind_material_for_mesh(
                         gl, shader, scene, model_node,
@@ -2055,28 +2005,6 @@ void main() {
                     );
                     if !bound {
                         self.bind_material(gl, shader, scene, model_node, member_key, runtime_state, force_blend);
-                        // Log models that fall back to bind_material (no per-mesh shader binding)
-                        {
-                            use std::sync::Mutex;
-                            use std::collections::HashSet;
-                            static LOGGED_FB: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-                            if let Ok(mut guard) = LOGGED_FB.lock() {
-                                let set = guard.get_or_insert_with(HashSet::new);
-                                if set.insert(model_node.name.clone()) {
-                                    let eff_shader = runtime_state
-                                        .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
-                                        .cloned()
-                                        .unwrap_or_else(|| model_node.shader_name.clone());
-                                    let is_default = eff_shader.is_empty() || eff_shader.eq_ignore_ascii_case("DefaultShader");
-                                    if is_default {
-                                        web_sys::console::log_1(&format!(
-                                            "[W3D-DEFSHADER] model=\"{}\" resource=\"{}\" shader=\"{}\" parent=\"{}\"",
-                                            model_node.name, resource, eff_shader, model_node.parent_name
-                                        ).into());
-                                    }
-                                }
-                            }
-                        }
                     }
 
                     if mesh_buf.has_bones && has_skeleton_data {
@@ -2105,11 +2033,11 @@ void main() {
                 if let Ok(mut guard) = LOGGED_MISS.lock() {
                     let set = guard.get_or_insert_with(HashSet::new);
                     if set.insert(model_node.name.clone()) {
-                        web_sys::console::warn_1(&format!(
+                        console_warn!(
                             "[W3D-MISS] model=\"{}\" resource=\"{}\" (res=\"{}\", mres=\"{}\") — NOT in mesh_groups({} keys). parent=\"{}\"",
                             model_node.name, resource, model_node.resource_name,
                             model_node.model_resource_name, gpu_data.mesh_groups.len(), model_node.parent_name,
-                        ).into());
+                        );
                     }
                 }
             }
@@ -2123,44 +2051,6 @@ void main() {
             // Restore default culling after #back or #both
             gl.enable(WebGl2RenderingContext::CULL_FACE);
             gl.cull_face(WebGl2RenderingContext::FRONT);
-        }
-        // Log when a player/actor/bot model is actually drawn (once per model name)
-        if model_node.name.contains("PlayerModel") || model_node.name.contains("BotModel")
-            || model_node.name.contains("ActorModel") || model_node.name.contains("PAX_")
-            || model_node.name.contains("PPX_") || model_node.name.contains("BPX_")
-        {
-            use std::sync::Mutex;
-            use std::collections::HashSet;
-            static LOGGED_DRAW: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-            if let Ok(mut guard) = LOGGED_DRAW.lock() {
-                let set = guard.get_or_insert_with(HashSet::new);
-                if set.insert(model_node.name.clone()) {
-                    let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
-                    let found = self.member_data.get(member_key)
-                        .and_then(|d| d.mesh_groups.get(resource))
-                        .map(|g| g.len()).unwrap_or(0);
-                    // Get shader override info
-                    let shader_override = runtime_state
-                        .and_then(|rs| rs.node_shaders.get(&model_node.name))
-                        .map(|m| format!("{:?}", m))
-                        .unwrap_or_else(|| "none".to_string());
-                    // Get effective opacity
-                    let effective_shader_name = runtime_state
-                        .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
-                        .cloned()
-                        .unwrap_or_else(|| model_node.shader_name.clone());
-                    let opacity = Self::find_shader_ci(&scene.shaders, &effective_shader_name)
-                        .and_then(|s| Self::find_material_ci(&scene.materials, &s.material_name))
-                        .map(|m| m.opacity)
-                        .unwrap_or(1.0);
-                    web_sys::console::log_1(&format!(
-                        "[W3D-DRAW] model=\"{}\" resource=\"{}\" meshes={} pos=({:.1},{:.1},{:.1}) parent=\"{}\" shader_overrides={} eff_shader=\"{}\" opacity={:.2}",
-                        model_node.name, resource, found,
-                        world_matrix[12], world_matrix[13], world_matrix[14],
-                        model_node.parent_name, shader_override, effective_shader_name, opacity,
-                    ).into());
-                }
-            }
         }
     }
 
@@ -2599,9 +2489,9 @@ void main() {
                 gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
                 gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
                 gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
-                web_sys::console::log_1(&format!(
+                log(&format!(
                     "[3D-CUBEMAP] Created cubemap: \"{}\"", base_name
-                ).into());
+                ));
                 cube_maps.insert(base_name.clone(), cube_tex);
             }
             gl.bind_texture(WebGl2RenderingContext::TEXTURE_CUBE_MAP, None);
@@ -2975,56 +2865,9 @@ void main() {
             }
         }
 
-        // Debug: log shaders with 3+ renderable layers (one-time per combination)
-        if result.extra_layers.len() >= 2 {
-            use std::sync::Mutex;
-            use std::collections::HashSet;
-            static LOGGED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-            let names: Vec<&str> = layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.name.as_str()).collect();
-            let key = format!("{:?}", names);
-            if let Ok(mut guard) = LOGGED.lock() {
-                let set = guard.get_or_insert_with(HashSet::new);
-                if set.insert(key.clone()) {
-                    let blends: Vec<u8> = layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.blend_func).collect();
-                    let intensities: Vec<f32> = layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.intensity).collect();
-                    web_sys::console::warn_1(&format!(
-                        "[W3D-TEX3] 3+ layers: names={:?} blend_funcs={:?} intensities={:?}",
-                        names, blends, intensities
-                    ).into());
-                }
-            }
-        }
-
         // Do not promote textureList[2+] into diffuse when textureList[1] is empty.
         // Director uses that layout for lightmap-only meshes, which should render via
         // the non-textured material path plus the extra lightmap layer.
-
-        // Diagnostic: log multi-layer binding results for shaders with 2+ named layers
-        {
-            let named_count = layers.iter().filter(|l| !l.name.is_empty()).count();
-            if named_count >= 2 {
-                use std::sync::Mutex;
-                use std::collections::HashSet;
-                static LOGGED_BIND: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-                let names: Vec<&str> = layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.name.as_str()).collect();
-                let key = format!("{:?}", names);
-                if let Ok(mut guard) = LOGGED_BIND.lock() {
-                    let set = guard.get_or_insert_with(HashSet::new);
-                    if set.insert(key) {
-                        let found_in_gpu: Vec<bool> = layers.iter()
-                            .filter(|l| !l.name.is_empty())
-                            .map(|l| gpu_data.textures.contains_key(&l.name.to_lowercase()))
-                            .collect();
-                        web_sys::console::log_1(&format!(
-                            "[W3D-TEXBIND] layers={:?} found_in_gpu={:?} diffuse={} extra_layers={} blend_funcs={:?}",
-                            names, found_in_gpu,
-                            result.diffuse.is_some(), result.extra_layers.len(),
-                            layers.iter().filter(|l| !l.name.is_empty()).map(|l| l.blend_func).collect::<Vec<_>>()
-                        ).into());
-                    }
-                }
-            }
-        }
 
         result
     }
@@ -3232,52 +3075,10 @@ void main() {
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         force_blend: bool,
     ) -> bool {
-        // One-time skybox material diagnostic
-        if model_node.name.starts_with("SB_") {
-            use std::sync::Mutex;
-            use std::collections::HashSet;
-            static LOGGED_SB_MAT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-            let key = format!("{}:{}", model_node.name, mesh_idx);
-            if let Ok(mut guard) = LOGGED_SB_MAT.lock() {
-                let set = guard.get_or_insert_with(HashSet::new);
-                if set.insert(key) {
-                    let has_override = runtime_state
-                        .and_then(|rs| Self::node_shader_override(rs, &model_node.name, Some(mesh_idx)))
-                        .is_some();
-                    let binding_names: Vec<String> = res_info.map(|r| r.shader_bindings.iter()
-                        .map(|b| {
-                            let mesh_shader = b.mesh_bindings.get(mesh_idx).cloned().unwrap_or_default();
-                            format!("{}[{}]={}", b.name, mesh_idx, mesh_shader)
-                        }).collect()
-                    ).unwrap_or_default();
-                    let res_exists = res_info.is_some();
-                    web_sys::console::log_1(&format!(
-                        "[W3D-SB-MAT] model=\"{}\" mesh={} has_override={} res_exists={} bindings={:?} node_shader=\"{}\"",
-                        model_node.name, mesh_idx, has_override, res_exists, binding_names, model_node.shader_name
-                    ).into());
-                }
-            }
-        }
-
         // Check per-mesh shader override first (from Lingo shaderList[I] = shaderRef)
         if let Some(override_name) = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, &model_node.name, Some(mesh_idx)))
         {
-            // Log when DefaultShader override is used on MAP models
-            if override_name.eq_ignore_ascii_case("DefaultShader") && model_node.name.contains("MAP") {
-                use std::sync::Mutex;
-                use std::collections::HashSet;
-                static LOGGED_DS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-                if let Ok(mut guard) = LOGGED_DS.lock() {
-                    let set = guard.get_or_insert_with(HashSet::new);
-                    if set.insert(format!("{}:{}", model_node.name, mesh_idx)) {
-                        web_sys::console::log_1(&format!(
-                            "[W3D-DEFSHADER-OVERRIDE] model=\"{}\" mesh={} override=\"{}\"",
-                            model_node.name, mesh_idx, override_name
-                        ).into());
-                    }
-                }
-            }
             if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, override_name) {
                 let mat = if !w3d_shader.material_name.is_empty() {
                     Self::find_material_ci(&scene.materials, &w3d_shader.material_name)
@@ -3336,31 +3137,6 @@ void main() {
             }
         }
 
-        // Diagnostic: log per-mesh shader candidates for multi-mesh models
-        if res_info.shader_bindings.iter().any(|b| b.mesh_bindings.len() > 1) {
-            use std::sync::Mutex;
-            use std::collections::HashSet;
-            static LOGGED_MM: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-            let key = format!("{}:{}", model_node.name, mesh_idx);
-            if let Ok(mut guard) = LOGGED_MM.lock() {
-                let set = guard.get_or_insert_with(HashSet::new);
-                if set.insert(key) {
-                    let tex_info: Vec<String> = candidate_names.iter().map(|c| {
-                        let s = Self::resolve_shader_candidate_ci(scene, c);
-                        let layers: Vec<String> = s.map(|s| s.texture_layers.iter().map(|l| l.name.clone()).collect()).unwrap_or_default();
-                        let in_gpu: Vec<bool> = s.map(|s| s.texture_layers.iter().map(|l| {
-                            self.member_data.get(member_key).map(|g| g.textures.contains_key(&l.name.to_lowercase())).unwrap_or(false)
-                        }).collect()).unwrap_or_default();
-                        format!("{}(tex={:?},gpu={:?})", c, layers, in_gpu)
-                    }).collect();
-                    web_sys::console::log_1(&format!(
-                        "[W3D-MESH-SHADER] model=\"{}\" mesh={} candidates={:?}",
-                        model_node.name, mesh_idx, tex_info,
-                    ).into());
-                }
-            }
-        }
-
         let effective_shader_name = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
             .cloned()
@@ -3413,61 +3189,6 @@ void main() {
                 tex_bound = Self::bind_texture_layers(gl, shader, &layers);
             }
 
-            // Log MAPSTC models where shader is found but texture binding fails
-            if !tex_bound && w3d_shader.is_some() && model_node.name.contains("MAPSTC") {
-                use std::sync::Mutex;
-                use std::collections::HashSet;
-                static LOGGED_NOTEX: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-                let key = format!("{}:{}:{}", model_node.name, mesh_idx, candidate);
-                if let Ok(mut guard) = LOGGED_NOTEX.lock() {
-                    let set = guard.get_or_insert_with(HashSet::new);
-                    if set.insert(key) {
-                        let tex_names: Vec<String> = w3d_shader.map(|s| s.texture_layers.iter()
-                            .map(|l| l.name.clone()).collect()).unwrap_or_default();
-                        // Check if textures exist in GPU
-                        let tex_in_gpu: Vec<bool> = w3d_shader.map(|s| s.texture_layers.iter()
-                            .map(|l| {
-                                self.member_data.get(member_key)
-                                    .map(|gpu| gpu.textures.contains_key(&l.name.to_lowercase()))
-                                    .unwrap_or(false)
-                            }).collect()).unwrap_or_default();
-                        let mat_opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
-                        let all_candidates: Vec<&str> = candidate_names.iter().map(|s| s.as_str()).collect();
-                        // Only log non-DefaultShader candidates (these are the real issues)
-                        if candidate != "DefaultShader" && candidate != "default" {
-                            web_sys::console::log_1(&format!(
-                                "[W3D-NOTEX] model=\"{}\" mesh={} shader=\"{}\" tex={:?} in_gpu={:?} all_candidates={:?}",
-                                model_node.name, mesh_idx, candidate, tex_names, tex_in_gpu, all_candidates
-                            ).into());
-                        }
-                    }
-                }
-            }
-
-            // Skybox candidate diagnostic
-            if model_node.name.starts_with("SB_") {
-                use std::sync::Mutex;
-                use std::collections::HashSet;
-                static LOGGED_SBC: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-                let key = format!("{}:{}:{}", model_node.name, mesh_idx, candidate);
-                if let Ok(mut guard) = LOGGED_SBC.lock() {
-                    let set = guard.get_or_insert_with(HashSet::new);
-                    if set.insert(key) {
-                        let shader_found = w3d_shader.is_some();
-                        let tex_layers: Vec<String> = w3d_shader.map(|s| s.texture_layers.iter().map(|l| l.name.clone()).collect()).unwrap_or_default();
-                        let mat_info = mat.map(|m| format!("diffuse=[{:.2},{:.2},{:.2}] emissive=[{:.2},{:.2},{:.2}] ambient=[{:.2},{:.2},{:.2}]",
-                            m.diffuse[0], m.diffuse[1], m.diffuse[2],
-                            m.emissive[0], m.emissive[1], m.emissive[2],
-                            m.ambient[0], m.ambient[1], m.ambient[2],
-                        )).unwrap_or_else(|| "NO MATERIAL".to_string());
-                        web_sys::console::log_1(&format!(
-                            "[W3D-SB-CAND] model=\"{}\" mesh={} candidate=\"{}\" shader_found={} tex_bound={} mat={}",
-                            model_node.name, mesh_idx, candidate, shader_found, tex_bound, mat_info
-                        ).into());
-                    }
-                }
-            }
-
             if tex_bound {
                 if let Some(m) = mat {
                     self.set_material_uniforms(gl, shader, m);
@@ -3497,10 +3218,10 @@ void main() {
                 let set = guard.get_or_insert_with(HashSet::new);
                 if set.insert(key) {
                     let has_best = best_material.is_some();
-                    web_sys::console::log_1(&format!(
+                    log(&format!(
                         "[W3D-NOTEX-MESH] model=\"{}\" mesh={} candidates={:?} has_best_material={} → using material-only (no texture)",
                         model_node.name, mesh_idx, candidate_names, has_best,
-                    ).into());
+                    ));
                 }
             }
         }
@@ -3664,11 +3385,11 @@ void main() {
             if !BONE_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 let w = &world_matrices[0];
                 let ib = &inv_bind[0];
-                web_sys::console::log_1(&format!(
+                log(&format!(
                     "[3D-BONE0] rootLock={} world_pos=({:.1},{:.1},{:.1}) inv_bind_pos=({:.1},{:.1},{:.1}) skin_pos=({:.2},{:.2},{:.2})",
                     root_lock, w[12], w[13], w[14], ib[12], ib[13], ib[14],
                     skinning_matrices[12], skinning_matrices[13], skinning_matrices[14]
-                ).into());
+                ));
             }
         }
 
@@ -3849,10 +3570,10 @@ void main() {
                 let light_info: Vec<String> = scene.lights.iter().map(|l| {
                     format!("{}({:?}, color=[{:.2},{:.2},{:.2}])", l.name, l.light_type, l.color[0], l.color[1], l.color[2])
                 }).collect();
-                web_sys::console::log_1(&format!(
+                log(&format!(
                     "[W3D-LIGHTS] {} lights: {:?}",
                     scene.lights.len(), light_info
-                ).into());
+                ));
             }
         }
 
@@ -4017,10 +3738,10 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Optio
             Ok(img) => img.to_rgba8(),
             Err(e) => {
                 let header: Vec<String> = data.iter().take(8).map(|b| format!("{:02X}", b)).collect();
-                web_sys::console::warn_1(&format!(
+                console_warn!(
                     "[3D-TEX-DECODE] Failed to decode {} bytes, header=[{}]: {}",
                     data.len(), header.join(" "), e
-                ).into());
+                );
                 return None;
             }
         };
@@ -4047,10 +3768,10 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Optio
                 Ok(img) => img.to_rgba8(),
                 Err(e) => {
                     let header: Vec<String> = data.iter().take(8).map(|b| format!("{:02X}", b)).collect();
-                    web_sys::console::warn_1(&format!(
+                    console_warn!(
                         "[3D-TEX-DECODE] Failed to decode {} bytes, header=[{}]: {}",
                         data.len(), header.join(" "), e
-                    ).into());
+                    );
                     return None;
                 }
             };
@@ -4076,10 +3797,10 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Optio
     // Verify data size matches expected
     let expected_size = (width as usize) * (height as usize) * 4;
     if rgba_data.len() != expected_size {
-        web_sys::console::error_1(&format!(
+        console_warn!(
             "[3D-TEX] Size mismatch! {}x{} expects {} bytes but got {}",
             width, height, expected_size, rgba_data.len()
-        ).into());
+        );
         return None;
     }
 
@@ -4095,7 +3816,7 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Optio
         Some(&rgba_data),
     );
     if let Err(ref e) = upload_result {
-        web_sys::console::error_1(&format!("[3D-TEX] tex_image_2d failed: {:?}", e).into());
+        console_warn!("[3D-TEX] tex_image_2d failed: {:?}", e);
     }
     gl.generate_mipmap(WebGl2RenderingContext::TEXTURE_2D);
     gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);

@@ -28,7 +28,7 @@ use crate::player::{
     font::{measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference},
     geometry::IntRect,
     handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
-    score::{get_concrete_sprite_rect, get_sprite_at, ScoreRef},
+    score::{get_concrete_sprite_render_rect as get_concrete_sprite_rect, get_sprite_at, ScoreRef},
     sprite::{ColorRef, CursorRef, is_skew_flip},
     datum_ref::DatumRef, DirPlayer,
 };
@@ -118,10 +118,11 @@ impl WebGL2Renderer {
 
         // Create WebGL2 context with pixel-perfect settings:
         // - antialias: false - disable MSAA to prevent sub-pixel blurring
-        // - alpha: false - stage is always opaque, no HTML page bleed-through
+        // - alpha: true - required for copyTexSubImage2D compatibility with
+        //   RGBA8 trails textures. Stage is cleared to opaque bg each frame.
         let context_options = js_sys::Object::new();
         js_sys::Reflect::set(&context_options, &"antialias".into(), &false.into())?;
-        js_sys::Reflect::set(&context_options, &"alpha".into(), &false.into())?;
+        js_sys::Reflect::set(&context_options, &"alpha".into(), &true.into())?;
 
         let gl = canvas
             .get_context_with_context_options("webgl2", &context_options)?
@@ -217,10 +218,13 @@ impl WebGL2Renderer {
             None => return,
         };
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&tex));
+        // Use RGBA8 (sized) for the internal format. The default framebuffer
+        // may be RGBA8 or RGB8; copyTexSubImage2D requires a compatible format.
+        // RGBA8 matches the most common default framebuffer configuration.
         let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
             WebGl2RenderingContext::TEXTURE_2D,
             0,
-            WebGl2RenderingContext::RGBA as i32,
+            WebGl2RenderingContext::RGBA8 as i32,
             width as i32,
             height as i32,
             0,
@@ -568,6 +572,11 @@ impl WebGL2Renderer {
 
         let gl = self.context.gl();
         self.context.set_blend_alpha();
+
+        // Set projection matrix (required after shader program switch)
+        if let Some(ref loc) = program.u_projection {
+            gl.uniform_matrix4fv_with_f32_array(Some(loc), false, &self.projection_matrix);
+        }
 
         // Bind texture
         gl.active_texture(WebGl2RenderingContext::TEXTURE0);
@@ -1017,7 +1026,7 @@ impl WebGL2Renderer {
                 member_ref,
                 rect,
                 sprite.ink,
-                sprite.blend,
+                sprite.effective_blend(),
                 sprite.flip_h,
                 sprite.flip_v,
                 sprite.rotation,
@@ -1989,11 +1998,16 @@ impl WebGL2Renderer {
         let is_ink36_indexed = is_indexed && ink == 36;
 
         let colorize_params = if bitmap_bit_depth == 1 && (ink == 0 || ink == 36) {
-            // 1-bit bitmaps with ink 0: ALWAYS apply foreColor/bgColor
-            // This is Director behavior - 1-bit bitmaps always use sprite colors
+            // 1-bit bitmaps: apply foreColor/bgColor, but only when the sprite
+            // has explicitly set them OR the values differ from Director defaults
+            // (foreColor=black, bgColor=white). Otherwise the bitmap renders with
+            // its natural colors. Without this guard, a default-black foreColor
+            // would tint the bitmap solidly when it shouldn't be tinted at all.
+            let apply_fg = has_fore_color || fg_color_rgb != (0, 0, 0);
+            let apply_bg = has_back_color || bg_color_rgb != (255, 255, 255);
             Some((
-                true, // has_fore is always true for 1-bit bitmaps
-                true, // has_back is always true for 1-bit bitmaps
+                apply_fg,
+                apply_bg,
                 fg_color_rgb.0,
                 fg_color_rgb.1,
                 fg_color_rgb.2,
@@ -3793,6 +3807,29 @@ impl WebGL2Renderer {
         box_drop_shadow: u16,
         tab_stops: &[crate::player::cast_member::TabStop],
     ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
+        // Stage auto-scale: when drawRect > movie.rect, caller-provided width/
+        // height are already scaled (via get_concrete_sprite_render_rect), but
+        // font_size and line spacing are not. Scale them here so the text
+        // rasterizes at the target resolution — crisp in the enlarged viewport
+        // rather than a stretched low-res bitmap. Uniform scale factor is used
+        // so text preserves its font's aspect ratio regardless of drawRect
+        // non-uniformity.
+        let (scale_x, scale_y) = crate::player::stage::stage_scale(player);
+        let scale = scale_x.min(scale_y);
+        let font_size = ((font_size as f64) * scale).round().max(1.0) as u16;
+        let line_spacing = ((line_spacing as f64) * scale).round() as u16;
+        let top_spacing = ((top_spacing as f64) * scale).round() as i16;
+        let bottom_spacing = ((bottom_spacing as f64) * scale).round() as i16;
+        let styled_spans_scaled: Option<Vec<StyledSpan>> = styled_spans.map(|spans| {
+            spans.iter().map(|s| {
+                let mut style = s.style.clone();
+                if let Some(sz) = style.font_size {
+                    style.font_size = Some(((sz as f64) * scale).round().max(1.0) as i32);
+                }
+                StyledSpan { text: s.text.clone(), style }
+            }).collect()
+        });
+        let styled_spans = styled_spans_scaled.as_ref();
         let styled_span_count = styled_spans.map_or(0, |s| s.len());
         // Use the text member's own font_size for PFR rasterization target.
         // Taking the max of styled span sizes causes pixel fonts to be rasterized
@@ -3945,7 +3982,11 @@ impl WebGL2Renderer {
         // Measure actual text height and shrink render_height if the measured
         // content is smaller. Never grow beyond the member's rect — the rect
         // defines the visual boundary and the background fill must not exceed it.
-        if word_wrap && render_width > 0 {
+        // Only shrink when a real PFR bitmap font is loaded — for system fonts
+        // measure_text uses the system_font fallback (small char_height) which
+        // returns wrong measurements that would shrink the rect incorrectly.
+        let is_pfr_font_for_shrink = font.char_widths.is_some();
+        if is_pfr_font_for_shrink && word_wrap && render_width > 0 {
             let (_, measured_h) = measure_text_wrapped(
                 text, &font, render_width, true,
                 line_spacing, top_spacing, bottom_spacing, 0,
@@ -3955,7 +3996,7 @@ impl WebGL2Renderer {
             if measured_h > 0 && measured_h < render_height {
                 render_height = measured_h;
             }
-        } else if !word_wrap {
+        } else if is_pfr_font_for_shrink && !word_wrap {
             let (_, measured_h) = measure_text(
                 text, &font, None, line_spacing, top_spacing, bottom_spacing,
             );
@@ -5095,6 +5136,18 @@ impl WebGL2Renderer {
         self.context.gl().viewport(0, 0, width as i32, height as i32);
         // Update projection matrix for new size
         self.projection_matrix = Self::create_ortho_matrix(width as f32, height as f32);
+    }
+
+    /// Resize the canvas/viewport to `draw_w`x`draw_h` while keeping the sprite
+    /// coordinate space at `movie_w`x`movie_h` — sprites drawn at their native
+    /// movie coords fill the entire (larger or smaller) viewport, matching
+    /// Director's drawRect-scales-movie-to-stage behavior.
+    pub fn set_draw_rect_scaled(&mut self, draw_w: u32, draw_h: u32, movie_w: f32, movie_h: f32) {
+        self.size = (draw_w, draw_h);
+        self.canvas.set_width(draw_w);
+        self.canvas.set_height(draw_h);
+        self.context.gl().viewport(0, 0, draw_w as i32, draw_h as i32);
+        self.projection_matrix = Self::create_ortho_matrix(movie_w, movie_h);
     }
 
     /// Get the canvas
