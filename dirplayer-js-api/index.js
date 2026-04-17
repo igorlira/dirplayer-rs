@@ -110,3 +110,9 @@ export function onFlashMemberUnloaded(castLib, castMember) {
     console.log('Flash member unloaded:', castLib, castMember);
   }
 }
+
+export function onStageSizeChanged(width, height, center) {
+  if (vmCallbacks?.onStageSizeChanged) {
+    vmCallbacks.onStageSizeChanged(width, height, center);
+  }
+}

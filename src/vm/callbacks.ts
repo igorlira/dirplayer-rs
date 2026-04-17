@@ -151,5 +151,18 @@ export function initVmCallbacks() {
     onFlashMemberUnloaded: (castLib: number, castMember: number) => {
       destroyFlashInstance(castLib, castMember);
     },
+    onStageSizeChanged: (width: number, height: number, center: boolean) => {
+      const inner = document.getElementById('stage_canvas_container');
+      if (inner) {
+        inner.style.width = `${width}px`;
+        inner.style.height = `${height}px`;
+        const outer = inner.parentElement;
+        if (outer) {
+          outer.dataset.centerStage = center ? 'true' : 'false';
+          outer.style.justifyContent = center ? 'center' : 'flex-start';
+          outer.style.alignItems = center ? 'center' : 'flex-start';
+        }
+      }
+    },
   });
 }
