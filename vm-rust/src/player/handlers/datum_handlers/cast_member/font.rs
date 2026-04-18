@@ -431,6 +431,27 @@ impl FontMemberHandlers {
         bottom_spacing: i16,
         fixed_line_space: u16,
     ) -> (u16, u16) {
+        Self::measure_text_native_styled(
+            text, font_name, font_size, None,
+            word_wrap, max_width, top_spacing, bottom_spacing, fixed_line_space,
+        )
+    }
+
+    /// Styled variant — `font_style` matches the bitflag used by the renderer:
+    /// bit 0 = bold, bit 1 = italic, bit 2 = underline. Needed because bold/italic
+    /// glyphs are measurably wider than regular, and omitting them underestimates
+    /// the wrapped line count.
+    pub fn measure_text_native_styled(
+        text: &str,
+        font_name: &str,
+        font_size: u16,
+        font_style: Option<u8>,
+        word_wrap: bool,
+        max_width: i32,
+        top_spacing: i16,
+        bottom_spacing: i16,
+        fixed_line_space: u16,
+    ) -> (u16, u16) {
         use wasm_bindgen::JsCast;
 
         let document = match web_sys::window().and_then(|w| w.document()) {
@@ -458,7 +479,14 @@ impl FontMemberHandlers {
             None => return (100, font_size.max(12)),
         };
 
-        let font_str = format!("{}px {}", font_size, font_name);
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(s) = font_style {
+            if s & 0x02 != 0 { parts.push("italic".to_string()); }
+            if s & 0x01 != 0 { parts.push("bold".to_string()); }
+        }
+        parts.push(format!("{}px", font_size));
+        parts.push(font_name.to_string());
+        let font_str = parts.join(" ");
         ctx.set_font(&font_str);
         ctx.set_text_baseline("top");
 

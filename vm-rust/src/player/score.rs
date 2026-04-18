@@ -4736,23 +4736,128 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let extras = (2 * field_member.border as i32)
                 + (2 * field_member.margin as i32)
                 + (4 * field_member.box_drop_shadow as i32);
-            // For "adjust" fields, use sprite.height as initial estimate.
-            // The WebGL2 renderer will override with measure_text for accurate height.
             let is_adjust = field_member.box_type == "adjust";
-            let field_height = if field_member.word_wrap && is_adjust && field_member.text_height > 0 {
-                // Word wrap + adjust box type: expand to fit all wrapped text content.
-                (field_member.text_height as i32 + extras).max(sprite.height)
+
+            // Measure the actual rendered text height using the same logic as
+            // the text member path: bitmap font measurement when available,
+            // Canvas2D native measurement otherwise. Wrap at the inner content
+            // width (field_width minus border/margin/shadow) so multi-line
+            // wrapped text reports the real height.
+            let measured_height: Option<i32> = if field_width > 0 && !field_member.text.is_empty() {
+                use crate::player::font::{measure_text, measure_text_wrapped, FontManager};
+                use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
+
+                let cache_key = FontManager::cache_key(&field_member.font);
+                let bitmap_font = player.font_manager.font_cache.get(&cache_key).cloned();
+                let inner_width = (field_width - extras).max(1) as u16;
+
+                let from_bitmap = bitmap_font.as_ref().map(|f| {
+                    if field_member.word_wrap {
+                        measure_text_wrapped(
+                            &field_member.text,
+                            f,
+                            inner_width,
+                            true,
+                            field_member.fixed_line_space,
+                            field_member.top_spacing,
+                            0,
+                            0,
+                        ).1 as i32
+                    } else {
+                        measure_text(
+                            &field_member.text,
+                            f,
+                            None,
+                            field_member.fixed_line_space,
+                            field_member.top_spacing,
+                            0,
+                        ).1 as i32
+                    }
+                }).filter(|h| *h > 0);
+
+                from_bitmap.or_else(|| {
+                    let font_name = if !field_member.font.is_empty() {
+                        field_member.font.as_str()
+                    } else {
+                        "Arial"
+                    };
+                    let font_size = if field_member.font_size > 0 { field_member.font_size } else { 12 };
+                    // Build the bold/italic/underline bitflag the same way the
+                    // renderer does (see webgl2/mod.rs Field branch) so the
+                    // Canvas2D measurement uses the same glyph widths.
+                    let style_lc = field_member.font_style.to_lowercase();
+                    let mut style: u8 = 0;
+                    if style_lc.contains("bold") { style |= 1; }
+                    if style_lc.contains("italic") { style |= 2; }
+                    if style_lc.contains("underline") { style |= 4; }
+                    let (_, h) = FontMemberHandlers::measure_text_native_styled(
+                        &field_member.text,
+                        font_name,
+                        font_size,
+                        if style == 0 { None } else { Some(style) },
+                        field_member.word_wrap,
+                        if field_member.word_wrap { inner_width as i32 } else { 0 },
+                        field_member.top_spacing,
+                        0,
+                        field_member.fixed_line_space,
+                    );
+                    if h > 0 { Some(h as i32) } else { None }
+                })
+            } else { None };
+
+            let measured_plus_extras = measured_height.map(|h| h + extras);
+
+            let (field_height, height_arm) = if is_adjust && measured_plus_extras.is_some() {
+                // #adjust: grow to fit the actual measured text. Floor at sprite.height
+                // so the field never shrinks below the authored box.
+                let m = measured_plus_extras.unwrap();
+                (m.max(sprite.height.max(1)), "adjust+measured")
+            } else if field_member.word_wrap
+                && measured_plus_extras.map_or(false, |m| m > sprite.height.max(0))
+            {
+                // Word-wrapped fixed/scroll: authored height is too small to hold
+                // the wrapped text. Expand so nothing clips.
+                (measured_plus_extras.unwrap(), "wrap+measured>sprite")
+            } else if field_member.word_wrap && is_adjust && field_member.text_height > 0 {
+                ((field_member.text_height as i32 + extras).max(sprite.height), "wrap+adjust+text_height")
             } else if sprite.height > 0 {
-                // Fixed/scroll fields and non-wrapping fields: use sprite.height.
-                sprite.height
+                (sprite.height, "sprite.height>0")
             } else if field_member.text_height > 0 {
-                field_member.text_height as i32 + extras
-            } else if rect_height > 0 && field_member.box_type != "adjust" {
-                rect_height + extras
+                (field_member.text_height as i32 + extras, "text_height>0")
+            } else if rect_height > 0 && !is_adjust {
+                (rect_height + extras, "rect_height>0+non-adjust")
             } else {
-                sprite.height
+                (sprite.height, "fallback-sprite.height")
             };
             let field_height = field_height.max(1);
+
+            debug!(
+                "Field sprite_rect #{}: field_width={} sprite.width={} sprite.height={} sprite.loc_h={} sprite.loc_v={} rect_top={} rect_bottom={} rect_height={} border={} margin={} box_drop_shadow={} extras={} box_type={} word_wrap={} is_adjust={} text_height={} font={} font_size={} font_style={} measured_height={:?} field_height={} height_arm={}",
+                sprite.number,
+                field_width,
+                sprite.width,
+                sprite.height,
+                sprite.loc_h,
+                sprite.loc_v,
+                field_member.rect_top,
+                field_member.rect_bottom,
+                rect_height,
+                field_member.border,
+                field_member.margin,
+                field_member.box_drop_shadow,
+                extras,
+                field_member.box_type,
+                field_member.word_wrap,
+                is_adjust,
+                field_member.text_height,
+                field_member.font,
+                field_member.font_size,
+                field_member.font_style,
+                measured_height,
+                field_height,
+                height_arm,
+            );
+
             IntRect::from_size(sprite.loc_h, sprite.loc_v, field_width, field_height)
         }
         CastMemberType::Button(button_member) => {
@@ -4856,29 +4961,15 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 })
             } else { None };
 
-            let stored_height = if info_height > 0 {
+            let stored_height = if info_height > sprite.height {
                 info_height
-            } else if text_member.height > 0 {
-                text_member.height as i32
             } else {
                 sprite.height
             };
 
-            // Trust stored_height (TextInfo.height / text_member.height) which
-            // now reflects XMED page_height — Director's authored member box
-            // height. Only fall back to measured when nothing else is available.
-            let text_height = if stored_height > 0 {
-                stored_height
-            } else if text_member.box_type == "adjust" {
-                // adjust: trust measured, fall back to stored
-                measured_height.unwrap_or(stored_height)
-            } else {
-                // other box types: use stored, but grow if measured is larger
-                // (prevents clipping when stored size is stale or too small)
-                match measured_height {
-                    Some(m) if m > stored_height => m,
-                    _ => stored_height,
-                }
+            let text_height = match measured_height {
+                Some(m) if m > stored_height => m,
+                _ => stored_height,
             };
 
             // System fonts render via Canvas2D with slightly larger glyph
