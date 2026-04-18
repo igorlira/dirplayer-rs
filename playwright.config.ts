@@ -13,8 +13,7 @@ export default defineConfig({
     video: process.env.CI ? "on" : "off",
   },
   webServer: {
-    command:
-      "python3 -m http.server 9101 --directory vm-rust/target/browser_runner --bind 127.0.0.1",
+    command: "node scripts/serve-browser-runner.mjs",
     port: 9101,
     cwd: __dirname,
     reuseExistingServer: true,
