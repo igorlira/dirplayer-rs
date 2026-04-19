@@ -479,6 +479,23 @@ impl WebGL2Renderer {
             }
         }
 
+        // Force the canvas alpha channel to 1.0 everywhere before present.
+        // The WebGL2 context uses `alpha: true` (needed for copyTexSubImage2D
+        // trails compatibility), which means per-pixel framebuffer alpha
+        // controls how the canvas composites with the page. Blend-mode sprites
+        // (e.g. ink 39 "Darkest" with sprite.blend=25 like cc.mixer.shadow)
+        // end up with alpha ≈ blend% in the framebuffer, and any non-dark
+        // element behind the canvas bleeds through, making the shadow render
+        // whitish. Clear only the alpha channel with colorMask so RGB stays
+        // untouched. The stage-bg clear at frame start already wrote alpha=1.0,
+        // but sprite draws then blended it down; this restores it.
+        {
+            let gl = self.context.gl();
+            gl.color_mask(false, false, false, true);
+            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+            gl.color_mask(true, true, true, true);
+        }
     }
 
     /// Draw the custom cursor sprite at the mouse position.
