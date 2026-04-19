@@ -157,7 +157,7 @@ jobs:
       - name: Build and run browser e2e tests
         id: browser_tests
         continue-on-error: true
-        run: bash scripts/run-browser-tests.sh
+        run: node scripts/run-browser-tests.mjs
 
       - name: Generate snapshot diff grid
         if: always()
