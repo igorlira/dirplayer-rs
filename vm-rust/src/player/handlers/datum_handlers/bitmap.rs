@@ -129,7 +129,37 @@ impl BitmapDatumHandlers {
                     &bitmap.palette_ref,
                     bitmap.original_bit_depth,
                 );
-                let int_color = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
+                // Director's getPixel(pt, #integer) returns the pixel's value in
+                // the bitmap's native format, not always 24-bit RGB:
+                //   - 8-bit: palette index (0..255)
+                //   - 16-bit: RGB555 packed word (0..32767)
+                //   - 32-bit: 24-bit RGB (0..16_777_215)
+                // Many classic Lingo hit-test handlers compare getPixel against
+                // 16-bit color constants (e.g. 32767 for white / transparent marker);
+                // returning 24-bit RGB here broke pixel-accurate avatar click
+                // tests so clicks on transparent pixels registered as hits.
+                let int_color = match bitmap.original_bit_depth {
+                    1 | 2 | 4 | 8 => {
+                        if let crate::player::sprite::ColorRef::PaletteIndex(idx) = color {
+                            idx as i32
+                        } else {
+                            ((r as i32) << 16) | ((g as i32) << 8) | (b as i32)
+                        }
+                    }
+                    16 => {
+                        // Pack as RGB555 (Director's 16-bit format). The original
+                        // file may have had the high bit set (giving 65535 vs 32767
+                        // for white) but that bit is lost during decode; return the
+                        // 15-bit value which matches the common 32767 transparent
+                        // marker. Scripts that accept either 32767 or 65535 (which
+                        // is the standard hit-test idiom) work correctly.
+                        let r5 = (r as i32 >> 3) & 0x1F;
+                        let g5 = (g as i32 >> 3) & 0x1F;
+                        let b5 = (b as i32 >> 3) & 0x1F;
+                        (r5 << 10) | (g5 << 5) | b5
+                    }
+                    _ => ((r as i32) << 16) | ((g as i32) << 8) | (b as i32),
+                };
                 Ok(player.alloc_datum(Datum::Int(int_color)))
             } else {
                 let color_ref = player.alloc_datum(Datum::ColorRef(color));
