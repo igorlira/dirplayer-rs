@@ -1,4 +1,4 @@
-use log::{debug, error};
+use log::{debug, warn, error};
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
@@ -376,10 +376,95 @@ impl MovieHandlers {
 
                 player_wait_available().await;
 
-                // Note: stepFrame, prepareFrame, and enterFrame are NOT dispatched here.
-                // The main frame loop handles those events after go() returns and
-                // has_frame_changed_in_go is set. Dispatching them here would cause
-                // re-entrant calls (e.g., stepFrame firing timers that call go() again).
+                // 3. Send stepFrame to actorList
+                let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
+                    reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
+
+                for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
+                    let still_active = active_actor_ids.contains(&actor_ref.unwrap());
+
+                    if still_active {
+                        let result =
+                            player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+
+                        if let Err(err) = result {
+                            if err.code == ScriptErrorCode::Abort {
+                                reserve_player_mut(|player| {
+                                    player.is_in_frame_update = false;
+                                });
+                                return Ok(DatumRef::Void);
+                            }
+                            error!("⚠ stepFrame[{}] error: {}", idx, err.message);
+                            reserve_player_mut(|player| {
+                                player.on_script_error(&err);
+                                player.is_in_frame_update = false;
+                            });
+                            return Ok(DatumRef::Void);
+                        }
+
+                        let refreshed_active_ids = reserve_player_ref(|player| {
+                            if player.actor_list_generation != actor_list_generation {
+                                Some(player.actor_list_active_ids())
+                            } else {
+                                None
+                            }
+                        });
+
+                        if let Some((next_active_actor_ids, next_actor_list_generation)) = refreshed_active_ids
+                        {
+                            active_actor_ids = next_active_actor_ids;
+                            actor_list_generation = next_actor_list_generation;
+                        }
+                    }
+                }
+
+                player_wait_available().await;
+
+                // Prevent re-entrant calls
+                let already_updating = reserve_player_mut(|player| {
+                    if player.is_in_frame_update {
+                        return true;
+                    }
+                    player.is_in_frame_update = true;
+                    false
+                });
+
+                if !already_updating {
+                    reserve_player_mut(|player| {
+                        player.in_prepare_frame = true;
+                    });
+
+                    // Relay prepareFrame to timeout targets
+                    dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
+
+                    // 4. Send prepareFrame: Sprite behaviors -> Frame behaviors
+                    let _ = dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
+
+                    reserve_player_mut(|player| {
+                        player.in_prepare_frame = false;
+                    });
+
+                    player_wait_available().await;
+
+                    reserve_player_mut(|player| {
+                        player.in_enter_frame = true;
+                    });
+
+                    // 5. Send enterFrame: Sprite behaviors -> Frame behaviors
+                    let _ = dispatch_event_to_all_behaviors(&"enterFrame".to_string(), &vec![]).await;
+
+                    reserve_player_mut(|player| {
+                        player.in_enter_frame = false;
+                    });
+
+                    player_wait_available().await;
+
+                    reserve_player_mut(|player| {
+                        player.is_in_frame_update = false;
+                    });
+                } else {
+                    warn!("Failed to run frame update in go function, already updating");
+                }
             }
         }
         
