@@ -352,6 +352,15 @@ impl WebGL2Renderer {
             self.last_palette_version = current_palette_version;
         }
 
+        // Evict textures for any cast members that were erased or replaced
+        // since the last frame. Cache keys are (castLib, memberNumber, ...), so
+        // if a new member ends up at the same slot number its sprite would
+        // otherwise hit the previous member's texture.
+        for member_ref in player.movie.cast_manager.drain_texture_invalidations() {
+            self.texture_cache.invalidate_for_member(&member_ref);
+            self.rendered_text_cache.invalidate_for_member(&member_ref);
+        }
+
         // Clear with stage background color
         let bg_color = self.get_stage_bg_color(player);
         {

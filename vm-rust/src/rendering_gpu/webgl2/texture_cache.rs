@@ -123,6 +123,13 @@ impl TextureCache {
         self.textures.remove(key)
     }
 
+    /// Drop every entry whose key references the given cast member. Used when a
+    /// member is erased or replaced so a subsequent allocation at the same slot
+    /// number doesn't hit a stale texture.
+    pub fn invalidate_for_member(&mut self, member_ref: &CastMemberRef) {
+        self.textures.retain(|k, _| k.member_ref != *member_ref);
+    }
+
     /// Clear all cached textures
     pub fn clear(&mut self) {
         self.textures.clear();
@@ -419,6 +426,11 @@ impl RenderedTextCache {
     /// Advance to next frame (for LRU tracking)
     pub fn next_frame(&mut self) {
         self.current_frame += 1;
+    }
+
+    /// Drop every entry whose key references the given cast member.
+    pub fn invalidate_for_member(&mut self, member_ref: &CastMemberRef) {
+        self.textures.retain(|k, _| k.member_ref != *member_ref);
     }
 
     /// Clear all cached textures

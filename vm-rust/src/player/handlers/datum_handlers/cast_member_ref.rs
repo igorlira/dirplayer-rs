@@ -436,6 +436,10 @@ impl CastMemberRefHandlers {
                 .get_cast_mut(dest_ref.cast_lib as u32);
             dest_cast.insert_member(dest_ref.cast_member as u32, new_member);
             player.movie.cast_manager.invalidate_member_name_cache();
+            player
+                .movie
+                .cast_manager
+                .queue_texture_invalidation(dest_ref.clone());
 
             Ok(player.alloc_datum(Datum::CastMember(dest_ref)))
         })

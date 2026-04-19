@@ -38,6 +38,10 @@ pub struct CastManager {
     /// Version counter incremented when palette cache is invalidated.
     /// Used by renderers to know when to clear texture caches.
     pub palette_version: RefCell<u32>,
+    /// Cast-member refs whose textures must be evicted from renderer caches
+    /// before the next frame. Populated when a member is erased or its slot
+    /// reassigned; drained by the renderer at frame start.
+    pub pending_texture_invalidations: RefCell<Vec<CastMemberRef>>,
 }
 
 const IS_WEB: bool = false;
@@ -56,6 +60,7 @@ impl CastManager {
             member_name_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
+            pending_texture_invalidations: RefCell::new(Vec::new()),
         }
     }
 
@@ -596,7 +601,25 @@ impl CastManager {
         let cast = self.get_cast_mut(member_ref.cast_lib as u32);
         cast.remove_member(member_ref.cast_member as u32);
         self.invalidate_member_name_cache();
+        self.queue_texture_invalidation(member_ref.clone());
         Ok(())
+    }
+
+    /// Queue a cast-member ref to have its cached textures evicted from
+    /// renderer caches before the next frame. Necessary whenever a member is
+    /// erased — without it, `first_free_member_id` can hand the same slot to a
+    /// new `new(#bitmap, castLib)` call and the renderer keeps serving the
+    /// previous member's texture (keyed by `(castLib, memberNumber)`).
+    pub fn queue_texture_invalidation(&self, member_ref: CastMemberRef) {
+        self.pending_texture_invalidations
+            .borrow_mut()
+            .push(member_ref);
+    }
+
+    /// Called by the renderer at frame start to collect and clear the list of
+    /// members whose cached textures need to be evicted this frame.
+    pub fn drain_texture_invalidations(&self) -> Vec<CastMemberRef> {
+        std::mem::take(&mut *self.pending_texture_invalidations.borrow_mut())
     }
 
     pub fn clear_movie_script_cache(&mut self) {

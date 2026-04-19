@@ -228,7 +228,13 @@ impl CastLib {
             "number" => Ok(Datum::Int(self.number as i32)),
             "name" => Ok(Datum::String(self.name.clone())),
             "number of castMembers" | "number of members" => {
-                Ok(Datum::Int(self.members.len() as i32))
+                // Director semantics: the highest member slot number in use,
+                // not the population count. Casts routinely have gaps, and
+                // Lingo code like `repeat with i = 1 to the number of
+                // castMembers of castLib "X"` relies on this to reach every
+                // populated slot (including dynamically created members at
+                // high numbers) — otherwise cleanup loops silently skip them.
+                Ok(Datum::Int(self.max_member_id() as i32))
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castLib property {}",
