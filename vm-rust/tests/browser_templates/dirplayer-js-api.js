@@ -42,7 +42,16 @@ export function onClearTimeouts() {
     clearInterval(_timeoutHandles[name]);
   }
 }
+export function onClearAllTimeouts() {
+  for (const name of Object.keys(_timeoutHandles)) {
+    clearInterval(_timeoutHandles[name]);
+    delete _timeoutHandles[name];
+  }
+}
 
 export function onDatumSnapshot() {}
 export function onScriptInstanceSnapshot() {}
 export function onExternalEvent() {}
+export function onFlashMemberLoaded() {}
+export function onFlashMemberUnloaded() {}
+export function onStageSizeChanged() {}
