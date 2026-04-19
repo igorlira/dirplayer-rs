@@ -2,6 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
+use log::warn;
 
 use crate::director::{
     chunks::{handler::HandlerDef, script::ScriptChunk},
@@ -261,17 +262,25 @@ pub fn script_get_prop(
         // Also check the cache — behaviors may be in cache but not in script_instance_list Vec
         Ok(player.alloc_datum(Datum::Int(0)))
     } else {
+        // Director silently returns VOID when reading a property that doesn't
+        // exist on an instance (or anywhere in its ancestor chain) — many
+        // Shockwave movies rely on this, e.g. `repeat with x in me.oItem.someList`
+        // where `someList` is only populated in some code paths. Raising a
+        // ScriptError here breaks those movies even though they ran fine in
+        // original Director. Log once per miss so real typos are still noticeable
+        // in the console.
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         let valid_props = script_instance.properties.keys().collect_vec();
-        Err(ScriptError::new(format!(
-            "Cannot get property {} found on script instance {}. Valid properties are: {}",
+        warn!(
+            "script_get_prop: undefined property '{}' on {} → returning VOID. Valid properties: {}",
             prop_name,
             format_concrete_datum(
                 &Datum::ScriptInstanceRef(script_instance_ref.clone()),
                 player
             ),
             valid_props.iter().join(", ")
-        )))
+        );
+        Ok(DatumRef::Void)
     }
 }
 
