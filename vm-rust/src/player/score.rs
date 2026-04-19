@@ -4576,6 +4576,17 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     && (sprite.height - bitmap_height).abs() <= 3
                     && sprite.width < bitmap_width
                     && 2 * sprite.width >= bitmap_width;
+                // WIDE bitmap (bw>bh) with HEIGHT matching and WIDTH moderately
+                // shrunk (≥2/3 of bitmap) → BBOX. Stricter threshold than
+                // wide_h_shrink because a horizontal crop of a horizontal bar
+                // is a plausible "real crop"; only treat as bbox when the
+                // sprite is ≥66.7% wide. This separates #80 (134x9 in a 189x9
+                // bitmap, 71%, bbox) from true crops like #779/#782/#772
+                // (sprite ~57% of bitmap width, SPRITE).
+                let wide_w_shrink = bitmap_width > bitmap_height
+                    && (sprite.height - bitmap_height).abs() <= 3
+                    && sprite.width < bitmap_width
+                    && 3 * sprite.width >= 2 * bitmap_width;
 
                 // Bypass the >=10 size guard when sprite is much larger than bitmap
                 // in BOTH dims (small bitmap drawn at native size inside larger bbox).
@@ -4591,7 +4602,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
 
                 let is_bbox = if expand_w || expand_h
                     || extend_h_shrink_w || extend_w_shrink_h
-                    || wide_h_shrink || tall_w_shrink {
+                    || wide_h_shrink || tall_w_shrink || wide_w_shrink {
                     true
                 } else if size_ok
                     && sprite.width > 0 && sprite.height > 0
