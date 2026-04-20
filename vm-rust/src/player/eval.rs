@@ -17,7 +17,8 @@ use crate::{
         DirPlayer,
     },
 };
-
+use crate::player::cast_lib::CastMemberRef;
+use crate::player::handlers::movie::MovieHandlers;
 use super::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, sprite::ColorRef, DatumRef, ScriptError};
 
 #[derive(Parser)]
@@ -279,53 +280,12 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             let member_id_ref = eval_lingo_pair_static(member_expr)?;
 
             // Optional: "of castLib X"
-            let cast_lib_ref = if let Some(castlib_expr) = inner.next() {
-                Some(eval_lingo_pair_static(castlib_expr)?)
+            if let Some(castlib_expr) = inner.next() {
+                let cast_lib_ref = eval_lingo_pair_static(castlib_expr)?;
+                MovieHandlers::member(&[member_id_ref, cast_lib_ref])
             } else {
-                None
-            };
-
-            reserve_player_mut(|player| {
-                let member_id_datum = player.get_datum(&member_id_ref).clone();
-
-                // Get cast lib datum if specified
-                let cast_lib_datum = cast_lib_ref.as_ref().map(|r| player.get_datum(r).clone());
-
-                // Use find_member_ref_by_identifiers for proper member lookup
-                // This handles both string names and numeric member IDs
-                let member_result = player.movie.cast_manager.find_member_ref_by_identifiers(
-                    &member_id_datum,
-                    cast_lib_datum.as_ref(),
-                    &player.allocator,
-                )?;
-
-                let member_ref = match member_result {
-                    Some(r) => r,
-                    None => {
-                        // If cast_lib was specified, create a ref with the specified values
-                        // Otherwise return invalid ref
-                        if let Some(cast_datum) = cast_lib_datum {
-                            let cast_lib_num = match cast_datum {
-                                Datum::Int(num) => num,
-                                Datum::CastLib(num) => num as i32,
-                                _ => return Err(ScriptError::new(format!(
-                                    "Expected int or castLib, got {:?}",
-                                    cast_datum.type_enum()
-                                ))),
-                            };
-                            let member_num = member_id_datum.int_value().unwrap_or(0);
-                            super::cast_lib::CastMemberRef {
-                                cast_lib: cast_lib_num,
-                                cast_member: member_num,
-                            }
-                        } else {
-                            INVALID_CAST_MEMBER_REF
-                        }
-                    }
-                };
-
-                Ok(player.alloc_datum(Datum::CastMember(member_ref)))
-            })
+                MovieHandlers::member(&[member_id_ref])
+            }
         }
         Rule::castlib_ref => {
             let mut inner = pair.into_inner();
@@ -1365,6 +1325,15 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                             Ok(rect_arr[(index_num - 1) as usize].clone())
                         }
                     }
+                    // Cast lib member list
+                    Datum::CastMember(CastMemberRef { cast_lib, cast_member }) if *cast_member == -1 => {
+                        let index_num = index_datum.int_value()? as i16;
+                        Ok(reserve_player_mut(|p| p.alloc_datum(if index_num < 0 {
+                            Datum::Void
+                        } else {
+                            Datum::CastMember(CastMemberRef { cast_lib: *cast_lib, cast_member: index_num as i32 })
+                        })))
+                    }
                     _ => Err(ScriptError::new(format!(
                         "Cannot index non-list type: {:?}",
                         list_datum.type_enum()
@@ -1429,54 +1398,12 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             let member_id_ref = Box::pin(eval_lingo_expr_ast_runtime(member_expr.as_ref())).await?;
 
             // Evaluate cast lib (or None if not specified)
-            let cast_lib_ref = if let Some(expr) = cast_lib_expr {
-                Some(Box::pin(eval_lingo_expr_ast_runtime(expr.as_ref())).await?)
+            if let Some(expr) = cast_lib_expr {
+                let cast_lib_ref = Box::pin(eval_lingo_expr_ast_runtime(expr.as_ref())).await?;
+                MovieHandlers::member(&[member_id_ref, cast_lib_ref])
             } else {
-                None
-            };
-
-            reserve_player_mut(|player| {
-                let member_id_datum = player.get_datum(&member_id_ref).clone();
-
-                // Get cast lib datum if specified
-                let cast_lib_datum = cast_lib_ref.as_ref().map(|r| player.get_datum(r).clone());
-
-                // Use find_member_ref_by_identifiers for proper member lookup
-                // This handles both string names and numeric member IDs
-                let member_result = player.movie.cast_manager.find_member_ref_by_identifiers(
-                    &member_id_datum,
-                    cast_lib_datum.as_ref(),
-                    &player.allocator,
-                )?;
-
-                let member_ref = match member_result {
-                    Some(r) => r,
-                    None => {
-                        // If cast_lib was specified, create a ref with member 0
-                        // Otherwise return invalid ref
-                        if let Some(cast_datum) = cast_lib_datum {
-                            let cast_lib_num = match cast_datum {
-                                Datum::Int(num) => num,
-                                Datum::CastLib(num) => num as i32,
-                                _ => return Err(ScriptError::new(format!(
-                                    "Expected int or castLib, got {:?}",
-                                    cast_datum.type_enum()
-                                ))),
-                            };
-                            // Try to get member number for explicit reference
-                            let member_num = member_id_datum.int_value().unwrap_or(0);
-                            super::cast_lib::CastMemberRef {
-                                cast_lib: cast_lib_num,
-                                cast_member: member_num,
-                            }
-                        } else {
-                            super::cast_lib::INVALID_CAST_MEMBER_REF
-                        }
-                    }
-                };
-
-                Ok(player.alloc_datum(Datum::CastMember(member_ref)))
-            })
+                MovieHandlers::member(&[member_id_ref])
+            }
         }
         LingoExpr::Identifier(ident_name) => {
             reserve_player_mut(|player| get_eval_top_level_prop(player, ident_name))

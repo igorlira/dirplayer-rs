@@ -5,6 +5,7 @@ use log::debug;
 use wasm_bindgen::JsValue;
 use std::collections::{HashMap, HashSet};
 
+use crate::player::eval::eval_lingo_expr_static;
 use crate::{
     console_warn,
     director::{
@@ -75,7 +76,8 @@ impl SpriteChannel {
 pub struct ScoreBehaviorReference {
     pub cast_lib: u16,
     pub cast_member: u16,
-    pub parameter: Vec<DatumRef>,
+    /// Raw Lingo expression strings evaluated fresh at attachment time.
+    pub parameter: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -239,10 +241,7 @@ impl Score {
             cast_lib
         };
 
-        let mut script_ref = CastMemberRef {
-            cast_lib: resolved_cast_lib,
-            cast_member,
-        };
+        let mut script_ref = cast_member_ref(resolved_cast_lib, cast_member);
 
         // Check if the script exists in the resolved cast library
         // For cast 65535 (relative cast reference), we only use the filmloop's own cast.
@@ -588,13 +587,10 @@ impl Score {
                 } else if data.cast_lib == 0 {
                     1
                 } else {
-                    data.cast_lib as i32
+                    data.cast_lib as i16 as i32
                 };
 
-                let member = CastMemberRef {
-                    cast_lib: resolved_cast_lib,
-                    cast_member: data.cast_member as i32,
-                };
+                let member = cast_member_ref(resolved_cast_lib, data.cast_member as i32);
 
                 // For Stage sprites, use sprite_set_prop which handles intrinsic size
                 // initialization and other side effects. For FilmLoop sprites, set
@@ -829,10 +825,7 @@ impl Score {
                     data.cast_lib as i32
                 };
 
-                let member = CastMemberRef {
-                    cast_lib: resolved_cast_lib,
-                    cast_member: data.cast_member as i32,
-                };
+                let member = cast_member_ref(resolved_cast_lib, data.cast_member as i32);
 
                 // Update member if changed (skip if auto-puppeted)
                 let current_member = self.get_sprite(sprite_num).and_then(|s| s.member.clone());
@@ -924,10 +917,7 @@ impl Score {
                     } else {
                         data.cast_lib as i32
                     };
-                    let member = CastMemberRef {
-                        cast_lib: resolved_cast_lib,
-                        cast_member: data.cast_member as i32,
-                    };
+                    let member = cast_member_ref(resolved_cast_lib, data.cast_member as i32);
 
                     match &score_ref {
                         ScoreRef::Stage => {
@@ -1059,10 +1049,7 @@ impl Score {
                             let sound_member_opt = match &score_ref {
                                 ScoreRef::FilmLoop(filmloop_member_ref) => {
                                     // Look up sound in the film loop's cast library
-                                    let cast_member_ref = CastMemberRef {
-                                        cast_lib: filmloop_member_ref.cast_lib,
-                                        cast_member: sound_data.cast_member as i32,
-                                    };
+                                    let cast_member_ref = cast_member_ref(filmloop_member_ref.cast_lib, sound_data.cast_member as i32);
                                     player.movie.cast_manager.find_member_by_ref(&cast_member_ref)
                                         .map(|m| (m, cast_member_ref))
                                 }
@@ -1072,10 +1059,7 @@ impl Score {
                                         .find_member_by_slot_number(sound_data.cast_member as u32)
                                         .map(|m| {
                                             let ref_ = CastMemberRefHandlers::member_ref_from_slot_number(m.number);
-                                            (m, CastMemberRef {
-                                                cast_lib: ref_.cast_lib as i32,
-                                                cast_member: ref_.cast_member as i32,
-                                            })
+                                            (m, cast_member_ref(ref_.cast_lib as i32, ref_.cast_member as i32))
                                         })
                                 }
                             };
@@ -1214,11 +1198,25 @@ impl Score {
                         );
                     });
 
-                    // Parameter setup
+                    // Parameter setup — evaluate raw Lingo expressions fresh so DatumRefs
+                    // are live in the current allocator (avoids stale refs after movie rewind).
                     if !behavior_ref.parameter.is_empty() {
+                        let evaluated_params: Vec<DatumRef> = behavior_ref.parameter.iter()
+                            .filter_map(|expr| {
+                                debug!("🔧 Evaluating parameter expression: {:?}", expr);
+                                // TODO: Replace `eval_lingo` with a parser
+                                match eval_lingo_expr_static(expr.clone()) {
+                                    Ok(r) => Some(r),
+                                    Err(e) => {
+                                        debug!("  ⚠️ Failed to evaluate parameter: {}", e.message);
+                                        None
+                                    }
+                                }
+                            })
+                            .collect();
                         reserve_player_mut(|player| {
                             debug!("🔧 Applying {} saved parameters", behavior_ref.parameter.len());
-                            for param_ref in &behavior_ref.parameter {
+                            for param_ref in &evaluated_params {
                                 let param_datum = player.get_datum(param_ref);
                                 debug!("  Parameter type: {:?}", param_datum.type_enum());
                                 if let Datum::PropList(props, _) = param_datum {
@@ -1405,12 +1403,28 @@ impl Score {
                             );
                         });
 
-                        // Apply behavior parameters from initializer data
+                        // Apply behavior parameters — evaluate raw Lingo expressions fresh so
+                        // DatumRefs are live in the current allocator (avoids stale refs after rewind).
                         if !behavior.parameter.is_empty() {
-                            debug!("🔧 [sprite_details] Applying {} saved parameters for behavior cast {}/{}", 
+                            debug!("🔧 [sprite_details] Applying {} saved parameters for behavior cast {}/{}",
                                 behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
+                            let evaluated_params: Vec<DatumRef> = behavior.parameter.iter()
+                                .filter_map(|expr| {
+                                    debug!("  [sprite_details] Evaluating: {:?}", expr);
+                                    match eval_lingo_expr_static(expr.clone()) {
+                                        Ok(r) => {
+                                            debug!("  [sprite_details] ✅ Evaluated ok");
+                                            Some(r)
+                                        }
+                                        Err(e) => {
+                                            debug!("  [sprite_details] ⚠️ Eval failed: {}", e.message);
+                                            None
+                                        }
+                                    }
+                                })
+                                .collect();
                             reserve_player_mut(|player| {
-                                for param_ref in &behavior.parameter {
+                                for param_ref in &evaluated_params {
                                     let param_datum = player.get_datum(param_ref);
                                     debug!("  [sprite_details] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
@@ -1497,10 +1511,7 @@ impl Score {
                 } else {
                     data.cast_lib as i32
                 };
-                let sprite_member = CastMemberRef {
-                    cast_lib: sprite_cast_lib,
-                    cast_member: data.cast_member as i32,
-                };
+                let sprite_member = cast_member_ref(sprite_cast_lib, data.cast_member as i32);
                 debug!(
                     "D5 sprite ch={}: scriptId=({},{}), sprite_member=({},{})",
                     channel_num, resolved_cast_lib, script_member,
@@ -1676,26 +1687,36 @@ impl Score {
                             );
                         });
 
-                        // Apply behavior parameters
+                        // Apply behavior parameters — evaluate raw Lingo expressions fresh so
+                        // DatumRefs are live in the current allocator (avoids stale refs after rewind).
                         if !behavior.parameter.is_empty() {
-                            debug!("🔧 [delta-data] Applying {} saved parameters for behavior cast {}/{}", 
+                            debug!("🔧 [delta-data] Applying {} saved parameters for behavior cast {}/{}",
                                 behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
+                            let evaluated_params: Vec<DatumRef> = behavior.parameter.iter()
+                                .filter_map(|expr| {
+                                    debug!("  [delta-data] Evaluating: {:?}", expr);
+                                    match eval_lingo_expr_static(expr.clone()) {
+                                        Ok(r) => {
+                                            debug!("  [delta-data] ✅ Evaluated ok");
+                                            Some(r)
+                                        }
+                                        Err(e) => {
+                                            debug!("  [delta-data] ⚠️ Eval failed: {}", e.message);
+                                            None
+                                        }
+                                    }
+                                })
+                                .collect();
                             reserve_player_mut(|player| {
-                                for param_ref in &behavior.parameter {
+                                for param_ref in &evaluated_params {
                                     let param_datum = player.get_datum(param_ref);
-                                    debug!("  [delta-data] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
                                         let props_to_set: Vec<(String, DatumRef)> = props.iter()
                                             .filter_map(|(key_ref, value_ref)| {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
                                                     let value = player.get_datum(value_ref);
-                                                    debug!("    [delta-data] prop: {} type: {:?}", key_name, value.type_enum());
-                                                    match value {
-                                                        Datum::String(s) => debug!("      [delta-data] value: {:?}", s),
-                                                        Datum::Int(n) => debug!("      [delta-data] value: {}", n),
-                                                        _ => debug!("      [delta-data] value: <{:?}>", value.type_enum()),
-                                                    }
+                                                    debug!("    [delta-data] prop: {} = {:?}", key_name, value.type_enum());
                                                     Some((key_name.clone(), value_ref.clone()))
                                                 } else {
                                                     None
@@ -1703,7 +1724,6 @@ impl Score {
                                             })
                                             .collect();
                                         for (prop_name, value_ref) in props_to_set {
-                                            debug!("      [delta-data] Setting property {} on script instance", prop_name);
                                             let result = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
@@ -1712,9 +1732,9 @@ impl Score {
                                                 false,
                                             );
                                             if let Err(e) = result {
-                                                debug!("      [delta-data] ⚠️ Failed to set property {}: {}", prop_name, e.message);
+                                                debug!("      [delta-data] ⚠️ Failed to set '{}': {}", prop_name, e.message);
                                             } else {
-                                                debug!("      [delta-data] ✅ Successfully set property {}", prop_name);
+                                                debug!("      [delta-data] ✅ Set '{}'", prop_name);
                                             }
                                         }
                                     }
@@ -1821,8 +1841,24 @@ impl Score {
 
                                 // Apply behavior parameters
                                 if !behavior.parameter.is_empty() {
+                                    let evaluated_params: Vec<DatumRef> = behavior.parameter.iter()
+                                        .filter_map(|expr| {
+                                            debug!("  [delta-data] Evaluating: {:?}", expr);
+                                            match eval_lingo_expr_static(expr.clone()) {
+                                                Ok(r) => {
+                                                    debug!("  [delta-data] ✅ Evaluated ok");
+                                                    Some(r)
+                                                }
+                                                Err(e) => {
+                                                    debug!("  [delta-data] ⚠️ Eval failed: {}", e.message);
+                                                    None
+                                                }
+                                            }
+                                        })
+                                        .collect();
+
                                     reserve_player_mut(|player| {
-                                        for param_ref in &behavior.parameter {
+                                        for param_ref in &evaluated_params {
                                             let param_datum = player.get_datum(param_ref);
                                             if let Datum::PropList(props, _) = param_datum {
                                                 let props_to_set: Vec<(String, DatumRef)> = props.iter()
@@ -1925,10 +1961,7 @@ impl Score {
                 });
 
                 // Create the CastMemberRef for later use
-                let cast_member_ref = CastMemberRef {
-                    cast_lib: behavior_ref.cast_lib as i32,
-                    cast_member: behavior_ref.cast_member as i32,
-                };
+                let cast_member_ref = cast_member_ref(behavior_ref.cast_lib as i32, behavior_ref.cast_member as i32);
 
                 // Set spriteNum property
                 reserve_player_mut(|player| {
@@ -1942,12 +1975,14 @@ impl Score {
                     );
                 });
 
-                // Apply behavior parameters
+                // Apply behavior parameters — evaluate raw Lingo expressions fresh so
+                // DatumRefs are live in the current allocator (avoids stale refs after rewind).
                 if !behavior_ref.parameter.is_empty() {
+                    let evaluated_params: Vec<DatumRef> = behavior_ref.parameter.iter()
+                        .filter_map(|expr| eval_lingo_expr_static(expr.clone()).ok())
+                        .collect();
                     reserve_player_mut(|player| {
-                        debug!("  Applying {} parameters", behavior_ref.parameter.len());
-
-                        for param_ref in &behavior_ref.parameter {
+                        for param_ref in &evaluated_params {
                             let param_datum = player.get_datum(param_ref);
 
                             if let Datum::PropList(props, _) = param_datum {
@@ -2085,10 +2120,7 @@ impl Score {
                 data.cast_lib as i32
             };
 
-            let member = CastMemberRef {
-                cast_lib: resolved_cast_lib,
-                cast_member: data.cast_member as i32,
-            };
+            let member = cast_member_ref(resolved_cast_lib, data.cast_member as i32);
 
             // Set member directly on the sprite instead of using sprite_set_prop,
             // because sprite_set_prop always writes to main stage score,
@@ -3013,10 +3045,7 @@ impl Score {
                     PaletteRef::from(*member, *cast_lib, 0)
                 } else if *member > 0 {
                     // Positive member = cast member palette
-                    PaletteRef::Member(CastMemberRef {
-                        cast_lib: *cast_lib as i32,
-                        cast_member: *member as i32,
-                    })
+                    PaletteRef::Member(cast_member_ref(*cast_lib as i32, *member as i32))
                 } else {
                     // member == 0: use system default
                     PaletteRef::BuiltIn(get_system_default_palette())

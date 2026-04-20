@@ -16,8 +16,8 @@ use crate::{
     js_api::JsApi,
     player::cast_lib::CastLib,
 };
-
-use crate::player::FontManager;
+use crate::player::cast_lib::cast_member_ref;
+use crate::player::{reserve_player_ref, FontManager};
 use crate::player::font::FontRef;
 
 use super::{
@@ -177,10 +177,7 @@ impl CastManager {
                         target_member, cast.number
                     );
                     if let Some(bitmap) = bitmap_manager.get_bitmap_mut(bitmap_ref) {
-                        bitmap.palette_ref = PaletteRef::Member(CastMemberRef {
-                            cast_lib: cast.number as i32,
-                            cast_member: target_member,
-                        });
+                        bitmap.palette_ref = PaletteRef::Member(cast_member_ref(cast.number as i32, target_member));
                     }
                     found = true;
                     break;
@@ -238,19 +235,17 @@ impl CastManager {
     }
 
     pub fn get_cast_or_null(&self, number: u32) -> Option<&CastLib> {
-        return self.casts.get(number as usize - 1);
+        return self.casts.get((number as usize).wrapping_sub(1));
     }
 
-    pub fn get_cast_mut(&mut self, number: u32) -> &mut CastLib {
-        let n_casts = self.casts.len();
-        match self.casts.get_mut(number as usize - 1) {
-            Some(cast) => cast,
-            None => panic!(
-                "Cast index out of bounds: {} (# casts={})",
-                number,
-                n_casts
-            ),
-        }
+    pub fn get_cast_mut(&mut self, number: u32) -> Result<&mut CastLib, ScriptError> {
+        return self
+            .get_cast_mut_or_null(number)
+            .ok_or_else(|| ScriptError::new(format!("Cast not found: {}", number)));
+    }
+
+    pub fn get_cast_mut_or_null(&mut self, number: u32) -> Option<&mut CastLib> {
+        self.casts.get_mut((number as usize).wrapping_sub(1))
     }
 
     pub fn get_cast_by_name(&self, name: &str) -> Option<&CastLib> {
@@ -265,10 +260,7 @@ impl CastManager {
                     || CastMemberRefHandlers::get_cast_slot_number(cast.number, member.number)
                         == number
                 {
-                    return Some(CastMemberRef {
-                        cast_lib: cast.number as i32,
-                        cast_member: member.number as i32,
-                    });
+                    return Some(cast_member_ref(cast.number as i32, member.number as i32));
                 }
             }
         }
@@ -307,10 +299,7 @@ impl CastManager {
     pub fn find_member_ref_by_name(&self, name: &str) -> Option<CastMemberRef> {
         for cast in &self.casts {
             if let Some(member) = cast.find_member_by_name(name) {
-                return Some(CastMemberRef {
-                    cast_lib: cast.number as i32,
-                    cast_member: member.number as i32,
-                });
+                return Some(cast_member_ref(cast.number as i32, member.number as i32));
             }
         }
         None
@@ -323,6 +312,50 @@ impl CastManager {
         datums: &DatumAllocator,
     ) -> Result<Option<CastMemberRef>, ScriptError> {
         // --- Determine cast library ---
+        let cast_lib = self.find_cast_lib_by_identifier(cast_name_or_num);
+
+        self.find_member_ref_in_cast_by_identifier(member_name_or_num, cast_lib)
+    }
+
+    pub fn find_member_ref_in_cast_by_identifier(&self, member_name_or_num: &Datum, cast_lib: Option<&CastLib>) -> Result<Option<CastMemberRef>, ScriptError> {
+        let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
+            (Datum::String(name), Some(cast_lib)) => {
+                cast_lib.find_member_by_name(name).map(|member| {
+                    cast_member_ref(cast_lib.number as i32, member.number as i32)
+                })
+            }
+            (Datum::String(name), None) => self
+                .find_member_ref_by_name(name)
+                .map(|member_ref| member_ref),
+            
+            (Datum::Int(num), Some(cast_lib)) => {
+                Some(cast_member_ref(cast_lib.number as i32, *num as i32))
+            }
+            (Datum::Int(num), None) => Some(self
+                .find_member_ref_by_number(*num as u32)
+                .unwrap_or(cast_member_ref(1, *num))),
+            (Datum::Float(num), Some(cast_lib)) => {
+                Some(cast_member_ref(cast_lib.number as i32, *num as i32))
+            }
+            (Datum::Float(num), None) => Some(self
+                .find_member_ref_by_number(*num as u32)
+                .unwrap_or(cast_member_ref(1, *num as i32))),
+            (Datum::CastMember(member_ref), _) => Some(member_ref.clone()),
+            _ => return Err(ScriptError::new(format!(
+                "Member number or name type invalid: {} ({})",
+                member_name_or_num.type_str(),
+                reserve_player_ref(|p| member_name_or_num.repr(p))
+            ))),
+        };
+
+        if let Some(CastMemberRef { cast_member, .. }) = member_ref && cast_member < 0 {
+            return Ok(None);
+        }
+
+        Ok(member_ref)
+    }
+
+    pub(crate) fn find_cast_lib_by_identifier(&self, cast_name_or_num: Option<&Datum>) -> Option<&CastLib> {
         let cast_lib = if cast_name_or_num.is_none()
             || cast_name_or_num.is_some_and(|x| matches!(x, Datum::Void))
         {
@@ -355,54 +388,7 @@ impl CastManager {
             );
             None
         };
-
-        let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
-            (Datum::String(name), Some(cast_lib)) => {
-                cast_lib.find_member_by_name(name).map(|member| {
-                    Ok(Some(CastMemberRef {
-                        cast_lib: cast_lib.number as i32,
-                        cast_member: member.number as i32,
-                    }))
-                })
-            }
-            (Datum::String(name), None) => self
-                .find_member_ref_by_name(name)
-                .map(|member_ref| Ok(Some(member_ref))),
-            (Datum::Int(num), Some(cast_lib)) => {
-                cast_lib.find_member_by_number(*num as u32).map(|member| {
-                    Ok(Some(CastMemberRef {
-                        cast_lib: cast_lib.number as i32,
-                        cast_member: member.number as i32,
-                    }))
-                })
-            }
-            (Datum::Int(num), None) => self
-                .find_member_ref_by_number(*num as u32)
-                .map(|member_ref| Ok(Some(member_ref))),
-            (Datum::Float(num), Some(cast_lib)) => {
-                cast_lib.find_member_by_number(*num as u32).map(|member| {
-                    Ok(Some(CastMemberRef {
-                        cast_lib: cast_lib.number as i32,
-                        cast_member: member.number as i32,
-                    }))
-                })
-            }
-            (Datum::Float(num), None) => self
-                .find_member_ref_by_number(*num as u32)
-                .map(|member_ref| Ok(Some(member_ref))),
-            (Datum::CastMember(member_ref), _) => Some(Ok(Some(member_ref.clone()))),
-            _ => Some(Err(ScriptError::new(format!(
-                "Member number or name type invalid: {}",
-                member_name_or_num.type_str()
-            )))),
-        };
-
-        match member_ref {
-            None => Ok(None),
-            Some(Ok(None)) => Ok(None),
-            Some(Ok(Some(member_ref))) => Ok(Some(member_ref)),
-            Some(Err(err)) => Err(err),
-        }
+        cast_lib
     }
 
     pub fn find_member_by_identifiers(
@@ -464,7 +450,7 @@ impl CastManager {
         if member_ref.cast_lib <= 0 || member_ref.cast_lib > self.casts.len() as i32 {
             return None;
         }
-        self.get_cast_mut(member_ref.cast_lib as u32)
+        self.get_cast_mut_or_null(member_ref.cast_lib as u32)?
             .find_mut_member_by_number(member_ref.cast_member as u32)
     }
 
@@ -526,7 +512,7 @@ impl CastManager {
                 "Cannot remove member with invalid cast lib".to_string(),
             ));
         }
-        let cast = self.get_cast_mut(member_ref.cast_lib as u32);
+        let cast = self.get_cast_mut(member_ref.cast_lib as u32)?;
         cast.remove_member(member_ref.cast_member as u32);
         Ok(())
     }

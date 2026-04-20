@@ -1,5 +1,8 @@
 import { useState, useMemo } from "react"
-import { ICastMemberIdentifier, castMemberIdentifier, CastSnapshot, CastMemberRecord } from "../../vm"
+import {
+  ICastMemberIdentifier, castMemberIdentifier, CastSnapshot, CastMemberRecord, IScriptSnapshot,
+  IScriptMemberSnapshot, memberMatches
+} from "../../vm"
 import classNames from "classnames"
 import styles from './styles.module.css'
 import _ from "lodash"
@@ -63,9 +66,8 @@ function CastListItem({ number, name, members, selectedMemberId, onSelectMember,
 
   const filteredMembers = useMemo(() => {
     if (!filterText) return Object.entries(members);
-    const lowerFilter = filterText.toLowerCase();
     return Object.entries(members).filter(([, member]) =>
-      member.name.toLowerCase().includes(lowerFilter)
+        memberMatches(member, filterText)
     );
   }, [members, filterText]);
 
@@ -130,7 +132,7 @@ export default function CastList({ castNames, castSnapshots, selectedMemberId, o
 
         // When searching, check if this cast has any matching members
         const hasMatchingMembers = isSearching && Object.values(members).some(
-          (member) => member.name.toLowerCase().includes(searchQuery.toLowerCase())
+            (member) => memberMatches(member, searchQuery)
         );
 
         // Skip casts with no matching members when searching

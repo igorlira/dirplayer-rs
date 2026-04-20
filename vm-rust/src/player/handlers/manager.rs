@@ -30,11 +30,15 @@ pub struct BuiltInHandlerManager {}
 
 impl BuiltInHandlerManager {
     fn param(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_ref(|player| {
+        reserve_player_mut(|player| {
             let param_number = player.get_datum(&args[0]).int_value()?;
-            let scope_ref = player.current_scope_ref();
-            let scope = player.scopes.get(scope_ref).unwrap();
-            Ok(scope.args[(param_number - 1) as usize].clone())
+            if let Some(scope) = player.get_current_scope() &&
+                let Some(arg) = scope.args.get(param_number.wrapping_sub(1) as usize) {
+                Ok(arg.clone())
+            } else {
+                // outside a function, Director returns 0
+                return Ok(player.alloc_datum(Datum::Int(0)));
+            }
         })
     }
 
@@ -286,7 +290,7 @@ impl BuiltInHandlerManager {
         Ok(DatumRef::Void)
     }
 
-    fn format_for_put(datum: &Datum, player: &DirPlayer) -> String {
+    pub fn format_for_put(datum: &Datum, player: &DirPlayer) -> String {
         match datum {
             // Strings are output with quotes
             Datum::String(s) => format!("\"{}\"", s),
@@ -1183,8 +1187,7 @@ impl BuiltInHandlerManager {
 
     fn dont_pass_event(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let scope_ref = player.current_scope_ref();
-            if let Some(scope) = player.scopes.get_mut(scope_ref) {
+            if let Some(scope) = player.get_current_scope_mut() {
                 scope.passed = false;  // Set passed to false to stop propagation
             }
             Ok(DatumRef::Void)

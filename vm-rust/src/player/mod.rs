@@ -112,7 +112,7 @@ use crate::{
     rendering::with_renderer_mut,
     utils::{get_base_url, get_elapsed_ticks},
 };
-
+use crate::player::cast_lib::cast_member_ref;
 use self::{
     bitmap::manager::BitmapRef,
     bytecode::handler_manager::StaticBytecodeHandlerManager,
@@ -279,6 +279,26 @@ pub struct DirPlayer {
     pub last_sprite_prop_ref: Option<DatumRef>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
     pub console: console::ConsoleBuffer,
+    /// Introduced in MX 2004 with a default value of 10; older movies have 9.
+    /// Behaves like an int but Director only supports values of 9 and 10.
+    /// Values < 9 or > 10 get rounded to nearest valid value.
+    pub script_execution_style: ScriptExecutionStyle,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScriptExecutionStyle {
+    Version9 = 9,
+    Version10 = 10,
+}
+
+impl From<i32> for ScriptExecutionStyle {
+    fn from(value: i32) -> Self {
+        if value < 10 {
+            ScriptExecutionStyle::Version9
+        } else {
+            ScriptExecutionStyle::Version10
+        }
+    }
 }
 
 /// Target frame for a movie transition (gotoNetMovie or go movie).
@@ -415,6 +435,7 @@ impl DirPlayer {
             virtual_scripts: FxHashMap::default(),
             console: console::ConsoleBuffer::new(),
             rng: rand::rngs::SmallRng::seed_from_u64(0),
+            script_execution_style: ScriptExecutionStyle::Version10,
         };
 
         result.reset();
@@ -455,6 +476,12 @@ impl DirPlayer {
                 &mut self.dir_cache,
             )
             .await;
+
+        self.script_execution_style = if self.movie.dir_version < 1000 {
+            ScriptExecutionStyle::Version9
+        } else {
+            ScriptExecutionStyle::Version10
+        };
 
         self.bg_color = self.movie.stage_color_ref.clone();
 
@@ -1318,8 +1345,7 @@ impl DirPlayer {
             "currentSpriteNum" => {
                 // TODO: this can also be called by a static script
                 let script_instance_ref = self
-                    .scopes
-                    .get(self.current_scope_ref())
+                    .get_current_scope()
                     .and_then(|scope| scope.receiver.clone());
 
                 if let Some(script_instance_ref) = script_instance_ref {
@@ -1441,6 +1467,7 @@ impl DirPlayer {
                     .collect();
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
             },
+            "scriptExecutionStyle" => Ok(self.alloc_datum(Datum::Int(self.script_execution_style as i32))),
             _ => {
                 let datum = self.movie.get_prop(prop)?;
                 Ok(self.alloc_datum(datum))
@@ -1557,6 +1584,10 @@ impl DirPlayer {
                     _ => Err(ScriptError::new("actorList must be a list".to_string())),
                 }
             },
+            "scriptExecutionStyle" => {
+                self.script_execution_style = value.int_value()?.into();
+                Ok(())
+            },
             _ => self.movie.set_prop(prop, value, &self.allocator)
         })
     }
@@ -1620,8 +1651,17 @@ impl DirPlayer {
         self.scope_count -= 1;
     }
 
-    pub fn current_scope_ref(&self) -> ScopeRef {
-        (self.scope_count - 1) as ScopeRef
+    pub fn current_scope_ref(&self) -> Option<ScopeRef> {
+        self.scope_count.checked_sub(1).map(|c| c as ScopeRef)
+    }
+
+    pub fn get_current_scope(&self) -> Option<&Scope> {
+        self.scopes.get(self.current_scope_ref()?)
+    }
+
+    pub fn get_current_scope_mut(&mut self) -> Option<&mut Scope> {
+        let scope = self.current_scope_ref()?;
+        self.scopes.get_mut(scope)
     }
 
     // Lingo: sound(channelNum)
@@ -1959,9 +1999,7 @@ impl ScriptError {
 pub fn player_handle_scope_return(scope: &ScopeResult) {
     if scope.passed {
         reserve_player_mut(|player| {
-            let scope_ref = player.current_scope_ref();
-            let last_scope = player.scopes.get_mut(scope_ref);
-            if let Some(last_scope) = last_scope {
+            if let Some(last_scope) = player.get_current_scope_mut() {
                 last_scope.passed = true;
             }
         });
@@ -2142,10 +2180,7 @@ pub async fn player_call_script_handler_raw_args(
     let is_frame_script = reserve_player_ref(|player| {
         let frame_script = player.movie.score.get_script_in_frame(player.movie.current_frame);
         if let Some(fs) = frame_script {
-            let frame_script_ref = CastMemberRef {
-                cast_lib: fs.cast_lib.into(),
-                cast_member: fs.cast_member.into(),
-            };
+            let frame_script_ref = cast_member_ref(fs.cast_lib.into(), fs.cast_member.into());
             script_member_ref == &frame_script_ref
         } else {
             false
@@ -3331,10 +3366,7 @@ fn get_active_static_script_refs<'a>(
         active_script_refs.push(script.member_ref.clone());
     }
     if let Some(frame_script) = frame_script {
-        active_script_refs.push(CastMemberRef {
-            cast_lib: frame_script.cast_lib.into(),
-            cast_member: frame_script.cast_member.into(),
-        });
+        active_script_refs.push(cast_member_ref(frame_script.cast_lib.into(), frame_script.cast_member.into()));
     }
     for global in globals.values() {
         if let Datum::VarRef(VarRef::Script(script_ref)) = global {

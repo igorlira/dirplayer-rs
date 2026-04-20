@@ -37,7 +37,11 @@ impl GetSetUtils {
     ) -> Result<DatumRef, ScriptError> {
         match prop_name {
             "paramCount" => Ok(player.alloc_datum(Datum::Int(
-                player.scopes.get(ctx.scope_ref).unwrap().args.len() as i32,
+                if let Some(scope) = player.scopes.get(ctx.scope_ref) {
+                    scope.args.len() as i32
+                } else {
+                    0
+                }
             ))),
             "result" => Ok(player.last_handler_result.clone()),
             "pi" => Ok(player.alloc_datum(Datum::Float(std::f64::consts::PI))),

@@ -240,3 +240,22 @@ export interface ScoreSnapshot {
 }
 
 export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IFontMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)
+
+export function memberMatches(record: CastMemberRecord, query: string): boolean {
+  const lowerQuery = query.toLowerCase();
+
+  if (record.name.toLowerCase().includes(lowerQuery)) {
+    return true;
+  }
+
+  switch (record.type) {
+    case 'field':
+      return (record.snapshot as IFieldMemberSnapshot)?.text.toLowerCase().includes(lowerQuery) ?? false;
+    case 'script':
+      return (record.snapshot as IScriptMemberSnapshot)?.script.handlers.some(handler =>
+          handler.name.toLowerCase().includes(lowerQuery)
+      ) ?? false;
+    default:
+      return false;
+  }
+}

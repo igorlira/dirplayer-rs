@@ -14,7 +14,7 @@ use crate::{
         sprite::ColorRef,
     },
 };
-
+use crate::player::cast_lib::cast_member_ref;
 use super::cast_member::{
     bitmap::BitmapMemberHandlers, button::ButtonMemberHandlers, field::FieldMemberHandlers,
     film_loop::FilmLoopMemberHandlers, font::FontMemberHandlers, sound::SoundMemberHandlers,
@@ -49,10 +49,7 @@ impl CastMemberRefHandlers {
     }
 
     pub fn member_ref_from_slot_number(slot_number: u32) -> CastMemberRef {
-        CastMemberRef {
-            cast_lib: (slot_number >> 16) as i32,
-            cast_member: (slot_number & 0xFFFF) as i32,
-        }
+        cast_member_ref((slot_number >> 16) as i16 as i32, (slot_number & 0xFFFF) as i16 as i32)
     }
 
     pub fn call(
@@ -252,7 +249,7 @@ impl CastMemberRefHandlers {
             let dest_cast = player
                 .movie
                 .cast_manager
-                .get_cast_mut(dest_ref.cast_lib as u32);
+                .get_cast_mut(dest_ref.cast_lib as u32)?;
             dest_cast.insert_member(dest_ref.cast_member as u32, new_member);
 
             Ok(player.alloc_datum(Datum::Int(dest_slot_number)))
@@ -267,7 +264,7 @@ impl CastMemberRefHandlers {
         match prop {
             "name" => Ok(Datum::String("".to_string())),
             "number" => Ok(Datum::Int(-1)),
-            "type" => Ok(Datum::String("empty".to_string())),
+            "type" => Ok(Datum::Symbol("empty".to_string())),
             "castLibNum" => Ok(Datum::Int(-1)),
             "memberNum" => Ok(Datum::Int(-1)),
             "width" | "height" | "rect" | "duration" => Ok(Datum::Void),

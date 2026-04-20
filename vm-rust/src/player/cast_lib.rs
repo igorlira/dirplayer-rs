@@ -213,7 +213,8 @@ impl CastLib {
             "name" => Ok(Datum::String(self.name.clone())),
             "number of castMembers" | "number of members" => {
                 Ok(Datum::Int(self.members.len() as i32))
-            }
+            },
+            "member" => Ok(Datum::CastMember(cast_member_ref(self.number as i32, -1))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castLib property {}",
                 prop
@@ -464,6 +465,9 @@ pub const NULL_CAST_MEMBER_REF: CastMemberRef = CastMemberRef {
 };
 
 pub fn cast_member_ref(cast_lib: i32, cast_member: i32) -> CastMemberRef {
+    if cast_lib == 65535 {
+        panic!("cast_lib cannot be 65535 (treated as -1)");
+    }
     CastMemberRef {
         cast_lib,
         cast_member,
@@ -485,7 +489,7 @@ pub async fn player_cast_lib_set_prop(
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
 
     let cast_manager = &mut player.movie.cast_manager;
-    let cast_lib_obj = cast_manager.get_cast_mut(cast_lib as u32);
+    let cast_lib_obj = cast_manager.get_cast_mut(cast_lib as u32)?;
 
     if prop_name == "fileName" {
         log_i(

@@ -5,6 +5,7 @@ use crate::{
         ScriptErrorCode,
     },
 };
+use crate::player::cast_lib::cast_member_ref;
 
 pub struct CastLibDatumHandlers {}
 
@@ -60,16 +61,10 @@ impl CastLibDatumHandlers {
 
                     let member_ref = match &member_name_or_num {
                         Datum::String(name) => {
-                            cast.find_member_by_name(name).map(|member| CastMemberRef {
-                                cast_lib: cast_lib_num as i32,
-                                cast_member: member.number as i32,
-                            })
+                            cast.find_member_by_name(name).map(|member| cast_member_ref(cast_lib_num as i32, member.number as i32))
                         }
                         Datum::Int(num) => {
-                            cast.find_member_by_number(*num as u32).map(|member| CastMemberRef {
-                                cast_lib: cast_lib_num as i32,
-                                cast_member: member.number as i32,
-                            })
+                            cast.find_member_by_number(*num as u32).map(|member| cast_member_ref(cast_lib_num as i32, member.number as i32))
                         }
                         _ => {
                             return Err(ScriptError::new(format!(
@@ -83,10 +78,7 @@ impl CastLibDatumHandlers {
                         Some(mr) => Ok(player.alloc_datum(Datum::CastMember(mr))),
                         None => {
                             // Return an invalid member ref (member 0) for non-existent members
-                            Ok(player.alloc_datum(Datum::CastMember(CastMemberRef {
-                                cast_lib: cast_lib_num as i32,
-                                cast_member: 0,
-                            })))
+                            Ok(player.alloc_datum(Datum::CastMember(cast_member_ref(cast_lib_num as i32, 0))))
                         }
                     }
                 }

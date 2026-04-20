@@ -720,7 +720,7 @@ impl TypeHandlers {
                 } else {
                     (1, None)
                 };
-                let cast = player.movie.cast_manager.get_cast_mut(cast_num);
+                let cast = player.movie.cast_manager.get_cast_mut(cast_num)?;
                 let member_slot = slot.unwrap_or_else(|| cast.first_free_member_id());
                 let member_ref = cast.create_member_at(
                     member_slot,
@@ -1392,8 +1392,7 @@ impl TypeHandlers {
             let handler_name = player.get_datum(&args[0]).string_value()?;
 
             // Get the current scope's script_ref to determine which script we're currently in
-            let current_scope_ref = player.current_scope_ref();
-            let current_script_ref = player.scopes.get(current_scope_ref)
+            let current_script_ref = player.get_current_scope()
                 .map(|scope| scope.script_ref.clone());
 
             let list_or_script_instance = player.get_datum(&args[1]);
