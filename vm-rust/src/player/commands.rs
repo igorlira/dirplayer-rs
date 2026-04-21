@@ -27,7 +27,7 @@ use super::{
     keyboard_events::{player_key_down, player_key_up},
     player_alloc_datum, player_call_script_handler, player_dispatch_global_event,
     player_is_playing, reserve_player_mut, reserve_player_ref,
-    score::{concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at},
+    score::{concrete_sprite_hit_test, get_concrete_sprite_rect, get_interactable_sprite_at, get_sprite_at},
     PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX,
 };
 
@@ -695,33 +695,44 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
 
                 let hovered_sprite = player.hovered_sprite;
-                let sprite_num = get_sprite_at(player, x, y, false);
-                if let Some(sprite_num) = sprite_num {
-                    player.hovered_sprite = Some(sprite_num as i16);
-                }
+                let sprite_num = get_interactable_sprite_at(player, x, y);
+                player.hovered_sprite = sprite_num.map(|n| n as i16);
                 (sprite_num, hovered_sprite)
             });
-            if let Some(sprite_num) = sprite_num {
-                let hovered_sprite = hovered_sprite.unwrap_or(-1);
-                if hovered_sprite != sprite_num as i16 {
-                    if hovered_sprite != -1 {
+            match sprite_num {
+                Some(sprite_num) => {
+                    let prev = hovered_sprite.unwrap_or(-1);
+                    if prev != sprite_num as i16 {
+                        if prev != -1 {
+                            player_dispatch_event_to_sprite(
+                                &"mouseLeave".to_string(),
+                                &vec![],
+                                prev as u16,
+                            );
+                        }
                         player_dispatch_event_to_sprite(
-                            &"mouseLeave".to_string(),
+                            &"mouseEnter".to_string(),
                             &vec![],
-                            hovered_sprite as u16,
-                        )
+                            sprite_num as u16,
+                        );
+                    } else {
+                        player_dispatch_event_to_sprite(
+                            &"mouseWithin".to_string(),
+                            &vec![],
+                            sprite_num as u16,
+                        );
                     }
-                    player_dispatch_event_to_sprite(
-                        &"mouseEnter".to_string(),
-                        &vec![],
-                        sprite_num as u16,
-                    );
-                } else {
-                    player_dispatch_event_to_sprite(
-                        &"mouseWithin".to_string(),
-                        &vec![],
-                        sprite_num as u16,
-                    );
+                }
+                None => {
+                    if let Some(prev) = hovered_sprite {
+                        if prev != -1 {
+                            player_dispatch_event_to_sprite(
+                                &"mouseLeave".to_string(),
+                                &vec![],
+                                prev as u16,
+                            );
+                        }
+                    }
                 }
             }
         }

@@ -596,12 +596,20 @@ pub async fn player_dispatch_event_beginsprite(
         return Ok(Vec::new());
     }
     
-    if frame_instances.len() > 0 {
-        let _ = player_invoke_frame_and_movie_scripts(
-            handler_name,
-            args,
-        )
-        .await;
+    // Dispatch beginSprite to channel 0 (frame script) behavior instances directly
+    for (_channel_number, behavior) in frame_instances {
+        let receivers = vec![behavior.clone()];
+        if let Err(err) = player_invoke_targeted_event(handler_name, args, Some(receivers).as_ref()).await {
+            if err.code == ScriptErrorCode::Abort {
+                return Ok(vec![]);
+            }
+            web_sys::console::error_1(
+                &format!("Error in {} for frame script: {}", handler_name, err.message).into()
+            );
+            reserve_player_mut(|player| {
+                player.on_script_error(&err);
+            });
+        }
     }
     
     // Dispatch to sprite behaviors (number > 0)
@@ -865,6 +873,31 @@ pub async fn dispatch_event_to_all_behaviors(
             player.current_score_context = ScoreRef::Stage;
         });
     }
+
+    // Dispatch to channel 0 (frame script) behaviors
+    // Per ScummVM, the script channel instance receives frame events (enterFrame/exitFrame)
+    // but NOT sprite events (beginSprite/endSprite).
+    for (_channel_number, behaviors) in frame_behaviors {
+        for behavior in behaviors {
+            let receivers = vec![behavior.clone()];
+            if let Err(err) = player_invoke_event_to_instances(handler_name, args, &receivers).await {
+                if err.code == ScriptErrorCode::Abort {
+                    reserve_player_mut(|player| {
+                        player.is_dispatching_events = false;
+                        player.current_score_context = ScoreRef::Stage;
+                    });
+                    return;
+                }
+                web_sys::console::error_1(
+                    &format!("Error in {} for frame script: {}", handler_name, err.message).into()
+                );
+                reserve_player_mut(|player| {
+                    player.on_script_error(&err);
+                });
+            }
+        }
+    }
+
     // Dispatch event to frame/movie scripts
     if let Err(err) = player_invoke_frame_and_movie_scripts(handler_name, args).await {
         if err.code != ScriptErrorCode::Abort {
