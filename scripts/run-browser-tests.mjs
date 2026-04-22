@@ -3,11 +3,14 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as esbuild from "esbuild";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const VM_RUST_DIR = path.join(REPO_ROOT, "vm-rust");
 const ASSET_DIR = path.join(REPO_ROOT, "public");
+const RUFFLE_DIR = path.join(ASSET_DIR, "ruffle");
+const FLASH_MANAGER_SRC = path.join(REPO_ROOT, "src", "services", "flashPlayerManager.ts");
 const RUNNER_DIR = path.join(VM_RUST_DIR, "target", "browser_runner");
 const TEMPLATE_DIR = path.join(VM_RUST_DIR, "tests", "browser_templates");
 const CONFIG_DIR = path.join(VM_RUST_DIR, "tests", "e2e", "configs");
@@ -110,6 +113,28 @@ fs.copyFileSync(
   path.join(TEMPLATE_DIR, "dirplayer-js-api.js"),
   path.join(RUNNER_DIR, "dirplayer-js-api.js"),
 );
+
+// 6a. Bundle flashPlayerManager.ts for Ruffle integration.
+//     The `vm-rust` import is externalized and resolved through the
+//     importmap to the test's wasm-bindgen module.
+await esbuild.build({
+  entryPoints: [FLASH_MANAGER_SRC],
+  bundle: true,
+  format: "esm",
+  target: "es2020",
+  external: ["vm-rust"],
+  outfile: path.join(RUNNER_DIR, "flashPlayerManager.bundle.js"),
+  logLevel: "info",
+});
+
+// 6b. Copy the Ruffle runtime into the runner so ruffle.js can load
+//     its wasm chunk from a sibling path.
+if (fs.existsSync(RUFFLE_DIR)) {
+  fs.cpSync(RUFFLE_DIR, path.join(RUNNER_DIR, "ruffle"), { recursive: true });
+} else {
+  console.warn(`Ruffle directory not found at ${RUFFLE_DIR}; Flash members won't render in tests.`);
+}
+
 const template = fs.readFileSync(
   path.join(TEMPLATE_DIR, "index.template.html"),
   "utf8",
