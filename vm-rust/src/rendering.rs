@@ -2850,6 +2850,11 @@ impl Renderer for PlayerCanvasRenderer {
 thread_local! {
     pub static RENDERER_LOCK: RefCell<Option<DynamicRenderer>> = RefCell::new(None);
     pub static LAST_DRAW_MS: Cell<i64> = Cell::new(0);
+    /// Whether the persistent draw loop has already been spawned. The loop
+    /// itself picks up whatever renderer is currently in RENDERER_LOCK on
+    /// each rAF, so we only need one loop across the whole WASM lifetime —
+    /// dropping and recreating the renderer between tests must not respawn it.
+    pub static DRAW_LOOP_SPAWNED: Cell<bool> = Cell::new(false);
 }
 
 pub fn mark_frame_drawn() {
@@ -3192,9 +3197,14 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
             };
 
             *renderer_lock = Some(dynamic_renderer);
-            spawn_local(async {
-                run_draw_loop().await;
-            });
+            // Only spawn the draw loop the first time. Later calls (after the
+            // renderer was dropped between movies) reuse the existing loop.
+            if !DRAW_LOOP_SPAWNED.with(|f| f.get()) {
+                DRAW_LOOP_SPAWNED.with(|f| f.set(true));
+                spawn_local(async {
+                    run_draw_loop().await;
+                });
+            }
         }
     });
 
@@ -3232,7 +3242,21 @@ async fn run_draw_loop() {
 
     let mut last_frame_ms = 0;
     let cb = Closure::<dyn FnMut()>::new(move || {
-        let mut player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+        // Player may be momentarily None while a test harness tears down the
+        // old player before allocating the new one. Skip drawing instead of
+        // panicking — the next rAF will pick it back up.
+        let player = match unsafe { PLAYER_OPT.as_mut() } {
+            Some(p) => p,
+            None => {
+                if let Ok(cb) = rc.try_borrow() {
+                    if let Some(cb) = cb.as_ref() {
+                        request_animation_frame(cb);
+                    }
+                }
+                return;
+            }
+        };
+        let mut player = player;
         let draw_fps = 24;
 
         let frame_interval = 1000 / draw_fps as i64;

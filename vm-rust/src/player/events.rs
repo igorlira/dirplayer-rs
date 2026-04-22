@@ -422,12 +422,32 @@ pub async fn player_dispatch_movie_callback(
 
 pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
     warn!("Starting event loop");
+    // Snapshot the player generation this loop belongs to. If the generation
+    // changes (another test reset the player), this loop is stale and must
+    // exit so it can't dispatch events on the new player's state.
+    let generation = unsafe { crate::player::PLAYER_GENERATION };
+
     while !rx.is_closed() {
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Event loop stopped (generation changed)");
+            return;
+        }
         let item = match rx.recv().await {
             Ok(item) => item,
             Err(_) => break, // Channel closed (sender dropped)
         };
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Event loop stopped after recv (generation changed)");
+            return;
+        }
         player_wait_available().await;
+        // After the semaphore yield, re-check generation before touching any
+        // player state — a reset during the yield would make this dispatch
+        // stale and any handler call would run on the new player.
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Event loop stopped after semaphore (generation changed)");
+            return;
+        }
         if !player_is_playing().await {
             continue;
         }

@@ -5197,6 +5197,16 @@ impl super::Renderer for WebGL2Renderer {
         WebGL2Renderer::draw_frame(self, player)
     }
 
+    fn reset_for_new_movie(&mut self) {
+        // Drop all cached GPU textures and rendered-text bitmaps so sprites
+        // from a previous movie don't bleed into the next one. The Scene3D
+        // backing store also holds per-member GPU resources keyed by cast
+        // ref — clearing those forces rebuild on the next frame.
+        self.texture_cache.clear();
+        self.rendered_text_cache.clear();
+        self.last_palette_version = 0;
+    }
+
     fn draw_preview_frame(&mut self, player: &mut DirPlayer) {
         WebGL2Renderer::draw_preview_frame(self, player)
     }

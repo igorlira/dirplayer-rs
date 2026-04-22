@@ -120,11 +120,24 @@ fn has_executable_callback(callback: &Option<ScriptReceiver>) -> bool {
 pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
     warn!("Starting command loop");
 
+    // Snapshot the player generation this loop belongs to. If the generation
+    // changes (another test reset the player), this loop is stale and must
+    // exit so it can't mutate the new player's state.
+    let generation = unsafe { crate::player::PLAYER_GENERATION };
+
     while !rx.is_closed() {
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Command loop stopped (generation changed)");
+            return;
+        }
         let item = match rx.recv().await {
             Ok(item) => item,
             Err(_) => break, // Channel closed (sender dropped)
         };
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Command loop stopped after recv (generation changed)");
+            return;
+        }
         let result = run_player_command(item.command).await;
         match result {
             Ok(result) => {
@@ -179,7 +192,20 @@ pub async fn player_dispatch_async(command: PlayerVMCommand) -> Result<DatumRef,
 }
 
 pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, ScriptError> {
+    // Snapshot the generation this command belongs to. `player_wait_available`
+    // yields, and during that yield a new test can reset the player (bumping
+    // PLAYER_GENERATION). If that happens, this command is stale — executing
+    // it would mutate the new player's state (unbalancing scope push/pop,
+    // leaking timeouts, etc.). Bail with Abort so the outer command loop
+    // treats it as a normal cancellation.
+    let generation_at_entry = unsafe { crate::player::PLAYER_GENERATION };
     player_wait_available().await;
+    if unsafe { crate::player::PLAYER_GENERATION } != generation_at_entry {
+        return Err(crate::player::ScriptError::new_code(
+            crate::player::ScriptErrorCode::Abort,
+            "Command cancelled: player generation changed (test reset)".to_string(),
+        ));
+    }
     match command {
         PlayerVMCommand::SetExternalParams(params) => {
             reserve_player_mut(|player| {
