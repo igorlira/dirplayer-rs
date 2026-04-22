@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_intel/DoNotPush.dcr"
+
+[test]
+suite = "intel"

@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_nintendo/nomiss.dcr"
+
+[test]
+suite = "nintendo"

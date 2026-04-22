@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_sulake/lumisota/lumisota.dcr"
+
+[test]
+suite = "sulake"

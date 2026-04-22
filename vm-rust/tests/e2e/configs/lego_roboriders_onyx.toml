@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_lego/ClubGames/RoboRiders/onyx.dcr"
+
+[test]
+suite = "lego"

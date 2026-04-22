@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_lego/ClubGames/Junkbot/NoSave/DSWMEDIA/Junkbot.dcr"
+
+[test]
+suite = "lego"

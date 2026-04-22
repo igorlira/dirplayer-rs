@@ -1,5 +1,0 @@
-[movie]
-path = "dcr_lego/ClubGames/WorldBuilder/worldbuilder/worldbuilder.dcr"
-
-[test]
-suite = "worldbuilder"

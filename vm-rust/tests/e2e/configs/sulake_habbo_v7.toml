@@ -1,0 +1,9 @@
+[movie]
+path = "dcr_sulake/habbo_v7/habbo.dcr"
+
+[test]
+suite = "sulake"
+
+[params]
+username = "${HABBO_V7_USERNAME:testuser}"
+password = "${HABBO_V7_PASSWORD:testpass1}"
