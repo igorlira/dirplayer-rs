@@ -1295,13 +1295,31 @@ impl Shockwave3dMemberHandlers {
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
                                         });
+                                        // Namespace every descendant's name to avoid collisions
+                                        // with prior clones from the same source. Names are keyed
+                                        // case-insensitively since Director is case-insensitive.
+                                        let mut node_name_map: std::collections::HashMap<String, String> =
+                                            std::collections::HashMap::new();
+                                        for child in &src_child_nodes {
+                                            let new_name = format!("{}{}", ns, child.name);
+                                            node_name_map.insert(child.name.to_ascii_lowercase(), new_name);
+                                        }
+
                                         // Clone child nodes from source scene, re-parenting
-                                        // the direct children of source_model to obj_name
+                                        // the direct children of source_model to obj_name and
+                                        // rewiring deeper parent links to the namespaced names.
                                         for child in &src_child_nodes {
                                             let mut cloned = child.clone();
-                                            // Re-parent: if child's parent was the source model, change to new name
+                                            // Rename the node itself
+                                            if let Some(new_name) = node_name_map.get(&cloned.name.to_ascii_lowercase()) {
+                                                cloned.name = new_name.clone();
+                                            }
+                                            // Re-parent: direct child of source_model → obj_name;
+                                            // otherwise remap to the namespaced descendant name.
                                             if cloned.parent_name.eq_ignore_ascii_case(&source_model_name) {
                                                 cloned.parent_name = obj_name.clone();
+                                            } else if let Some(new_parent) = node_name_map.get(&cloned.parent_name.to_ascii_lowercase()) {
+                                                cloned.parent_name = new_parent.clone();
                                             }
                                             // Namespace child resource names to match cloned mesh data
                                             if !cloned.resource_name.is_empty() {
@@ -1314,10 +1332,8 @@ impl Shockwave3dMemberHandlers {
                                             if let Some(new_shader) = shader_name_map.get(&cloned.shader_name) {
                                                 cloned.shader_name = new_shader.clone();
                                             }
-                                            // Check if node with same name already exists
-                                            if !scene.nodes.iter().any(|n| n.name == cloned.name) {
-                                                scene.nodes.push(cloned);
-                                            }
+                                            // Names are now unique per clone — push unconditionally
+                                            scene.nodes.push(cloned);
                                         }
                                     } else if obj_type == "motion" {
                                         scene.motions.push(W3dMotion {

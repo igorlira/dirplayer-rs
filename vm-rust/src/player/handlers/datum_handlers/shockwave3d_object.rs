@@ -3684,7 +3684,7 @@ impl Shockwave3dObjectDatumHandlers {
             "child.count" | "childCount" => {
                 // Count children of this node
                 let count = scene.nodes.iter()
-                    .filter(|n| n.parent_name == model_name)
+                    .filter(|n| n.parent_name.eq_ignore_ascii_case(model_name))
                     .count();
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
             },
@@ -3692,7 +3692,7 @@ impl Shockwave3dObjectDatumHandlers {
                 // Return list of child node refs
                 use crate::director::lingo::datum::Shockwave3dObjectRef;
                 let children: Vec<_> = scene.nodes.iter()
-                    .filter(|n| n.parent_name == model_name)
+                    .filter(|n| n.parent_name.eq_ignore_ascii_case(model_name))
                     .collect();
                 let mut items = VecDeque::new();
                 for child in &children {
