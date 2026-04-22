@@ -376,46 +376,59 @@ impl MovieHandlers {
 
                 player_wait_available().await;
 
-                // 3. Send stepFrame to actorList
-                let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
-                    reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
+                // 3. Send stepFrame to actorList — gate on in_step_frame so a
+                // nested go() (e.g. enterFrame handler calling mach8_go) does
+                // not re-dispatch stepFrame on the same actorList during the
+                // current frame cycle.
+                let step_frame_entered = reserve_player_mut(|player| {
+                    if player.in_step_frame { return true; }
+                    player.in_step_frame = true;
+                    false
+                });
+                if !step_frame_entered {
+                    let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
+                        reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
 
-                for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-                    let still_active = active_actor_ids.contains(&actor_ref.unwrap());
+                    for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
+                        let still_active = active_actor_ids.contains(&actor_ref.unwrap());
 
-                    if still_active {
-                        let result =
-                            player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+                        if still_active {
+                            let result =
+                                player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
 
-                        if let Err(err) = result {
-                            if err.code == ScriptErrorCode::Abort {
+                            if let Err(err) = result {
+                                if err.code == ScriptErrorCode::Abort {
+                                    reserve_player_mut(|player| {
+                                        player.is_in_frame_update = false;
+                                        player.in_step_frame = false;
+                                    });
+                                    return Ok(DatumRef::Void);
+                                }
+                                error!("⚠ stepFrame[{}] error: {}", idx, err.message);
                                 reserve_player_mut(|player| {
+                                    player.on_script_error(&err);
                                     player.is_in_frame_update = false;
+                                    player.in_step_frame = false;
                                 });
                                 return Ok(DatumRef::Void);
                             }
-                            error!("⚠ stepFrame[{}] error: {}", idx, err.message);
-                            reserve_player_mut(|player| {
-                                player.on_script_error(&err);
-                                player.is_in_frame_update = false;
+
+                            let refreshed_active_ids = reserve_player_ref(|player| {
+                                if player.actor_list_generation != actor_list_generation {
+                                    Some(player.actor_list_active_ids())
+                                } else {
+                                    None
+                                }
                             });
-                            return Ok(DatumRef::Void);
-                        }
 
-                        let refreshed_active_ids = reserve_player_ref(|player| {
-                            if player.actor_list_generation != actor_list_generation {
-                                Some(player.actor_list_active_ids())
-                            } else {
-                                None
+                            if let Some((next_active_actor_ids, next_actor_list_generation)) = refreshed_active_ids
+                            {
+                                active_actor_ids = next_active_actor_ids;
+                                actor_list_generation = next_actor_list_generation;
                             }
-                        });
-
-                        if let Some((next_active_actor_ids, next_actor_list_generation)) = refreshed_active_ids
-                        {
-                            active_actor_ids = next_active_actor_ids;
-                            actor_list_generation = next_actor_list_generation;
                         }
                     }
+                    reserve_player_mut(|player| { player.in_step_frame = false; });
                 }
 
                 player_wait_available().await;
@@ -879,47 +892,59 @@ impl MovieHandlers {
             player.movie.score.apply_tween_modifiers(player.movie.current_frame);
         });
 
-        // 1. Send stepFrame to actorList
-        let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
-            reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
+        // 1. Send stepFrame to actorList — gate on in_step_frame so a nested
+        // go() does not re-dispatch stepFrame on the same actorList during
+        // the current frame cycle.
+        let step_frame_entered = reserve_player_mut(|player| {
+            if player.in_step_frame { return true; }
+            player.in_step_frame = true;
+            false
+        });
+        if !step_frame_entered {
+            let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
+                reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
 
-        for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-            let still_active = active_actor_ids.contains(&actor_ref.unwrap());
+            for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
+                let still_active = active_actor_ids.contains(&actor_ref.unwrap());
 
-            if still_active {
-                let result =
-                    player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+                if still_active {
+                    let result =
+                        player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
 
-                if let Err(err) = result {
-                    if err.code == ScriptErrorCode::Abort {
+                    if let Err(err) = result {
+                        if err.code == ScriptErrorCode::Abort {
+                            reserve_player_mut(|player| {
+                                player.is_in_frame_update = false;
+                                player.in_step_frame = false;
+                            });
+                            return Err(err);
+                        }
+                        error!("⚠ stepFrame[{}] error: {}", idx, err.message);
                         reserve_player_mut(|player| {
+                            player.on_script_error(&err);
                             player.is_in_frame_update = false;
+                            player.in_step_frame = false;
                         });
                         return Err(err);
                     }
-                    error!("⚠ stepFrame[{}] error: {}", idx, err.message);
-                    reserve_player_mut(|player| {
-                        player.on_script_error(&err);
-                        player.is_in_frame_update = false;
+
+                    let refreshed_active_ids = reserve_player_ref(|player| {
+                        if player.actor_list_generation != actor_list_generation {
+                            Some(player.actor_list_active_ids())
+                        } else {
+                            None
+                        }
                     });
-                    return Err(err);
-                }
 
-                let refreshed_active_ids = reserve_player_ref(|player| {
-                    if player.actor_list_generation != actor_list_generation {
-                        Some(player.actor_list_active_ids())
-                    } else {
-                        None
+                    if let Some((next_active_actor_ids, next_actor_list_generation)) =
+                        refreshed_active_ids
+                    {
+                        active_actor_ids = next_active_actor_ids;
+                        actor_list_generation = next_actor_list_generation;
                     }
-                });
-
-                if let Some((next_active_actor_ids, next_actor_list_generation)) =
-                    refreshed_active_ids
-                {
-                    active_actor_ids = next_active_actor_ids;
-                    actor_list_generation = next_actor_list_generation;
                 }
             }
+            reserve_player_mut(|player| { player.in_step_frame = false; });
         }
 
         player_wait_available().await;

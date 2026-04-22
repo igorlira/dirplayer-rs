@@ -449,54 +449,62 @@ fn get_eval_top_level_prop(
 
     // Resolve against the current scope (locals, args, receiver properties)
     // This is needed both during breakpoint evaluation and during `do` command execution
-    if player.scope_count > 0 {
-        let scope_idx = if player.current_breakpoint.is_some() {
-            player.eval_scope_index.unwrap_or(player.scope_count - 1) as usize
+    if player.scope_count > 0 && (player.scope_count as usize) <= player.scopes.len() {
+        let raw = if player.current_breakpoint.is_some() {
+            player.eval_scope_index.unwrap_or(player.scope_count - 1)
         } else {
-            (player.scope_count - 1) as usize
+            player.scope_count - 1
         };
-        let scope = &player.scopes[scope_idx];
+        // Defensive: if scope_count was corrupted (e.g. an underflowed u32
+        // from a stale post-reset pop), fall through to the globals branch
+        // instead of panicking on an out-of-range scope index.
+        let scope_idx = raw as usize;
+        if scope_idx >= player.scopes.len() {
+            // Fall through to globals.
+        } else {
+            let scope = &player.scopes[scope_idx];
 
-        // Check locals by reverse-looking up the name_id from the name table
-        {
-            let script_ref_for_locals = scope.script_ref.clone();
-            if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref_for_locals) {
-                if let Some(lctx) = get_lctx_for_script(player, &script_rc) {
-                    if let Some(name_id) = lctx.names.iter().position(|n| n.eq_ignore_ascii_case(prop_name)) {
-                        if let Some(local_ref) = player.scopes[scope_idx].locals.get(&(name_id as u16)) {
-                            return Ok(local_ref.clone());
+            // Check locals by reverse-looking up the name_id from the name table
+            {
+                let script_ref_for_locals = scope.script_ref.clone();
+                if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref_for_locals) {
+                    if let Some(lctx) = get_lctx_for_script(player, &script_rc) {
+                        if let Some(name_id) = lctx.names.iter().position(|n| n.eq_ignore_ascii_case(prop_name)) {
+                            if let Some(local_ref) = player.scopes[scope_idx].locals.get(&(name_id as u16)) {
+                                return Ok(local_ref.clone());
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Check "me" (the receiver)
-        if prop_name == "me" {
-            if let Some(receiver) = scope.receiver.clone() {
-                return Ok(player.alloc_datum(Datum::ScriptInstanceRef(receiver)));
+            // Check "me" (the receiver)
+            if prop_name == "me" {
+                if let Some(receiver) = scope.receiver.clone() {
+                    return Ok(player.alloc_datum(Datum::ScriptInstanceRef(receiver)));
+                }
             }
-        }
 
-        // Resolve handler name from the scope's handler_name_id
-        let script_ref = scope.script_ref.clone();
-        let handler_name_id = scope.handler_name_id;
-        if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref) {
-            let script = script_rc.clone();
-            // Find the handler whose name_id matches this scope's handler_name_id
-            let handler_name = script.handlers.iter()
-                .find(|(_, h)| h.name_id == handler_name_id)
-                .map(|(name, _)| name.as_str().to_owned());
-            if let Some(handler_name) = handler_name {
-                if let Some(handler_def) = script.get_own_handler(&handler_name) {
-                    let handler_def = handler_def.clone();
-                    // Check handler arguments by name
-                    if let Some(lctx) = get_lctx_for_script(player, &script) {
-                        for (i, &name_id) in handler_def.argument_name_ids.iter().enumerate() {
-                            if let Some(name) = lctx.names.get(name_id as usize) {
-                                if name.eq_ignore_ascii_case(prop_name) {
-                                    if let Some(arg_ref) = player.scopes[scope_idx].args.get(i) {
-                                        return Ok(arg_ref.clone());
+            // Resolve handler name from the scope's handler_name_id
+            let script_ref = scope.script_ref.clone();
+            let handler_name_id = scope.handler_name_id;
+            if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref) {
+                let script = script_rc.clone();
+                // Find the handler whose name_id matches this scope's handler_name_id
+                let handler_name = script.handlers.iter()
+                    .find(|(_, h)| h.name_id == handler_name_id)
+                    .map(|(name, _)| name.as_str().to_owned());
+                if let Some(handler_name) = handler_name {
+                    if let Some(handler_def) = script.get_own_handler(&handler_name) {
+                        let handler_def = handler_def.clone();
+                        // Check handler arguments by name
+                        if let Some(lctx) = get_lctx_for_script(player, &script) {
+                            for (i, &name_id) in handler_def.argument_name_ids.iter().enumerate() {
+                                if let Some(name) = lctx.names.get(name_id as usize) {
+                                    if name.eq_ignore_ascii_case(prop_name) {
+                                        if let Some(arg_ref) = player.scopes[scope_idx].args.get(i) {
+                                            return Ok(arg_ref.clone());
+                                        }
                                     }
                                 }
                             }
@@ -504,14 +512,14 @@ fn get_eval_top_level_prop(
                     }
                 }
             }
-        }
 
-        // Check properties on the receiver (me) object
-        let receiver = player.scopes[scope_idx].receiver.clone();
-        if let Some(receiver_ref) = receiver {
-            let prop_name_str = prop_name.to_string();
-            if let Some(result) = script_get_prop_opt(player, &receiver_ref, &prop_name_str) {
-                return Ok(result);
+            // Check properties on the receiver (me) object
+            let receiver = player.scopes[scope_idx].receiver.clone();
+            if let Some(receiver_ref) = receiver {
+                let prop_name_str = prop_name.to_string();
+                if let Some(result) = script_get_prop_opt(player, &receiver_ref, &prop_name_str) {
+                    return Ok(result);
+                }
             }
         }
     }

@@ -277,6 +277,7 @@ pub struct DirPlayer {
     pub w3d_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
     pub in_enter_frame: bool,
     pub in_prepare_frame: bool,
+    pub in_step_frame: bool,
     pub in_event_dispatch: bool,
     pub command_handler_yielding: bool, // Pauses frame loop when a command handler (keyDown) needs updateStage to yield
     pub in_mouse_command: bool, // Pauses frame loop during mouse handlers; updateStage renders without yielding
@@ -454,6 +455,7 @@ impl DirPlayer {
             w3d_frame_buffers: HashMap::new(),
             in_enter_frame: false,
             in_prepare_frame: false,
+            in_step_frame: false,
             in_event_dispatch: false,
             command_handler_yielding: false,
             in_mouse_command: false,
@@ -2076,11 +2078,20 @@ impl DirPlayer {
     }
 
     pub fn pop_scope(&mut self) {
-        self.scope_count -= 1;
+        // Guard against underflow. A stale handler resuming from an async JS
+        // callback after a test reset (Ruffle init, MP3 decode, fetch) can
+        // decrement scope_count on a freshly-reset player. A wrapping subtract
+        // would drive `scope_count` to u32::MAX-N and poison every later
+        // `scope_count - 1` index computation.
+        if self.scope_count > 0 {
+            self.scope_count -= 1;
+        } else {
+            warn!("pop_scope called with scope_count=0 (stale handler?)");
+        }
     }
 
     pub fn current_scope_ref(&self) -> ScopeRef {
-        (self.scope_count - 1) as ScopeRef
+        self.scope_count.saturating_sub(1) as ScopeRef
     }
 
     // Lingo: sound(channelNum)
@@ -2718,7 +2729,7 @@ pub async fn player_call_script_handler_raw_args(
                 }
                 // Cleanup on error
                 reserve_player_mut(|player| {
-                    player.handler_stack_depth -= 1;
+                    player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
                     if is_frame_script {
                         player.in_frame_script = false;
                     }
@@ -2770,7 +2781,7 @@ pub async fn player_call_script_handler_raw_args(
                 }
                 // Cleanup on error
                 reserve_player_mut(|player| {
-                    player.handler_stack_depth -= 1;
+                    player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
                     if is_frame_script {
                         player.in_frame_script = false;
                     }
@@ -2809,7 +2820,7 @@ pub async fn player_call_script_handler_raw_args(
 
     // Cleanup after successful execution
     reserve_player_mut(|player| {
-        player.handler_stack_depth -= 1;
+        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
         if is_frame_script {
             player.in_frame_script = false;
         }
@@ -3006,46 +3017,56 @@ async fn run_movie_init_sequence() {
 
     player_wait_available().await;
 
-    // stepFrame to actorList
-    let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
-        reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
+    // stepFrame to actorList — gate on in_step_frame to prevent re-entry.
+    let step_frame_entered = reserve_player_mut(|player| {
+        if player.in_step_frame { return true; }
+        player.in_step_frame = true;
+        false
+    });
+    if !step_frame_entered {
+        let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
+            reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
 
-    for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-        let still_active = active_actor_ids.contains(&actor_ref.unwrap());
+        for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
+            let still_active = active_actor_ids.contains(&actor_ref.unwrap());
 
-        if still_active {
-            let result =
-                player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+            if still_active {
+                let result =
+                    player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
 
-            if let Err(err) = result {
-                if err.code == ScriptErrorCode::Abort {
+                if let Err(err) = result {
+                    if err.code == ScriptErrorCode::Abort {
+                        reserve_player_mut(|player| {
+                            player.is_in_frame_update = false;
+                            player.in_step_frame = false;
+                        });
+                        return;
+                    }
+                    error!("⚠ stepFrame[{}] error: {}", idx, err.message);
                     reserve_player_mut(|player| {
+                        player.on_script_error(&err);
                         player.is_in_frame_update = false;
+                        player.in_step_frame = false;
                     });
                     return;
                 }
-                error!("⚠ stepFrame[{}] error: {}", idx, err.message);
-                reserve_player_mut(|player| {
-                    player.on_script_error(&err);
-                    player.is_in_frame_update = false;
+
+                let refreshed_active_ids = reserve_player_ref(|player| {
+                    if player.actor_list_generation != actor_list_generation {
+                        Some(player.actor_list_active_ids())
+                    } else {
+                        None
+                    }
                 });
-                return;
-            }
 
-            let refreshed_active_ids = reserve_player_ref(|player| {
-                if player.actor_list_generation != actor_list_generation {
-                    Some(player.actor_list_active_ids())
-                } else {
-                    None
+                if let Some((next_active_actor_ids, next_actor_list_generation)) = refreshed_active_ids
+                {
+                    active_actor_ids = next_active_actor_ids;
+                    actor_list_generation = next_actor_list_generation;
                 }
-            });
-
-            if let Some((next_active_actor_ids, next_actor_list_generation)) = refreshed_active_ids
-            {
-                active_actor_ids = next_active_actor_ids;
-                actor_list_generation = next_actor_list_generation;
             }
         }
+        reserve_player_mut(|player| { player.in_step_frame = false; });
     }
 
     reserve_player_mut(|player| {
@@ -3894,7 +3915,7 @@ async fn player_ext_call<'a>(
 
     // Always decrement handler depth before returning
     reserve_player_mut(|player| {
-        player.handler_stack_depth -= 1;
+        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
     });
     
     result

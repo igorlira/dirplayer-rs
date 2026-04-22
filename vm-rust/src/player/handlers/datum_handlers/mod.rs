@@ -82,7 +82,7 @@ pub async fn player_call_datum_handler(
         if should_skip {
             // Decrement handler depth before returning
             reserve_player_mut(|player| {
-                player.handler_stack_depth -= 1;
+                player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
             });
             
             // Return empty property list
@@ -286,7 +286,7 @@ pub async fn player_call_datum_handler(
 
     // Always decrement, even on error
     reserve_player_mut(|player| {
-        player.handler_stack_depth -= 1;
+        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
     });
 
     // end_profiling(profile_token);
