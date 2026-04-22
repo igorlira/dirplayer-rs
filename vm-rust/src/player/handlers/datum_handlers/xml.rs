@@ -59,7 +59,10 @@ impl XmlParser {
             return Ok((None, HashMap::new()));
         }
 
-        let cursor = Cursor::new(content.as_bytes());
+        // Director's XML Xtra tolerates duplicate attributes (last wins).
+        // xml-rs errors out, so preprocess to drop earlier duplicates.
+        let cleaned = crate::player::xtra::xmlparser::dedup_duplicate_attributes(content);
+        let cursor = Cursor::new(cleaned.as_bytes());
         let parser = EventReader::new(cursor);
 
         let mut nodes: HashMap<u32, XmlNode> = HashMap::new();

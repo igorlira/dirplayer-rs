@@ -43,7 +43,11 @@ impl XmlParserXtraInstance {
         self.error = None;
         self.parsed_root = None;
 
-        let parser = EventReader::from_str(xml_string);
+        // Director's XML Xtra tolerates duplicate attributes (last wins).
+        // xml-rs is strict and errors out, so preprocess the source to drop
+        // earlier duplicates within each element's attribute list.
+        let cleaned = dedup_duplicate_attributes(xml_string);
+        let parser = EventReader::from_str(&cleaned);
         let mut stack: Vec<XmlNode> = Vec::new();
         let mut root: Option<XmlNode> = None;
 
@@ -574,3 +578,175 @@ pub fn borrow_xmlparser_manager_mut<T>(
 }
 
 pub static mut XMLPARSER_XTRA_MANAGER_OPT: Option<XmlParserXtraManager> = None;
+
+/// Strip earlier occurrences of duplicate attributes within each element's
+/// opening tag. Matches Director's XML Xtra behavior: last attribute wins.
+/// Only touches text inside `<…>` tag delimiters; element text content is
+/// left alone. Skips comments (`<!-- -->`), CDATA (`<![CDATA[…]]>`), and
+/// processing instructions (`<?…?>`).
+pub fn dedup_duplicate_attributes(xml: &str) -> String {
+    let bytes = xml.as_bytes();
+    let mut out = String::with_capacity(xml.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c != b'<' {
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        // Possible specials: <!-- comment -->, <![CDATA[…]]>, <?…?>. Copy
+        // through without parsing attributes.
+        if xml[i..].starts_with("<!--") {
+            if let Some(end) = xml[i + 4..].find("-->") {
+                let end_idx = i + 4 + end + 3;
+                out.push_str(&xml[i..end_idx]);
+                i = end_idx;
+                continue;
+            } else {
+                out.push_str(&xml[i..]);
+                break;
+            }
+        }
+        if xml[i..].starts_with("<![CDATA[") {
+            if let Some(end) = xml[i + 9..].find("]]>") {
+                let end_idx = i + 9 + end + 3;
+                out.push_str(&xml[i..end_idx]);
+                i = end_idx;
+                continue;
+            } else {
+                out.push_str(&xml[i..]);
+                break;
+            }
+        }
+        if xml[i..].starts_with("<?") {
+            if let Some(end) = xml[i + 2..].find("?>") {
+                let end_idx = i + 2 + end + 2;
+                out.push_str(&xml[i..end_idx]);
+                i = end_idx;
+                continue;
+            } else {
+                out.push_str(&xml[i..]);
+                break;
+            }
+        }
+        // Regular element tag: find matching `>` while respecting quotes.
+        let mut j = i + 1;
+        let mut in_quote: Option<u8> = None;
+        while j < bytes.len() {
+            let ch = bytes[j];
+            if let Some(q) = in_quote {
+                if ch == q { in_quote = None; }
+            } else if ch == b'"' || ch == b'\'' {
+                in_quote = Some(ch);
+            } else if ch == b'>' {
+                break;
+            }
+            j += 1;
+        }
+        if j >= bytes.len() {
+            // Malformed — bail out copying the remainder verbatim.
+            out.push_str(&xml[i..]);
+            break;
+        }
+        // xml[i..=j] is the full tag including angle brackets.
+        let tag = &xml[i..=j];
+        out.push_str(&rewrite_tag_dedup(tag));
+        i = j + 1;
+    }
+    out
+}
+
+/// Given a single opening tag like `<Foo a="1" b="2" a="3"/>`, rewrite it
+/// keeping only the last occurrence of each attribute name.
+fn rewrite_tag_dedup(tag: &str) -> String {
+    // Fast path: tags without `=` have no attributes.
+    if !tag.contains('=') { return tag.to_string(); }
+
+    let bytes = tag.as_bytes();
+    // Find end of element name: after `<` (or `</`), up to whitespace or `/`/`>`.
+    let mut p = 1; // skip `<`
+    if p < bytes.len() && bytes[p] == b'/' { p += 1; } // `</…>`
+    let name_start = p;
+    while p < bytes.len() {
+        let ch = bytes[p];
+        if ch.is_ascii_whitespace() || ch == b'/' || ch == b'>' { break; }
+        p += 1;
+    }
+    let name_end = p;
+    if name_start == name_end { return tag.to_string(); }
+
+    // Parse attributes: (name, value, with_quotes_string) tuples, in order.
+    #[derive(Default)]
+    struct Attr { name: String, raw: String }
+    let mut attrs: Vec<Attr> = Vec::new();
+
+    let mut q = p;
+    while q < bytes.len() {
+        // Skip whitespace.
+        while q < bytes.len() && bytes[q].is_ascii_whitespace() { q += 1; }
+        // End of tag?
+        if q >= bytes.len() || bytes[q] == b'/' || bytes[q] == b'>' { break; }
+        // Read attribute name.
+        let a_name_start = q;
+        while q < bytes.len() {
+            let ch = bytes[q];
+            if ch.is_ascii_whitespace() || ch == b'=' || ch == b'/' || ch == b'>' { break; }
+            q += 1;
+        }
+        let a_name_end = q;
+        if a_name_start == a_name_end { break; }
+        let a_name = &tag[a_name_start..a_name_end];
+        // Skip whitespace + `=` + whitespace.
+        while q < bytes.len() && bytes[q].is_ascii_whitespace() { q += 1; }
+        if q >= bytes.len() || bytes[q] != b'=' {
+            // Valueless attribute (rare in Director) — keep as-is.
+            attrs.push(Attr { name: a_name.to_string(), raw: a_name.to_string() });
+            continue;
+        }
+        q += 1;
+        while q < bytes.len() && bytes[q].is_ascii_whitespace() { q += 1; }
+        if q >= bytes.len() { break; }
+        // Read quoted or unquoted value.
+        let v_start = q;
+        let quote = bytes[q];
+        if quote == b'"' || quote == b'\'' {
+            q += 1;
+            while q < bytes.len() && bytes[q] != quote { q += 1; }
+            if q < bytes.len() { q += 1; } // consume closing quote
+        } else {
+            while q < bytes.len() {
+                let ch = bytes[q];
+                if ch.is_ascii_whitespace() || ch == b'/' || ch == b'>' { break; }
+                q += 1;
+            }
+        }
+        let raw = format!("{}={}", a_name, &tag[v_start..q]);
+        attrs.push(Attr { name: a_name.to_string(), raw });
+    }
+
+    // Deduplicate: keep only the LAST occurrence of each name.
+    let mut seen_later: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut keep = vec![true; attrs.len()];
+    for idx in (0..attrs.len()).rev() {
+        if !seen_later.insert(attrs[idx].name.as_str()) {
+            keep[idx] = false;
+        }
+    }
+
+    // Rebuild the tag.
+    let suffix = {
+        // Trailing `/` or just `>`.
+        let end = bytes.len() - 1; // index of `>`
+        if end > 0 && bytes[end - 1] == b'/' { "/>" } else { ">" }
+    };
+    let mut rebuilt = String::with_capacity(tag.len());
+    rebuilt.push_str(&tag[0..name_end]);
+    for (idx, attr) in attrs.iter().enumerate() {
+        if !keep[idx] { continue; }
+        rebuilt.push(' ');
+        rebuilt.push_str(&attr.raw);
+    }
+    rebuilt.push_str(suffix);
+    rebuilt
+}
