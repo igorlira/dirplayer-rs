@@ -82,7 +82,11 @@ jobs:
       - name: Install Playwright browsers
         if: inputs.suite != 'native'
         run: npx playwright install --with-deps chromium
-
+      
+      - name: Build and copy Ruffle
+        working-directory: ./vm-rust
+        run: npm run build-ruffle && npm run copy-ruffle
+      
       - name: Download test assets
         run: |
           if [ -z "$TEST_ASSETS_URL" ]; then

@@ -154,6 +154,10 @@ jobs:
         working-directory: ./vm-rust
         run: cargo fetch
 
+      - name: Build and copy Ruffle
+        working-directory: ./vm-rust
+        run: npm run build-ruffle && npm run copy-ruffle
+
       - name: Build and run browser e2e tests
         id: browser_tests
         continue-on-error: true
