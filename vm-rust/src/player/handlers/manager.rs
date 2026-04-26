@@ -1308,17 +1308,30 @@ impl BuiltInHandlerManager {
                         let (x_from_zero, y) = if text.contains('\t') && !tab_stops.is_empty() {
                             let eff_lh = if font.font_size > 0 { font.font_size } else { font.char_height };
                             let line_step = fixed_line_space.max(eff_lh) as i16 + 1;
+                            // Helper: width of a substring (chars only, excluding control chars).
+                            let segment_width = |chars: &[char], from: usize| -> i16 {
+                                let mut w: i16 = 0;
+                                for c in chars.iter().skip(from) {
+                                    if *c == '\t' || *c == '\r' || *c == '\n' { break; }
+                                    w = w.saturating_add(
+                                        font.get_char_advance(*c as u8) as i16 + 1 + char_spacing,
+                                    );
+                                }
+                                w
+                            };
+                            let chars: Vec<char> = text.chars().collect();
                             let mut x: i16 = 0;
                             let mut y: i16 = top_spacing;
                             let mut current_line_tab_count: usize = 0;
                             let mut char_i: usize = 0;
                             let mut prev_was_cr = false;
                             let mut result: Option<(i16, i16)> = None;
-                            for c in text.chars() {
+                            while char_i < chars.len() {
                                 if char_i == index {
                                     result = Some((x, y));
                                     break;
                                 }
+                                let c = chars[char_i];
                                 if c == '\n' && prev_was_cr {
                                     prev_was_cr = false;
                                     char_i += 1;
@@ -1331,9 +1344,19 @@ impl BuiltInHandlerManager {
                                     current_line_tab_count = 0;
                                 } else if c == '\t' {
                                     prev_was_cr = false;
-                                    if current_line_tab_count < tab_stops.len() {
-                                        let stop = tab_stops[current_line_tab_count].position as i16;
-                                        if stop > x { x = stop; }
+                                    if let Some(stop) = tab_stops.get(current_line_tab_count) {
+                                        let stop_pos = stop.position as i16;
+                                        // Match the renderer's flush_line tab logic
+                                        // (text.rs): right/center tabs look ahead at
+                                        // the next segment's width to anchor the
+                                        // segment to the stop's right edge / centre.
+                                        let next_seg_w = segment_width(&chars, char_i + 1);
+                                        let new_x = match stop.tab_type.as_str() {
+                                            "right" => (stop_pos - next_seg_w).max(x),
+                                            "center" => (stop_pos - next_seg_w / 2).max(x),
+                                            _ => stop_pos.max(x), // #left / #decimal
+                                        };
+                                        x = new_x;
                                     }
                                     current_line_tab_count += 1;
                                 } else {
@@ -1344,6 +1367,12 @@ impl BuiltInHandlerManager {
                                 }
                                 char_i += 1;
                             }
+                            // If we exited the loop without hitting `index` (target
+                            // beyond end-of-text), result stays None and we fall back
+                            // to the final (x, y).
+                            if result.is_none() && char_i == index {
+                                result = Some((x, y));
+                            }
                             result.unwrap_or((x, y))
                         } else {
                             crate::player::font::get_text_char_pos(&text, &params, index)
@@ -1352,7 +1381,21 @@ impl BuiltInHandlerManager {
                         // Apply alignment offset so the returned x matches the pixel position
                         // in the rasterised image (the bitmap render centres/right-aligns the
                         // line inside member_width; see text.rs flush_line at lines 888-892).
-                        let start_x = if align_kind != 0 && member_width > 0 {
+                        //
+                        // EXCEPTION: when the line has a right or center tab, the renderer
+                        // anchors segments to those stops and skips alignment (see
+                        // flush_line's `has_right_tab` branch). We must skip alignment too,
+                        // otherwise charPosToLoc returns positions shifted by the centring
+                        // amount even though the rendered text is left-anchored. Coke
+                        // Studios userlist hits this: alignment=#center inherited from the
+                        // loading screen, but each row uses [#left at 18, #right at pwidth-1]
+                        // tabs — Lingo's dotted-line bounds were drawn off-canvas because
+                        // dotleft/dotright both got an extra ~71px centring offset.
+                        let line_has_anchor_tab = !tab_stops.is_empty()
+                            && tab_stops.iter().any(|t| {
+                                t.tab_type == "right" || t.tab_type == "center"
+                            });
+                        let start_x = if align_kind != 0 && member_width > 0 && !line_has_anchor_tab {
                             // Compute the width of the line that `index` falls on, using the
                             // same advance-per-char sum as flush_line.
                             let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
