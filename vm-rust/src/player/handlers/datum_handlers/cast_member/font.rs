@@ -1411,14 +1411,14 @@ impl FontMemberHandlers {
     }
 
     pub fn set_prop(
-        player: &mut DirPlayer,
+        _player: &mut DirPlayer,
         member_ref: &CastMemberRef,
         prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
         borrow_member_mut(
             member_ref,
-            |player| (), // no extra data needed
+            |_player| (), // no extra data needed
             |cast_member, _| {
                 if let CastMemberType::Font(font_member) = &mut cast_member.member_type {
                     let prop = prop.to_ascii_lowercase();

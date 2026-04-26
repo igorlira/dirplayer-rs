@@ -12,7 +12,7 @@ impl PlayerDatumHandlers {
     pub fn call(handler_name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         match handler_name {
             "count" => Self::count(args),
-            _ => reserve_player_ref(|player| {
+            _ => reserve_player_ref(|_player| {
                 Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,
                     format!("No handler {handler_name} for player datum"),

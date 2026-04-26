@@ -3622,7 +3622,7 @@ impl SoundChannel {
         self.sample_count as f64 / self.sample_rate as f64
     }
 
-    pub fn update(&mut self, delta_time: f64, player: &mut DirPlayer) -> Result<(), ScriptError> {
+    pub fn update(&mut self, delta_time: f64, _player: &mut DirPlayer) -> Result<(), ScriptError> {
         // Handle fading
         if self.is_fading {
             self.fade_elapsed += delta_time;

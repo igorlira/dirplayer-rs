@@ -1633,7 +1633,7 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
         }
         LingoExpr::PutDisplay(value_expr) => {
             let value = Box::pin(eval_lingo_expr_ast_runtime(value_expr)).await?;
-            reserve_player_mut(|player| {
+            reserve_player_mut(|_player| {
                 use crate::player::handlers::manager::BuiltInHandlerManager;
                 BuiltInHandlerManager::put(&vec![value])?;
                 Ok(DatumRef::Void)

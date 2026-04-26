@@ -3258,7 +3258,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "stretch" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 sprite.stretch = value?;
                 Ok(())
@@ -3266,7 +3266,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "locH" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 let val = value?;
                 sprite.loc_h = val;
@@ -3275,7 +3275,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "locV" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 let val = value?;
                 sprite.loc_v = val;
@@ -3289,7 +3289,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             }
             borrow_sprite_mut(
                 sprite_id,
-                |player| value.int_value(),
+                |_player| value.int_value(),
                 |sprite, value| {
                     sprite.loc_z = value?;
                     Ok(())
@@ -3298,7 +3298,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         }
         "width" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 sprite.width = value?;
                 sprite.has_size_changed = true;
@@ -3307,7 +3307,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "height" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 sprite.height = value?;
                 sprite.has_size_changed = true;
@@ -3370,7 +3370,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "ink" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 sprite.ink = value?;
                 Ok(())
@@ -3378,7 +3378,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "blend" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 sprite.blend = value?;
                 Ok(())
@@ -3587,7 +3587,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "memberNum" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 let value = value?;
                 // Check if value looks like a slot number (cast_lib << 16 | cast_member)
@@ -3610,7 +3610,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "castNum" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 let value = value?;
                 let new_member_ref =
@@ -3845,7 +3845,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "constraint" => borrow_sprite_mut(
             sprite_id,
-            |player| value.int_value(),
+            |_player| value.int_value(),
             |sprite, value| {
                 let val = value?;
                 sprite.constraint = val;
