@@ -2,7 +2,17 @@ use itertools::Itertools;
 
 use crate::{
     director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType},
-    player::{DatumRef, DirPlayer, ScriptError, cast_member::CastMemberType, handlers::datum_handlers::string::string_get_words, reserve_player_mut},
+    player::{
+        cast_lib::CastMemberRef,
+        cast_member::CastMemberType,
+        handlers::datum_handlers::{
+            cast_member::font::{HtmlStyle, StyledSpan},
+            string::string_get_words,
+        },
+        reserve_player_mut,
+        sprite::ColorRef,
+        DatumRef, DirPlayer, ScriptError,
+    },
 };
 
 use super::string::{string_get_items, string_get_lines};
@@ -529,8 +539,6 @@ impl StringChunkHandlers {
         let datum = datum.clone();
         reserve_player_mut(|player| {
             let datum_val = player.get_datum(&datum);
-            let (source, _, _) = datum_val.to_string_chunk()?;
-            let source = source.clone();
             let parent_str = datum_val.string_value()?;
             let prop_name = player.get_datum(&args[0]).string_value()?;
             let start = player.get_datum(&args[1]).int_value()?;
@@ -549,11 +557,179 @@ impl StringChunkHandlers {
             let str_value =
                 StringChunkUtils::resolve_chunk_expr_string(&parent_str, &chunk_expr)?;
             if as_ref {
-                Ok(player.alloc_datum(Datum::StringChunk(source, chunk_expr, str_value)))
+                // Nested chunks must chain via `StringChunkSource::Datum` so the
+                // outer operation (e.g. `.line[n]`) is preserved. Using the outer
+                // chunk's own source flattens the chain, losing context —
+                // `listmember.line[35].item[1]` would then resolve to item 1 of
+                // the *full* text, not of line 35. Coke Studios' per-line colour
+                // on the roomlist requires the chain to be preserved so each
+                // line's item picks up the right character range.
+                Ok(player.alloc_datum(Datum::StringChunk(
+                    StringChunkSource::Datum(datum.clone()),
+                    chunk_expr,
+                    str_value,
+                )))
             } else {
                 Ok(player.alloc_datum(Datum::String(str_value)))
             }
         })
+    }
+
+    /// Resolve the character range (start inclusive, end exclusive) that
+    /// `chunk_expr` selects from `text`. Used by styled-span chunk setters.
+    pub fn resolve_chunk_char_range(
+        text: &str,
+        chunk_expr: &StringChunkExpr,
+    ) -> (usize, usize) {
+        let total_chars = text.chars().count();
+        match chunk_expr.chunk_type {
+            StringChunkType::Char => {
+                StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), total_chars)
+            }
+            StringChunkType::Item => {
+                resolve_delimited_char_range_single(
+                    text,
+                    chunk_expr.item_delimiter,
+                    chunk_expr.start,
+                    chunk_expr.end,
+                )
+            }
+            StringChunkType::Word => resolve_word_char_range(text, chunk_expr.start, chunk_expr.end),
+            StringChunkType::Line => resolve_line_char_range(text, chunk_expr.start, chunk_expr.end),
+        }
+    }
+
+    /// Walk the nested-chunk chain from `datum_ref` back to the originating
+    /// `Member`, accumulating the cumulative character range so styled-span
+    /// setters know which slice of the member's text to retouch.
+    ///
+    /// Returns `(member_ref, char_start, char_end)` where the range is in the
+    /// member's full text and uses character indices (not bytes).
+    pub fn walk_chunk_to_member_range(
+        player: &DirPlayer,
+        datum_ref: &DatumRef,
+    ) -> Option<(CastMemberRef, usize, usize)> {
+        // Collect the chunk chain outermost-last by walking the source chain
+        // inward: the datum itself holds the innermost expr, its source holds
+        // the next, and so on until we hit a Member.
+        let mut chain: Vec<StringChunkExpr> = Vec::new();
+        let mut current_ref = datum_ref.clone();
+        let member_ref;
+        loop {
+            let datum = player.get_datum(&current_ref);
+            match datum {
+                Datum::StringChunk(source, expr, _) => {
+                    chain.push(expr.clone());
+                    match source {
+                        StringChunkSource::Member(mref) => {
+                            member_ref = mref.clone();
+                            break;
+                        }
+                        StringChunkSource::Datum(parent_ref) => {
+                            current_ref = parent_ref.clone();
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+
+        let member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
+        let text = match &member.member_type {
+            CastMemberType::Text(t) => t.text.clone(),
+            CastMemberType::Field(f) => f.text.clone(),
+            _ => return None,
+        };
+
+        // Apply chunks outermost → innermost to narrow the range inside the
+        // full member text.
+        let mut range_start = 0usize;
+        let mut range_end = text.chars().count();
+        for expr in chain.into_iter().rev() {
+            let slice: String = text
+                .chars()
+                .skip(range_start)
+                .take(range_end - range_start)
+                .collect();
+            let (s, e) = Self::resolve_chunk_char_range(&slice, &expr);
+            range_end = range_start + e;
+            range_start += s;
+        }
+        Some((member_ref, range_start, range_end))
+    }
+
+    /// Split `html_styled_spans` at the boundaries [start, end) and apply
+    /// `modifier` to the style of the segment inside. Existing spans outside
+    /// the range are preserved; spans that straddle a boundary are split so
+    /// the boundary pixels don't inherit the new style.
+    pub fn apply_styled_span_range<F: FnMut(&mut HtmlStyle)>(
+        full_text: &str,
+        spans: &mut Vec<StyledSpan>,
+        start: usize,
+        end: usize,
+        default_style: HtmlStyle,
+        mut modifier: F,
+    ) {
+        if start >= end {
+            return;
+        }
+        // Seed with a single span covering the full text when nothing is set
+        // yet, otherwise we'd have nowhere to split.
+        if spans.is_empty() {
+            spans.push(StyledSpan {
+                text: full_text.to_string(),
+                style: default_style,
+            });
+        }
+
+        let mut new_spans: Vec<StyledSpan> = Vec::new();
+        let mut char_pos = 0usize;
+        for span in spans.drain(..) {
+            let span_len = span.text.chars().count();
+            if span_len == 0 {
+                new_spans.push(span);
+                continue;
+            }
+            let span_end = char_pos + span_len;
+
+            if span_end <= start || char_pos >= end {
+                new_spans.push(span);
+                char_pos = span_end;
+                continue;
+            }
+
+            // Partition this span into up-to-three pieces.
+            let local_start = start.saturating_sub(char_pos).min(span_len);
+            let local_end = end.saturating_sub(char_pos).min(span_len);
+            let chars: Vec<char> = span.text.chars().collect();
+
+            if local_start > 0 {
+                let before: String = chars[..local_start].iter().collect();
+                new_spans.push(StyledSpan {
+                    text: before,
+                    style: span.style.clone(),
+                });
+            }
+            if local_end > local_start {
+                let inside: String = chars[local_start..local_end].iter().collect();
+                let mut new_style = span.style.clone();
+                modifier(&mut new_style);
+                new_spans.push(StyledSpan {
+                    text: inside,
+                    style: new_style,
+                });
+            }
+            if local_end < span_len {
+                let after: String = chars[local_end..].iter().collect();
+                new_spans.push(StyledSpan {
+                    text: after,
+                    style: span.style.clone(),
+                });
+            }
+
+            char_pos = span_end;
+        }
+        *spans = new_spans;
     }
 
     pub fn set_prop(
@@ -564,7 +740,7 @@ impl StringChunkHandlers {
     ) -> Result<(), ScriptError> {
         match prop {
             "font" | "fontStyle" | "color" => {
-                // TODO
+                return Self::set_chunk_style_prop(player, datum_ref, prop, value_ref);
             }
             "fontSize" => {
                 let new_val = player.get_datum(value_ref).int_value()?;
@@ -639,6 +815,155 @@ impl StringChunkHandlers {
         Ok(())
     }
 
+    /// Apply a font / fontStyle / color change to a nested string-chunk datum
+    /// by splitting the source member's `html_styled_spans` at the chunk
+    /// boundaries. Used by Coke Studios for per-line colour + bold/underline
+    /// on the roomlist audition rows; without it the whole member's style
+    /// would change (or worse, nothing would happen).
+    fn set_chunk_style_prop(
+        player: &mut DirPlayer,
+        datum_ref: &DatumRef,
+        prop: &str,
+        value_ref: &DatumRef,
+    ) -> Result<(), ScriptError> {
+        // Resolve the chunk range up-front (read-only borrows) before taking
+        // the mutable borrow on the target member.
+        let resolved = Self::walk_chunk_to_member_range(player, datum_ref);
+        let Some((member_ref, start, end)) = resolved else { return Ok(()); };
+        if start >= end {
+            return Ok(());
+        }
+
+        // Build the style modifier from the incoming value.
+        enum StyleChange {
+            Font(String),
+            FontStyle { bold: bool, italic: bool, underline: bool },
+            Color(u32),
+        }
+        let value_datum = player.get_datum(value_ref).clone();
+        let change = match prop {
+            "font" => StyleChange::Font(value_datum.string_value()?),
+            "fontStyle" => {
+                // Director accepts either a single symbol (#bold) or a list
+                // of symbols ([#bold, #underline]). #plain resets the style.
+                let mut bold = false;
+                let mut italic = false;
+                let mut underline = false;
+                let symbols: Vec<String> = match &value_datum {
+                    Datum::Symbol(s) => vec![s.clone()],
+                    Datum::List(_, items, _) => {
+                        let mut out = Vec::new();
+                        for item_ref in items.iter() {
+                            if let Datum::Symbol(s) = player.get_datum(item_ref) {
+                                out.push(s.clone());
+                            }
+                        }
+                        out
+                    }
+                    _ => Vec::new(),
+                };
+                for s in symbols.iter() {
+                    match s.to_ascii_lowercase().as_str() {
+                        "bold" => bold = true,
+                        "italic" => italic = true,
+                        "underline" => underline = true,
+                        "plain" => {
+                            bold = false;
+                            italic = false;
+                            underline = false;
+                        }
+                        _ => {}
+                    }
+                }
+                StyleChange::FontStyle { bold, italic, underline }
+            }
+            "color" => {
+                let color_ref = value_datum.to_color_ref()?.to_owned();
+                let rgb = match color_ref {
+                    ColorRef::Rgb(r, g, b) => {
+                        ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+                    }
+                    ColorRef::PaletteIndex(_) => {
+                        // Resolve palette index to RGB using the system palette
+                        // so styled-span color (which is a plain u32 RGB) ends
+                        // up matching what the renderer would draw.
+                        let palettes = player.movie.cast_manager.palettes();
+                        let bitmap_palette = crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
+                            crate::player::bitmap::bitmap::get_system_default_palette(),
+                        );
+                        let (r, g, b) = crate::player::bitmap::bitmap::resolve_color_ref(
+                            &palettes, &color_ref, &bitmap_palette, 8,
+                        );
+                        ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+                    }
+                };
+                StyleChange::Color(rgb)
+            }
+            _ => return Ok(()),
+        };
+
+        // Now mutate the target member.
+        let Some(member) = player.movie.cast_manager.find_member_by_ref_mut(&member_ref) else {
+            return Ok(());
+        };
+        let mem_name = member.name.clone();
+        match &mut member.member_type {
+            CastMemberType::Text(text) => {
+                let full_text = text.text.clone();
+                let default_style = HtmlStyle {
+                    font_face: if text.font.is_empty() { None } else { Some(text.font.clone()) },
+                    font_size: if text.font_size > 0 { Some(text.font_size as i32) } else { None },
+                    bold: text.font_style.iter().any(|s| s == "bold"),
+                    italic: text.font_style.iter().any(|s| s == "italic"),
+                    underline: text.font_style.iter().any(|s| s == "underline"),
+                    ..HtmlStyle::default()
+                };
+                Self::apply_styled_span_range(
+                    &full_text,
+                    &mut text.html_styled_spans,
+                    start,
+                    end,
+                    default_style,
+                    |style| match &change {
+                        StyleChange::Font(f) => style.font_face = Some(f.clone()),
+                        StyleChange::FontStyle { bold, italic, underline } => {
+                            style.bold = *bold;
+                            style.italic = *italic;
+                            style.underline = *underline;
+                        }
+                        StyleChange::Color(rgb) => style.color = Some(*rgb),
+                    },
+                );
+                let _ = mem_name;
+            }
+            CastMemberType::Field(field) => {
+                // FieldMember has no per-char style storage (just one string
+                // of font_style for the whole member), so a chunk-level font/
+                // fontStyle write on a field applies to the entire field. This
+                // matches Director's own fallback for fields that don't track
+                // styled runs.
+                match &change {
+                    StyleChange::Font(f) => field.font = f.clone(),
+                    StyleChange::FontStyle { bold, italic, underline } => {
+                        let mut parts: Vec<&str> = Vec::new();
+                        if *bold { parts.push("bold"); }
+                        if *italic { parts.push("italic"); }
+                        if *underline { parts.push("underline"); }
+                        field.font_style = if parts.is_empty() { "plain".to_string() } else { parts.join(",") };
+                    }
+                    StyleChange::Color(rgb) => {
+                        let r = ((*rgb >> 16) & 0xFF) as u8;
+                        let g = ((*rgb >> 8) & 0xFF) as u8;
+                        let b = (*rgb & 0xFF) as u8;
+                        field.fore_color = Some(ColorRef::Rgb(r, g, b));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn delete(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;
@@ -676,5 +1001,137 @@ impl StringChunkHandlers {
                 "No handler {handler_name} for string chunk datum"
             ))),
         }
+    }
+}
+
+/// Convert a 1-based inclusive VM index range into the character-index range
+/// `[start, end)` of the Nth..Mth segment in `text`, where segments are
+/// delimited by a single `delim` character (used for item chunks). If the
+/// requested index is out of bounds an empty range at the text's end is
+/// returned so callers can safely pass it to `apply_styled_span_range` without
+/// corrupting unrelated text.
+fn resolve_delimited_char_range_single(
+    text: &str,
+    delim: char,
+    start: i32,
+    end: i32,
+) -> (usize, usize) {
+    // Build segment starts/ends as char indices by walking the text once.
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    let mut seg_start = 0usize;
+    let mut idx = 0usize;
+    for ch in text.chars() {
+        if ch == delim {
+            segments.push((seg_start, idx));
+            seg_start = idx + 1;
+        }
+        idx += 1;
+    }
+    segments.push((seg_start, idx));
+    let total_chars = idx;
+    if segments.is_empty() {
+        return (total_chars, total_chars);
+    }
+    let (s, e) = StringChunkUtils::vm_range_to_host((start, end), segments.len());
+    if s >= segments.len() {
+        return (total_chars, total_chars);
+    }
+    let range_start = segments[s].0;
+    let range_end = segments[e.saturating_sub(1).min(segments.len() - 1)].1;
+    if e <= s {
+        (range_start, range_start)
+    } else {
+        (range_start, range_end)
+    }
+}
+
+/// Line-chunk char range. Mirrors `string_get_lines`: detects a single line
+/// break style per text (\r\n, \n, or \r). Returns the char range that would
+/// be selected by `line[start..end]` in Director semantics.
+fn resolve_line_char_range(text: &str, start: i32, end: i32) -> (usize, usize) {
+    let total_chars = text.chars().count();
+    if text.is_empty() {
+        return (0, 0);
+    }
+    let contains_crlf = text.contains("\r\n");
+    let contains_lf = !contains_crlf && text.contains('\n');
+    // contains_cr true when neither of the above match
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    let mut seg_start = 0usize;
+    let mut idx = 0usize;
+    let mut prev_was_cr = false;
+    for ch in text.chars() {
+        let is_break = if contains_crlf {
+            // Treat \r\n as a single break: end the line on \r, then skip \n.
+            if prev_was_cr && ch == '\n' {
+                seg_start = idx + 1;
+                prev_was_cr = false;
+                idx += 1;
+                continue;
+            }
+            prev_was_cr = ch == '\r';
+            ch == '\r'
+        } else if contains_lf {
+            ch == '\n'
+        } else {
+            ch == '\r'
+        };
+        if is_break {
+            segments.push((seg_start, idx));
+            seg_start = idx + 1;
+        }
+        idx += 1;
+    }
+    segments.push((seg_start, idx));
+    if segments.is_empty() {
+        return (total_chars, total_chars);
+    }
+    let (s, e) = StringChunkUtils::vm_range_to_host((start, end), segments.len());
+    if s >= segments.len() {
+        return (total_chars, total_chars);
+    }
+    let range_start = segments[s].0;
+    let range_end = segments[e.saturating_sub(1).min(segments.len() - 1)].1;
+    if e <= s {
+        (range_start, range_start)
+    } else {
+        (range_start, range_end)
+    }
+}
+
+/// Word-chunk char range. Words are runs of non-whitespace (matches
+/// `string_get_words` which splits on Director whitespace).
+fn resolve_word_char_range(text: &str, start: i32, end: i32) -> (usize, usize) {
+    let is_ws = |c: char| c.is_ascii_control() || c.is_ascii_whitespace();
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    let mut seg_start: Option<usize> = None;
+    let mut idx = 0usize;
+    for ch in text.chars() {
+        if is_ws(ch) {
+            if let Some(s) = seg_start.take() {
+                segments.push((s, idx));
+            }
+        } else if seg_start.is_none() {
+            seg_start = Some(idx);
+        }
+        idx += 1;
+    }
+    if let Some(s) = seg_start {
+        segments.push((s, idx));
+    }
+    let total_chars = idx;
+    if segments.is_empty() {
+        return (total_chars, total_chars);
+    }
+    let (s, e) = StringChunkUtils::vm_range_to_host((start, end), segments.len());
+    if s >= segments.len() {
+        return (total_chars, total_chars);
+    }
+    let range_start = segments[s].0;
+    let range_end = segments[e.saturating_sub(1).min(segments.len() - 1)].1;
+    if e <= s {
+        (range_start, range_start)
+    } else {
+        (range_start, range_end)
     }
 }
