@@ -79,7 +79,7 @@ impl CastDef {
         let mut section_to_member: HashMap<u32, (u32, String)> = HashMap::new();
         for i in 0..member_ids.len() {
             let section_id = member_ids[i];
-            if section_id <= 0 {
+            if section_id == 0 {
                 continue;
             }
             let member_id = i as u16 + min_member;

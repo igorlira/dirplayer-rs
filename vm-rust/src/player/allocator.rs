@@ -422,7 +422,7 @@ impl DatumAllocator {
 
     pub fn get_datum_ref(&self, id: DatumId) -> Option<DatumRef> {
         if let Some(entry) = self.datums.get(id) {
-            Some(DatumRef::from_id(id, entry.ref_count.get()))
+            Some(unsafe { DatumRef::from_id(id, entry.ref_count.get()) })
         } else {
             None
         }
@@ -430,7 +430,7 @@ impl DatumAllocator {
 
     pub fn get_script_instance_ref(&self, id: ScriptInstanceId) -> Option<ScriptInstanceRef> {
         if let Some(entry) = self.script_instances.get(id as usize) {
-            Some(ScriptInstanceRef::from_id(id, entry.ref_count.get()))
+            Some(unsafe { ScriptInstanceRef::from_id(id, entry.ref_count.get()) })
         } else {
             None
         }
@@ -550,7 +550,7 @@ impl ScriptInstanceAllocatorTrait for DatumAllocator {
             .unwrap()
             .ref_count
             .get();
-        ScriptInstanceRef::from_id(id, ref_count_ptr)
+        unsafe { ScriptInstanceRef::from_id(id, ref_count_ptr) }
     }
 
     fn get_script_instance(&self, instance_ref: &ScriptInstanceRef) -> &ScriptInstance {
