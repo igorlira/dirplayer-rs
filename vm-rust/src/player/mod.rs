@@ -3892,6 +3892,15 @@ async fn player_ext_call<'a>(
                 });
                 return_value.clone()
             } else {
+                // Lingo's bare `return` yields Void. We must explicitly reset
+                // scope.return_value because a preceding extcall (e.g.
+                // `voidp(...)`) would have written its own result there, and
+                // without this reset a bare `return` leaks that stale value
+                // to the caller. See Coke Studios popup-positioning bug,
+                // where `me.closeWindow()` was leaking `voidp`'s Int(1).
+                reserve_player_mut(|player| {
+                    player.scopes.get_mut(scope_ref).unwrap().return_value = DatumRef::Void;
+                });
                 DatumRef::Void
             };
             (HandlerExecutionResult::Stop, return_value)
