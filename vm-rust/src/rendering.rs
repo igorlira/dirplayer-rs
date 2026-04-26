@@ -1681,10 +1681,22 @@ pub fn render_score_to_bitmap_with_offset(
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
+                    // A cast member `.color` set to an RGB value wins over the sprite's
+                    // palette-index color — matches Director semantics and Coke Studios'
+                    // `sprite.color = paletteIndex(255)` + `member.color = rgb(...)` pattern
+                    // where the authored RGB must render.
+                    let text_color = if matches!(member.color, ColorRef::Rgb(..)) {
+                        member.color.clone()
+                    } else if let Some(fc) = field_member.fore_color.clone() {
+                        fc
+                    } else {
+                        sprite.color.clone()
+                    };
+
                     let params = CopyPixelsParams {
                         blend: sprite.effective_blend() as i32,
                         ink: sprite.ink as u32,
-                        color: sprite.color.clone(),
+                        color: text_color,
                         bg_color: sprite.bg_color.clone(),
                         mask_image: None,
                         is_text_rendering: true,
@@ -2148,10 +2160,20 @@ pub fn render_score_to_bitmap_with_offset(
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
+                    // A cast member `.color` set to an RGB value wins over the sprite's
+                    // palette-index color — matches Director semantics and Coke Studios'
+                    // `new(#text)` + `myMember.color = rgb(...)` pattern where the authored
+                    // RGB must render even when Lingo also sets `sprite.color = paletteIndex(255)`.
+                    let text_color = if matches!(member.color, ColorRef::Rgb(..)) {
+                        member.color.clone()
+                    } else {
+                        sprite.color.clone()
+                    };
+
                     let params = CopyPixelsParams {
                         blend: sprite.effective_blend() as i32,
                         ink: sprite.ink as u32,
-                        color: sprite.color.clone(),
+                        color: text_color,
                         bg_color: sprite.bg_color.clone(),
                         mask_image: None,
                         is_text_rendering: true,
