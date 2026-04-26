@@ -411,6 +411,20 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
             Ok(left_number < *right)
         }
 
+        // String / Symbol comparisons — Director compares case-insensitively
+        // lexicographically. Without this, any `.add()` to a sorted list of
+        // strings (e.g. CS FurnitureItem draw-order tags "a","b","c","d") would
+        // always return 0 from find_index_to_add and silently prepend every
+        // item, breaking sprite-pool allocation order.
+        (Datum::String(left), Datum::String(right)) =>
+            Ok(left.to_ascii_lowercase() < right.to_ascii_lowercase()),
+        (Datum::Symbol(left), Datum::Symbol(right)) =>
+            Ok(left.to_ascii_lowercase() < right.to_ascii_lowercase()),
+        (Datum::String(left), Datum::Symbol(right)) =>
+            Ok(left.to_ascii_lowercase() < right.to_ascii_lowercase()),
+        (Datum::Symbol(left), Datum::String(right)) =>
+            Ok(left.to_ascii_lowercase() < right.to_ascii_lowercase()),
+
         // String comparisons
         (Datum::String(..), Datum::String(..)) => Ok(false),
 
