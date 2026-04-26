@@ -553,7 +553,7 @@ pub fn compute_filmloop_initial_rect_with_members(
         // Get actual bitmap dimensions and registration point from the cast member.
         // The registration point is the anchor used for positioning - sprite_left = pos_x - reg_x.
         let (actual_width, actual_height, reg_x, reg_y) = if let Some(sprite_member) =
-            player.movie.cast_manager.find_member_by_ref(&sprite_member_ref)
+            player.movie.cast_manager.find_filmloop_inner_member(&sprite_member_ref)
         {
             match &sprite_member.member_type {
                 CastMemberType::Bitmap(bm) => {
@@ -753,11 +753,14 @@ fn render_filmloop_from_channel_data(
             cast_member: data.cast_member as i32,
         };
 
-        let member = player.movie.cast_manager.find_member_by_ref(&sprite_member_ref);
+        let member = player.movie.cast_manager.find_filmloop_inner_member(&sprite_member_ref);
         if member.is_none() {
-            debug!(
-                "  channel {}: member {}:{} not found",
-                channel_num, sprite_member_ref.cast_lib, sprite_member_ref.cast_member
+            warn!(
+                "[FILMLOOP-LOOKUP-FAIL] filmloop=({},{}) chan={} asked_for=({},{}) raw_cast_lib={}",
+                filmloop_cast_lib, member_ref.cast_member,
+                channel_num,
+                sprite_member_ref.cast_lib, sprite_member_ref.cast_member,
+                data.cast_lib,
             );
             continue;
         }

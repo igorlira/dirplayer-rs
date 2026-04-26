@@ -291,6 +291,24 @@ impl CastManager {
         None
     }
 
+    /// Like `find_member_by_ref`, but when `cast_lib=0` (shorthand for
+    /// "any cast"), search from the highest cast lib downward so external
+    /// casts (loaded last) win over internal casts. Used by filmloop inner
+    /// sprite rendering, where the score stores `cast_lib=0` for members
+    /// that should resolve against the filmloop's source external cast
+    /// rather than shadowed duplicates in cast 1.
+    pub fn find_filmloop_inner_member(&self, member_ref: &CastMemberRef) -> Option<&CastMember> {
+        if member_ref.cast_lib > 0 {
+            return self.find_member_by_ref(member_ref);
+        }
+        for cast in self.casts.iter().rev() {
+            if let Some(member) = cast.find_member_by_number(member_ref.cast_member as u32) {
+                return Some(member);
+            }
+        }
+        None
+    }
+
     pub fn invalidate_palette_cache(&self) {
         self.palette_cache.replace(None);
         // Increment version counter so renderers know to clear texture caches
