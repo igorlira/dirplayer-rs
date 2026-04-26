@@ -3500,34 +3500,40 @@ impl WebGL2Renderer {
         let is_system_font_requested = font_name == "System" || font_name.is_empty();
         let force_bitmap = glyph_pref == GlyphPreference::Bitmap || glyph_pref == GlyphPreference::Outline;
         let force_native = glyph_pref == GlyphPreference::Native;
-        let mut synthetic_spans: Option<Vec<StyledSpan>> = None;
+        let synthetic_spans = if !force_bitmap
+            && (force_native || !is_pfr_font || use_native_for_pfr)
+            && !is_system_font_requested
+            && styled_spans.is_none()
+        {
+            let (r, g, b) = resolve_color_ref(
+                &palettes,
+                fg_color,
+                &PaletteRef::BuiltIn(get_system_default_palette()),
+                8,
+            );
+            let mut style = HtmlStyle::default();
+            // Use the REQUESTED font name for Canvas2D rendering, not the fallback.
+            // When "Arial" is requested but the PFR lookup falls back to System,
+            // we want Canvas2D to render with "Arial" (a real browser font).
+            style.font_face = Some(font_name.to_string());
+            style.font_size = Some(font_size as i32);
+            style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
+            style.bold = bold;
+            style.italic = italic;
+            style.underline = underline;
+            Some(vec![StyledSpan {
+                text: text.to_string(),
+                style,
+            }])
+        } else {
+            None
+        };
         let spans_for_native: Option<&Vec<StyledSpan>> = if force_bitmap {
-            // Force bitmap rendering for everything
             None
         } else if (force_native || !is_pfr_font || use_native_for_pfr) && !is_system_font_requested {
             if let Some(spans) = styled_spans {
                 Some(spans)
             } else {
-                let (r, g, b) = resolve_color_ref(
-                    &palettes,
-                    fg_color,
-                    &PaletteRef::BuiltIn(get_system_default_palette()),
-                    8,
-                );
-                let mut style = HtmlStyle::default();
-                // Use the REQUESTED font name for Canvas2D rendering, not the fallback.
-                // When "Arial" is requested but the PFR lookup falls back to System,
-                // we want Canvas2D to render with "Arial" (a real browser font).
-                style.font_face = Some(font_name.to_string());
-                style.font_size = Some(font_size as i32);
-                style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
-                style.bold = bold;
-                style.italic = italic;
-                style.underline = underline;
-                synthetic_spans = Some(vec![StyledSpan {
-                    text: text.to_string(),
-                    style,
-                }]);
                 synthetic_spans.as_ref()
             }
         } else {

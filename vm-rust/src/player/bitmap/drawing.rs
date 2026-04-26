@@ -1706,13 +1706,10 @@ impl Bitmap {
         let src_left_f = src_rect.left as f64;
         let src_top_f = src_rect.top as f64;
 
-        let mut sprite_num = 0;
-
         // ----------------------------------------------------------
         // Calculate sprite rotation pivot (registration point)
         // ----------------------------------------------------------
         let (center_x, center_y) = if let Some(sprite) = params.sprite {
-            sprite_num = sprite.number;
             // Rotate around the sprite's registration point (locH, locV)
             (sprite.loc_h as f64, sprite.loc_v as f64)
         } else {

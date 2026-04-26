@@ -287,8 +287,6 @@ impl BitmapInfo {
         let mut reader = BinaryReader::from_u8(bytes);
         reader.set_endian(binary_reader::Endian::Big);
 
-        let mut width = 0u16;
-        let mut height = 0u16;
         let mut reg_x = 0i16;
         let mut reg_y = 0i16;
         let mut bit_depth = 1u8;
@@ -309,8 +307,8 @@ impl BitmapInfo {
         let left = reader.read_i16().unwrap_or(0);
         let bottom = reader.read_i16().unwrap_or(0);
         let right = reader.read_i16().unwrap_or(0);
-        height = (bottom - top) as u16;
-        width = (right - left) as u16;
+        let height = (bottom - top) as u16;
+        let width = (right - left) as u16;
 
         if dir_version < 600 {
             // D4/D5: bytes 10-17 = boundingRect (8 bytes, skip)

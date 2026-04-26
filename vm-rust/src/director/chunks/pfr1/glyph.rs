@@ -1570,8 +1570,8 @@ impl<'a> Pfr1HeaderParser<'a> {
 
     /// Process curve commands 7-15
     fn process_curve(&mut self, cmd: i32) {
-        let mut v5: u32 = 0;
-        let mut path: u32 = 0; // 49, 54, or 70
+        let v5: u32;
+        let path: u32; // 49, 54, or 70
 
         match cmd {
             7 => { v5 = 2210; path = 49; }
@@ -3273,10 +3273,10 @@ pub fn parse_glyph(
     let mut best_glyph: Option<OutlineGlyph> = None;
     let mut best_score: i32 = -1;
     let mut best_is_header = false;
-    let mut header_score: i32 = 0;
-    let mut direct_score: i32 = 0;
-    let mut header_contours = 0usize;
-    let mut direct_contours = 0usize;
+    let header_score: i32;
+    let direct_score: i32;
+    let header_contours: usize;
+    let direct_contours: usize;
 
     {
         let known_offsets = if known_gps_offsets.is_empty() { None } else { Some(known_gps_offsets) };

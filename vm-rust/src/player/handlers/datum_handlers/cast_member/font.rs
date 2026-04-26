@@ -990,7 +990,6 @@ impl FontMemberHandlers {
             } else {
                 if !current_line.is_empty() {
                     lines.push(current_line);
-                    current_line = String::new();
                 }
                 // Handle very long words
                 if word.len() > max_chars {
