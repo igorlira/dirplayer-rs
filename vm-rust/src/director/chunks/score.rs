@@ -52,6 +52,27 @@ pub struct ScoreFrameChannelData {
     pub moveable: bool,
     pub editable: bool,
     pub trails: bool,
+    /// Stretch bit (bit 7 of the ink byte) — Director uses this to signal
+    /// the sprite should be drawn at the exact width/height of the channel
+    /// rather than the bitmap's own size.
+    pub stretch: bool,
+    /// Low 4 bits of the color_code byte (offset 20). Bits 4-5 are
+    /// color_flag, 6-7 are editable/moveable — 0-3 are reserved.
+    pub color_code_low4: u8,
+    /// Per-frame sprite flags byte (offset 22). In D5 this slot held line
+    /// thickness; D8+ repurposes it. Confirmed bits:
+    ///   bit 0 (0x01) — sprite active (always set for live sprites)
+    ///   bit 4 (0x10) — unknown (seen on filmloops that drive tweens)
+    ///   bit 5 (0x20) — flipH
+    ///   bit 6 (0x40) — flipV (presumed; mirror of bit 5)
+    ///   bit 7 (0x80) — animation/keyframe marker, toggles per frame
+    pub sprite_flags: u8,
+    /// Raw byte at offset 23. Purpose unknown — observed as 0 in tested movies.
+    pub reserved_23: u8,
+    /// Raw u16 at offset 28-29 (immediately before the rotation field).
+    pub reserved_28: u16,
+    /// Raw u16 at offset 32-33 (between rotation and skew).
+    pub reserved_32: u16,
 }
 
 impl ScoreFrameChannelData {
@@ -60,6 +81,14 @@ impl ScoreFrameChannelData {
     pub fn sprite_list_idx(&self) -> u32 {
         ((self.sprite_list_idx_hi as u32) << 16) | (self.sprite_list_idx_lo as u32)
     }
+
+    /// Horizontal flip flag (bit 5 of the offset-22 sprite flags byte).
+    /// Set on pre-mirrored filmloop inner sprites (e.g. `rightwall` wall-item
+    /// posters reuse the same bitmaps as `leftwall` and toggle this bit).
+    pub fn flip_h(&self) -> bool { (self.sprite_flags & 0x20) != 0 }
+
+    /// Vertical flip flag (bit 6 of the offset-22 sprite flags byte).
+    pub fn flip_v(&self) -> bool { (self.sprite_flags & 0x40) != 0 }
 }
 
 impl ScoreFrameChannelData {
@@ -76,6 +105,7 @@ impl ScoreFrameChannelData {
             .map_err(|e| format!("Failed to read ink: {:?}", e))?;
         let raw_ink = raw_ink_byte & 0x3f;
         let trails = (raw_ink_byte & 0x40) != 0;
+        let stretch = (raw_ink_byte & 0x80) != 0;
         let fore_color = reader
             .read_u8()
             .map_err(|e| format!("Failed to read fore_color: {:?}", e))?;
@@ -120,10 +150,16 @@ impl ScoreFrameChannelData {
 
         let mut moveable = false;
         let mut editable = false;
+        let mut color_code_low4: u8 = 0;
+        let mut sprite_flags: u8 = 0;
+        let mut reserved_23: u8 = 0;
+        let mut reserved_28: u16 = 0;
+        let mut reserved_32: u16 = 0;
 
         if sz >= 22 {
             let color_code = reader.read_u8()
                 .map_err(|e| format!("Failed to read color_code: {:?}", e))?;
+            color_code_low4 = color_code & 0x0f;
             color_flag = (color_code >> 4) & 0x03;  // bits 4-5 only (bits 6-7 are editable/moveable)
             editable = (color_code & 0x40) != 0;  // bit 6
             moveable = (color_code & 0x80) != 0;  // bit 7
@@ -132,10 +168,10 @@ impl ScoreFrameChannelData {
         }
 
         if sz >= 24 {
-            let _unk5 = reader.read_u8()
-                .map_err(|e| format!("Failed to read unk5: {:?}", e))?;
-            let _unk6 = reader.read_u8()
-                .map_err(|e| format!("Failed to read unk6: {:?}", e))?;
+            sprite_flags = reader.read_u8()
+                .map_err(|e| format!("Failed to read sprite_flags: {:?}", e))?;
+            reserved_23 = reader.read_u8()
+                .map_err(|e| format!("Failed to read reserved_23: {:?}", e))?;
         }
 
         // D8+ extended color fields
@@ -152,15 +188,15 @@ impl ScoreFrameChannelData {
 
         // D8+ rotation/skew fields
         if sz >= 36 {
-            let _unk7 = reader.read_u16()
-                .map_err(|e| format!("Failed to read unk7: {:?}", e))?;
+            reserved_28 = reader.read_u16()
+                .map_err(|e| format!("Failed to read reserved_28: {:?}", e))?;
             let rotation_raw = reader.read_u16()
                 .map_err(|e| format!("Failed to read rotation: {:?}", e))? as i16;
             if rotation_raw != 0 {
                 rotation_angle = rotation_raw as f64 / 100.0;
             }
-            let _unk8 = reader.read_u16()
-                .map_err(|e| format!("Failed to read unk8: {:?}", e))?;
+            reserved_32 = reader.read_u16()
+                .map_err(|e| format!("Failed to read reserved_32: {:?}", e))?;
             let skew_raw = reader.read_u16()
                 .map_err(|e| format!("Failed to read skew: {:?}", e))? as i16;
             if skew_raw != 0 {
@@ -192,6 +228,12 @@ impl ScoreFrameChannelData {
             moveable,
             editable,
             trails,
+            stretch,
+            color_code_low4,
+            sprite_flags,
+            reserved_23,
+            reserved_28,
+            reserved_32,
         })
     }
 
@@ -275,6 +317,13 @@ impl ScoreFrameChannelData {
             moveable,
             editable,
             trails,
+            stretch: (ink_data & 0x80) != 0,
+            color_code_low4: colorcode & 0x0f,
+            // D5 stored line thickness here; D8+ reuses this byte for per-frame flags
+            sprite_flags: _thickness,
+            reserved_23: _unused,
+            reserved_28: 0,
+            reserved_32: 0,
         })
     }
 
@@ -586,6 +635,12 @@ impl ScoreFrameData {
                             moveable: false,
                             editable: false,
                             trails: false,
+                            stretch: false,
+                            color_code_low4: 0,
+                            sprite_flags: 0,
+                            reserved_23: 0,
+                            reserved_28: 0,
+                            reserved_32: 0,
                         }));
                     }
 

@@ -193,7 +193,7 @@ pub fn get_channel_number_from_index(index: u32) -> u32 {
 /// Convert raw blend byte from score data to a 0-100 percentage.
 /// D8+ uses inverted 0-255 scale: 0 → 100% (opaque), 255 → 0% (transparent).
 /// D5-D7 uses direct 0-100 percentage: 0 → 100% (opaque/not set).
-fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
+pub(crate) fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
     if dir_version > 600 {
         // D8+: inverted 0-255 scale
         if raw == 0 {

@@ -894,7 +894,21 @@ fn render_filmloop_from_channel_data(
                 // When bitmap dimensions differ from display dimensions (e.g. thin strips
                 // that Director stretches to fill the display rect), copy_pixels will
                 // handle the scaling automatically via its scale_x/scale_y computation.
-                let dst_rect = sprite_rect.clone();
+                //
+                // Filmloop inner sprites encode flipH/flipV as bit flags in the
+                // `unk5` byte of the score record (bit 5 = flipH, bit 6 = flipV
+                // — unused D7 editable/moveable byte repurposed in D8+). Wall
+                // posters that ship a pre-flipped pair (`leftwall X` vs
+                // `rightwall X`) rely on these bits. Invert the dst_rect
+                // corners to trigger copy_pixels' existing mirror path.
+                let flip_h = data.flip_h();
+                let flip_v = data.flip_v();
+                let dst_rect = {
+                    let mut r = sprite_rect.clone();
+                    if flip_h { std::mem::swap(&mut r.left, &mut r.right); }
+                    if flip_v { std::mem::swap(&mut r.top, &mut r.bottom); }
+                    r
+                };
 
                 // Check if bitmap has actual data
                 let has_data = !src_bitmap.data.is_empty();
@@ -918,9 +932,7 @@ fn render_filmloop_from_channel_data(
 
                 // Filmloop blend: inverted 0-255 scale (0 → 100%, 127 → ~50%)
                 // 255 is treated as default/opaque (same as shape/vector paths)
-                let blend = if data.blend == 255 { 100 } else {
-                    ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
-                };
+                let blend = crate::player::score::convert_raw_blend(data.blend, player.movie.dir_version);
 
                 // Only use matte mask for inks that support it:
                 // - Ink 0 (copy): for trimWhiteSpace edge transparency (indexed and 16-bit)
@@ -994,11 +1006,19 @@ fn render_filmloop_from_channel_data(
                     bg_color: sprite_bg_color,
                     mask_image: mask.map(|m| m as &BitmapMask),
                     is_text_rendering: false,
-                    rotation: 0.0,
-                    skew: 0.0,
+                    // Carry the inner sprite's stored rotation / skew so
+                    // filmloops that mirror via Director's (rotation=180,
+                    // skew=180) trick render correctly — without this, wall
+                    // posters that ship both left/right filmloops with
+                    // mirrored inner sprites render unflipped.
+                    rotation: data.rotation,
+                    skew: data.skew,
                     sprite: None,
                     mask_offset: (0, 0),
-                    original_dst_rect: Some(dst_rect.clone()),
+                    // Pass the non-inverted sprite_rect here — copy_pixels uses
+                    // it for scale_w/scale_h, which must stay positive. The
+                    // `dst_rect` argument carries the flip via swapped corners.
+                    original_dst_rect: Some(sprite_rect.clone()),
                     ink9_mask_bitmap: None,
                 };
 
