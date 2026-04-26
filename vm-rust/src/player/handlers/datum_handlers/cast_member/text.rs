@@ -851,11 +851,58 @@ impl TextMemberHandlers {
                     } else {
                         font.char_height
                     };
+                    // For wrapped text, re-walk the wrap logic to count visual
+                    // lines directly. The previous `height / raw_line_h` formula
+                    // was wrong: `raw_line_h = font.char_height - 1` can be much
+                    // larger than the actual `line_step` used by measure_text_wrapped
+                    // (which honours `fixed_line_space`), so 2-line text divided by
+                    // a 25-px PFR cell rounds down to 1 line. CS catalog rows that
+                    // wrapped to ["Premier Studio Chair - 500", "dB"] were getting
+                    // a 14-px-tall bitmap that clipped the second line.
                     let line_count = if text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0) {
-                        let raw_line_h = font.char_height.saturating_sub(1).max(1) as u16;
-                        (height / raw_line_h.max(1)).max(1) as usize
+                        let max_w = explicit_box_width.unwrap() as i32;
+                        let cs = text_data.char_spacing;
+                        let space_w =
+                            font.get_char_advance(b' ') as i32 + cs;
+                        let normalised: String = text_data.text
+                            .replace("\r\n", "\n")
+                            .replace('\r', "\n");
+                        let mut count: usize = 0;
+                        for raw in normalised.split('\n') {
+                            if raw.is_empty() {
+                                count += 1;
+                                continue;
+                            }
+                            let mut current_w: i32 = 0;
+                            let mut had_word = false;
+                            for word in raw.split(' ') {
+                                if word.is_empty() { continue; }
+                                let word_w: i32 = word
+                                    .chars()
+                                    .map(|c| font.get_char_advance(c as u8) as i32 + cs)
+                                    .sum();
+                                let candidate = if !had_word {
+                                    word_w
+                                } else {
+                                    current_w + space_w + word_w
+                                };
+                                if candidate <= max_w || !had_word {
+                                    current_w = candidate;
+                                    had_word = true;
+                                } else {
+                                    count += 1;
+                                    current_w = word_w;
+                                }
+                            }
+                            count += 1;
+                        }
+                        count.max(1)
                     } else {
-                        text_data.text.chars().filter(|c| *c == '\r' || *c == '\n').count() + 1
+                        text_data.text
+                            .replace("\r\n", "\n")
+                            .chars()
+                            .filter(|c| *c == '\r' || *c == '\n')
+                            .count() + 1
                     };
                     let line_h = (nominal as f32 * 1.4).round() as u16;
                     // See `.rect` getter for rationale on folding
