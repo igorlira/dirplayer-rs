@@ -445,45 +445,30 @@ pub fn multiply_datums(
         (Datum::Int(left), Datum::Float(right)) => Datum::Float((*left as f64) * right),
         (Datum::Float(left), Datum::Int(right)) => Datum::Float(*left * (*right as f64)),
         (Datum::Float(left), Datum::Float(right)) => Datum::Float(left * right),
-        (Datum::Rect(a), Datum::Int(right)) => {
-            let right_ref = player.alloc_datum(Datum::Int(*right));
+        (Datum::Rect(r), scalar) if matches!(scalar, Datum::Int(_) | Datum::Float(_)) => {
+            let scalar_ref = player.alloc_datum(scalar.clone());
             let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
             for i in 0..4 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
+                let r_val = player.get_datum(&r[i]).clone();
+                let s_val = player.get_datum(&scalar_ref).clone();
                 let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
+                    player.alloc_datum(r_val),
+                    player.alloc_datum(s_val),
                     player
                 )?;
                 result[i] = player.alloc_datum(prod);
             }
             Datum::Rect(result)
         }
-        (Datum::Rect(a), Datum::Float(right)) => {
-            let right_ref = player.alloc_datum(Datum::Float(*right));
+        (scalar, Datum::Rect(r)) if matches!(scalar, Datum::Int(_) | Datum::Float(_)) => {
+            let scalar_ref = player.alloc_datum(scalar.clone());
             let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
             for i in 0..4 {
-                let a_val = player.get_datum(&a[i]).clone();
-                let b_val = player.get_datum(&right_ref).clone();
+                let s_val = player.get_datum(&scalar_ref).clone();
+                let r_val = player.get_datum(&r[i]).clone();
                 let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
-                    player
-                )?;
-                result[i] = player.alloc_datum(prod);
-            }
-            Datum::Rect(result)
-        }
-        (Datum::Float(left), Datum::Rect(b)) => {
-            let left_ref = player.alloc_datum(Datum::Float(*left));
-            let mut result: [DatumRef; 4] = std::array::from_fn(|_| DatumRef::Void);
-            for i in 0..4 {
-                let a_val = player.get_datum(&left_ref).clone();
-                let b_val = player.get_datum(&b[i]).clone();
-                let prod = multiply_datums(
-                    player.alloc_datum(a_val),
-                    player.alloc_datum(b_val),
+                    player.alloc_datum(s_val),
+                    player.alloc_datum(r_val),
                     player
                 )?;
                 result[i] = player.alloc_datum(prod);
