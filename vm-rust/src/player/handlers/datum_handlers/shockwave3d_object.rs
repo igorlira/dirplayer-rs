@@ -25,7 +25,7 @@ const W3D_OBJECT_LOG: bool = false;
 
 fn log(msg: &str) {
     if W3D_OBJECT_LOG {
-        web_sys::console::log_1(&format!("[W3D-OBJECT] {}", msg).into());
+        debug!("[W3D-OBJECT] {}", msg);
     }
 }
 

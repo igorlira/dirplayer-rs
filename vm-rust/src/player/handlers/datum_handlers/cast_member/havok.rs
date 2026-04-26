@@ -633,15 +633,12 @@ impl HavokPhysicsMemberHandlers {
         let movable_names: Vec<String> = havok.state.rigid_bodies.iter()
             .filter(|rb| !rb.pinned && rb.mass > 0.0)
             .map(|rb| format!("{}({:.1})", rb.name, rb.mass)).collect();
-        web_sys::console::log_1(
-            &format!(
-                "Havok initialized: scale={}, gravity=({:.2},{:.2},{:.2}), drag=({:.2},{:.2}), bodies={} ({} movable: {:?})",
-                scale,
-                havok.state.gravity[0], havok.state.gravity[1], havok.state.gravity[2],
-                havok.state.drag_params[0], havok.state.drag_params[1],
-                havok.state.rigid_bodies.len(), movable_names.len(), movable_names
-            )
-            .into(),
+        debug!(
+            "Havok initialized: scale={}, gravity=({:.2},{:.2},{:.2}), drag=({:.2},{:.2}), bodies={} ({} movable: {:?})",
+            scale,
+            havok.state.gravity[0], havok.state.gravity[1], havok.state.gravity[2],
+            havok.state.drag_params[0], havok.state.drag_params[1],
+            havok.state.rigid_bodies.len(), movable_names.len(), movable_names
         );
 
         Ok(DatumRef::Void)
@@ -994,13 +991,13 @@ impl HavokPhysicsMemberHandlers {
 
         // Diagnostic: log mesh + computed unit inertia so we can verify it matches
         // Director. For a 15×30×10 box we expect diag (83.33, 27.08, 93.75).
-        web_sys::console::log_1(&format!(
+        debug!(
             "[HAVOK-RB '{}'] verts={} faces={} he=({:.1},{:.1},{:.1}) unit_I_diag=({:.2},{:.2},{:.2}) (polyhedron, unscaled)",
             model_name,
             mesh_vertices.len(), mesh_faces.len(),
             mesh_half_extents[0], mesh_half_extents[1], mesh_half_extents[2],
             unit_inertia[0], unit_inertia[4], unit_inertia[8],
-        ).into());
+        );
 
         let member = player
             .movie

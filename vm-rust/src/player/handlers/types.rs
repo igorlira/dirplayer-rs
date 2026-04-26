@@ -319,12 +319,10 @@ impl TypeUtils {
                 Ok(())
             }
             _ => {
-                web_sys::console::warn_1(
-                    &format!(
-                        "⚠️ Cannot set sub-prop `{}` on prop of type {} (ignored)",
-                        formatted_key,
-                        datum_type.type_str()
-                    ).into(),
+                warn!(
+                    "⚠️ Cannot set sub-prop `{}` on prop of type {} (ignored)",
+                    formatted_key,
+                    datum_type.type_str()
                 );
                 Ok(())
             }
@@ -456,12 +454,9 @@ impl TypeHandlers {
                     }
                     Err(err) => {
                         if !is_expected_value_retry_fragment(&s, &cleaned) {
-                            web_sys::console::warn_1(
-                                &format!(
-                                    "[value()] parse error → Void — input={:?} cleaned={:?} err={}",
-                                    s, cleaned, &err.message
-                                )
-                                .into(),
+                            warn!(
+                                "[value()] parse error → Void — input={:?} cleaned={:?} err={}",
+                                s, cleaned, &err.message
                             );
                         }
                         Ok(DatumRef::Void)
@@ -971,10 +966,10 @@ impl TypeHandlers {
         reserve_player_mut(|player| {
             let xtra_name = player.get_datum(&args[0]).string_value()?;
             if is_xtra_registered(&xtra_name) {
-                web_sys::console::log_1(&format!("Xtra '{}' registered OK", xtra_name).into());
+                debug!("Xtra '{}' registered OK", xtra_name);
                 Ok(player.alloc_datum(Datum::Xtra(xtra_name)))
             } else {
-                web_sys::console::log_1(&format!("Xtra '{}' NOT registered", xtra_name).into());
+                debug!("Xtra '{}' NOT registered", xtra_name);
                 Err(ScriptError::new(format!(
                     "Xtra {} is not registered",
                     xtra_name

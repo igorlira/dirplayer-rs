@@ -9,6 +9,8 @@
 /// identified by 4-byte tokens followed by their values.
 /// Mass is stored per-primitive; total body mass = sum of primitive masses.
 
+use log::debug;
+
 pub struct HkeCollisionMesh {
     pub name: String,
     pub entry_type: u16,
@@ -143,10 +145,10 @@ pub fn parse_hke(data: &[u8]) -> HkeWorld {
         .filter(|b| b.total_mass > 0.0)
         .map(|b| b.name.as_str())
         .collect();
-    web_sys::console::log_1(&format!(
+    debug!(
         "HKE parsed: {} meshes, {} bodies ({} movable: {:?}), worldScale={}",
         world.meshes.len(), world.bodies.len(), movable.len(), movable, world.world_scale
-    ).into());
+    );
 
     world
 }

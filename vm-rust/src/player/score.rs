@@ -1,7 +1,7 @@
 use std::{cell::RefCell, cmp::max, sync::Arc};
 
 use itertools::Itertools;
-use log::debug;
+use log::{debug, warn};
 use wasm_bindgen::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1288,10 +1288,10 @@ impl Score {
                                             false,
                                         );
                                         if let Err(e) = &result {
-                                            web_sys::console::warn_1(&format!(
+                                            warn!(
                                                 "[BEHAVIOR-APPLY] FAILED {}.{} = {}: {}",
                                                 behavior_ref.cast_member, prop_name, val_str, e.message
-                                            ).into());
+                                            );
                                         }
                                     }
                                     // Log all property values for debugging
@@ -1457,10 +1457,10 @@ impl Score {
 
                         // Apply behavior parameters from initializer data
                         if !behavior.parameter.is_empty() {
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "[BEHAVIOR-APPLY] sprite_details: applying {} params for cast {}/{}",
                                 behavior.parameter.len(), behavior.cast_lib, behavior.cast_member
-                            ).into());
+                            );
                             reserve_player_mut(|player| {
                                 for param_ref in &behavior.parameter {
                                     let param_datum = player.get_datum(param_ref);
@@ -1493,10 +1493,10 @@ impl Score {
                                                 false,
                                             );
                                             if let Err(e) = &result {
-                                                web_sys::console::warn_1(&format!(
+                                                warn!(
                                                     "[BEHAVIOR-APPLY] FAILED to set {}: {}",
                                                     prop_name, e.message
-                                                ).into());
+                                                );
                                             }
                                         }
                                         debug!(
@@ -3272,9 +3272,9 @@ pub fn sprite_get_prop(
                 Some(ref_) => Ok(player.get_datum(&ref_).clone()),
                 None => {
                     // Unknown sprite props may be custom behavior properties — return VOID
-                    web_sys::console::warn_1(&format!(
+                    warn!(
                         "Unknown sprite prop '{}' — returning VOID", prop_name
-                    ).into());
+                    );
                     Ok(Datum::Void)
                 }
             }

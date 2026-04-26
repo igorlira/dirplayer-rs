@@ -2,6 +2,7 @@
 /// Ported from W3DFileParser.cs.
 
 use std::collections::HashMap;
+use log::debug;
 use super::bitstream::IFXBitStreamCompressed;
 use super::block_reader::W3dBlockReader;
 use super::block_types::*;
@@ -13,7 +14,7 @@ const W3D_PARSER_LOG: bool = false;
 
 fn log(msg: &str) {
     if W3D_PARSER_LOG {
-        web_sys::console::log_1(&format!("[W3D-PARSER] {}", msg).into());
+        debug!("[W3D-PARSER] {}", msg);
     }
 }
 

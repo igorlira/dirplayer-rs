@@ -940,10 +940,10 @@ impl SpriteDatumHandlers {
                                 new_instances.push(instance_ref);
                             }
                             Err(e) => {
-                                web_sys::console::warn_1(&format!(
+                                warn!(
                                     "[setScriptList] Failed to create instance for member({},{}): {}",
                                     member_ref.cast_lib, member_ref.cast_member, e.message
-                                ).into());
+                                );
                             }
                         }
                     }

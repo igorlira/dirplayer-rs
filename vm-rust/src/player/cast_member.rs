@@ -2324,10 +2324,10 @@ impl CastMember {
 
     fn log_unknown_ole(number: u32, chunk: &CastMemberChunk) {
         let name = chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or("");
-        web_sys::console::log_1(&format!(
+        debug!(
             "Cast member #{} has unimplemented type: Ole (name: {})",
             number, name
-        ).into());
+        );
     }
 
     /// Parse SWF stage dimensions from uncompressed SWF header.
@@ -2847,10 +2847,10 @@ impl CastMember {
             // (HKE binary data can be mis-parsed as styled text)
             if Self::is_havok_member_any(&chunk.specific_data_raw, &chunk.member_info) {
                 let hke_data = xm.raw_data.clone();
-                web_sys::console::log_1(&format!(
+                debug!(
                     "Havok Physics member #{} detected in scan_children_for_ole (early), HKE data={} bytes",
                     number, hke_data.len()
-                ).into());
+                );
                 return Some(CastMember {
                     number,
                     name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
@@ -2891,10 +2891,10 @@ impl CastMember {
 
             // 3) Shockwave3D — IFX IFF container; not a font
             if xm.is_shockwave3d() {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "Detected as Shockwave3D (IFX) member #{}, {} bytes",
                     number, xm.raw_data.len()
-                ).into());
+                );
                 let w3d_data = xm.raw_data.clone();
                 let parsed_scene = if !w3d_data.is_empty() {
                     match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
@@ -3674,8 +3674,8 @@ impl CastMember {
                     let parsed_scene = if !w3d_data.is_empty() {
                         match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
                             Ok(scene) => {
-                                web_sys::console::log_1(&format!("W3D parsed: {} materials, {} nodes, {} meshes, {} motions",
-                                    scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len(), scene.motions.len()).into());
+                                debug!("W3D parsed: {} materials, {} nodes, {} meshes, {} motions",
+                                    scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len(), scene.motions.len());
                                 Some(std::rc::Rc::new(scene))
                             }
                             Err(e) => {
@@ -3718,10 +3718,10 @@ impl CastMember {
                             _ => None,
                         })
                         .unwrap_or_default();
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "Havok Physics member #{} detected, HKE data={} bytes",
                         number, hke_data.len()
-                    ).into());
+                    );
                     return CastMember {
                         number,
                         name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
@@ -4245,10 +4245,10 @@ impl CastMember {
                             _ => None,
                         })
                         .unwrap_or_else(|| chunk.specific_data_raw.clone());
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "Havok Physics member #{} detected in default branch (type={:?}), HKE data={} bytes",
                         number, chunk.member_type, hke_data.len()
-                    ).into());
+                    );
                     CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data))
                 } else {
                     CastMemberType::Unknown
@@ -4272,10 +4272,10 @@ impl CastMember {
                         _ => None,
                     })
                     .unwrap_or_else(|| chunk.specific_data_raw.clone());
-                web_sys::console::log_1(&format!(
+                debug!(
                     "Havok Physics member #{} detected by name override (was {:?}), HKE={} bytes",
                     number, member_type, hke_data.len()
-                ).into());
+                );
                 CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data))
             } else {
                 member_type

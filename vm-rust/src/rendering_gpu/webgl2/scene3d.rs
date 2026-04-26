@@ -23,7 +23,7 @@ const SCENE3D_LOG: bool = false;
 
 fn log(msg: &str) {
     if SCENE3D_LOG {
-        web_sys::console::log_1(&format!("[SCENE-3D] {}", msg).into());
+        debug!("[SCENE-3D] {}", msg);
     }
 }
 

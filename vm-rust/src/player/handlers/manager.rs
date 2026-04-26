@@ -1582,19 +1582,19 @@ impl BuiltInHandlerManager {
             if is_pressed && (key_code == 123 || key_code == 124) {
                 static KP_LR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                 if KP_LR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[KEY-STEER] keyPressed({}) = TRUE ({})",
                         key_code, if key_code == 123 { "LEFT" } else { "RIGHT" }
-                    ).into());
+                    );
                 }
             }
             if is_pressed && (key_code == 125 || key_code == 126) {
                 static KP_UD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                 if KP_UD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[KEY-DRIVE] keyPressed({}) = TRUE ({})",
                         key_code, if key_code == 126 { "UP" } else { "DOWN" }
-                    ).into());
+                    );
                 }
             }
 

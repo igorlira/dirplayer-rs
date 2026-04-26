@@ -512,11 +512,11 @@ impl DirPlayer {
                             let data = flash_member.data.clone();
                             let w = channel.sprite.width.max(1) as u32;
                             let h = channel.sprite.height.max(1) as u32;
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "[Flash] Pre-dispatching {}:{} ({}x{}, {} bytes)",
                                 member_ref.cast_lib, member_ref.cast_member,
                                 w, h, data.len()
-                            ).into());
+                            );
                             JsApi::dispatch_flash_member_loaded(
                                 member_ref.cast_lib,
                                 member_ref.cast_member,
@@ -2872,7 +2872,7 @@ async fn stop_movie_sequence() {
 /// Shared by `play()` and `transition_to_net_movie`.
 async fn run_movie_init_sequence() {
     // prepareMovie
-    web_sys::console::log_1(&">>> Dispatching prepareMovie".into());
+    debug!(">>> Dispatching prepareMovie");
     dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
 
     if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
@@ -2882,7 +2882,7 @@ async fn run_movie_init_sequence() {
         }
         return;
     }
-    web_sys::console::log_1(&">>> prepareMovie completed successfully".into());
+    debug!(">>> prepareMovie completed successfully");
 
     // Log bPreloadCasts state after prepareMovie
     reserve_player_ref(|player| {
@@ -2891,7 +2891,7 @@ async fn run_movie_init_sequence() {
             Some(r) => format!("{}", player.get_datum(r).type_str()),
             None => "NOT SET".to_string(),
         };
-        web_sys::console::log_1(&format!(">>> bPreloadCasts after prepareMovie: {}", desc).into());
+        debug!(">>> bPreloadCasts after prepareMovie: {}", desc);
     });
 
     player_wait_available().await;
@@ -3651,14 +3651,14 @@ pub async fn run_frame_loop() {
 
         // Wait for pending Flash/Ruffle instances to finish loading BEFORE running scripts.
         if is_flash_loading().unwrap_or(false) {
-            web_sys::console::log_1(&"[Flash] Waiting for Ruffle instance to finish loading...".into());
+            debug!("[Flash] Waiting for Ruffle instance to finish loading...");
             for _ in 0..150 {
                 timeout(Duration::from_millis(100), future::pending::<()>()).await.unwrap_err();
                 if !is_flash_loading().unwrap_or(false) {
                     break;
                 }
             }
-            web_sys::console::log_1(&"[Flash] Ruffle instance ready, resuming frame loop.".into());
+            debug!("[Flash] Ruffle instance ready, resuming frame loop.");
         }
 
         // Run one frame cycle (scripts + advance)
@@ -3673,14 +3673,14 @@ pub async fn run_frame_loop() {
         // Also check after frame execution: if scripts tried to access a Flash
         // instance that doesn't exist yet, wait for Ruffle to finish loading.
         if is_flash_loading().unwrap_or(false) {
-            web_sys::console::log_1(&"[Flash] Scripts accessed unready Flash instance, waiting...".into());
+            debug!("[Flash] Scripts accessed unready Flash instance, waiting...");
             for _ in 0..150 {
                 timeout(Duration::from_millis(100), future::pending::<()>()).await.unwrap_err();
                 if !is_flash_loading().unwrap_or(false) {
                     break;
                 }
             }
-            web_sys::console::log_1(&"[Flash] Ruffle instance ready, resuming frame loop.".into());
+            debug!("[Flash] Ruffle instance ready, resuming frame loop.");
         }
 
         // Get the target frame delay based on cached tempo for current frame

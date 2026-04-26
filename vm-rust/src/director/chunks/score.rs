@@ -1268,10 +1268,10 @@ impl ScoreChunk {
                                         parameter.push(proplist);
                                     }
                                     Err(e) => {
-                                        web_sys::console::warn_1(&format!(
+                                        warn!(
                                             "[SCORE-DETAIL] Behavior {}/{}: parse FAILED: {} str={:?}",
                                             cast_lib, cast_member, e.message, &clean[..clean.len().min(120)]
-                                        ).into());
+                                        );
                                     }
                                 }
                             } else {
@@ -1723,10 +1723,10 @@ impl ScoreChunk {
                                                                         secondary.parameter.push(proplist);
                                                                     }
                                                                     Err(e) => {
-                                                                        web_sys::console::warn_1(&format!(
+                                                                        warn!(
                                                                             "[SCORE-PARAM] Behavior {}/{}: eval_lingo_expr_static FAILED: {}",
                                                                             cast_lib, cast_member, e.message
-                                                                        ).into());
+                                                                        );
                                                                     }
                                                                 }
                                                             }

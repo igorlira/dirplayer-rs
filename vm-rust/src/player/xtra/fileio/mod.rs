@@ -1,4 +1,5 @@
 use fxhash::FxHashMap;
+use log::{debug, warn};
 
 use crate::{
     director::lingo::datum::Datum,
@@ -220,18 +221,18 @@ impl FileIoXtraManager {
                     let instance = manager.instances.get_mut(&instance_id).unwrap();
                     match result {
                         Some(Ok(bytes)) => {
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "FileIO.openFile: loaded '{}' ({} bytes)",
                                 relative_name, bytes.len()
-                            ).into());
+                            );
                             instance.data = bytes;
                             instance.is_open = true;
                         }
                         _ => {
-                            web_sys::console::warn_1(&format!(
+                            warn!(
                                 "FileIO.openFile: failed to load '{}'",
                                 relative_name
-                            ).into());
+                            );
                             instance.data = Vec::new();
                             instance.is_open = true;
                             if mode == 1 {
@@ -246,10 +247,10 @@ impl FileIoXtraManager {
                 })
             }
             "displayopen" | "displaysave" => {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "FileIO.{}(): file dialogs not yet supported in WASM, returning empty",
                     handler_name
-                ).into());
+                );
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::String(String::new())))
                 })
@@ -535,10 +536,10 @@ impl FileIoXtraManager {
 
             // -- Dialog stubs (sync fallback) --
             "displayopen" | "displaysave" => {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "FileIO.{}(): sync fallback, returning empty",
                     handler_name
-                ).into());
+                );
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::String(String::new())))
                 })

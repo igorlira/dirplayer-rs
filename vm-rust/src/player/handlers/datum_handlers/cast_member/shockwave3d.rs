@@ -18,7 +18,7 @@ const W3D_HANDLER_LOG: bool = false;
 
 fn log(msg: &str) {
     if W3D_HANDLER_LOG {
-        web_sys::console::log_1(&format!("[W3D-HANDLER] {}", msg).into());
+        debug!("[W3D-HANDLER] {}", msg);
     }
 }
 

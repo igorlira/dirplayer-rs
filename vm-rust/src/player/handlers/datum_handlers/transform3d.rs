@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::cell::RefCell;
+use log::debug;
 
 thread_local! {
     /// Track which Transform3d datum IDs were mutated in-place (dirty).
@@ -88,10 +89,10 @@ impl Transform3dDatumHandlers {
                     if v[2].abs() > 400.0 {
                         static T3D_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                         if T3D_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "[T3D-POS] transform.position = ({:.1},{:.1},{:.1}) datum_id={:?}",
                                 v[0], v[1], v[2], datum
-                            ).into());
+                            );
                         }
                     }
                 }
@@ -103,10 +104,10 @@ impl Transform3dDatumHandlers {
                     if v[2].abs() > 0.1 {
                         static ROT_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                         if ROT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "[T3D-ROT] transform.rotation = ({:.1},{:.1},{:.1}) pos=({:.1},{:.1},{:.1})",
                                 v[0], v[1], v[2], m[12], m[13], m[14]
-                            ).into());
+                            );
                         }
                     }
                     // Preserve position and scale, rebuild rotation

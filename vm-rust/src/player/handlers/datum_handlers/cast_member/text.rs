@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use log::debug;
+use log::{debug, warn};
 use crate::{
     director::enums::TextInfo,
     director::lingo::datum::{
@@ -1049,9 +1049,7 @@ impl TextMemberHandlers {
                         text_data.bottom_spacing,
                         &text_data.tab_stops,
                     ) {
-                        web_sys::console::warn_1(
-                            &format!("[text.image] Native render error: {:?}", e).into()
-                        );
+                        warn!("[text.image] Native render error: {:?}", e);
                     }
                 } else {
                     // Bitmap glyph rendering using PFR rasterizer font

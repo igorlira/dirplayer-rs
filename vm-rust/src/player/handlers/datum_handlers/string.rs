@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use log::warn;
+
 use crate::{
     director::lingo::datum::{
         Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
@@ -66,12 +68,9 @@ impl StringDatumUtils {
                         if !crate::player::handlers::types::is_expected_value_retry_fragment(
                             value, &cleaned,
                         ) {
-                            web_sys::console::warn_1(
-                                &format!(
-                                    "[string.value] parse error → raw String — input={:?} cleaned={:?} err={}",
-                                    value, cleaned, err.message
-                                )
-                                .into(),
+                            warn!(
+                                "[string.value] parse error → raw String — input={:?} cleaned={:?} err={}",
+                                value, cleaned, err.message
                             );
                         }
                         Ok(Datum::String(value.to_owned()))

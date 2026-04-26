@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use log::debug;
+
 use crate::player::datum_formatting::format_concrete_datum;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
@@ -293,10 +295,10 @@ impl ListDatumHandlers {
                 };
 
                 // Debug: log context search result
-                web_sys::console::log_1(&format!(
+                debug!(
                     "[W3D-ADD] add() no-args on list datum_id={} context={:?}",
                     datum.unwrap(), tex_layer_context
-                ).into());
+                );
 
                 if let Some((cast_lib, cast_member, model_name, mesh_idx)) = tex_layer_context {
                     // Get current layer count to determine the new layer index

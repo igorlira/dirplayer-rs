@@ -1,13 +1,15 @@
 /// Primitive generator parameter parsing (Plane, Box, Sphere, Cylinder).
 /// These just store parameters; actual mesh generation is deferred to rendering.
 
+use log::debug;
+
 use super::block_reader::W3dBlockReader;
 
 const W3D_PRIMITIVES_LOG: bool = false;
 
 fn log(msg: &str) {
     if W3D_PRIMITIVES_LOG {
-        web_sys::console::log_1(&format!("[W3D-PRIMITIVES] {}", msg).into());
+        debug!("[W3D-PRIMITIVES] {}", msg);
     }
 }
 

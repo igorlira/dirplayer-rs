@@ -7,7 +7,7 @@ pub mod rendering_gpu;
 pub mod utils;
 
 use async_std::task::spawn_local;
-use log::debug;
+use log::{debug, warn};
 use js_api::JsApi;
 use num::ToPrimitive;
 use utils::set_panic_hook;
@@ -478,10 +478,10 @@ pub fn update_flash_frame(cast_lib: i32, cast_member: i32, width: u32, height: u
 
     let expected_len = (width * height * 4) as usize;
     if rgba_data.len() != expected_len {
-        web_sys::console::warn_1(&format!(
+        warn!(
             "update_flash_frame: expected {} bytes, got {}",
             expected_len, rgba_data.len()
-        ).into());
+        );
         return;
     }
 
@@ -796,9 +796,9 @@ pub fn export_w3d_raw(cast_lib: i32, cast_member: i32) {
         if let Some(off) = offset {
             let ifx_data = &data[off..];
             trigger_browser_download(&format!("member_{}_{}.w3d", cast_lib, cast_member), ifx_data, "application/octet-stream");
-            web_sys::console::log_1(&format!("Exported {} bytes of IFX data (offset {} in {} byte XMED)", ifx_data.len(), off, data.len()).into());
+            debug!("Exported {} bytes of IFX data (offset {} in {} byte XMED)", ifx_data.len(), off, data.len());
         } else {
-            web_sys::console::log_1(&"No IFX magic found in W3D data".into());
+            debug!("No IFX magic found in W3D data");
         }
     });
 }
@@ -852,10 +852,10 @@ pub fn export_w3d_obj(cast_lib: i32, cast_member: i32) {
 
         trigger_browser_download(&format!("{}.zip", name), &zip_data, "application/zip");
 
-        web_sys::console::log_1(&format!(
+        debug!(
             "Exported {}.obj ({} bytes), {}.mtl ({} bytes), {}.glb ({} bytes), {} textures",
             name, obj_data.len(), name, mtl_data.len(), name, glb_data.len(), scene.texture_images.len()
-        ).into());
+        );
     });
 }
 
@@ -879,7 +879,7 @@ pub fn list_w3d_members() -> String {
         if result.is_empty() {
             result = "No Shockwave3D members found.".to_string();
         }
-        web_sys::console::log_1(&result.clone().into());
+        debug!("{}", result);
         result
     })
 }

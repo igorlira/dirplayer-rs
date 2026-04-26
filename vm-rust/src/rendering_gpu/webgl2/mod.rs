@@ -1044,10 +1044,10 @@ impl WebGL2Renderer {
             let w3d_cam = sprite.w3d_camera.clone();
             let w3d_extra_cams = sprite.w3d_cameras.clone();
             if w3d_cam.is_some() || !w3d_extra_cams.is_empty() {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "[W3D-RENDER] sprite {} camera={:?} extras={:?}",
                     channel_num, w3d_cam, w3d_extra_cams
-                ).into());
+                );
             }
             let rect = get_concrete_sprite_rect(player, sprite);
             (
@@ -1157,12 +1157,12 @@ impl WebGL2Renderer {
             if !player.flash_frame_buffers.contains_key(&flash_key) {
                 if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
                     if let CastMemberType::Flash(flash_member) = &member.member_type {
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "Flash dispatch check {}:{} data_len={} first_bytes={:?}",
                             member_ref.cast_lib, member_ref.cast_member,
                             flash_member.data.len(),
                             &flash_member.data[..3.min(flash_member.data.len())]
-                        ).into());
+                        );
                         if crate::rendering::has_swf_signature(&flash_member.data) {
                             let data = flash_member.data.clone();
                             let w = sprite_width.max(1) as u32;
@@ -1202,9 +1202,9 @@ impl WebGL2Renderer {
                 static PH_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                 let ph_log = !PH_LOG.swap(true, std::sync::atomic::Ordering::Relaxed);
                 if ph_log {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[W3D-PH] {} placeholders to resolve", placeholder_names.len()
-                    ).into());
+                    );
                 }
                 let mut resolved: Vec<(String, Vec<u8>)> = Vec::new();
                 let palettes = player.movie.cast_manager.palettes();
@@ -1232,7 +1232,7 @@ impl WebGL2Renderer {
                             }
                             None => "NOT_FOUND".into(),
                         };
-                        web_sys::console::log_1(&format!("[W3D-PH] '{}' -> {}", tex_name, status).into());
+                        debug!("[W3D-PH] '{}' -> {}", tex_name, status);
                     }
                     if let Some(src_ref) = found_ref {
                         if let Some(src_member) = player.movie.cast_manager.find_member_by_ref(&src_ref) {
@@ -1313,10 +1313,10 @@ impl WebGL2Renderer {
                             let has_skeleton = !scene.skeletons.is_empty()
                                 && scene.skeletons.iter().any(|s| s.bones.len() > 1);
                             let anim_type = if has_skeleton { "bones" } else { "keyframe" };
-                            web_sys::console::log_1(&format!(
+                            debug!(
                                 "[3D] animationEnabled: auto-starting {} motion '{}' (loop={})",
                                 anim_type, first_motion.name, w3d.info.loops
-                            ).into());
+                            );
                             w3d.runtime_state.current_motion = Some(first_motion.name.clone());
                             w3d.runtime_state.animation_playing = true;
                             w3d.runtime_state.animation_loop = w3d.info.loops;
@@ -1911,10 +1911,10 @@ impl WebGL2Renderer {
                 }
                 CastMemberType::Shockwave3d(w3d) => {
                     if w3d.parsed_scene.is_none() {
-                        web_sys::console::warn_1(&format!(
+                        warn!(
                             "[3D] Sprite {} member {}:{} has NO parsed_scene — W3D parsing failed or data is empty (w3d_data len={})",
                             channel_num, member_ref.cast_lib, member_ref.cast_member, w3d.w3d_data.len()
-                        ).into());
+                        );
                     }
                     if let Some(ref parsed_scene) = w3d.parsed_scene {
                         // FBO dimensions from sprite rect
@@ -1922,12 +1922,12 @@ impl WebGL2Renderer {
                         {
                             static RECT_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                             if !RECT_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                web_sys::console::log_1(&format!(
+                                debug!(
                                     "[3D-RECT] sprite_rect=({},{},{},{}) fbo={}x{} loc=({},{}) sprite_wh=({},{}) regPt=({},{})",
                                     sprite_rect.left, sprite_rect.top, sprite_rect.right, sprite_rect.bottom,
                                     w, h, raw_loc.0, raw_loc.1, sprite_width, sprite_height,
                                     w3d.info.reg_point.0, w3d.info.reg_point.1
-                                ).into());
+                                );
                             }
                         }
                         let extra_cams = w3d_extra_cams.clone();
@@ -2159,12 +2159,12 @@ impl WebGL2Renderer {
                 ref tab_stops,
             } => {
                 if text.contains('\t') || !tab_stops.is_empty() {
-                    web_sys::console::warn_1(&format!(
+                    warn!(
                         "[webgl2 RenderedText] member={}:{} tabs={} has_tab={} text='{}'",
                         cache_key.member_ref.cast_lib, cache_key.member_ref.cast_member,
                         tab_stops.len(), text.contains('\t'),
                         &text[..text.len().min(40)]
-                    ).into());
+                    );
                 }
                 // Check cache first
                 if let Some(cached) = self.rendered_text_cache.get(cache_key) {
@@ -2639,7 +2639,7 @@ impl WebGL2Renderer {
                 if extra_cameras.is_empty() {
                     static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                     if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        web_sys::console::warn_1(&"[3D] No extra cameras — Main camera not added via addCamera".into());
+                        warn!("[3D] No extra cameras — Main camera not added via addCamera");
                     }
                 }
                 for cam_name in &extra_cameras {
@@ -2647,10 +2647,10 @@ impl WebGL2Renderer {
                         .get(&cam_name.to_ascii_lowercase()).copied().unwrap_or(true);
                     static CAM_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                     if !CAM_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[W3D-MULTICAM] extra cam='{}' should_clear={} clear_map={:?}",
                             cam_name, should_clear, runtime_state.camera_clear_at_render
-                        ).into());
+                        );
                     }
                     self.scene3d.active_camera = Some(cam_name.clone());
                     if let Err(e) = self.scene3d.render_scene_with_state_ex(
@@ -2681,7 +2681,7 @@ impl WebGL2Renderer {
                 let fbo_tex = match self.scene3d.fbo_texture.as_ref() {
                     Some(tex) => tex.clone(),
                     None => {
-                        web_sys::console::warn_1(&format!("[3D] No FBO texture for member {:?}", member_key).into());
+                        warn!("[3D] No FBO texture for member {:?}", member_key);
                         return;
                     }
                 };

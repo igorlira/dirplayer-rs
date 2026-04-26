@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use async_std::sync::Mutex;
+use log::debug;
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use percent_encoding::percent_decode_str;
 use url::Url;
@@ -171,10 +172,10 @@ impl NetManager {
             };
             if norm_url.to_lowercase().starts_with(&prefix.to_lowercase()) {
                 let relative = &norm_url[prefix.len()..];
-                web_sys::console::log_1(&format!(
+                debug!(
                     "preload_net_thing: stripped override path '{}' -> '{}'",
                     url, relative
-                ).into());
+                );
                 relative.to_string()
             } else {
                 url

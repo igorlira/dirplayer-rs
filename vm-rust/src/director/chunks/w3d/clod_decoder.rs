@@ -3,6 +3,8 @@
 ///
 /// Decodes compressed progressive meshes from IFX CompressedGeom (0xFFFFFF49) blocks.
 
+use log::debug;
+
 use super::bitstream::IFXBitStreamCompressed;
 use super::clod_types::*;
 use super::types::*;
@@ -102,10 +104,10 @@ impl ClodMeshDecoder {
         // Log mesh info for debugging
         if !self.meshes.is_empty() {
             let attrs: Vec<String> = self.meshes.iter().map(|m| format!("0x{:X}", m.vertex_attributes)).collect();
-            web_sys::console::log_1(&format!(
+            debug!(
                 "[W3D CLOD] \"{}\" updates={} meshes={} vertAttrs=[{}] nbr={}",
                 name, update_count, self.meshes.len(), attrs.join(","), self.has_neighbor_mesh
-            ).into());
+            );
         }
 
         // Safety: update_count should never be huge
@@ -117,12 +119,12 @@ impl ClodMeshDecoder {
             // Single mesh path
             for u in 0..update_count {
                 if let Err(e) = self.decode_mesh_update(&mut bs, 0) {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[W3D CLOD] decode failed \"{}\" update {}/{}: {} ({} verts, {} faces so far)",
                         name, u, update_count, e,
                         self.meshes.get(0).map(|m| m.positions.len()).unwrap_or(0),
                         self.meshes.get(0).map(|m| m.faces.len()).unwrap_or(0),
-                    ).into());
+                    );
                     // Use whatever geometry was decoded so far instead of failing completely
                     break;
                 }
@@ -153,10 +155,10 @@ impl ClodMeshDecoder {
                         let entries = &sync_table[mi];
                         while cursors[mi] < entries.len() && entries[cursors[mi]] <= global_res {
                             if let Err(e) = self.decode_mesh_update(&mut bs, mi) {
-                                web_sys::console::log_1(&format!(
+                                debug!(
                                     "[W3D CLOD] multi-mesh decode failed mesh={} cursor={}: {} (using partial geometry)",
                                     mi, cursors[mi], e
-                                ).into());
+                                );
                                 // Put cursors back before returning
                                 self.mesh_cursors = Some(cursors);
                                 self.global_update_counter += update_count;

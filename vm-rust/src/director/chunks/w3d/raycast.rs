@@ -1,5 +1,7 @@
 //! Ray casting utilities for 3D picking (modelUnderLoc, modelUnderRay).
 
+use log::debug;
+
 use super::types::*;
 
 pub struct Ray {
@@ -178,14 +180,14 @@ pub fn raycast_scene_multi(
         if node.name == "MainA" {
             static MA_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if MA_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 {
-                web_sys::console::log_1(&format!(
+                debug!(
                     "[RAYCAST] MainA xform: pos=({:.1},{:.1},{:.1}) X=({:.4},{:.4},{:.4}) Y=({:.4},{:.4},{:.4}) Z=({:.4},{:.4},{:.4}) parent='{}'",
                     world_transform[12], world_transform[13], world_transform[14],
                     world_transform[0], world_transform[1], world_transform[2],
                     world_transform[4], world_transform[5], world_transform[6],
                     world_transform[8], world_transform[9], world_transform[10],
                     node.parent_name
-                ).into());
+                );
             }
         }
         let inv_transform = invert_4x4(&world_transform);
@@ -201,16 +203,16 @@ pub fn raycast_scene_multi(
                 if let Some(meshes) = scene.clod_meshes.get(resource.as_str()) {
                     for (mi, m) in meshes.iter().enumerate() {
                         let v0z = if !m.positions.is_empty() { m.positions[0][2] } else { -999.0 };
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[RAYCAST-MESH] MainA sub[{}]: {} verts, {} faces, v0z={:.1}",
                             mi, m.positions.len(), m.faces.len(), v0z
-                        ).into());
+                        );
                     }
                     // Check sub[4] face 35 specifically (should be the floor)
                     if meshes.len() > 4 && meshes[4].faces.len() > 35 {
                         let f = &meshes[4].faces[35];
                         let m = &meshes[4];
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[FLOOR-FACE] sub[4] face35=[{},{},{}] v{}=({:.1},{:.1},{:.1}) v{}=({:.1},{:.1},{:.1}) v{}=({:.1},{:.1},{:.1})",
                             f[0], f[1], f[2],
                             f[0], m.positions.get(f[0] as usize).map(|p| p[0]).unwrap_or(-1.0),
@@ -222,7 +224,7 @@ pub fn raycast_scene_multi(
                             f[2], m.positions.get(f[2] as usize).map(|p| p[0]).unwrap_or(-1.0),
                                   m.positions.get(f[2] as usize).map(|p| p[1]).unwrap_or(-1.0),
                                   m.positions.get(f[2] as usize).map(|p| p[2]).unwrap_or(-1.0),
-                        ).into());
+                        );
                         // Test ray intersection manually
                         let lo = [3428.0f32, -5878.0, 219.0]; // local ray origin
                         let ld = [0.0f32, 0.0, -1.0]; // local ray dir
@@ -232,9 +234,9 @@ pub fn raycast_scene_multi(
                         if let Some((t, _, _)) = ray_triangle_intersect(
                             &Ray { origin: lo, direction: ld }, &p0, &p1, &p2
                         ) {
-                            web_sys::console::log_1(&format!("[FLOOR-FACE] ray hit! t={:.2}", t).into());
+                            debug!("[FLOOR-FACE] ray hit! t={:.2}", t);
                         } else {
-                            web_sys::console::log_1(&"[FLOOR-FACE] ray MISS!".into());
+                            debug!("[FLOOR-FACE] ray MISS!");
                         }
                     }
                 }
@@ -247,12 +249,12 @@ pub fn raycast_scene_multi(
             if node.name == "MainA" && ray.direction[2] < -0.9 && ray.direction[0].abs() < 0.1 && ray.origin[2] > 300.0 {
                 static LR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                 if LR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 2 {
-                    web_sys::console::log_1(&format!(
+                    debug!(
                         "[LOCAL-RAY] MainA: world_orig=({:.1},{:.1},{:.1}) local_orig=({:.1},{:.1},{:.1}) local_dir=({:.4},{:.4},{:.4})",
                         ray.origin[0], ray.origin[1], ray.origin[2],
                         local_ray.origin[0], local_ray.origin[1], local_ray.origin[2],
                         local_ray.direction[0], local_ray.direction[1], local_ray.direction[2],
-                    ).into());
+                    );
                 }
             }
             for (mi, mesh) in meshes.iter().enumerate() {
@@ -265,12 +267,12 @@ pub fn raycast_scene_multi(
                         let p1 = mesh.positions[f[1] as usize];
                         let p2 = mesh.positions[f[2] as usize];
                         let result = ray_triangle_intersect(&local_ray, &p0, &p1, &p2);
-                        web_sys::console::log_1(&format!(
+                        debug!(
                             "[SUB4-F35] local_orig=({:.1},{:.1},{:.1}) dir=({:.4},{:.4},{:.4}) face=[{},{},{}] hit={:?} nfaces={}",
                             local_ray.origin[0], local_ray.origin[1], local_ray.origin[2],
                             local_ray.direction[0], local_ray.direction[1], local_ray.direction[2],
                             f[0], f[1], f[2], result, mesh.faces.len()
-                        ).into());
+                        );
                     }
                 }
                 let tc = mesh.tex_coords.first().map(|v| v.as_slice());

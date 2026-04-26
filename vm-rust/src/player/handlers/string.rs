@@ -1,3 +1,5 @@
+use log::debug;
+
 use crate::{
     director::lingo::datum::Datum,
     player::{datum_formatting::format_concrete_datum, reserve_player_mut, DatumRef, ScriptError},
@@ -202,7 +204,7 @@ impl StringHandlers {
                 _ => return Err(ScriptError::new("urlEncode: argument must be a prop list or string".to_string()))
             };
 
-            web_sys::console::log_1(&format!("urlEncode() = '{}'", result).into());
+            debug!("urlEncode() = '{}'", result);
             Ok(player.alloc_datum(Datum::String(result)))
         })
     }
