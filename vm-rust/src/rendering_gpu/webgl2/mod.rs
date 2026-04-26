@@ -1521,17 +1521,30 @@ impl WebGL2Renderer {
                         )
                     };
                     // Color priority for text:
-                    // 1. Sprite has explicit foreColor (tween/Lingo has_fore_color) -> override everything
-                    // 2. Non-default, non-black sprite.color (score frame data) -> matches non-WebGL2
-                    //    PFR bitmap rendering where params.color = sprite.color always wins
-                    // 3. Styled span color from XMED/HTML -> use per-span color
-                    // 4. CastMember.color (XMED foreColor preserved at member level) -> fallback
-                    // 5. Sprite.color (default palette) -> final fallback
-                    let text_fg_color = if has_fore_color {
+                    // 1. Non-default RGB sprite.color wins outright. Catches both
+                    //    score-frame-data tweens (FurniFactory animates sprite.color
+                    //    to Rgb(214,183,58) via the score; has_fore_color stays false
+                    //    because the flag only catches Lingo writes) AND explicit
+                    //    Lingo `sprite.color = rgb(...)` writes. Black is excluded
+                    //    so a sprite at its RGB default doesn't shadow member.color.
+                    // 2. CastMember `.color` set to RGB. Coke Studios does
+                    //    `sprite.color = paletteIndex(255)` (default-marker) +
+                    //    `member.color = rgb(...)`; member RGB wins over the
+                    //    sprite's palette default.
+                    // 3. Sprite has_fore_color (Lingo touched it, palette index).
+                    // 4. Non-default, non-black sprite.color (score palette index).
+                    // 5. Single styled-span color (XMED/HTML).
+                    // 6. Stored member.color (palette fallback).
+                    // 7. sprite.color as final fallback.
+                    let text_fg_color = if matches!(fg_color, ColorRef::Rgb(..))
+                        && fg_color != ColorRef::Rgb(0, 0, 0)
+                    {
+                        fg_color.clone()
+                    } else if matches!(member.color, ColorRef::Rgb(..)) {
+                        member.color.clone()
+                    } else if has_fore_color {
                         fg_color.clone()
                     } else if fg_color != ColorRef::PaletteIndex(255) && fg_color != ColorRef::Rgb(0, 0, 0) {
-                        // Non-default, non-black sprite.color always wins over XMED span colors
-                        // Matches non-WebGL2 PFR bitmap rendering: params.color = sprite.color
                         fg_color.clone()
                     } else if text_member.html_styled_spans.len() == 1 {
                         let style_color = text_member.html_styled_spans[0].style.color;
@@ -1542,13 +1555,11 @@ impl WebGL2Renderer {
                                 (c & 0xFF) as u8,
                             )
                         } else if member.color != ColorRef::PaletteIndex(255) {
-                            // Fallback to member's stored foreColor (from XMED)
                             member.color.clone()
                         } else {
                             fg_color.clone()
                         }
                     } else if member.color != ColorRef::PaletteIndex(255) {
-                        // Multi-span text with no explicit sprite color: use member foreColor
                         member.color.clone()
                     } else {
                         fg_color.clone()
@@ -1749,9 +1760,21 @@ impl WebGL2Renderer {
                     }
 
                     // Color priority for fields:
-                    // - If sprite has explicit foreColor (tween/Lingo), that overrides member colors
-                    // - Otherwise, prefer the member's own STXT/FieldInfo colors
-                    let effective_fg = if has_fore_color {
+                    // 1. Non-default RGB sprite color wins outright. Covers both
+                    //    score-frame-data tweens (FurniFactory; sprite.color = RGB but
+                    //    has_fore_color=false) and Lingo writes. Black is excluded so
+                    //    a sprite at default doesn't shadow member.color.
+                    // 2. Cast member `.color` set to RGB (CS convention).
+                    // 3. Sprite has_fore_color (Lingo touched it, palette index).
+                    // 4. STXT/FieldInfo fore_color (parse-time fallback).
+                    // 5. Sprite color as final fallback.
+                    let effective_fg = if matches!(fg_color, ColorRef::Rgb(..))
+                        && fg_color != ColorRef::Rgb(0, 0, 0)
+                    {
+                        fg_color.clone()
+                    } else if matches!(member.color, ColorRef::Rgb(..)) {
+                        member.color.clone()
+                    } else if has_fore_color {
                         fg_color.clone()
                     } else {
                         field_member.fore_color.clone()
