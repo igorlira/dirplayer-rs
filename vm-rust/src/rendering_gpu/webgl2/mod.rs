@@ -4039,32 +4039,46 @@ impl WebGL2Renderer {
         // measure_text uses the system_font fallback (small char_height) which
         // returns wrong measurements that would shrink the rect incorrectly.
         let is_pfr_font_for_shrink = font.char_widths.is_some();
-        if is_pfr_font_for_shrink && word_wrap && render_width > 0 {
-            let (_, measured_h) = measure_text_wrapped(
-                text, &font, render_width, true,
-                line_spacing, top_spacing, bottom_spacing, 0,
-            );
-            let measured_h = measured_h
+        if is_pfr_font_for_shrink {
+            let (_, measured_h_raw) = if word_wrap && render_width > 0 {
+                measure_text_wrapped(
+                    text, &font, render_width, true,
+                    render_line_spacing, top_spacing, bottom_spacing, 0,
+                )
+            } else {
+                measure_text(
+                    text, &font, None, render_line_spacing, top_spacing, bottom_spacing,
+                )
+            };
+            let measured_h = measured_h_raw
                 + (2 * border) + (4 * box_drop_shadow);
             if measured_h > 0 && measured_h < render_height {
-                render_height = measured_h;
+                let line_count = text
+                    .replace("\r\n", "\n")
+                    .chars()
+                    .filter(|c| *c == '\r' || *c == '\n')
+                    .count() + 1;
+                // Only scale line spacing to fill the sprite_rect for multi-line
+                // text whose styled spans were cleared (the `.text = ...` setter
+                // in text.rs clears them). That signals the text is dynamically
+                // rebuilt by Lingo to populate a sibling-aligned column —
+                // Junkbot's level.num/level.name pair is the canonical case.
+                //
+                // XMED-authored multi-line text members (e.g. BossBot's welcome
+                // letter) preserve their styled spans and want the original
+                // tight line spacing, not stretched to fill whatever sprite_rect
+                // the score allocated for the letter background.
+                if line_count > 1 && styled_spans.is_none() {
+                    let extra = render_height as u32 - measured_h as u32;
+                    let extra_per_gap = (extra / (line_count as u32 - 1)) as u16;
+                    render_line_spacing = render_line_spacing.saturating_add(extra_per_gap);
+                } else {
+                    // Single line OR styled-spans text: shrink bitmap to content
+                    // (preserve tight bounds for chat bubbles, button labels,
+                    // BossBot letters, etc.).
+                    render_height = measured_h;
+                }
             }
-        } else if is_pfr_font_for_shrink && !word_wrap {
-            let (_, measured_h) = measure_text(
-                text, &font, None, line_spacing, top_spacing, bottom_spacing,
-            );
-            let measured_h = measured_h
-                + (2 * border) + (4 * box_drop_shadow);
-            if measured_h > 0 && measured_h < render_height {
-                render_height = measured_h;
-            }
-        }
-
-        // For bitmap font rendering (PFR or System font), keep rendering constrained to the sprite text box.
-        // Expanding to measured width breaks wrapping because max_width tracks render width.
-        // System font is a bitmap font that needs the same treatment as PFR fonts
-        if (is_pfr_font || font.font_name == "System") && styled_spans.is_none() {
-            render_line_spacing = 0;
         }
 
         // Compute alignment offset for bitmap font rendering (native text handles alignment internally).
