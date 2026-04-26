@@ -222,19 +222,43 @@ impl TextMemberHandlers {
                     player.font_manager.get_system_font().unwrap()
                 };
                 let is_pfr = font.char_widths.is_some();
-                let (width, measured_height) = if !is_pfr {
-                    // For non-PFR (system/browser) fonts, use Canvas2D measurement
-                    // to match the Canvas2D rendering used by .image
-                    let font_name = if !text_data.font.is_empty() {
-                        text_data.font.as_str()
-                    } else {
-                        "Arial"
-                    };
+                // When the member will render via Canvas2D (standard font +
+                // prefer_native flag) the measurement MUST come from Canvas2D
+                // too — PFR wraps text at different points because browser
+                // fonts are measurably wider than the PFR atlas, so a PFR
+                // line-count can disagree with the Canvas2D render, leaving
+                // wrapped text clipped or the bitmap over-sized.
+                let requested_font_for_measure = if !text_data.font.is_empty() {
+                    text_data.font.as_str()
+                } else {
+                    "Arial"
+                };
+                let measure_with_canvas = !is_pfr;
+                // Pass bold/italic to Canvas2D measurement so wrap decisions
+                // match the actual rendered text — bold glyphs are measurably
+                // wider than regular and the member's `fontStyle` plain-vs-bold
+                // flag moves the wrap point on long catalog / button labels.
+                let member_style_bits: u8 = {
+                    let mut s = 0u8;
+                    for tag in &text_data.font_style {
+                        match tag.as_str() {
+                            "bold" => s |= 0x01,
+                            "italic" => s |= 0x02,
+                            "underline" => s |= 0x04,
+                            _ => {}
+                        }
+                    }
+                    s
+                };
+                let (width, measured_height) = if measure_with_canvas {
+                    // Canvas2D measurement — matches the Canvas2D render path
+                    // used by `.image` for non-PFR and native-standard fonts.
                     let font_size = if text_data.font_size > 0 { text_data.font_size } else { 12 };
-                    FontMemberHandlers::measure_text_native(
+                    FontMemberHandlers::measure_text_native_styled(
                         &text_data.text,
-                        font_name,
+                        requested_font_for_measure,
                         font_size,
+                        Some(member_style_bits),
                         text_data.word_wrap,
                         if text_data.width > 0 { text_data.width as i32 } else { 0 },
                         text_data.top_spacing,
@@ -242,14 +266,63 @@ impl TextMemberHandlers {
                         text_data.fixed_line_space,
                     )
                 } else {
-                    measure_text(
+                    // PFR path: measure_text returns the full PFR bitmap-cell height
+                    // (char_height-1), which can be ~2x the Lingo-authored font size
+                    // because the rasterised PFR cell includes generous padding.
+                    // Director's `.rect` returns a glyph-extent height ≈ font_size + 4
+                    // (~1.4x). Use the Lingo-set text_data.font_size, NOT font.font_size
+                    // (the loaded bitmap's internal size — often the rasterisation size,
+                    // e.g. 20 for 10pt). CS centering formulas like
+                    //   sprite.locV = locV + (btn_h/2) - (member.rect.height/2)
+                    // (windows script.ls:564) depend on matching Director's value here.
+                    let (w, _) = measure_text(
                         &text_data.text,
                         &font,
                         None,
                         text_data.fixed_line_space,
                         text_data.top_spacing,
                         text_data.bottom_spacing,
-                    )
+                    );
+                    // Count CRLF / lone CR / lone LF as one break each. Without
+                    // CRLF normalisation Lingo's `& RETURN` (which is `\r\n` on
+                    // Windows-saved movies) double-counts and over-allocates
+                    // text height — Coke Studios' roomlist hits this and
+                    // double-spaces every row.
+                    let line_count = text_data.text
+                        .replace("\r\n", "\n")
+                        .chars()
+                        .filter(|c| *c == '\r' || *c == '\n')
+                        .count() + 1;
+                    let nominal = if text_data.font_size > 0 {
+                        text_data.font_size
+                    } else if font.font_size > 0 {
+                        font.font_size
+                    } else {
+                        font.char_height
+                    };
+                    // Director's glyph-extent line height is ~1.4 × nominal size.
+                    let line_h = (nominal as f32 * 1.4).round() as u16;
+                    // Match the renderer's per-line advance at font.rs:921 —
+                    // it adds top_spacing AND bottom_spacing to the line step
+                    // every iteration. The CS Hotel Navigator Writer maps
+                    // `define([#fixedLineSpace: 18])` to `pMember.fixedLineSpace=10
+                    // pMember.topSpacing=8`, so the renderer steps 18 px per row
+                    // but a `line_step = fixed_line_space` would only allocate 10
+                    // — clipping rows 7-10 of a 10-row list. Folding both
+                    // spacings into line_step keeps `.height` / `.image` aligned
+                    // with what the renderer actually draws.
+                    let line_step = (if text_data.fixed_line_space > 0 {
+                        text_data.fixed_line_space
+                    } else {
+                        line_h
+                    }) as i32
+                        + text_data.top_spacing as i32
+                        + text_data.bottom_spacing as i32;
+                    let h = (text_data.top_spacing as i32
+                        + line_h as i32
+                        + (line_count as i32 - 1) * line_step)
+                        .max(0) as u16;
+                    (w, h)
                 };
                 // Use member's explicit width/height when available (matches .image box dimensions).
                 // This is important for center/right-aligned text where visible pixels
@@ -294,34 +367,80 @@ impl TextMemberHandlers {
                         player.font_manager.get_system_font().unwrap()
                     };
                     let is_pfr = font.char_widths.is_some();
-                    // For an #adjust box, Director returns the height of the fully
-                    // wrapped text. Pass the member's authored width as max_width
-                    // so PFR bitmap fonts wrap the same way the renderer does.
                     let wrap_width = if text_data.width > 0 {
                         text_data.width
                     } else if let Some(ref info) = text_data.info {
                         if info.width > 0 { info.width as u16 } else { 0 }
                     } else { 0 };
-                    let (_, height) = if !is_pfr {
-                        let font_name = if !text_data.font.is_empty() { text_data.font.as_str() } else { "Arial" };
+                    let requested_font_for_measure = if !text_data.font.is_empty() {
+                        text_data.font.as_str()
+                    } else {
+                        "Arial"
+                    };
+                    let measure_with_canvas = !is_pfr;
+                    let member_style_bits: u8 = {
+                        let mut s = 0u8;
+                        for tag in &text_data.font_style {
+                            match tag.as_str() {
+                                "bold" => s |= 0x01,
+                                "italic" => s |= 0x02,
+                                "underline" => s |= 0x04,
+                                _ => {}
+                            }
+                        }
+                        s
+                    };
+                    let height = if measure_with_canvas {
                         let font_size = if text_data.font_size > 0 { text_data.font_size } else { 12 };
-                        FontMemberHandlers::measure_text_native(
-                            &text_data.text, font_name, font_size,
+                        let (_, h) = FontMemberHandlers::measure_text_native_styled(
+                            &text_data.text, requested_font_for_measure, font_size,
+                            Some(member_style_bits),
                             text_data.word_wrap,
                             if wrap_width > 0 { wrap_width as i32 } else { 0 },
                             text_data.top_spacing, text_data.bottom_spacing, text_data.fixed_line_space,
-                        )
-                    } else if text_data.word_wrap && wrap_width > 0 {
-                        measure_text_wrapped(
-                            &text_data.text, &font, wrap_width, true,
-                            text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
-                            text_data.char_spacing,
-                        )
+                        );
+                        h
                     } else {
-                        measure_text(
-                            &text_data.text, &font, None,
-                            text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
-                        )
+                        // PFR path: mirror the `.rect` getter — `measure_text`
+                        // returns the full PFR cell height (char_height-1),
+                        // which over-reports by ~2x for fonts with generous
+                        // cell padding (Verdana 10pt char_height=26). Director's
+                        // `.height` is a glyph-extent height ≈ font_size × 1.4,
+                        // so CS chat's `nameHeight = member(...).height` centring
+                        // math and similar layouts match Shockwave.
+                        let nominal = if text_data.font_size > 0 {
+                            text_data.font_size
+                        } else if font.font_size > 0 {
+                            font.font_size
+                        } else {
+                            font.char_height
+                        };
+                        // Count lines (respecting word-wrap if enabled).
+                        let line_count = if text_data.word_wrap && wrap_width > 0 {
+                            let (_, wrapped_h) = measure_text_wrapped(
+                                &text_data.text, &font, wrap_width, true,
+                                text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
+                                text_data.char_spacing,
+                            );
+                            let raw_line_h = font.char_height.saturating_sub(1).max(1) as u16;
+                            (wrapped_h / raw_line_h.max(1)).max(1) as usize
+                        } else {
+                            text_data.text.chars().filter(|c| *c == '\r' || *c == '\n').count() + 1
+                        };
+                        let line_h = (nominal as f32 * 1.4).round() as u16;
+                        // See `.rect` getter for rationale on folding
+                        // top_spacing + bottom_spacing into line_step.
+                        let line_step = (if text_data.fixed_line_space > 0 {
+                            text_data.fixed_line_space
+                        } else {
+                            line_h
+                        }) as i32
+                            + text_data.top_spacing as i32
+                            + text_data.bottom_spacing as i32;
+                        (text_data.top_spacing as i32
+                            + line_h as i32
+                            + (line_count as i32 - 1) * line_step)
+                            .max(0) as u16
                     };
                     Ok(Datum::Int(height as i32))
                 }
@@ -650,15 +769,37 @@ impl TextMemberHandlers {
                     None
                 };
 
-                // Measure text dimensions
-                let (mut width, mut height) = if !is_pfr_font {
-                    // Use Canvas2D measurement for non-PFR fonts
-                    let font_name = preferred_font_name.as_deref().unwrap_or("Arial");
+                // Decide the measurement path. When the member will render via
+                // Canvas2D (non-PFR, or standard-font with prefer_native), measure
+                // with Canvas2D so `.rect` / `.height` / `.image` dimensions match
+                // the actual rendered bitmap — PFR wrap points disagree with
+                // Canvas2D's wider browser-font metrics and would size the bitmap
+                // for the wrong line count.
+                let requested_font_for_measure = preferred_font_name.as_deref()
+                    .filter(|n| !n.is_empty())
+                    .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None })
+                    .unwrap_or("Arial");
+                let measure_with_canvas = !is_pfr_font;
+                let member_style_bits: u8 = {
+                    let mut s = 0u8;
+                    for tag in &text_data.font_style {
+                        match tag.as_str() {
+                            "bold" => s |= 0x01,
+                            "italic" => s |= 0x02,
+                            "underline" => s |= 0x04,
+                            _ => {}
+                        }
+                    }
+                    s
+                };
+
+                let (mut width, mut height) = if measure_with_canvas {
                     let font_size = preferred_font_size.unwrap_or(12);
-                    FontMemberHandlers::measure_text_native(
+                    FontMemberHandlers::measure_text_native_styled(
                         &text_data.text,
-                        font_name,
+                        requested_font_for_measure,
                         font_size,
+                        Some(member_style_bits),
                         text_data.word_wrap,
                         if text_data.width > 0 { text_data.width as i32 } else { 0 },
                         text_data.top_spacing,
@@ -694,6 +835,42 @@ impl TextMemberHandlers {
                 if let Some(w) = explicit_box_width {
                     // For text members with an authored box width, keep wrapping constrained to that box.
                     box_width = w.max(1);
+                }
+                // PFR bitmap-font path: raw `measure_text*` reports the full PFR
+                // cell height (char_height-1) which over-reports vs Director's
+                // glyph-extent height (~font_size × 1.4). Recompute to match
+                // the `.height` getter so CS chat's
+                // `nameImage.copyPixels(nameTempImage, nameImage.rect, nameImage.rect)`
+                // uses consistent bounds. Skipped when measuring with Canvas2D
+                // (above branch) because that already returns the right height.
+                if is_pfr_font && !measure_with_canvas {
+                    let nominal = if text_data.font_size > 0 {
+                        text_data.font_size
+                    } else if font.font_size > 0 {
+                        font.font_size
+                    } else {
+                        font.char_height
+                    };
+                    let line_count = if text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0) {
+                        let raw_line_h = font.char_height.saturating_sub(1).max(1) as u16;
+                        (height / raw_line_h.max(1)).max(1) as usize
+                    } else {
+                        text_data.text.chars().filter(|c| *c == '\r' || *c == '\n').count() + 1
+                    };
+                    let line_h = (nominal as f32 * 1.4).round() as u16;
+                    // See `.rect` getter for rationale on folding
+                    // top_spacing + bottom_spacing into line_step.
+                    let line_step = (if text_data.fixed_line_space > 0 {
+                        text_data.fixed_line_space
+                    } else {
+                        line_h
+                    }) as i32
+                        + text_data.top_spacing as i32
+                        + text_data.bottom_spacing as i32;
+                    box_height = (text_data.top_spacing as i32
+                        + line_h as i32
+                        + (line_count as i32 - 1) * line_step)
+                        .max(1) as u16;
                 }
                 // For #adjust box type, always use measured height. For #fixed/#scroll, use stored height.
                 if text_data.box_type != "adjust" {
@@ -763,14 +940,52 @@ impl TextMemberHandlers {
                             bitmap.original_bit_depth,
                         )
                     };
-                    let mut style = HtmlStyle::default();
-                    style.font_face = Some(font_name_str.to_string());
-                    style.font_size = Some(font_size_val as i32);
-                    style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
-                    let spans = vec![StyledSpan {
-                        text: text_data.text.clone(),
-                        style,
-                    }];
+                    let default_color_u32 = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                    let default_bold = text_data.font_style.iter().any(|s| s == "bold");
+                    let default_italic = text_data.font_style.iter().any(|s| s == "italic");
+                    let default_underline = text_data.font_style.iter().any(|s| s == "underline");
+
+                    // Prefer the stored styled spans (set via chunk style setters
+                    // or XMED parsing) over a single synthetic span. Fill in any
+                    // Nones from the spans with member-level defaults so each span
+                    // has a concrete font / size / color for the renderer.
+                    let spans: Vec<StyledSpan> = if text_data.html_styled_spans.len() >= 2 {
+                        text_data.html_styled_spans.iter().map(|sp| {
+                            let mut s = sp.style.clone();
+                            if s.font_face.is_none() {
+                                s.font_face = Some(font_name_str.to_string());
+                            }
+                            if s.font_size.is_none() {
+                                s.font_size = Some(font_size_val as i32);
+                            }
+                            if s.color.is_none() {
+                                s.color = Some(default_color_u32);
+                            }
+                            // Member-level fontStyle defaults apply only when the
+                            // span has no overrides of its own. We can't perfectly
+                            // tell "no override" from "explicitly off" at this
+                            // layer, but the chunk-style setters set bold/italic/
+                            // underline explicitly whenever Lingo writes fontStyle,
+                            // so the OR-with-defaults here just carries the member-
+                            // wide `[#underline]` CS sets before per-chunk writes.
+                            s.bold = s.bold || default_bold;
+                            s.italic = s.italic || default_italic;
+                            s.underline = s.underline || default_underline;
+                            StyledSpan { text: sp.text.clone(), style: s }
+                        }).collect()
+                    } else {
+                        let mut style = HtmlStyle::default();
+                        style.font_face = Some(font_name_str.to_string());
+                        style.font_size = Some(font_size_val as i32);
+                        style.color = Some(default_color_u32);
+                        style.bold = default_bold;
+                        style.italic = default_italic;
+                        style.underline = default_underline;
+                        vec![StyledSpan {
+                            text: text_data.text.clone(),
+                            style,
+                        }]
+                    };
                     if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
                         &mut bitmap,
                         &spans,
@@ -791,50 +1006,6 @@ impl TextMemberHandlers {
                             &format!("[text.image] Native render error: {:?}", e).into()
                         );
                     }
-                } else if use_native && is_pfr_font {
-                    // Native Canvas2D for PFR fonts - use the PFR font name, but Canvas2D
-                    // won't have it registered, so it will fall back to a browser default.
-                    // Still useful for comparison/debugging purposes.
-                    let font_name_str = preferred_font_name.as_deref().unwrap_or(&font.font_name);
-                    let font_size_val = preferred_font_size.unwrap_or(font.font_size.max(12));
-                    let (r, g, b) = {
-                        use crate::player::bitmap::bitmap::resolve_color_ref;
-                        let palettes = player.movie.cast_manager.palettes();
-                        resolve_color_ref(
-                            &palettes,
-                            &member.color,
-                            &bitmap.palette_ref,
-                            bitmap.original_bit_depth,
-                        )
-                    };
-                    let mut style = HtmlStyle::default();
-                    style.font_face = Some(font_name_str.to_string());
-                    style.font_size = Some(font_size_val as i32);
-                    style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
-                    let spans = vec![StyledSpan {
-                        text: text_data.text.clone(),
-                        style,
-                    }];
-                    if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
-                        &mut bitmap,
-                        &spans,
-                        0,
-                        text_data.top_spacing as i32,
-                        box_width as i32,
-                        box_height as i32,
-                        alignment,
-                        box_width as i32,
-                        text_data.word_wrap,
-                        None,
-                        text_data.fixed_line_space,
-                        text_data.top_spacing,
-                        text_data.bottom_spacing,
-                        &text_data.tab_stops,
-                    ) {
-                        web_sys::console::warn_1(
-                            &format!("[text.image] Native render error (PFR): {:?}", e).into()
-                        );
-                    }
                 } else {
                     // Bitmap glyph rendering using PFR rasterizer font
                     let font_bitmap = player
@@ -853,8 +1024,8 @@ impl TextMemberHandlers {
                         skew: 0.0,
                         sprite: None,
                         mask_offset: (0, 0),
-                    original_dst_rect: None,
-                    ink9_mask_bitmap: None,
+                        original_dst_rect: None,
+                        ink9_mask_bitmap: None,
                     };
 
                     use crate::player::bitmap::bitmap::resolve_color_ref;
@@ -866,9 +1037,9 @@ impl TextMemberHandlers {
                         &bitmap.palette_ref,
                         bitmap.original_bit_depth,
                     );
-                    let bold = text_data.font_style.iter().any(|s| s == "bold");
-                    let italic = text_data.font_style.iter().any(|s| s == "italic");
-                    let underline = text_data.font_style.iter().any(|s| s == "underline");
+                    let default_bold = text_data.font_style.iter().any(|s| s == "bold");
+                    let default_italic = text_data.font_style.iter().any(|s| s == "italic");
+                    let default_underline = text_data.font_style.iter().any(|s| s == "underline");
                     let is_pfr_font = font.char_widths.is_some();
 
                     let max_width = box_width as i32;
@@ -880,59 +1051,239 @@ impl TextMemberHandlers {
                         .map(|s| s.style.char_spacing)
                         .unwrap_or(0);
 
-                    let mut flush_line = |line: &str, y_pos: i32, bitmap: &mut Bitmap| {
-                        let line_width: i32 = line
-                            .chars()
-                            .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
-                            .sum();
-                        let start_x = match alignment {
-                            TextAlignment::Center => ((max_width - line_width) / 2).max(0),
-                            TextAlignment::Right => (max_width - line_width).max(0),
-                            _ => 0,
+                    // Build a per-character style map. Indexed by character
+                    // position in `text_data.text`, each entry gives the style
+                    // overrides for that character. Coke Studios applies
+                    // per-line / per-item colour + bold/underline via chunk
+                    // setters, and relies on this bitmap render path honouring
+                    // them. When no styled spans are present every char gets
+                    // the member-level defaults.
+                    #[derive(Clone, Copy)]
+                    struct PerCharStyle {
+                        bold: bool,
+                        italic: bool,
+                        underline: bool,
+                        color: (u8, u8, u8),
+                    }
+                    let default_per_char = PerCharStyle {
+                        bold: default_bold,
+                        italic: default_italic,
+                        underline: default_underline,
+                        color: text_color,
+                    };
+                    let mut per_char: Vec<PerCharStyle> = Vec::new();
+                    if text_data.html_styled_spans.len() >= 2 {
+                        // Build per-char with the SAME normalisation the renderer
+                        // applies (CRLF → LF, lone CR → LF). The renderer iterates
+                        // normalised lines and indexes per_char by
+                        // `line_char_offset + ch_idx`, where line_char_offset
+                        // assumes single-char line breaks. If we kept the raw
+                        // `\r\n` here, per_char would be one entry longer per
+                        // CRLF and styles would shift backwards on every CRLF
+                        // — Coke Studios' roomlist (Windows-saved with `\r\n`)
+                        // bleeds audition row's bold/blue down by N lines.
+                        let mut prev_was_cr = false;
+                        for span in &text_data.html_styled_spans {
+                            let col = if let Some(c) = span.style.color {
+                                (((c >> 16) & 0xFF) as u8,
+                                 ((c >> 8) & 0xFF) as u8,
+                                 (c & 0xFF) as u8)
+                            } else {
+                                text_color
+                            };
+                            // Spans set via chunk-style setters are authoritative
+                            // for that range: don't OR with member defaults, or
+                            // `[#plain]` wouldn't be able to strip underline from
+                            // a member that has underline as its default style.
+                            let style_entry = PerCharStyle {
+                                bold: span.style.bold,
+                                italic: span.style.italic,
+                                underline: span.style.underline,
+                                color: col,
+                            };
+                            for c in span.text.chars() {
+                                if prev_was_cr && c == '\n' {
+                                    // Drop \n that follows \r — the \r already
+                                    // contributed an entry that the renderer
+                                    // treats as the single break.
+                                    prev_was_cr = false;
+                                    continue;
+                                }
+                                prev_was_cr = c == '\r';
+                                per_char.push(style_entry);
+                            }
+                        }
+                    }
+
+                    // Capture tab stops for the closure (line_char_offset usage below
+                    // also needs them, but the closure can't borrow text_data through
+                    // reserve_player_mut). Clone to a small Vec.
+                    let line_tab_stops: Vec<(String, i32)> = text_data
+                        .tab_stops
+                        .iter()
+                        .map(|t| (t.tab_type.clone(), t.position as i32))
+                        .collect();
+
+                    let mut flush_line = |line: &str, line_char_offset: usize, y_pos: i32, bitmap: &mut Bitmap| {
+                        // Helper: width of a substring (character advances).
+                        let segment_width = |s: &str| -> i32 {
+                            s.chars()
+                                .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
+                                .sum::<i32>()
                         };
-                        let mut x = start_x;
-                        for ch in line.chars() {
+
+                        // Split the line into tab-delimited segments. Each segment
+                        // starts at a tab-stop position (or 0 for the first one).
+                        // Director tab-stop semantics applied here:
+                        //   - #left:    next segment renders starting at the stop
+                        //   - #right:   next segment renders ending at the stop
+                        //   - #center:  next segment centred on the stop
+                        //   - #decimal: treated as #right for now (CS doesn't use it)
+                        // Without tab stops we fall back to advance-as-glyph (TAB
+                        // glyphs in PFR atlases are usually zero-width).
+                        let segments: Vec<&str> = line.split('\t').collect();
+                        let mut segment_starts: Vec<i32> = Vec::with_capacity(segments.len());
+
+                        // Compute the line's logical width for alignment when there
+                        // are no tabs OR when tabs leave the line left-anchored.
+                        let logical_line_width: i32 = if segments.len() == 1 {
+                            segment_width(line)
+                        } else {
+                            let mut acc = 0i32;
+                            for (i, seg) in segments.iter().enumerate() {
+                                let seg_w = segment_width(seg);
+                                if i == 0 {
+                                    acc = seg_w;
+                                } else if let Some((tab_type, tab_pos)) = line_tab_stops.get(i - 1) {
+                                    acc = match tab_type.as_str() {
+                                        "right" => *tab_pos,
+                                        "center" => (*tab_pos + seg_w / 2).max(acc),
+                                        _ => (*tab_pos + seg_w).max(acc + seg_w),
+                                    };
+                                } else {
+                                    acc += seg_w;
+                                }
+                            }
+                            acc
+                        };
+
+                        // Apply line-level alignment offset (only meaningful when no
+                        // right-type tabs anchor the right edge — tabs already
+                        // place segments at fixed positions).
+                        let has_right_tab = line_tab_stops
+                            .iter()
+                            .any(|(t, _)| t == "right");
+                        let line_offset = if has_right_tab {
+                            0
+                        } else {
+                            match alignment {
+                                TextAlignment::Center => ((max_width - logical_line_width) / 2).max(0),
+                                TextAlignment::Right => (max_width - logical_line_width).max(0),
+                                _ => 0,
+                            }
+                        };
+
+                        // First segment always starts at line_offset (no preceding tab).
+                        segment_starts.push(line_offset);
+                        let mut cursor_x = line_offset + segment_width(segments[0]);
+                        for i in 1..segments.len() {
+                            let seg_w = segment_width(segments[i]);
+                            let stop_x = match line_tab_stops.get(i - 1) {
+                                Some((tab_type, tab_pos)) => match tab_type.as_str() {
+                                    "right" => (*tab_pos - seg_w).max(cursor_x),
+                                    "center" => (*tab_pos - seg_w / 2).max(cursor_x),
+                                    _ => (*tab_pos).max(cursor_x), // #left / #decimal
+                                },
+                                None => cursor_x, // no more tab stops — render inline
+                            };
+                            segment_starts.push(stop_x);
+                            cursor_x = stop_x + seg_w;
+                        }
+
+                        // Walk the line again to draw, skipping `\t` chars and using
+                        // the precomputed segment starts.
+                        let mut current_segment = 0usize;
+                        let mut x = segment_starts[0];
+                        for (ch_idx, ch) in line.chars().enumerate() {
+                            if ch == '\t' {
+                                current_segment += 1;
+                                if let Some(&sx) = segment_starts.get(current_segment) {
+                                    x = sx;
+                                }
+                                continue;
+                            }
                             let adv = font.get_char_advance(ch as u8) as i32;
+                            let per = per_char
+                                .get(line_char_offset + ch_idx)
+                                .copied()
+                                .unwrap_or(default_per_char);
                             // Use tight copy for PFR fonts when cell width is much larger
                             // than character advance, to prevent transparent cell areas from
                             // overlapping and erasing adjacent characters.
                             let use_tight = is_pfr_font && (font.char_width as i32) > (adv * 2).max(16);
+                            let ch_params = CopyPixelsParams {
+                                blend: params.blend,
+                                ink: params.ink,
+                                color: crate::player::sprite::ColorRef::Rgb(per.color.0, per.color.1, per.color.2),
+                                bg_color: params.bg_color.clone(),
+                                mask_image: None,
+                                is_text_rendering: params.is_text_rendering,
+                                rotation: params.rotation,
+                                skew: params.skew,
+                                sprite: None,
+                                mask_offset: params.mask_offset,
+                                original_dst_rect: params.original_dst_rect.clone(),
+                                ink9_mask_bitmap: None,
+                            };
                             if use_tight {
                                 bitmap_font_copy_char_tight(
                                     &font, font_bitmap, ch as u8, bitmap,
-                                    x, y_pos, &palettes, &params,
+                                    x, y_pos, &palettes, &ch_params,
                                 );
                             } else {
                                 bitmap_font_copy_char(
                                     &font, font_bitmap, ch as u8, bitmap,
-                                    x, y_pos, &palettes, &params,
+                                    x, y_pos, &palettes, &ch_params,
                                 );
                             }
-                            if bold {
+                            if per.bold {
                                 if use_tight {
                                     bitmap_font_copy_char_tight(
                                         &font, font_bitmap, ch as u8, bitmap,
-                                        x + 1, y_pos, &palettes, &params,
+                                        x + 1, y_pos, &palettes, &ch_params,
                                     );
                                 } else {
                                     bitmap_font_copy_char(
                                         &font, font_bitmap, ch as u8, bitmap,
-                                        x + 1, y_pos, &palettes, &params,
+                                        x + 1, y_pos, &palettes, &ch_params,
                                     );
+                                }
+                            }
+                            if per.underline {
+                                // Per-character underline so per-span underline
+                                // is honoured (CS uses underline on some items
+                                // only). Draw one pixel row under this glyph.
+                                let underline_y = y_pos + line_height - 1;
+                                let run_end = (x + adv + char_spacing).max(x);
+                                for ux in x..run_end {
+                                    bitmap.set_pixel(ux, underline_y, per.color, &palettes);
                                 }
                             }
                             x += adv + char_spacing;
                         }
-
-                        if underline {
-                            let underline_y = y_pos + line_height - 1;
-                            for ux in start_x..(start_x + line_width).max(start_x) {
-                                bitmap.set_pixel(ux, underline_y, text_color, &palettes);
-                            }
-                        }
                     };
 
-                    let raw_lines: Vec<&str> = text_data.text.split(|c| c == '\r' || c == '\n').collect();
+                    // Normalise CRLF / lone CR to \n first so a `\r\n` pair counts
+                    // as ONE line break — splitting on either char individually
+                    // would double the line count for Lingo strings produced via
+                    // `& RETURN` on platforms where RETURN is `\r\n`. Coke
+                    // Studios' roomlist hits exactly this: every row of
+                    // "London I\tGo!\r\n..." was rendering with an empty line
+                    // between, doubling the visual line spacing.
+                    let normalised_text: String = text_data.text
+                        .replace("\r\n", "\n")
+                        .replace('\r', "\n");
+                    let raw_lines: Vec<&str> = normalised_text.split('\n').collect();
                     let mut lines_to_draw: Vec<String> = Vec::new();
 
                     if text_data.word_wrap && max_width > 0 {
@@ -941,8 +1292,22 @@ impl TextMemberHandlers {
                                 lines_to_draw.push(String::new());
                                 continue;
                             }
+                            // Wrap on space-separated words but preserve TAB
+                            // characters. Splitting via split_whitespace() and
+                            // re-joining with " " would silently strip tabs and
+                            // break tab-stop layouts (CS roomlist relies on a
+                            // right-tab to anchor "Go!" at the row's right
+                            // edge — tab-stripped lines collapsed everything
+                            // back to the left).
                             let mut current = String::new();
-                            for word in raw.split_whitespace() {
+                            for word in raw.split(' ') {
+                                if word.is_empty() {
+                                    // Multiple spaces in a row — preserve them
+                                    if !current.is_empty() {
+                                        current.push(' ');
+                                    }
+                                    continue;
+                                }
                                 let candidate = if current.is_empty() {
                                     word.to_string()
                                 } else {
@@ -975,9 +1340,17 @@ impl TextMemberHandlers {
                     let line_step = effective_line_height
                         + text_data.bottom_spacing as i32
                         + text_data.top_spacing as i32;
+                    // Track the character offset into `text_data.text` so
+                    // per-span styling aligns with the chars being drawn.
+                    // Word-wrap rebuilds lines from whitespace-split tokens so
+                    // the offset tracking is approximate there; for the
+                    // non-wrap case (which is what CS uses for the roomlist)
+                    // it's exact.
+                    let mut char_offset = 0usize;
                     for line in lines_to_draw {
-                        flush_line(&line, y, &mut bitmap);
+                        flush_line(&line, char_offset, y, &mut bitmap);
                         y += line_step;
+                        char_offset += line.chars().count() + 1; // +1 for the line break
                     }
 
                 } // end bitmap glyph else branch
@@ -1092,18 +1465,16 @@ impl TextMemberHandlers {
                     // Update the plain text
                     text_member.text = new_text.clone();
 
-                    // Update html_styled_spans to contain a single span with the new text
-                    // This ensures the styled_spans_hash changes when text changes
-                    if !text_member.html_styled_spans.is_empty() {
-                        // Create a new span with existing style from first span
-                        let style = text_member.html_styled_spans[0].style.clone();
-                        text_member.html_styled_spans = vec![
-                            crate::player::handlers::datum_handlers::cast_member::font::StyledSpan {
-                                text: new_text,
-                                style,
-                            }
-                        ];
-                    }
+                    // Clear html_styled_spans on .text assignment. Inheriting the
+                    // first existing span's style carried colour/bold from prior
+                    // chunk-style writes into the fresh text, so Coke Studios'
+                    // `listmember.text = listmember.text & roomname & ...` loop
+                    // ended up with every roomlist line tinted the audition blue
+                    // (or bold) from the last render. Clearing lets the next
+                    // render synthesise a clean default span, and any chunk-style
+                    // setter will seed from member-level defaults — matching
+                    // Director's behaviour where rewriting `.text` resets styling.
+                    text_member.html_styled_spans.clear();
 
                     Ok(())
                 },
