@@ -447,12 +447,9 @@ impl TypeHandlers {
                 match eval_lingo_expr_runtime(cleaned.clone()).await {
                     Ok(datum_ref) => {
                         if is_list_or_proplist_input {
-                            web_sys::console::log_1(
-                                &format!(
-                                    "[value() OK] input={:?}",
-                                    s.chars().take(140).collect::<String>()
-                                )
-                                .into(),
+                            debug!(
+                                "[value() OK] input={:?}",
+                                s.chars().take(140).collect::<String>()
                             );
                         }
                         Ok(datum_ref)
