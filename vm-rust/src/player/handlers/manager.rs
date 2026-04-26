@@ -1162,15 +1162,15 @@ impl BuiltInHandlerManager {
                         .find_member_by_ref(&member_ref)
                         .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
 
-                    let (text, fixed_line_space, top_spacing, char_spacing, member_width) = match &member.member_type {
+                    let (text, fixed_line_space, top_spacing, char_spacing, member_width, font_name, font_size, alignment, tab_stops) = match &member.member_type {
                         crate::player::cast_member::CastMemberType::Text(t) => {
-                            (t.text.clone(), t.fixed_line_space, t.top_spacing, t.char_spacing as i16, t.width as i16)
+                            (t.text.clone(), t.fixed_line_space, t.top_spacing, t.char_spacing as i16, t.width as i16, t.font.clone(), t.font_size, t.alignment.clone(), t.tab_stops.clone())
                         }
                         crate::player::cast_member::CastMemberType::Field(f) => {
-                            (f.text.clone(), f.fixed_line_space, f.top_spacing, 0, f.width as i16)
+                            (f.text.clone(), f.fixed_line_space, f.top_spacing, 0, f.width as i16, f.font.clone(), f.font_size, f.alignment.clone(), Vec::new())
                         }
                         crate::player::cast_member::CastMemberType::Button(b) => {
-                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing, 0, b.field.width as i16)
+                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing, 0, b.field.width as i16, b.field.font.clone(), b.field.font_size, b.field.alignment.clone(), Vec::new())
                         }
                         _ => {
                             return Err(ScriptError::new(
@@ -1179,21 +1179,213 @@ impl BuiltInHandlerManager {
                         }
                     };
 
-                    let font = player.font_manager.get_system_font().unwrap();
-                    let params = crate::player::font::DrawTextParams {
-                        font: &font,
-                        line_height: None,
-                        line_spacing: fixed_line_space,
-                        top_spacing,
-                        char_spacing,
-                        member_width: if member_width > 0 { Some(member_width) } else { None },
+                    let align_lower = alignment.to_lowercase();
+                    let align_kind: u8 = if align_lower == "center" || align_lower == "#center" {
+                        1
+                    } else if align_lower == "right" || align_lower == "#right" {
+                        2
+                    } else {
+                        0
                     };
 
-                    // char_pos is 1-based; convert to 0-based index
-                    let index = if char_pos > 0 { (char_pos - 1) as usize } else { 0 };
-                    let (x, y) = crate::player::font::get_text_char_pos(&text, &params, index);
+                    // Resolve the member's actual font the same way text.rs .image does.
+                    // If it's a PFR/bitmap font we can measure locally via get_text_char_pos;
+                    // otherwise we delegate to Canvas2D measure_text_native so the width
+                    // matches what was rasterised into the member's .image.
+                    let font_size_opt = if font_size > 0 { Some(font_size) } else { None };
+                    let loaded_font = if !font_name.is_empty() {
+                        player.font_manager.get_font_with_cast_and_bitmap(
+                            &font_name,
+                            &player.movie.cast_manager,
+                            &mut player.bitmap_manager,
+                            font_size_opt,
+                            None,
+                        )
+                    } else {
+                        None
+                    };
+                    let is_pfr = loaded_font.as_ref().map_or(false, |f| f.char_widths.is_some());
 
-                    Ok(player.alloc_datum(Datum::Point([x as f64, y as f64], 0)))
+                    // char_pos is 1-based; convert to 0-based index. Also cap to text length.
+                    let index = if char_pos > 0 { (char_pos - 1) as usize } else { 0 };
+
+                    if !is_pfr && !font_name.is_empty() {
+                        // Native Canvas2D path: measure the substring up to `index` using the
+                        // member's font so the returned x matches the rasterised image width.
+                        // Handle multi-line text by tracking which line `index` falls on.
+                        let display_font_name = if font_name.is_empty() { "Arial".to_string() } else { font_name.clone() };
+                        let display_font_size = if font_size > 0 { font_size } else { 12 };
+
+                        let mut consumed = 0usize;
+                        let mut line_idx = 0usize;
+                        let mut line_start: Option<&str> = None;
+                        let mut prefix_chars = 0usize;
+                        let chars_vec: Vec<char> = text.chars().collect();
+                        let target = index.min(chars_vec.len());
+
+                        // Split on \r / \n; treat \r\n as single break.
+                        let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
+                        for (li, line) in normalised.split('\n').enumerate() {
+                            let line_len = line.chars().count();
+                            if target <= consumed + line_len {
+                                line_idx = li;
+                                line_start = Some(line);
+                                prefix_chars = target - consumed;
+                                break;
+                            }
+                            consumed += line_len + 1; // +1 for the line break
+                        }
+                        let (line_ref, prefix_len) = match line_start {
+                            Some(l) => (l, prefix_chars),
+                            None => {
+                                // target was beyond end-of-text: use last line, full length.
+                                let lines: Vec<&str> = normalised.split('\n').collect();
+                                let last = lines.last().copied().unwrap_or("");
+                                line_idx = lines.len().saturating_sub(1);
+                                (last, last.chars().count())
+                            }
+                        };
+                        let prefix: String = line_ref.chars().take(prefix_len).collect();
+
+                        // Measure prefix width AND full line width via Canvas2D.
+                        // Full-line width is needed to apply alignment offset (center/right)
+                        // so the returned x matches the rasterised image's pixel position.
+                        let (prefix_w, line_w) = {
+                            use wasm_bindgen::JsCast;
+                            let font_str_for_log = format!("{}px {}", display_font_size, display_font_name);
+                            web_sys::window()
+                                .and_then(|w| w.document())
+                                .and_then(|d| d.create_element("canvas").ok())
+                                .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+                                .and_then(|c| c.get_context("2d").ok().flatten())
+                                .and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok())
+                                .map(|ctx| {
+                                    ctx.set_font(&font_str_for_log);
+                                    let p = ctx.measure_text(&prefix).ok().map(|m| m.width()).unwrap_or(0.0);
+                                    let l = ctx.measure_text(line_ref).ok().map(|m| m.width()).unwrap_or(0.0);
+                                    (p, l)
+                                })
+                                .unwrap_or((0.0, 0.0))
+                        };
+                        let start_x = match align_kind {
+                            1 if member_width > 0 => ((member_width as f64 - line_w) / 2.0).max(0.0),
+                            2 if member_width > 0 => (member_width as f64 - line_w).max(0.0),
+                            _ => 0.0,
+                        };
+                        let width = (start_x + prefix_w).round() as i32;
+
+                        let line_step = if fixed_line_space > 0 {
+                            fixed_line_space as i32
+                        } else {
+                            display_font_size as i32
+                        };
+                        let y = top_spacing as i32 + line_idx as i32 * line_step;
+
+                        Ok(player.alloc_datum(Datum::Point([width as f64, y as f64], 0)))
+                    } else {
+                        let font = loaded_font
+                            .or_else(|| player.font_manager.get_system_font())
+                            .ok_or_else(|| ScriptError::new("No font available".to_string()))?;
+                        let params = crate::player::font::DrawTextParams {
+                            font: &font,
+                            line_height: None,
+                            line_spacing: fixed_line_space,
+                            top_spacing,
+                            char_spacing,
+                            member_width: if member_width > 0 { Some(member_width) } else { None },
+                        };
+                        // Tab-aware char position. Coke Studios' userlist computes
+                        // the dotted-separator bounds via two charPosToLoc calls,
+                        // one landing on a char inside "Go!" (past the tab) and
+                        // one on the line's last char. We need the tab to advance
+                        // to its tab-stop for those positions to bracket the
+                        // empty space between the roomname column and the "Go!"
+                        // column — which is where the dotted line should span.
+                        // When the requested char index is BEFORE any tab on its
+                        // line we stay at the pre-tab x so Lingo that asks for
+                        // positions inside the name column (e.g. underline draws)
+                        // still returns the usual advance-based x.
+                        let (x_from_zero, y) = if text.contains('\t') && !tab_stops.is_empty() {
+                            let eff_lh = if font.font_size > 0 { font.font_size } else { font.char_height };
+                            let line_step = fixed_line_space.max(eff_lh) as i16 + 1;
+                            let mut x: i16 = 0;
+                            let mut y: i16 = top_spacing;
+                            let mut current_line_tab_count: usize = 0;
+                            let mut char_i: usize = 0;
+                            let mut prev_was_cr = false;
+                            let mut result: Option<(i16, i16)> = None;
+                            for c in text.chars() {
+                                if char_i == index {
+                                    result = Some((x, y));
+                                    break;
+                                }
+                                if c == '\n' && prev_was_cr {
+                                    prev_was_cr = false;
+                                    char_i += 1;
+                                    continue;
+                                }
+                                if c == '\r' || c == '\n' {
+                                    prev_was_cr = c == '\r';
+                                    x = 0;
+                                    y = y.saturating_add(line_step);
+                                    current_line_tab_count = 0;
+                                } else if c == '\t' {
+                                    prev_was_cr = false;
+                                    if current_line_tab_count < tab_stops.len() {
+                                        let stop = tab_stops[current_line_tab_count].position as i16;
+                                        if stop > x { x = stop; }
+                                    }
+                                    current_line_tab_count += 1;
+                                } else {
+                                    prev_was_cr = false;
+                                    let adv = font.get_char_advance(c as u8) as i16
+                                        + 1 + char_spacing;
+                                    x = x.saturating_add(adv);
+                                }
+                                char_i += 1;
+                            }
+                            result.unwrap_or((x, y))
+                        } else {
+                            crate::player::font::get_text_char_pos(&text, &params, index)
+                        };
+
+                        // Apply alignment offset so the returned x matches the pixel position
+                        // in the rasterised image (the bitmap render centres/right-aligns the
+                        // line inside member_width; see text.rs flush_line at lines 888-892).
+                        let start_x = if align_kind != 0 && member_width > 0 {
+                            // Compute the width of the line that `index` falls on, using the
+                            // same advance-per-char sum as flush_line.
+                            let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
+                            let mut consumed = 0usize;
+                            let target = index.min(text.chars().count());
+                            let mut hit_line: Option<String> = None;
+                            for line in normalised.split('\n') {
+                                let line_len = line.chars().count();
+                                if target <= consumed + line_len {
+                                    hit_line = Some(line.to_string());
+                                    break;
+                                }
+                                consumed += line_len + 1;
+                            }
+                            let line = hit_line.unwrap_or_else(|| {
+                                normalised.split('\n').last().unwrap_or("").to_string()
+                            });
+                            let line_width: i32 = line
+                                .chars()
+                                .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing as i32)
+                                .sum();
+                            match align_kind {
+                                1 => ((member_width as i32 - line_width) / 2).max(0),
+                                2 => (member_width as i32 - line_width).max(0),
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+
+                        let x = x_from_zero as i32 + start_x;
+                        Ok(player.alloc_datum(Datum::Point([x as f64, y as f64], 0)))
+                    }
                 })
             }
             _ => {

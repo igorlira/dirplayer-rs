@@ -143,46 +143,14 @@ impl CastMemberRefHandlers {
             "duplicate" => Self::duplicate(datum, args),
             "erase" => Self::erase(datum, args),
             "charPosToLoc" => {
-                reserve_player_mut(|player| {
-                    let cast_member_ref = match player.get_datum(datum) {
-                        Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
-                        _ => {
-                            return Err(ScriptError::new(
-                                "Cannot call charPosToLoc on non-cast-member".to_string(),
-                            ))
-                        }
-                    };
-                    let cast_member = player
-                        .movie
-                        .cast_manager
-                        .find_member_by_ref(&cast_member_ref)
-                        .expect("cast member ref should be valid in charPosToLoc");
-                    let char_pos = player.get_datum(&args[0]).int_value()? as u16;
-                    let char_width: i32 = 7;
-
-                    let (text, line_height) = if let Some(text_data) = cast_member.member_type.as_text() {
-                        (text_data.text.clone(), get_text_member_line_height(&text_data) as i32)
-                    } else if let Some(field_data) = cast_member.member_type.as_field() {
-                        let lh = if field_data.fixed_line_space > 0 {
-                            field_data.fixed_line_space as i32
-                        } else {
-                            field_data.font_size as i32 + 4
-                        };
-                        (field_data.text.clone(), lh)
-                    } else {
-                        return Err(ScriptError::new(format!("charPosToLoc: member is not a text or field member")));
-                    };
-
-                    let (x, y) = if text.is_empty() || char_pos <= 0 {
-                        (0, 0)
-                    } else if char_pos > text.len() as u16 {
-                        (char_width * text.len() as i32, line_height)
-                    } else {
-                        (char_width * (char_pos - 1) as i32, line_height)
-                    };
-
-                    Ok(player.alloc_datum(Datum::Point([x as f64, y as f64], 0)))
-                })
+                let member_arg = datum.clone();
+                let mut delegated_args: Vec<DatumRef> = Vec::with_capacity(args.len() + 1);
+                delegated_args.push(member_arg);
+                delegated_args.extend(args.iter().cloned());
+                crate::player::handlers::manager::BuiltInHandlerManager::call_handler(
+                    "charpostoloc",
+                    &delegated_args,
+                )
             }
             "getProp" => {
                 let result_ref = reserve_player_mut(|player| {
