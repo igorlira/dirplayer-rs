@@ -416,6 +416,8 @@ pub fn render_preview_bitmap(
                 skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
+                bg_color_explicit: false,
+                fore_color_explicit: false,
                 ink9_mask_bitmap: None,
             };
 
@@ -440,8 +442,10 @@ pub fn render_preview_bitmap(
                             skew: 0.0,
                             sprite: None,
                             mask_offset: (0, 0),
-                    original_dst_rect: None,
-                    ink9_mask_bitmap: None,
+                            original_dst_rect: None,
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
                         };
                         bitmap.draw_text(
                             &label,
@@ -1019,6 +1023,8 @@ fn render_filmloop_from_channel_data(
                     // it for scale_w/scale_h, which must stay positive. The
                     // `dst_rect` argument carries the flip via swapped corners.
                     original_dst_rect: Some(sprite_rect.clone()),
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
                     ink9_mask_bitmap: None,
                 };
 
@@ -1098,8 +1104,10 @@ fn render_filmloop_from_channel_data(
                         skew: 0.0,
                         sprite: None,
                         mask_offset: (0, 0),
-                    original_dst_rect: None,
-                    ink9_mask_bitmap: None,
+                        original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
                     bitmap.draw_text(
@@ -1172,8 +1180,10 @@ fn render_filmloop_from_channel_data(
                         skew: 0.0,
                         sprite: None,
                         mask_offset: (0, 0),
-                    original_dst_rect: None,
-                    ink9_mask_bitmap: None,
+                        original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
                     bitmap.draw_text(
@@ -1217,8 +1227,10 @@ fn render_filmloop_from_channel_data(
                             skew: 0.0,
                             sprite: None,
                             mask_offset: (0, 0),
-                    original_dst_rect: Some(dst_rect.clone()),
-                    ink9_mask_bitmap: None,
+                            original_dst_rect: Some(dst_rect.clone()),
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -1546,6 +1558,8 @@ pub fn render_score_to_bitmap_with_offset(
                     ink: sprite.ink as u32,
                     color: sprite.color.clone(),
                     bg_color: sprite.bg_color.clone(),
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
                     mask_image: None,
                     is_text_rendering: false,
                     rotation: sprite.rotation,
@@ -1678,8 +1692,10 @@ pub fn render_score_to_bitmap_with_offset(
                         skew: 0.0,
                         sprite: None,
                         mask_offset: (0, 0),
-                    original_dst_rect: None,
-                    ink9_mask_bitmap: None,
+                        original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
                     bitmap.draw_text_wrapped(
@@ -1849,8 +1865,10 @@ pub fn render_score_to_bitmap_with_offset(
                         skew: 0.0,
                         sprite: None,
                         mask_offset: (0, 0),
-                    original_dst_rect: None,
-                    ink9_mask_bitmap: None,
+                        original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
                     temp.draw_text_wrapped(
@@ -2013,6 +2031,8 @@ pub fn render_score_to_bitmap_with_offset(
                     sprite: None,
                     mask_offset: (0, 0),
                     original_dst_rect: None,
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
                     ink9_mask_bitmap: None,
                 };
 
@@ -2139,8 +2159,10 @@ pub fn render_score_to_bitmap_with_offset(
                         skew: 0.0,
                         sprite: None,
                         mask_offset: (0, 0),
-                    original_dst_rect: None,
-                    ink9_mask_bitmap: None,
+                        original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
                     // Use styled text rendering if html_styled_spans is populated
@@ -2358,6 +2380,8 @@ pub fn render_score_to_bitmap_with_offset(
                     sprite: None,
                     mask_offset: (0, 0),
                     original_dst_rect: Some(logical_rect),
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
                     ink9_mask_bitmap: None,
                 };
 
@@ -2416,8 +2440,10 @@ pub fn render_score_to_bitmap_with_offset(
                             skew: sprite.skew,
                             sprite: Some(sprite),
                             mask_offset: (0, 0),
-                    original_dst_rect: Some(dst_rect.clone()),
-                    ink9_mask_bitmap: None,
+                            original_dst_rect: Some(dst_rect.clone()),
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -2654,6 +2680,8 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
                 skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
+                bg_color_explicit: false,
+                fore_color_explicit: false,
                 ink9_mask_bitmap: None,
             },
         );
@@ -2792,6 +2820,8 @@ impl PlayerCanvasRenderer {
                 skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
+                bg_color_explicit: false,
+                fore_color_explicit: false,
                 ink9_mask_bitmap: None,
             };
 

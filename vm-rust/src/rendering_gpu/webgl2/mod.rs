@@ -715,6 +715,8 @@ impl WebGL2Renderer {
             skew: 0.0,
             sprite: None,
             original_dst_rect: None,
+            bg_color_explicit: false,
+            fore_color_explicit: false,
             ink9_mask_bitmap: None,
         };
 
@@ -2425,8 +2427,10 @@ impl WebGL2Renderer {
                             skew: 0.0,
                             sprite: None,
                             mask_offset: (0, 0),
-                    original_dst_rect: None,
-                    ink9_mask_bitmap: None,
+                            original_dst_rect: None,
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
                         };
                         btn_bitmap.draw_text_wrapped(
                             &text, font, font_bmp,
@@ -4153,6 +4157,8 @@ impl WebGL2Renderer {
             skew: 0.0,
             sprite: None,
             original_dst_rect: None,
+            bg_color_explicit: false,
+            fore_color_explicit: false,
             ink9_mask_bitmap: None,
         };
 
@@ -4727,8 +4733,10 @@ impl WebGL2Renderer {
                             skew: params.skew,
                             sprite: None,
                             mask_offset: (0, 0),
-                    original_dst_rect: params.original_dst_rect.clone(),
-                    ink9_mask_bitmap: None,
+                            original_dst_rect: params.original_dst_rect.clone(),
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
                         };
 
                         let char_h = run.style.size_px.max(1);

@@ -1025,6 +1025,8 @@ impl TextMemberHandlers {
                         sprite: None,
                         mask_offset: (0, 0),
                         original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
                         ink9_mask_bitmap: None,
                     };
 
@@ -1233,6 +1235,8 @@ impl TextMemberHandlers {
                                 sprite: None,
                                 mask_offset: params.mask_offset,
                                 original_dst_rect: params.original_dst_rect.clone(),
+                                bg_color_explicit: false,
+                                fore_color_explicit: false,
                                 ink9_mask_bitmap: None,
                             };
                             if use_tight {
