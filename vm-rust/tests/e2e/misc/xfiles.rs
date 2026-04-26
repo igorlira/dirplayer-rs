@@ -19,6 +19,7 @@ browser_e2e_test!(test_04_xfiles_load, |player| async move {
 
     snapshots.verify("menu", player.snapshot_stage())?;
 
+    player.step_frames(75).await;
 
     player.click_sprite(sprite().member("scully")).await?;
 
@@ -32,7 +33,7 @@ browser_e2e_test!(test_04_xfiles_load, |player| async move {
 
     player.click_sprite(sprite().member("exit")).await?;
 
-    player.step_frames(20).await;
+    player.step_frames(50).await;
 
 
     player.click_sprite(sprite().member("mulder")).await?;
@@ -47,7 +48,7 @@ browser_e2e_test!(test_04_xfiles_load, |player| async move {
 
     player.click_sprite(sprite().member("exit")).await?;
 
-    player.step_frames(20).await;
+    player.step_frames(50).await;
 
 
     player.click_sprite(sprite().member("scully")).await?;
@@ -62,7 +63,7 @@ browser_e2e_test!(test_04_xfiles_load, |player| async move {
 
     player.click_sprite(sprite().member("exit")).await?;
 
-    player.step_frames(20).await;
+    player.step_frames(50).await;
 
 
     player.click_sprite(sprite().member("mulder")).await?;
