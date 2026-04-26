@@ -425,10 +425,52 @@ impl TypeHandlers {
             }
         });
         match eval_expr {
-            Some(s) => eval_lingo_expr_runtime(s.to_owned()).await.or_else(|err| {
-                warn!("value() eval error, returning Void: {}", &err.message);
-                Ok(DatumRef::Void)
-            }),
+            Some(s) => {
+                // Match the string-property `.value` cleanup — Coke Studios'
+                // ElementManager splits elements XML at every "]" and feeds
+                // partial fragments to value() until one parses (the Lingo
+                // relies on Void-on-failure to drive its retry loop). Without
+                // normalising comments and unbalanced brackets here, every
+                // partial attempt dumps a pest parse error to the console.
+                use crate::player::handlers::datum_handlers::string::{
+                    normalise_lingo_expr_for_value,
+                };
+                let cleaned = normalise_lingo_expr_for_value(&s);
+                // TEMP diagnostic: log EVERY value() call that looks like a
+                // Lingo prop-list/list so we can confirm whether the Coke
+                // Studios ElementManager retry (concatenating the two halves
+                // of a split-by-"]" element) produces a valid parse.
+                let is_list_or_proplist_input = {
+                    let t = s.trim_start();
+                    t.starts_with("[#") || t.starts_with("[")
+                };
+                match eval_lingo_expr_runtime(cleaned.clone()).await {
+                    Ok(datum_ref) => {
+                        if is_list_or_proplist_input {
+                            web_sys::console::log_1(
+                                &format!(
+                                    "[value() OK] input={:?}",
+                                    s.chars().take(140).collect::<String>()
+                                )
+                                .into(),
+                            );
+                        }
+                        Ok(datum_ref)
+                    }
+                    Err(err) => {
+                        if !is_expected_value_retry_fragment(&s, &cleaned) {
+                            web_sys::console::warn_1(
+                                &format!(
+                                    "[value()] parse error → Void — input={:?} cleaned={:?} err={}",
+                                    s, cleaned, &err.message
+                                )
+                                .into(),
+                            );
+                        }
+                        Ok(DatumRef::Void)
+                    }
+                }
+            }
             _ => Ok(args[0].clone()),
         }
     }
@@ -811,8 +853,8 @@ impl TypeHandlers {
             // TODO: Palette ref can be on args[3], need to handle it
             if args.len() < 3 {
                 return Err(ScriptError::new(
-          format!("image() expects at least 3 arguments: width, height, bitDepth, optional alphaDepth, got {}", args.len())
-        ));
+                    format!("image() expects at least 3 arguments: width, height, bitDepth, optional alphaDepth, got {}", args.len())
+                ));
             }
 
             let width_datum = player.get_datum(&args[0]);
@@ -1710,4 +1752,27 @@ impl TypeHandlers {
             Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })))
         })
     }
+}
+
+/// Returns true if the given input/cleaned strings look like a Lingo
+/// "fragment retry" — i.e. a partial piece produced by code that splits a
+/// prop list at `]` characters (e.g. Coke Studios' ElementManager.parsewindow
+/// feeding `sElement = sElements.item[i] & "]"` to value() and relying on
+/// Void on failure to drive a retry loop). These fragments legitimately
+/// fail to parse on the first attempt and we don't want to warn on them.
+pub fn is_expected_value_retry_fragment(input: &str, cleaned: &str) -> bool {
+    let t = input.trim();
+    // Trivially just a close bracket
+    if t == "]" {
+        return true;
+    }
+    // Tail fragment after a split — starts with a property-list separator
+    if t.starts_with(',') || t.starts_with(':') {
+        return true;
+    }
+    // Opened bracket with no close — normalisation stripped it to nothing
+    if cleaned.is_empty() && (t.starts_with('[') || t.starts_with('(')) {
+        return true;
+    }
+    false
 }

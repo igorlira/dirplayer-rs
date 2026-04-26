@@ -877,7 +877,7 @@ impl XmlDatumHandlers {
                 }
 
                 // Check if it's a node
-                if let Some(node) = player.xml_nodes.get(&xml_id) {
+                if let Some(_node) = player.xml_nodes.get(&xml_id) {
                     let children = XmlHelper::get_node_children(player, xml_id);
                     if let Some(first_child) = children.first() {
                         return Ok(first_child.clone());
