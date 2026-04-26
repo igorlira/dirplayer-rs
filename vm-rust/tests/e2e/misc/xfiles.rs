@@ -19,7 +19,7 @@ browser_e2e_test!(test_04_xfiles_load, |player| async move {
 
     snapshots.verify("menu", player.snapshot_stage())?;
 
-    player.step_frames(75).await;
+    player.step_frames(300).await;
 
     player.click_sprite(sprite().member("scully")).await?;
 
