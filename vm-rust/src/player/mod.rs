@@ -265,6 +265,8 @@ pub struct DirPlayer {
     /// Pending gotoNetMovie operation: (task_id, frame_destination).
     /// Overwritten by subsequent gotoNetMovie/go-to-movie calls (cancels previous).
     pub pending_goto_net_movie: Option<(u32, MovieFrameTarget)>,
+    pub pending_rewind: bool,
+    pub movie_initialized: bool,
     /// True while a net movie transition is in progress.
     /// Prevents the event loop from dispatching external events during the transition.
     pub is_in_transition: bool,
@@ -409,6 +411,8 @@ impl DirPlayer {
             eval_scope_index: None,
             delay_until: None,
             pending_goto_net_movie: None,
+            pending_rewind: false,
+            movie_initialized: false,
             is_in_transition: false,
             script_instance_list_cache: FxHashMap::default(),
             last_sprite_prop_ref: None,
@@ -489,13 +493,24 @@ impl DirPlayer {
         }
         self.is_playing = true;
         self.is_script_paused = false;
+        JsApi::dispatch_playback_state_changed(true);
+
+        let resume = self.movie_initialized;
 
         use crate::js_api::safe_string;
-        debug!("Loading Movie: {} (version: {})", safe_string(&self.movie.file_name), self.movie.dir_version);
+        debug!("Loading Movie: {} (version: {}) resume={}", safe_string(&self.movie.file_name), self.movie.dir_version, resume);
 
         async_std::task::spawn_local(async move {
-            run_movie_init_sequence().await;
+            if !resume {
+                run_movie_init_sequence().await;
+            }
             run_frame_loop().await;
+            // If a rewind was requested during init or after the frame loop exited,
+            // process it now that no other async task is competing.
+            let should_rewind = reserve_player_ref(|player| player.pending_rewind);
+            if should_rewind {
+                perform_rewind().await;
+            }
         });
     }
 
@@ -824,15 +839,10 @@ impl DirPlayer {
     }
 
     pub fn stop(&mut self) {
-        // TODO dispatch stop movie
         self.is_playing = false;
         self.next_frame = None;
-        //scopes.clear();
-        // currentBreakpoint?.completer.completeError(CancelledException());
-        // currentBreakpoint = null;
-        //self.timeout_manager.clear();
-        //notifyListeners();
-
+        self.sound_manager.stop_all();
+        JsApi::dispatch_playback_state_changed(false);
         warn!("Profiler report: {}", get_profiler_report());
     }
 
@@ -840,7 +850,7 @@ impl DirPlayer {
         self.stop();
 
         // Clear all references before resetting the allocator
-        // This ensures all DatumRef and ScriptInstanceRef objects are dropped properly
+        // to ensure DatumRef and ScriptInstanceRef objects are dropped properly
         debug!("Clearing scopes");
         self.scopes.clear();
         debug!("Clearing globals");
@@ -849,15 +859,23 @@ impl DirPlayer {
         self.timeout_manager.clear();
         debug!("Clearing debug datum refs");
         self.debug_datum_refs.clear();
-        // netManager.clear();
         debug!("Resetting score");
         self.movie.score.reset();
         self.script_instance_list_cache.clear();
         self.movie.current_frame = 1;
-        // TODO cancel breakpoints
+        self.movie.frame_script_instance = None;
+        self.movie.frame_script_member = None;
+        self.last_initialized_frame = None;
         self.current_breakpoint = None;
         self.scope_count = 0;
         self.pending_goto_net_movie = None;
+        self.pending_rewind = false;
+        self.movie_initialized = false;
+        self.virtual_scripts.clear();
+        self.sound_manager.stop_all();
+        // Note: bitmap_manager is intentionally not reset here. The font manager
+        // holds bitmap_refs (e.g. system font) that would become dangling.
+        // Movie bitmaps get replaced by load_movie_from_dir on reload.
 
         debug!("Resetting allocator");
         // Now it's safe to reset the allocator
@@ -2489,12 +2507,17 @@ async fn stop_movie_sequence() {
     player_wait_available().await;
 }
 
+fn should_cancel_init() -> bool {
+    reserve_player_ref(|player| player.pending_rewind || !player.is_playing)
+}
+
 /// Run the movie initialization sequence: prepareMovie, beginSprite, behavior init,
 /// stepFrame, prepareFrame, startMovie, enterFrame, exitFrame.
 /// Shared by `play()` and `transition_to_net_movie`.
 async fn run_movie_init_sequence() {
     // prepareMovie
     dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
+    if should_cancel_init() { return; }
 
     if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
         if err.code != ScriptErrorCode::Abort {
@@ -2504,10 +2527,12 @@ async fn run_movie_init_sequence() {
     }
 
     player_wait_available().await;
+    if should_cancel_init() { return; }
 
     // Dispatch streamStatus for any resources already loaded by the time prepareMovie
     // enables the handler (movie file, external casts, etc.)
     stream_status::dispatch_pending_stream_status().await;
+    if should_cancel_init() { return; }
 
     // Initialize sprites
     reserve_player_mut(|player| {
@@ -2517,6 +2542,7 @@ async fn run_movie_init_sequence() {
     });
 
     player_wait_available().await;
+    if should_cancel_init() { return; }
 
     // Collect behaviors that need initialization
     let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
@@ -2548,6 +2574,7 @@ async fn run_movie_init_sequence() {
     }
 
     player_wait_available().await;
+    if should_cancel_init() { return; }
 
     reserve_player_mut(|player| {
         player.is_in_frame_update = true;
@@ -2557,8 +2584,10 @@ async fn run_movie_init_sequence() {
         &"beginSprite".to_string(),
         &vec![]
     ).await;
+    if should_cancel_init() { return; }
 
     player_wait_available().await;
+    if should_cancel_init() { return; }
 
     reserve_player_mut(|player| {
         for sprite_list in begin_sprite_nums.iter() {
@@ -2613,6 +2642,7 @@ async fn run_movie_init_sequence() {
     }
 
     player_wait_available().await;
+    if should_cancel_init() { return; }
 
     // stepFrame to actorList
     let actor_list_snapshot = reserve_player_ref(|player| {
@@ -2660,7 +2690,9 @@ async fn run_movie_init_sequence() {
     });
 
     dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
+    if should_cancel_init() { return; }
     let _ = dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
+    if should_cancel_init() { return; }
 
     reserve_player_mut(|player| {
         player.in_prepare_frame = false;
@@ -2668,6 +2700,7 @@ async fn run_movie_init_sequence() {
 
     // startMovie
     dispatch_system_event_to_timeouts(&"startMovie".to_string(), &vec![]).await;
+    if should_cancel_init() { return; }
 
     if let Err(err) = player_invoke_global_event(&"startMovie".to_string(), &vec![]).await {
         if err.code != ScriptErrorCode::Abort {
@@ -2677,6 +2710,7 @@ async fn run_movie_init_sequence() {
     }
 
     player_wait_available().await;
+    if should_cancel_init() { return; }
 
     // enterFrame
     reserve_player_mut(|player| {
@@ -2684,21 +2718,27 @@ async fn run_movie_init_sequence() {
     });
 
     let _ = dispatch_event_to_all_behaviors(&"enterFrame".to_string(), &vec![]).await;
+    if should_cancel_init() { return; }
 
     reserve_player_mut(|player| {
         player.in_enter_frame = false;
     });
 
     player_wait_available().await;
+    if should_cancel_init() { return; }
 
     // exitFrame
     dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
+    if should_cancel_init() { return; }
     let _ = dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
+    if should_cancel_init() { return; }
 
     player_wait_available().await;
+    if should_cancel_init() { return; }
 
     reserve_player_mut(|player| {
         player.is_in_frame_update = false;
+        player.movie_initialized = true;
     });
 }
 
@@ -3136,6 +3176,46 @@ pub async fn run_single_frame() -> (bool, bool) {
     (is_playing, is_script_paused)
 }
 
+/// Reload the movie from the stored DirectorFile and stop at frame 1.
+/// Called from the frame loop when `pending_rewind` is set, or directly
+/// when the movie is not playing (e.g. after an error).
+pub async fn perform_rewind() {
+    let was_playing = reserve_player_ref(|player| player.is_playing);
+
+    reserve_player_mut(|player| {
+        player.is_playing = false;
+        player.is_in_transition = true;
+    });
+
+    if was_playing {
+        stop_movie_sequence().await;
+    }
+
+    let dir_file = reserve_player_mut(|player| {
+        player.movie.file.take()
+    });
+
+    let Some(dir_file) = dir_file else {
+        log::warn!("rewind: no DirectorFile stored, cannot reload");
+        reserve_player_mut(|player| { player.is_in_transition = false; });
+        return;
+    };
+
+    reserve_player_mut(|player| {
+        player.reset();
+    });
+
+    reserve_player_mut_async(|player| {
+        Box::pin(async move {
+            player.load_movie_from_dir(dir_file).await;
+        })
+    }).await;
+
+    reserve_player_mut(|player| {
+        player.is_in_transition = false;
+    });
+}
+
 pub async fn run_frame_loop() {
     unsafe {
         let player = PLAYER_OPT.as_ref().unwrap();
@@ -3167,6 +3247,16 @@ pub async fn run_frame_loop() {
 
         if let Some((task_id, target)) = goto_transition {
             transition_to_net_movie(task_id, target).await;
+            (is_playing, _) = reserve_player_ref(|player| {
+                (player.is_playing, player.is_script_paused)
+            });
+            last_frame_time = chrono::Local::now();
+            continue;
+        }
+
+        let should_rewind = reserve_player_ref(|player| player.pending_rewind);
+        if should_rewind {
+            perform_rewind().await;
             (is_playing, _) = reserve_player_ref(|player| {
                 (player.is_playing, player.is_script_paused)
             });

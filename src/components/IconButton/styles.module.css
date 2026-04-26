@@ -11,3 +11,9 @@
     background-color: #ddd;
   }
 }
+
+.iconButtonActive {
+  composes: iconButton;
+  background-color: #c8c8d0;
+  border-color: #99a;
+}

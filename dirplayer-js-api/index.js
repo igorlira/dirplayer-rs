@@ -87,6 +87,10 @@ export function onChannelDisplayNameChanged(channel, displayName) {
   vmCallbacks.onChannelDisplayNameChanged(channel, displayName)
 }
 
+export function onPlaybackStateChanged(isPlaying) {
+  vmCallbacks?.onPlaybackStateChanged?.(isPlaying)
+}
+
 export function onExternalEvent(event) {
   if (vmCallbacks?.onExternalEvent) {
     vmCallbacks.onExternalEvent(event);

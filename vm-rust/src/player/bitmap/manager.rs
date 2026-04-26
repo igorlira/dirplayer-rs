@@ -18,6 +18,11 @@ impl BitmapManager {
         }
     }
 
+    pub fn reset(&mut self) {
+        self.bitmaps.clear();
+        self.ref_counter = 0;
+    }
+
     pub fn add_bitmap(&mut self, bitmap: Bitmap) -> BitmapRef {
         self.ref_counter += 1;
 

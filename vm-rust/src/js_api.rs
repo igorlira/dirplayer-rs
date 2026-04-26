@@ -209,6 +209,7 @@ extern "C" {
     pub fn onChannelChanged(channel: i16, snapshot: js_sys::Object);
     pub fn onChannelDisplayNameChanged(channel: i16, display_name: &str);
     pub fn onFrameChanged(frame: u32);
+    pub fn onPlaybackStateChanged(is_playing: bool);
     pub fn onScriptError(data: js_sys::Object);
     pub fn onScopeListChanged(scopes: Vec<js_sys::Object>);
     pub fn onBreakpointListChanged(data: Vec<js_sys::Object>);
@@ -957,6 +958,10 @@ impl JsApi {
         onFrameChanged(frame);
     }
 
+    pub fn dispatch_playback_state_changed(is_playing: bool) {
+        onPlaybackStateChanged(is_playing);
+    }
+
     pub fn dispatch_debug_message(message: &str) {
         onDebugMessage(&&safe_string(message));
     }
@@ -1563,6 +1568,7 @@ impl JsApi {
     pub fn dispatch_score_changed() {}
     pub fn dispatch_channel_changed(_: i16) {}
     pub fn dispatch_frame_changed(_: u32) {}
+    pub fn dispatch_playback_state_changed(_: bool) {}
     pub fn dispatch_debug_message(_: &str) {}
     pub fn dispatch_debug_content(_: js_sys::Object) {}
     pub fn dispatch_debug_bitmap(_: u32, _: u32, _: &[u8]) {}

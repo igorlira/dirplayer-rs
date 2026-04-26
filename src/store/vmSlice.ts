@@ -27,6 +27,7 @@ interface VMSliceState {
   scriptInstanceSnapshots: Record<ScriptInstanceId, JsBridgeDatum>,
   channelSnapshots: Record<number, ScoreSpriteSnapshot>,
   subscribedMemberTokens: TMemberSubscription[],
+  isPlaying: boolean,
   isMovieLoaded: boolean,
   debugMessages: DebugMessage[],
 }
@@ -44,6 +45,7 @@ const initialState: VMSliceState = {
   scriptInstanceSnapshots: {},
   channelSnapshots: {},
   subscribedMemberTokens: [],
+  isPlaying: false,
   isMovieLoaded: false,
   debugMessages: [],
 }
@@ -225,6 +227,12 @@ const vmSlice = createSlice({
         subscribedMemberTokens: state.subscribedMemberTokens.filter(t => t.id !== action.payload),
       }
     },
+    playbackStateChanged: (state, action: PayloadAction<boolean>) => {
+      return {
+        ...state,
+        isPlaying: action.payload,
+      }
+    },
     movieLoaded: (state) => {
       return {
         ...state,
@@ -271,5 +279,5 @@ export const selectGlobals = (state: VMSliceState) => state.globals
 export const selectDebugMessages = (state: VMSliceState) => state.debugMessages
 
 // Action creators are generated for each case reducer function
-export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, movieUnloaded, debugMessageAdded, debugContentAdded, debugMessagesCleared } = vmSlice.actions
+export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, playbackStateChanged, movieLoaded, movieUnloaded, debugMessageAdded, debugContentAdded, debugMessagesCleared } = vmSlice.actions
 export default vmSlice.reducer
