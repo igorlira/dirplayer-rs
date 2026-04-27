@@ -199,12 +199,19 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         autoCapitalize="off"
         spellCheck={false}
         onKeyDown={e => {
-          // Handle special keys that don't produce input events
+          // Handle special keys that don't produce input events.
+          // Allow browser key-repeat through to wasm so holding e.g. Backspace
+          // continuously deletes characters at the browser's repeat cadence
+          // — exactly the behaviour users expect from an editable field. The
+          // outer canvas handler still blocks repeats because Lingo's
+          // keyPressed() polling drives held game keys, but the hidden input
+          // is only focused when an editable text/field sprite is active so
+          // letting repeats through here is safe.
           const special = ['Enter', 'Backspace', 'Tab', 'ArrowUp', 'ArrowDown',
                            'ArrowLeft', 'ArrowRight', 'Escape', 'Delete'];
           if (special.includes(e.key)) {
             e.preventDefault();
-            if (!e.repeat) key_down(e.key, e.keyCode);
+            key_down(e.key, e.keyCode);
           }
           // Regular characters flow through to onInput below
         }}
