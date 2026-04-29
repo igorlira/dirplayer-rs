@@ -304,6 +304,15 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let mouse_down_script_active = reserve_player_ref(|player| {
                 has_executable_callback(&player.movie.mouse_down_script)
             });
+            // Capture click timestamp BEFORE the stepFrame flush below. The flush is
+            // async and variable in length (CS rooms have 50+ FurnitureItems in
+            // actorList, plus IsoScene.processRoomRollover doing pixel hit-tests),
+            // so reading `now` after it would add the flush duration to the
+            // inter-click delta and a fast double-click could be misclassified as
+            // two single clicks. CS's ACTION_TIMED_ANIMATION (and similar) reads
+            // `the doubleClick` to gate `toggleState()`, so a wrong flag silently
+            // breaks every animation-toggling action.
+            let click_now = Local::now().timestamp_millis().abs();
             // Flush actorList stepFrame so cached rollover state (e.g. oMouseSquare)
             // is fresh before the mouseDown handler reads it. On mobile/touch there's
             // no prior mouse_move, so stepFrame hasn't run at the tap position yet.
@@ -323,13 +332,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
 
             if mouse_down_script_active {
                 reserve_player_mut(|player| {
-                    let now = Local::now().timestamp_millis().abs();
-                    let is_double_click = (now - player.last_mouse_down_time) < 500;
+                    let is_double_click = (click_now - player.last_mouse_down_time) < 500;
                     player.mouse_loc = (x, y);
                     player.movie.mouse_down = true;
                     player.movie.click_loc = (x, y);
                     player.is_double_click = is_double_click;
-                    player.last_mouse_down_time = now;
+                    player.last_mouse_down_time = click_now;
                 });
                 player_dispatch_movie_callback("mouseDown").await?;
                 return Ok(DatumRef::Void);
@@ -339,13 +347,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             // are detected. Non-scripted sprites (decorations, overlays) are skipped,
             // matching Director behavior.
             reserve_player_mut(|player| {
-                let now = Local::now().timestamp_millis().abs();
-                let is_double_click = (now - player.last_mouse_down_time) < 500;
+                let is_double_click = (click_now - player.last_mouse_down_time) < 500;
                 player.mouse_loc = (x, y);
                 player.movie.mouse_down = true;
                 player.movie.click_loc = (x, y);
                 player.is_double_click = is_double_click;
-                player.last_mouse_down_time = now;
+                player.last_mouse_down_time = click_now;
 
                 // "the clickOn" should return the topmost sprite at the click point
                 // regardless of whether it has a script — use unscripted lookup.
