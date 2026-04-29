@@ -4978,9 +4978,91 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.height
             };
 
-            let text_height = match measured_height {
-                Some(m) if m > stored_height => m,
-                _ => stored_height,
+            // Director's `#fixed` (and `#scroll` / `#limit`) box types keep
+            // the sprite locked to its authored / Lingo-set height — content
+            // that overflows is clipped, not grown into. Only `#adjust`
+            // grows the box to fit measured content — and even then, only
+            // when the text relies on RUN-TIME WRAP (single paragraph, no
+            // \n). When the text has explicit \n breaks the stored height
+            // already includes them (set in cast_member.rs from Paige's
+            // doc_bottom = page_height) and re-measuring with our PFR
+            // metrics overshoots Director (CS Junkbot credits: stored 375,
+            // re-measured 414, sprite_rect should be 375 to match Director).
+            //
+            // The previous unconditional `max(measured, stored)` made
+            // fixed-size displays balloon (CS clock display 52×18 → 52×48),
+            // and the always-grow #adjust path made the credits text
+            // sprite extend below member bounds.
+            // For `#adjust` text, Director uses `info_height` as the
+            // sprite height when the stored value already accounts for
+            // the laid-out content. Two cases:
+            //   1. info_height is reasonably close to the measured
+            //      content height (within 30%) — the stored value IS
+            //      the laid-out total. Trust it; the score's sprite.height
+            //      and our PFR rasterization both overshoot by a few px
+            //      otherwise (Junkbot READY: member 30, sprite 33).
+            //   2. info_height is much smaller than measured — it's
+            //      single-line authored, content has been added via
+            //      runtime text/html assignment that didn't update the
+            //      stored info. Grow to measured (CS recycler help member
+            //      82: info_height=36, measured=108).
+            // The 70% threshold is empirical: tested across Junkbot
+            // (READY 30/33, credits 72/72, level title 375/414) and
+            // CS members (recycler 36/108).
+            // Distinguishes the two #adjust scenarios:
+            //   A. Authored multi-paragraph layout — info_height is the full
+            //      laid-out total. Director clips overflow rather than growing
+            //      the sprite rect (Junkbot help member 124: info_h=310,
+            //      measured at 120 px wrap = 540 because the help text spans
+            //      30+ wrapped lines). Detected by explicit \r/\n breaks in
+            //      the text — multi-paragraph authored content always carries
+            //      them, and Lingo writes that produce multi-paragraph text
+            //      keep them too.
+            //   B. Runtime-grown wrap content — info_height is the single-
+            //      line authored value, the text is one paragraph that wraps
+            //      at the box width (CS recycler help member 82: info_h=36,
+            //      measured=108). No \r/\n in text → fall through to the
+            //      70% / measured.max(info_height) rule.
+            //
+            // par_runs.len() > 1 is NOT a safe discriminator here — single-
+            // paragraph members can still carry start+end par_run markers
+            // (recycler member 82 has 2 par_runs but no breaks), which would
+            // cause that path to incorrectly trust the single-line info_h.
+            let text_has_breaks = text_member.text.contains('\n')
+                || text_member.text.contains('\r');
+            // Prefer the cast_member-computed `text_member.height` over
+            // raw `text_info.height`. They diverge when info_h (TextInfo
+            // offset 48) ≠ page_h (Paige doc_bottom): cast_member.rs
+            // resolves to page_h for #adjust + breaks, which Director
+            // also reports as `member.height`. Junkbot V2 level-name
+            // member 5: info_h=331 (from header), page_h=361, Director
+            // and our `member.rect` both report 361 — but our score.rs
+            // path was returning 331 (info_h), making sprite.rect 30 px
+            // shorter than the bitmap and clipping all but 1-2 names.
+            let stored_member_h = text_member.height as i32;
+            let preferred_authored = if stored_member_h > 0 {
+                stored_member_h
+            } else {
+                info_height
+            };
+            let text_height = if text_member.box_type == "adjust" && preferred_authored > 0 {
+                if text_has_breaks {
+                    preferred_authored
+                } else {
+                    let measured_h = measured_height.unwrap_or(preferred_authored);
+                    if (preferred_authored as u32) * 10 >= (measured_h as u32) * 7 {
+                        preferred_authored
+                    } else {
+                        measured_h.max(preferred_authored)
+                    }
+                }
+            } else if text_member.box_type == "adjust" {
+                match measured_height {
+                    Some(m) if m > stored_height => m,
+                    _ => stored_height,
+                }
+            } else {
+                stored_height
             };
 
             // System fonts render via Canvas2D with slightly larger glyph

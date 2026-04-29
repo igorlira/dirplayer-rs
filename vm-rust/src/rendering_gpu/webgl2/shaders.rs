@@ -79,6 +79,12 @@ pub struct ShaderProgram {
     pub u_rotation: Option<WebGlUniformLocation>,
     pub u_rotation_center: Option<WebGlUniformLocation>,
     pub u_skew_flip: Option<WebGlUniformLocation>,
+    /// Continuous skew shear, in radians. The vertex shader applies a
+    /// horizontal shear `x += y * tan(skew)` around the registration point
+    /// before rotation. The special `skew_flip` (±180°) is handled
+    /// separately because tan(180°) = 0 wouldn't preserve Director's
+    /// vertical-flip behaviour at that exact value.
+    pub u_skew: Option<WebGlUniformLocation>,
 }
 
 /// Manages shader programs for different ink modes
@@ -160,6 +166,7 @@ uniform vec2 u_flip;         // flip x, flip y
 uniform float u_rotation;
 uniform vec2 u_rotation_center;  // sprite's loc (registration point)
 uniform float u_skew_flip;   // 1.0 = negate y before rotation (for skew=180 effect)
+uniform float u_skew;        // continuous horizontal-shear angle, in RADIANS
 
 out vec2 v_texcoord;
 
@@ -172,7 +179,8 @@ void main() {
 
     // Apply rotation around registration point (sprite's loc)
     // Director rotates around the registration point, not the sprite center
-    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5) {
+    bool needs_skew = abs(u_skew) > 0.001;
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || needs_skew) {
         vec2 center = u_rotation_center;
         world_pos -= center;
 
@@ -182,6 +190,19 @@ void main() {
         // rotation=180 + skew=180: (x,-y) -> (-x,y) = left-right mirror
         if (u_skew_flip > 0.5) {
             world_pos.y = -world_pos.y;
+        }
+
+        // Continuous horizontal shear (Director's `the skew`). Apply BEFORE
+        // rotation so the rectangle is parallelogram'd in sprite-local space
+        // and then the parallelogram is rotated around the registration
+        // point — matches Director's transform order.
+        // Sign: positive Director skew shifts the TOP of the sprite to the
+        // RIGHT (and bottom to the left) in screen coords with Y-down.
+        // Verified against CS RemoteControlCamera CRT (skew=26, rot=-26):
+        // the +x += y*tan path leaned the parallelogram opposite to the
+        // original Director output, so we negate to match.
+        if (needs_skew) {
+            world_pos.x -= world_pos.y * tan(u_skew);
         }
 
         float c = cos(u_rotation);
@@ -652,6 +673,7 @@ void main() {
         let u_rotation = gl.get_uniform_location(&program, "u_rotation");
         let u_rotation_center = gl.get_uniform_location(&program, "u_rotation_center");
         let u_skew_flip = gl.get_uniform_location(&program, "u_skew_flip");
+        let u_skew = gl.get_uniform_location(&program, "u_skew");
 
         Ok(ShaderProgram {
             program,
@@ -669,6 +691,7 @@ void main() {
             u_rotation,
             u_rotation_center,
             u_skew_flip,
+            u_skew,
         })
     }
 }

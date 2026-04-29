@@ -144,6 +144,15 @@ pub struct TextMember {
     pub char_spacing: i32,
     pub tab_stops: Vec<TabStop>,
     pub html_styled_spans: Vec<StyledSpan>,
+    /// Per-paragraph par_info table from XMED Section 0x0007. Each
+    /// entry holds line_spacing (Paige `dword270`) etc. Indexed by
+    /// `par_runs[N].par_info_index`. Empty for non-XMED text members.
+    pub par_infos: Vec<crate::director::chunks::xmedia_styled_text::ParInfo>,
+    /// Per-text-position par_info refs from XMED Section 0x0005
+    /// (par_run_key). Sorted by `position`. The active par_info for a
+    /// given text offset is the one whose `position` is the largest
+    /// value ≤ that offset. See `line_spacing_at()` helper.
+    pub par_runs: Vec<crate::director::chunks::xmedia_styled_text::ParRun>,
     pub info: Option<TextInfo>,
     /// Embedded 3D world for Director's "3D Text" feature (text extrusion).
     /// Lazily initialized when 3D methods (.model(), .camera(), etc.) are called.
@@ -288,6 +297,8 @@ impl TextMember {
             char_spacing: 0,
             tab_stops: Vec::new(),
             html_styled_spans: Vec::new(),
+            par_infos: Vec::new(),
+            par_runs: Vec::new(),
             info: None,
             w3d: None,
             sel_start: 0,
@@ -2877,6 +2888,19 @@ impl CastMember {
             };
             let is_text_ole = ole_type.is_empty() || ole_type == "text";
             if is_text_ole {
+                let hex_dump = xm.raw_data.clone()
+                    .iter()
+                    .map(|b| format!("{:02X} ", b))
+                    .collect::<Vec<String>>()
+                    .join(" ");
+                debug!(
+                    "XMED X2 (text member #{} '{}', {} bytes):\n{}",
+                    number,
+                    chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or(""),
+                    xm.raw_data.len(),
+                    hex_dump
+                );
+
                 if let Some(styled_text) = xm.parse_styled_text() {
                     debug!("Detected as XMED styled text");
                     let stxt_font_size: Option<u16> = None;
@@ -3063,22 +3087,52 @@ impl CastMember {
             TextAlignment::Justify => "justify",
         };
 
-        // Use first span font face, but member fontSize should track the largest styled size.
-        // XMED may store cell height (ascent+descent+leading) instead of point size.
-        // When STXT font_size is available, use it as the authoritative value and
-        // correct all styled span font_sizes proportionally.
+        // Use the FIRST styled span's font face and font size — i.e. the
+        // style covering text offset 0. This matches Paige's
+        // `pgFindStyleRun(pg, 0, NULL)` lookup that Director uses for
+        // `member.fontSize` (and `member.font`) when no selection is
+        // active. The C# PgWalkStyle reader confirms it walks Section 6's
+        // first character run → its `style_index` → Section 7's font_size.
+        //
+        // We previously took `max(span_sizes)` to guard against XMED
+        // members whose spans store cell-height instead of point size, but
+        // that diverged from Director for mixed-style text (e.g. a member
+        // with a 24pt heading + 12pt body would report 24 here whereas
+        // Director reports whichever style covers offset 0). The STXT
+        // correction below still re-anchors `font_size` proportionally
+        // when XMED's value disagrees with STXT, so the cell-height case
+        // remains protected — we just seed the ratio from the first span
+        // instead of the largest.
+        //
+        // `max` is kept ONLY as a last-ditch fallback when the first span
+        // has no font_size at all (rare), so we don't regress to the
+        // hardcoded 12 default.
         let (font_name, mut font_size) = if !styled_text.styled_spans.is_empty() {
             let first_style = &styled_text.styled_spans[0].style;
-            let max_span_size = styled_text
+            // Member-level font_size: prefer XMED Section 0x0005 (the
+            // par_run_key in Paige's enum, but used as the character-run
+            // table by Director) — Director's `the fontSize of member`
+            // reads this. Falls back to the first styled span's size, then
+            // to max-of-spans, then to 12 (matches the prior behaviour
+            // when 0x0005 is absent or empty).
+            let first_span_size = first_style
+                .font_size
+                .filter(|s| *s > 0)
+                .map(|s| s as u16);
+            let fallback_max = styled_text
                 .styled_spans
                 .iter()
                 .filter_map(|s| s.style.font_size)
                 .filter(|s| *s > 0)
                 .max()
-                .unwrap_or(12);
+                .unwrap_or(12) as u16;
+            let chosen_size = styled_text
+                .default_font_size
+                .or(first_span_size)
+                .unwrap_or(fallback_max);
             (
                 first_style.font_face.clone().unwrap_or_else(|| "Arial".to_string()),
-                max_span_size as u16,
+                chosen_size,
             )
         } else {
             ("Arial".to_string(), 12)
@@ -3126,8 +3180,145 @@ impl CastMember {
             }
             info
         });
-        let mut box_w = if text_info.width > 0 { text_info.width as u16 } else { 0 };
-        let mut box_h = if text_info.height > 0 { text_info.height as u16 } else { 0 };
+        // Prefer XMED Section 1 dword8C ("fallback height" → `styled_text
+        // .height`) for the authored member box height. The `text_info`
+        // chunk's height (offset 48-51 of its binary header) tracks a
+        // post-layout content extent in many cast versions and grows when
+        // multi-line text wraps inside a fixed-size box (CS / FurniFactory
+        // clock display: authored 52×18, but `text_info.height = 48` once
+        // "Time" + RETURN + value has been laid out — so member.rect was
+        // returning 52×48 instead of Director's 52×18).
+        // dword8C reflects the authored member dimensions and is stable
+        // across content changes, so it's the right source for member.rect.
+        let mut box_w = if styled_text.width > 0 {
+            styled_text.width as u16
+        } else if text_info.width > 0 {
+            text_info.width as u16
+        } else {
+            0
+        };
+        // For `#fixed` (and other non-adjust) box types, Director reports
+        // the AUTHORED single-line height regardless of how many lines of
+        // text the member currently holds. The XMED Section 1 dword90
+        // ("pageHeight" in the C# parser, Paige's `doc_bottom`) stores the
+        // total laid-out height = lines * line_height; dividing by the
+        // text's line count yields the stable per-line authored height
+        // that matches Director's `member.rect.height`.
+        //
+        // Verified in PgWalkStyle (C# Paige reader) against the FurniFactory
+        // clock display (member 74, "Time"+RETURN+timeValue): page_height=36,
+        // line_count=2 → 18, matches Director's `rect(0,0,52,18)`.
+        //
+        // We compute this BEFORE consulting `text_info.height`, because
+        // text_info.height (TextInfo header offset 48-51) is the laid-out
+        // content extent — it equals page_height for these members and
+        // grows with content. Using it as box_h would balloon a #fixed
+        // 52×18 member to 52×48 once two lines of text are written.
+        let line_count_for_box = styled_text
+            .text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .split('\n')
+            .filter(|l| !l.is_empty())
+            .count()
+            .max(1) as u32;
+        let box_type_is_adjust = text_info.box_type == 0; // 0=#adjust, 2=#fixed, 3=#limit
+        // For non-#adjust members, choose between two interpretations of
+        // `text_info.height`:
+        //
+        //   A. AUTHORED FULL LAYOUT — the value matches the laid-out
+        //      `page_height` exactly. Junkbot's level-name member
+        //      (#fixed, 15 paragraphs): info_h=page_h=331. Director
+        //      reports `member.height = 331` (full authored rect), so we
+        //      trust `info_h` verbatim.
+        //
+        //   B. POST-LAYOUT BALLOON — `info_h > page_h`, the TextInfo
+        //      header has grown past the layout extent because content
+        //      was added after the member was authored. FurniFactory
+        //      clock (#fixed, authored 52×18): info_h=48 once "Time" +
+        //      RETURN + value has been laid out, while page_h=36 reflects
+        //      the layout. Director reports the AUTHORED 18 here, which
+        //      we recover via `page_h / line_count`.
+        //
+        // The `info_h == page_h` test cleanly separates the two: when
+        // they agree, info_h is the authored full layout. When they
+        // disagree (info_h > page_h), info_h has ballooned and we divide.
+        let per_line_from_page = if !box_type_is_adjust && styled_text.page_height > 0 {
+            let info_h = text_info.height;
+            let page_h = styled_text.page_height as u32;
+            let per_line = if line_count_for_box > 0 {
+                page_h / line_count_for_box
+            } else {
+                0
+            };
+            // When `info_h` is too small to be multi-line authored
+            // (< 2 × per_line) but `page_h` clearly is multi-line
+            // (page_h > per_line), prefer page_h. Junkbot V2 names
+            // member 6: info_h=24, per_line=24 (page_h=361, 15 lines),
+            // 24 % 24 = 0 would trip the multiple-rule and trust 24,
+            // but the AUTHORED member.height is 361.
+            // Member-height resolution for non-#adjust (boxType=#fixed/
+            // #limit/#scroll) text members. Three observed patterns:
+            //
+            //   • info_h < page_h: page_h is the laid-out total of
+            //     current authored content. Use page_h.
+            //     Junkbot V2 names (cast 11 member 5): info=348,
+            //     page=361 → 361 (Director).
+            //
+            //   • info_h ≥ page_h with info_h being "real" multi-row
+            //     authored:
+            //       - info_h == page_h  (member 124: info=page=331)
+            //       - info_h is an integer multiple of per_line
+            //       - info_h has ≥1 full extra row past page_h
+            //         (hint_text member 174: info=107, page=68,
+            //          per_line=34, diff=39 ≥ 34 → 107)
+            //
+            //   • Otherwise (FurniFactory clock balloon: info=48,
+            //     page=36, per_line=18 → divide to 18).
+            let result = if info_h > 0 && page_h > 0 && per_line > 0 {
+                if info_h < page_h {
+                    page_h as u16
+                } else if info_h == page_h
+                    || info_h % per_line == 0
+                    || info_h.saturating_sub(page_h) >= per_line
+                {
+                    info_h as u16
+                } else {
+                    per_line as u16
+                }
+            } else if per_line > 0 {
+                per_line as u16
+            } else {
+                0
+            };
+            result
+        } else {
+            0
+        };
+
+        // For `#adjust` members whose text has EXPLICIT line breaks
+        // (\n / \r), Paige's `doc_bottom` (XMED Section 1 dword90 →
+        // `page_height`) is the laid-out total Director reports for
+        // member.height. CS Junkbot credits (member 16, 16 \n breaks):
+        // page_height=375 matches Director exactly, while text_info.height
+        // baked at 483 disagrees. For single-paragraph wrap-only #adjust
+        // members (member 82 recycler help: 0 \n, page_height=36, Director
+        // dynamically measures wrap to 108) the rule must NOT fire — we
+        // fall through to `text_info.height` like before.
+        let adjust_use_page_height = box_type_is_adjust
+            && styled_text.page_height > 0
+            && (styled_text.text.contains('\n') || styled_text.text.contains('\r'));
+        let mut box_h = if per_line_from_page > 0 {
+            per_line_from_page
+        } else if adjust_use_page_height {
+            styled_text.page_height as u16
+        } else if styled_text.height > 0 {
+            styled_text.height as u16
+        } else if text_info.height > 0 {
+            text_info.height as u16
+        } else {
+            0
+        };
 
         // Fallback for older text member formats: parse raw text member data for dimensions.
         if box_w == 0 || box_h == 0 {
@@ -3141,14 +3332,11 @@ impl CastMember {
             }
         }
 
-        // XMED page_height (Section 1 dword90) is Director's authored member
-        // box height. Trust it when other sources didn't provide a height —
-        // matches the Director-authored "default member dims" exactly.
+        // Final fallback: full page_height (overshoots #fixed but we already
+        // tried per-line above; this branch is reached only when both
+        // styled_text.height and text_info.height were 0).
         if box_h == 0 && styled_text.page_height > 0 {
             box_h = styled_text.page_height as u16;
-        }
-        if box_w == 0 && styled_text.width > 0 {
-            box_w = styled_text.width as u16;
         }
 
         if box_w == 0 { box_w = 100; }
@@ -3185,6 +3373,8 @@ impl CastMember {
                 .map(|s| s.style.char_spacing as i32)
                 .unwrap_or(0),
             tab_stops: Vec::new(),
+            par_infos: styled_text.par_infos.clone(),
+            par_runs: styled_text.par_runs.clone(),
             html_styled_spans: styled_text.styled_spans,
             info: Some(text_info),
             w3d: None,

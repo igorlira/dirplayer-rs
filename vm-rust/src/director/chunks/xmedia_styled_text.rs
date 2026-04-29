@@ -31,6 +31,85 @@ fn mac_roman_to_char(byte: u8) -> char {
     }
 }
 
+impl XmedStyledText {
+    /// Resolve the active `par_info` for a given text byte/char position.
+    /// Walks `par_runs` (sorted by `position`) and returns the par_info
+    /// referenced by the run with the largest position ≤ `pos`. Falls
+    /// back to `par_infos[0]` (the document default) when no run applies.
+    pub fn par_info_at(&self, pos: u32) -> Option<&ParInfo> {
+        let mut active: Option<&ParRun> = None;
+        for run in &self.par_runs {
+            if run.position <= pos {
+                active = Some(run);
+            } else {
+                break;
+            }
+        }
+        let idx = active.map(|r| r.par_info_index as usize).unwrap_or(0);
+        self.par_infos.get(idx)
+    }
+
+    /// Effective `line_spacing` for a given text position, with the
+    /// "0 means inherit / use document default" rule applied. Returns
+    /// 0 only when no par_info has a non-zero spacing.
+    pub fn line_spacing_at(&self, pos: u32) -> i32 {
+        if let Some(pi) = self.par_info_at(pos) {
+            if pi.line_spacing != 0 {
+                return pi.line_spacing;
+            }
+        }
+        // Find the first non-zero par_info as the document default.
+        // Director treats `par_info[par_run_idx].line_spacing == 0` as
+        // "inherit" rather than "literally 0 px".
+        self.par_infos
+            .iter()
+            .find_map(|pi| if pi.line_spacing != 0 { Some(pi.line_spacing) } else { None })
+            .unwrap_or(0)
+    }
+}
+
+/// One paragraph's formatting record (Paige `par_info`). Section 0x0007
+/// stores N of these; Section 0x0005's `par_run` entries point into this
+/// table by index. The renderer / `member.line[N].fixedLineSpace` getter
+/// looks up which par_info applies to a given text position via par_runs,
+/// then reads `line_spacing` (Paige `dword270`).
+#[derive(Debug, Clone)]
+pub struct ParInfo {
+    pub line_spacing: i32,
+    pub line_height: i32,
+    pub left_indent: i32,
+    pub right_indent: i32,
+    pub first_indent: i32,
+    pub top_spacing: i32,
+    pub bottom_spacing: i32,
+    /// Paige par_info `justification` (word0): 0=left, 1=center, 2=right, 3=justify.
+    pub justification: i32,
+}
+
+impl Default for ParInfo {
+    fn default() -> Self {
+        ParInfo {
+            line_spacing: 0,
+            line_height: 0,
+            left_indent: 0,
+            right_indent: 0,
+            first_indent: 0,
+            top_spacing: 0,
+            bottom_spacing: 0,
+            justification: 0,
+        }
+    }
+}
+
+/// Paragraph run: maps a text offset to a par_info index. Stored in
+/// XMED Section 0x0005 (Paige `par_run_key`). Same wire format as
+/// style_run_key but the index is into `par_infos`, not `styles`.
+#[derive(Debug, Clone)]
+pub struct ParRun {
+    pub position: u32,
+    pub par_info_index: u16,
+}
+
 /// Parsed XMED styled text with all formatting information
 pub struct XmedStyledText {
     pub text: String,
@@ -52,8 +131,22 @@ pub struct XmedStyledText {
     pub line_spacing: i32,
     pub top_spacing: i32,
     pub bottom_spacing: i32,
+    // Per-paragraph formatting: Section 0x0007 stores N par_info entries;
+    // Section 0x0005 (par_run_key) maps text offsets to indices in this
+    // table. Use `line_spacing_at(pos)` to resolve per-line line_spacing.
+    pub par_infos: Vec<ParInfo>,
+    pub par_runs: Vec<ParRun>,
     // Background color (from Section 0x0000 document header, indices 30-32)
     pub bg_color: Option<(u8, u8, u8)>,
+    /// Member-level "default" font size, sourced from XMED Section 0x0005's
+    /// first character run → its `style_index` → Section 7's `font_size`.
+    /// In Paige enum order 0x0005 is `par_run_key`; XMED reverses the role —
+    /// Director's `the fontSize of member` reads through this section's
+    /// first run (verified against FurniFactory clock display: 0x0004 said
+    /// 15, 0x0005 said 12, Director reports 12).
+    /// `None` when 0x0005 is absent — the consumer should fall back to the
+    /// existing per-span font size.
+    pub default_font_size: Option<u16>,
 }
 
 /// Section 1 data - document header with page/field properties
@@ -63,6 +156,14 @@ struct Section1Data {
     height: i32,
     page_height: i32,
     bg_color: Option<(u8, u8, u8)>,
+    /// HTML `<font size=N>` attribute (1..7) saved into the doc header by
+    /// Director when a member.html setter assigns text without authoring
+    /// a Section 7 style entry. Only meaningful when Section 7 declares
+    /// 0 styles — otherwise the per-style font_size in Section 7 is the
+    /// authoritative source. Verified empirically against members 36
+    /// (`<font size=6>` → val=6 → 24 pt) vs 82 (no size attr → val=0 →
+    /// engine default 12 pt).
+    html_font_size_attr: i32,
 }
 
 impl Default for Section1Data {
@@ -73,6 +174,7 @@ impl Default for Section1Data {
             height: 0,
             page_height: 0,
             bg_color: None,
+            html_font_size_attr: 0,
         }
     }
 }
@@ -115,6 +217,14 @@ fn normalize_char_runs(runs: &[CharRun]) -> Vec<CharRun> {
 /// Section 7 data - style definitions
 struct Section7Data {
     styles: Vec<XmedStyle>,
+    /// Style count declared in the section header. The packed data often
+    /// contains MORE styles than this (we keep parsing past the count
+    /// because char-run arrays can reference later styles), but Director
+    /// itself appears to treat any styles past the declared count as
+    /// invalid for purposes of `member.fontSize` defaulting. When this is
+    /// 0, the member has no authored style and the size lookup must fail
+    /// so the consumer falls back to the engine default.
+    declared_style_count: usize,
 }
 
 /// XMED style definition
@@ -131,6 +241,31 @@ struct XmedStyle {
     back_color: u32,  // dword5E from Section 7 (used in PropertyExtractor lines 66-67)
     kerning: i32,     // dword98 from Section 7 (stored as fixed-point * 65536, divide to get value)
     char_spacing: i32, // dword9C from Section 7 (stored as fixed-point * 65536, divide to get pixels)
+    /// True if this style's `word0` (font index) was within the parsed
+    /// Section 9 font-name table when the style was loaded. Used by the
+    /// member-level fontSize logic to decide whether the 0x0004 char run's
+    /// style is "valid" enough to source a fontSize from, or whether to
+    /// fall back to 0x0005's first run instead. (Director appears to skip
+    /// style runs whose font_index is out of range when computing
+    /// `member.fontSize`.)
+    font_index_valid: bool,
+    /// Raw `word0` font index from Section 7. Section 9 in some XMED chunks
+    /// declares many more fonts than are realistically authored (member 74
+    /// declares 15 entries even though only Arial+Verdana are real
+    /// references), so `font_index_valid` (a `< font_names.len()` check)
+    /// can spuriously accept synthesised styles like style[4].word0=14.
+    /// The HTML-map detector uses this raw value with a small threshold to
+    /// distinguish authored styles (word0 0..~7) from synthesised noise.
+    font_index_raw: i32,
+    /// Raw `word48` from Section 7. When this style was authored from an
+    /// HTML `<font size=N>` tag, word48 is non-zero (encodes a per-style
+    /// size class). When the wrapping `<font>` tag had no `size=`
+    /// attribute, word48 is 0 — Director then falls back to the document
+    /// default (style[0].word46) for that char's `member.fontSize` rather
+    /// than the per-style word46. Verified empirically against member 16
+    /// (CS credits screen, all `<font>` tags lack `size=`, every char
+    /// run resolves to a style with word48=0, member.fontSize → 12).
+    word48_raw: i32,
 }
 
 impl Default for XmedStyle {
@@ -147,6 +282,9 @@ impl Default for XmedStyle {
             back_color: 0xFFFFFFFF,  // White with full alpha (default)
             kerning: 0,              // Default: no kerning adjustment
             char_spacing: 0,         // Default: no extra spacing
+            font_index_valid: false, // No referenced font for the default
+            font_index_raw: -1,
+            word48_raw: 0,
         }
     }
 }
@@ -315,7 +453,23 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
     } else {
         ParagraphInfo::default()
     };
-    let alignment = paragraph_info.alignment;
+
+    // Per-paragraph par_info table. Section 0x0007 holds N par_info
+    // records (Paige `par_info` struct, 748 bytes when expanded but
+    // packed via Packer at ~30-50 bytes each). Section 0x0005 stores
+    // (text_offset, par_info_idx) pairs that point into this table.
+    // Used by `XmedStyledText::line_spacing_at(pos)` and the
+    // `member.line[N].fixedLineSpace` getter.
+    let par_infos: Vec<ParInfo> = if let Some(section7) = sections.get(&0x0007) {
+        parse_section_8_par_infos(section7, doc_version)
+    } else {
+        Vec::new()
+    };
+
+    // Member-level alignment is computed below, after section5_char_runs
+    // (the par_run table) is loaded — we look up par_info[par_run[0].idx]
+    // to get the first paragraph's justification.
+    let mut alignment = paragraph_info.alignment;
 
     // Parse Section 6 (styles)
     // File section 0x0006 ProcessSection7
@@ -324,27 +478,38 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
     } else {
         Section7Data {
             styles: vec![XmedStyle::default()],
+            declared_style_count: 0,
         }
     };
 
-    // Parse Section 5 (character runs)
-    // File section 0x0004 or 0x0005
-    // IMPORTANT: BOTH sections should be processed and COMBINED
-    let mut all_char_runs = Vec::new();
+    // Parse Section 0x0004 (style_runs: position → style_index) and
+    // Section 0x0005 (par_runs: position → par_info_index). These two
+    // sections share the (offset, index) wire format but the indices
+    // point into DIFFERENT tables — Section 7 styles vs. Section 8
+    // par_infos. They must be kept separate.
+    //
+    // We previously concatenated them into `all_char_runs` and used the
+    // union for styled_spans, which corrupted span colors at positions
+    // where a par_run landed (Junkbot help member 139: par_run at pos
+    // 378 with par_info_index=1 was misread as style_index=1, splitting
+    // the eyeBOT title across two spans with the wrong style).
+    let mut section4_char_runs: Vec<CharRun> = Vec::new();
     let mut section5_char_runs: Vec<CharRun> = Vec::new();
 
     if let Some(section4) = sections.get(&0x0004) {
-        debug!("Processing Section 0x0004 (character runs part 1)");
+        debug!("Processing Section 0x0004 (style_runs)");
         let data4 = parse_section_6(section4)?;
-        all_char_runs.extend(data4.char_runs);
+        section4_char_runs = data4.char_runs.clone();
     }
 
     if let Some(section5) = sections.get(&0x0005) {
-        debug!("Processing Section 0x0005 (character runs part 2)");
+        debug!("Processing Section 0x0005 (par_runs)");
         let data5 = parse_section_6(section5)?;
         section5_char_runs = data5.char_runs.clone();
-        all_char_runs.extend(data5.char_runs);
     }
+
+    // Styled spans are driven solely by style_runs (Section 0x0004).
+    let mut all_char_runs: Vec<CharRun> = section4_char_runs.clone();
 
     // Adjust character run positions to account for \r characters inserted between
     // Section 2 chunks. Each boundary represents a point where a \r was inserted,
@@ -362,6 +527,33 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
                 .filter(|&&b| b <= run.position)
                 .count() as u32;
             run.position += shift;
+        }
+    }
+
+    // Member-level alignment: look up the par_info referenced by the
+    // FIRST par_run (Section 0x0005 entry at position 0) — that's the
+    // alignment of the first paragraph, which Director reports as
+    // `member.alignment`. par_info[0] is a template default; par_info[1+]
+    // hold per-paragraph overrides. par_run[0] points to whichever
+    // par_info applies to text offset 0.
+    //
+    //   Junkbot brick info member 139: par_runs=[(0,0), (N,1), …]
+    //     par_run[0] → par_info[0].justification=0 → Left ✓
+    //   Centered title member: par_runs=[(0,1)]
+    //     par_run[0] → par_info[1].justification=1 → Center ✓
+    //
+    // par_info[0]'s value alone was wrong because it's just a template;
+    // the heuristic byte-36 reader was wrong because it indexes into the
+    // SECOND par_info (which holds a per-paragraph override).
+    if let Some(par_run0) = section5_char_runs.first() {
+        let idx = par_run0.style_index as usize;
+        if let Some(pi) = par_infos.get(idx) {
+            alignment = match pi.justification {
+                1 => TextAlignment::Center,
+                2 => TextAlignment::Right,
+                3 => TextAlignment::Justify,
+                _ => TextAlignment::Left,
+            };
         }
     }
 
@@ -439,6 +631,157 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         styled_spans.len(),
     );
 
+    // Compute member-level default font_size from the two char run
+    // sections' first runs. Director's `the fontSize of member` returns
+    // the SMALLER of:
+    //   - 0x0004's first run's referenced style's font_size, and
+    //   - 0x0005's first run's referenced style's font_size
+    //
+    // Rationale: 0x0004 (Paige's style_run_key) is the per-character style
+    // run array; 0x0005 (par_run_key in Paige but reused here) is a
+    // separate per-character style table that supplies the *member-level*
+    // default. When both reference different styles for offset 0,
+    // Director picks the smaller — empirically:
+    //   - Member 71: 0x0004→10, 0x0005→12  → 10 ✓
+    //   - Member 74: 0x0004→15, 0x0005→12  → 12 ✓
+    //   - Member 82: Section 7 declares 0 styles (member.html was set
+    //     without a `size` attr, so no style runs are authored). Our
+    //     parser still reads stray bytes past the declared count, so we
+    //     gate the lookup on `declared_style_count`: when 0, both
+    //     lookups fail → consumer falls back to engine default 12. ✓
+    //
+    // (We tried "use 0x0004 only when its font_index is valid" first, but
+    // our Section 9 parser is more permissive than the C# reference and
+    // marks word0=14 as valid even when only Arial+Verdana are authored,
+    // breaking member 74. The min rule sidesteps that question.)
+    // If Section 7 declared zero styles (member 82 — text was set via
+    // member.html with no `size=` attr, so no style runs are authored),
+    // no font size can come from the styles regardless of what stray
+    // bytes our packer pulled past the count. Fall through to consumer
+    // defaults.
+    // For HTML-set members, Director re-maps the stored XMED font_size
+    // through its `<font size=N>` table — stored values are slightly
+    // compressed compared to the HTML pt sizes Director reports
+    // (size=5 → stored 16, returned 18; size=4 → stored 13, returned 14;
+    // size=6 → stored 19, returned 24). The mapping is "round up to next
+    // entry in [8,10,12,14,18,24,36]".
+    //
+    // The detector for "HTML-set" is `font_index_valid` on the style
+    // 0x0004's first run references. Director's HTML-set members have a
+    // legit `<font face="...">` tag whose font index points into a real
+    // entry in Section 9. Plain styled-text members (set via member.text
+    // or programmatic font assignment) leave the per-style font_index as
+    // a synthesised value beyond Section 9's range, which our parser
+    // marks `font_index_valid=false`.
+    //
+    // Verified empirically:
+    //   - Member 30 (HTML "directions"): style[7] valid → 16 → 18 ✓
+    //   - Member 8  (HTML rich text):    style[5] valid → 19 → 24 ✓
+    //   - Member 71 (HTML small text):   style[3] valid → 10 → 10 ✓
+    //   - Member 74 (#fixed clock):      style[4] INVALID (word0=14 vs
+    //     2 fonts in Section 9) → fall through to 0x0005 first → 12 ✓
+    //   - Member 82 (HTML, no size attr): declared_count=0 → None → 12 ✓
+    let declared_count = style_data.declared_style_count;
+    let lookup_size_via = |runs: &[CharRun]| -> Option<u16> {
+        if declared_count == 0 {
+            return None;
+        }
+        let run = runs.first()?;
+        let style = style_data.styles.get(run.style_index as usize)?;
+        if style.font_size == 0 {
+            return None;
+        }
+        Some(style.font_size)
+    };
+    // HTML-style detector: 0x0004's first run references a real authored
+    // style. Two signals must hold:
+    //
+    //   1. word0 (font_index_raw) is small (< 8). Section 9 sometimes
+    //      declares many synthesised entries (member 74 declares 15),
+    //      so `font_index_valid` (a `< font_names.len()` check) is
+    //      unreliable. Real authored styles reference the first few
+    //      fonts only.
+    //   2. word48 is non-zero. word48 stores the per-style HTML size
+    //      class — non-zero when the wrapping `<font>` tag had a
+    //      `size=N` attribute, zero when no size was set. When zero
+    //      Director defers to the document default for member.fontSize
+    //      (verified against member 16's credits screen — every
+    //      `<font>` tag lacks `size=`, all char-run styles have
+    //      word48=0, Director returns 12).
+    const HTML_AUTHORED_FONT_INDEX_LIMIT: i32 = 8;
+    let s4_first_style_is_html = section4_char_runs
+        .first()
+        .and_then(|r| style_data.styles.get(r.style_index as usize))
+        .map(|s| {
+            s.font_index_raw >= 0
+                && s.font_index_raw < HTML_AUTHORED_FONT_INDEX_LIMIT
+                && s.font_size > 0
+                && s.word48_raw != 0
+        })
+        .unwrap_or(false);
+    fn map_html_pt(stored: u16) -> u16 {
+        const HTML_PT: [u16; 7] = [8, 10, 12, 14, 18, 24, 36];
+        for &pt in &HTML_PT {
+            if pt >= stored {
+                return pt;
+            }
+        }
+        stored
+    }
+    // Two branches for member.fontSize:
+    //   A. HTML with explicit `<font size=N>` (s4_first_style_is_html
+    //      already gates word0<8 AND word48!=0): apply HTML pt map.
+    //   B. Otherwise: use the first run's style font_size directly. We
+    //      now source style.font_size from Paige's `dword84` (real
+    //      `point`), so the first-run style carries the correct authored
+    //      size — Junkbot brick info member 141 uses style[4] with
+    //      dword84 → 6 px and Director reports `member.fontSize = 6`.
+    //      The legacy "word48==0 → fall back to styles[0].font_size"
+    //      override was a workaround for word46 (style_num) being
+    //      mis-read as fontSize and is no longer needed.
+    let default_font_size = if s4_first_style_is_html {
+        lookup_size_via(&section4_char_runs).map(map_html_pt)
+    } else {
+        let s4 = lookup_size_via(&section4_char_runs);
+        let s5 = lookup_size_via(&section5_char_runs);
+        match (s4, s5) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    };
+
+    // When Section 7 declares 0 styles AND no char-run path produced a
+    // size, fall back to the HTML `<font size=N>` attribute Director
+    // captures in Section 1 at index [42] (verified empirically by
+    // diffing member 36 vs member 82's S1 dumps — only member 36 had
+    // the attribute set, matching its HTML `<font size=6>` tag → 24 pt).
+    // Non-HTML-set or default-sized members store 0 there and fall
+    // through to the engine default (12).
+    let default_font_size = default_font_size.or_else(|| {
+        let attr = section1_data.html_font_size_attr;
+        if (1..=7).contains(&attr) {
+            const HTML_PT: [u16; 7] = [8, 10, 12, 14, 18, 24, 36];
+            Some(HTML_PT[(attr - 1) as usize])
+        } else {
+            None
+        }
+    });
+
+    // Build par_runs from Section 0x0005's char-run-format entries.
+    // Same wire format (position, index) but the index points into the
+    // par_infos table (0x0007), NOT the styles table (0x0006). Used by
+    // the `member.line[N].fixedLineSpace` getter and the renderer's
+    // per-line stride lookup.
+    let par_runs: Vec<ParRun> = section5_char_runs
+        .iter()
+        .map(|cr| ParRun {
+            position: cr.position,
+            par_info_index: cr.style_index,
+        })
+        .collect();
+
     Ok(XmedStyledText {
         text: text_data.text,
         styled_spans,
@@ -456,7 +799,10 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         line_spacing: paragraph_info.line_spacing,
         top_spacing: paragraph_info.top_spacing,
         bottom_spacing: paragraph_info.bottom_spacing,
+        par_infos,
+        par_runs,
         bg_color: section1_data.bg_color,
+        default_font_size,
     })
 }
 
@@ -592,8 +938,24 @@ fn parse_section_1(data: &[u8]) -> Result<Section1Data, String> {
         }
     }
 
-    debug!("Section 1: version={}, width={}, height={}, pageHeight={}, bg_color={:?}",
-        section1.doc_version, section1.width, section1.height, section1.page_height, section1.bg_color);
+    // Values [33..42] — read 10 more values to reach the HTML font-size
+    // attribute at index [42] (verified against the C# reference parser's
+    // S1-DUMP indices). Capture the last read (index [42]); intermediates
+    // are discarded but still consume packer state.
+    for i in 33..=42 {
+        if packer.remaining() < 2 {
+            break;
+        }
+        let val = packer.unpack_num();
+        if i == 42 {
+            section1.html_font_size_attr = val;
+            debug!("    Section1: html_font_size_attr (idx 42)={}", val);
+        }
+    }
+
+    debug!("Section 1: version={}, width={}, height={}, pageHeight={}, bg_color={:?}, html_size={}",
+        section1.doc_version, section1.width, section1.height, section1.page_height,
+        section1.bg_color, section1.html_font_size_attr);
 
     Ok(section1)
 }
@@ -832,14 +1194,23 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
 
         if !parse_failed && packer.remaining() >= 2 {
             let font_index = packer.unpack_num();
+            style.font_index_raw = font_index;
             if font_index >= 0 && (font_index as usize) < font_names.len() {
                 style.font_name = font_names[font_index as usize].clone();
+                style.font_index_valid = true;
             } else if let Some(prev) = styles.last() {
                 // Some files emit indices beyond parsed section-9 entries; inherit prior font.
+                // Mark `font_index_valid=false` so member-level lookups can
+                // tell this style's font reference was synthesised, not
+                // authored. Director appears to skip such styles when
+                // computing `member.fontSize` and falls back to the next
+                // char run array.
                 style.font_name = prev.font_name.clone();
+                style.font_index_valid = false;
             }
-            debug!("    Style {}: word0={} -> font='{}'",
-                                             style_idx, font_index, style.font_name);
+            debug!("    Style {}: word0={} -> font='{}' valid={}",
+                                             style_idx, font_index, style.font_name,
+                                             style.font_index_valid);
         } else { parse_failed = true; }
 
         if !parse_failed && packer.remaining() >= 2 { packer.unpack_num(); } else { parse_failed = true; }
@@ -857,8 +1228,14 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
         if !parse_failed && packer.remaining() >= 2 {
             let word_wrap_value = packer.unpack_num();
             // 0 = #adjust (no wrap), 1 = #scroll, 2 = #fixed, 3 = #limit (all wrap)
+            // ALSO: when this style came from an HTML `<font size=N>` tag,
+            // this slot stores the per-style HTML size class (non-zero);
+            // when the wrapping `<font>` had no `size=` attribute, it's 0.
+            // We keep the original `word_wrap` interpretation but also
+            // expose the raw value for the member.fontSize logic.
             style.word_wrap = word_wrap_value != 0;
-            debug!("    Style {}: word_wrap_value={} → word_wrap={}", style_idx, word_wrap_value, style.word_wrap);
+            style.word48_raw = word_wrap_value;
+            debug!("    Style {}: word48_raw={} → word_wrap={}", style_idx, word_wrap_value, style.word_wrap);
         } else { parse_failed = true; }
 
         if !parse_failed && packer.remaining() >= 2 { packer.unpack_num(); } else { parse_failed = true; }
@@ -918,11 +1295,36 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
         }
 
         // 15-25. dword80 through dwordA8 (11 values) - lines 1304-1314
-        // Index: 0=dword80, 1=dword84, 2=dword88, 3=dword8C, 4=dword90, 5=dword94,
-        //        6=dword98 (kerning), 7=dword9C (charSpacing), 8=dwordA0, 9=dwordA4, 10=dwordA8
+        // Paige style_info pg_fixed block (each = 16.16 fixed-point):
+        //   index 0 = char_width
+        //   index 1 = point   ← REAL fontSize (Director's `the fontSize`)
+        //   index 2 = left_overhang
+        //   index 3 = right_overhang
+        //   index 4 = top_extra
+        //   index 5 = bot_extra
+        //   index 6 = space_extra (kerning)
+        //   index 7 = char_extra (charSpacing)
+        //   index 8/9/10 = trailing pg_fixed slots
+        //
+        // We previously sourced font_size from `word46`, which is actually
+        // Paige's `style_num` (RTF stylesheet ID) — close to the real point
+        // value for some styles but wrong for most. Junkbot help member 124
+        // S7.7 reports word46=5 but Director queries fontSize=6; the real
+        // value lives in `dword84` (pg_fixed point) where 393216/65536=6.
+        // Override style.font_size with the dword84 value when it's set.
         for i in 0..11 {
             if !parse_failed && packer.remaining() >= 2 {
                 let value = packer.unpack_num();
+                // dword84 is at index 1 — Paige's `point` (font size in
+                // 16.16 fixed-point). Trust it over word46.
+                if i == 1 {
+                    let real_size = (value as i64) / 65536;
+                    if real_size > 0 && real_size <= 200 {
+                        style.font_size = real_size as u16;
+                        debug!("    Style {}: dword84 (real fontSize)={} (raw={})",
+                                                         style_idx, real_size, value);
+                    }
+                }
                 // dword98 is at index 6, contains kerning as fixed-point (value * 65536)
                 if i == 6 {
                     style.kerning = value / 65536;  // Convert from fixed-point
@@ -1019,13 +1421,29 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
 
     debug!("   Section 7: Parsed {} style(s) (initial count was {})", styles.len(), style_count);
 
+    let declared_style_count = if style_count > 0 { style_count as usize } else { 0 };
+
+    // If the section header declared zero styles, no font_size info is
+    // authored — every style we parsed came from stray bytes past the
+    // declared count and Director treats them all as untrusted. Zero the
+    // sizes here so downstream span construction and member-level font
+    // size lookups all default to engine fallbacks. (When declared_count
+    // > 0, leave parsed styles alone: char runs in some files
+    // legitimately reference styles past the declared count, and zeroing
+    // those would regress members whose first run uses such a style.)
+    if declared_style_count == 0 {
+        for s in styles.iter_mut() {
+            s.font_size = 0;
+        }
+    }
+
     if styles.is_empty() {
         styles.push(XmedStyle::default());
     }
 
-    debug!("    Section 7: Parsed {} style(s)", styles.len());
+    debug!("    Section 7: Parsed {} style(s), declared={}", styles.len(), declared_style_count);
 
-    Ok(Section7Data { styles })
+    Ok(Section7Data { styles, declared_style_count })
 }
 
 /// Paragraph formatting values from Section 8
@@ -1178,6 +1596,108 @@ fn parse_section_8(data: &[u8], doc_version: i32) -> Result<ParagraphInfo, Strin
     }
 
     Ok(info)
+}
+
+/// Parse Section 0x0007 (called Section 8 by C# convention) into a list of
+/// per-paragraph `par_info` records. Director uses these via Section 0x0005
+/// (par_run_key) to assign each text range a different `line_spacing`.
+/// Faithful port of `Sections.cs::ProcessSection8` field-by-field; reads
+/// entries until the packer is exhausted (was hardcoded to 2 in C#).
+fn parse_section_8_par_infos(data: &[u8], doc_version: i32) -> Vec<ParInfo> {
+    let mut packer = Packer::new(data.to_vec());
+    let mut par_infos: Vec<ParInfo> = Vec::new();
+    while packer.remaining() > 4 && par_infos.len() < 32 {
+        let start_pos = packer.pos;
+        let mut info = ParInfo::default();
+
+        // word0 = Paige par_info.justification (0=left, 1=center, 2=right, 3=justify)
+        info.justification = packer.unpack_num();
+        // word2 (lineHeight)
+        info.line_height = packer.unpack_num();
+        // dword250 (boxType) — discard
+        packer.unpack_num();
+        // int25C[3] — LeftIndent, RightIndent, FirstIndent
+        info.left_indent = packer.unpack_num();
+        info.right_indent = packer.unpack_num();
+        info.first_indent = packer.unpack_num();
+        // dword268 (border), dword26C (margin) — discard
+        packer.unpack_num();
+        packer.unpack_num();
+        // dword270 (LineSpacing) ← target field
+        info.line_spacing = packer.unpack_num();
+        // dword274 if version >= 65547
+        if doc_version >= 65547 { packer.unpack_num(); }
+        // dword278..dword294 (8 values)
+        for _ in 0..8 { packer.unpack_num(); }
+        // wordC if version >= 65552
+        if doc_version >= 65552 { packer.unpack_num(); }
+        // UnpackRefcon (variable)
+        packer.unpack_refcon(doc_version);
+        // dword2E8
+        packer.unpack_num();
+        // gap2A8 (8 values)
+        for _ in 0..8 { packer.unpack_num(); }
+        // wordE: extra inner loop count
+        let word_e = packer.unpack_num();
+        let sizea = word_e;
+        if word_e > 0 {
+            let actual = if word_e > 32 { 32 } else { word_e };
+            for _ in 0..actual {
+                // 3 UnpackNum + 1 UnpackRefcon
+                packer.unpack_num();
+                packer.unpack_num();
+                packer.unpack_num();
+                packer.unpack_refcon(doc_version);
+            }
+            if sizea > 32 {
+                for _ in 0..(sizea - 32) {
+                    packer.unpack_num();
+                }
+            }
+        }
+        // dword258 if version >= 8
+        if doc_version >= 8 { packer.unpack_num(); }
+        // word4 (FirstIndent) if version >= 65548
+        if doc_version >= 65548 { packer.unpack_num(); }
+        // dword298, word6 (TopSpacing), word8 (BottomSpacing), wordA if version >= 65552
+        if doc_version >= 65552 {
+            packer.unpack_num();
+            info.top_spacing = packer.unpack_num();
+            info.bottom_spacing = packer.unpack_num();
+            packer.unpack_num();
+        }
+        // dword254 if version >= 65555
+        if doc_version >= 65555 { packer.unpack_num(); }
+        // dword210..238 (9 values) if version >= 131075
+        if doc_version >= 131075 {
+            for _ in 0..9 { packer.unpack_num(); }
+        }
+        // dword29C if version >= 131090
+        if doc_version >= 131090 { packer.unpack_num(); }
+        // dword244, 240, 24C, 248 if version >= 131090
+        if doc_version >= 131090 {
+            packer.unpack_num();
+            packer.unpack_num();
+            packer.unpack_num();
+            packer.unpack_num();
+            // dword218 if version >= 196614
+            if doc_version >= 196614 { packer.unpack_num(); }
+            // dword234 — extra read in the >=196615 branch
+            if doc_version >= 196615 { packer.unpack_num(); }
+            // dword23C if version >= 196616
+            if doc_version >= 196616 { packer.unpack_num(); }
+        }
+
+        // Safety: if no progress made, abort to avoid infinite loop.
+        if packer.pos == start_pos { break; }
+
+        debug!(
+            "  par_info[{}] line_spacing={} top_spacing={} bottom_spacing={}",
+            par_infos.len(), info.line_spacing, info.top_spacing, info.bottom_spacing
+        );
+        par_infos.push(info);
+    }
+    par_infos
 }
 
 /// Font information from Section 9
@@ -1479,6 +1999,16 @@ fn create_styled_spans(
             &styles.styles[0]
         };
 
+        // Trust the per-style font_size verbatim. We now source it from
+        // Paige's `dword84` (pg_fixed `point`, the real point size) rather
+        // than `word46` (RTF stylesheet number), so the historical
+        // "word48 == 0 → fall back to document default" override is no
+        // longer needed and was actively wrong for the Junkbot help screen
+        // (S7.7: dword84 → 6 px body text was being inflated to 12 px
+        // because its word48 happens to be 0). The CS Junkbot credits
+        // 04b_08 * concern that motivated the override does not regress
+        // because dword84 already carries the correct point size for the
+        // default style too.
         let html_style = xmed_style_to_html_style(style);
         let color_hex = html_style.color.map(|c| format!("#{:06X}", c & 0xFFFFFF)).unwrap_or_else(|| "none".to_string());
         let bg_hex = html_style.bg_color.map(|c| format!("#{:06X}", c & 0xFFFFFF)).unwrap_or_else(|| "none".to_string());

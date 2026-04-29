@@ -283,16 +283,36 @@ impl TextMemberHandlers {
                         text_data.top_spacing,
                         text_data.bottom_spacing,
                     );
-                    // Count CRLF / lone CR / lone LF as one break each. Without
-                    // CRLF normalisation Lingo's `& RETURN` (which is `\r\n` on
-                    // Windows-saved movies) double-counts and over-allocates
-                    // text height — Coke Studios' roomlist hits this and
-                    // double-spaces every row.
-                    let line_count = text_data.text
-                        .replace("\r\n", "\n")
-                        .chars()
-                        .filter(|c| *c == '\r' || *c == '\n')
-                        .count() + 1;
+                    // Count lines, accounting for word-wrap when enabled. Without
+                    // wrap-aware counting, HTML-set #adjust members (e.g. CS recycler
+                    // help text — one paragraph wrapped to 6 lines at width 355)
+                    // collapse to a single-line `line_count = 1` here and the
+                    // returned rect-bottom (17) disagrees with `.height` (~85),
+                    // since `.height` already calls measure_text_wrapped.
+                    let wrap_width = if text_data.width > 0 {
+                        text_data.width
+                    } else if let Some(ref info) = text_data.info {
+                        if info.width > 0 { info.width as u16 } else { 0 }
+                    } else { 0 };
+                    let line_count = if text_data.word_wrap && wrap_width > 0 {
+                        let (_, wrapped_h) = measure_text_wrapped(
+                            &text_data.text, &font, wrap_width, true,
+                            text_data.fixed_line_space,
+                            text_data.top_spacing, text_data.bottom_spacing,
+                            text_data.char_spacing,
+                        );
+                        let raw_line_h = font.char_height.saturating_sub(1).max(1) as u16;
+                        (wrapped_h / raw_line_h.max(1)).max(1) as usize
+                    } else {
+                        // Count CRLF / lone CR / lone LF as one break each.
+                        // Without CRLF normalisation Lingo's `& RETURN` (which
+                        // is `\r\n` on Windows-saved movies) double-counts.
+                        text_data.text
+                            .replace("\r\n", "\n")
+                            .chars()
+                            .filter(|c| *c == '\r' || *c == '\n')
+                            .count() + 1
+                    };
                     let nominal = if text_data.font_size > 0 {
                         text_data.font_size
                     } else if font.font_size > 0 {
@@ -300,8 +320,32 @@ impl TextMemberHandlers {
                     } else {
                         font.char_height
                     };
-                    // Director's glyph-extent line height is ~1.4 × nominal size.
-                    let line_h = (nominal as f32 * 1.4).round() as u16;
+                    // Director's per-line height for PFR-rendered text is
+                    // capped at `nominal × 1.5`. The PFR atlas's cell
+                    // height is otherwise authoritative (matches the
+                    // rasterized glyph extent), but pixel fonts pad their
+                    // cell well past 1.5× nominal — 04b_08 * 12pt has
+                    // char_height=26 (cell-1=25) for ~8 px glyphs. Without
+                    // this cap, member 16 (CS Junkbot credits, 19 lines
+                    // of 04b_08 *) reports 19×25=485 vs Director's 375.
+                    // Tight-cell PFR fonts (Verdana/Arial 12pt:
+                    // char_height≈14) still get the smaller cell-1=13 and
+                    // don't regress.
+                    let cell_h = if font.char_widths.is_some() {
+                        font.char_height.saturating_sub(1)
+                    } else {
+                        font.char_height
+                    };
+                    let nominal_capped = (nominal as f32 * 1.5).round() as u16;
+                    // When the member has an explicit fixed_line_space,
+                    // trust it as the per-line extent — `cell_h = char_h - 1`
+                    // is one pixel taller than fixed_line_space for pixel
+                    // fonts, which inflates a 16-line list by 16 px.
+                    let line_h = if text_data.fixed_line_space > 0 {
+                        text_data.fixed_line_space
+                    } else {
+                        cell_h.min(nominal_capped)
+                    };
                     // Match the renderer's per-line advance at font.rs:921 —
                     // it adds top_spacing AND bottom_spacing to the line step
                     // every iteration. The CS Hotel Navigator Writer maps
@@ -333,23 +377,66 @@ impl TextMemberHandlers {
                 } else if let Some(ref info) = text_data.info {
                     if info.width > 0 { box_width = info.width as u16; }
                 }
-                let mut box_height = measured_height;
-                if text_data.box_type != "adjust" {
-                    if text_data.height > 0 {
-                        box_height = box_height.max(text_data.height);
-                    }
-                    if let Some(ref info) = text_data.info {
-                        if info.height > 0 {
-                            box_height = box_height.max(info.height as u16);
-                        }
-                    }
-                }
+                // Mirror the `.height` getter: trust `text_data.height`
+                // for non-#adjust members and for #adjust members whose
+                // text has explicit line breaks (where the stored value is
+                // the laid-out total). Also trust it for members that were
+                // AUTHORED with multi-paragraph data (par_runs.len() > 1) —
+                // Director keeps `member.rect`/`.height` immutable across
+                // `member.text = "…"` writes, so a Junkbot level-name list
+                // authored with 16 paragraphs reports 331 even after Lingo
+                // overwrites the text with a single name. Without the
+                // par_runs gate we re-measured the 1-line content and
+                // reported `line_h ≈ fixed_line_space + 1 = 22`, clipping
+                // the rendered bitmap to one line.
+                // Wrap-only #adjust (single paragraph, no \n — member 82
+                // recycler help, par_runs.len() ≤ 1) still falls through.
+                let text_has_breaks = text_data.text.contains('\n')
+                    || text_data.text.contains('\r');
+                let is_multi_par_authored = text_data.par_runs.len() > 1;
+                let box_height = if text_data.height > 0
+                    && (text_data.box_type != "adjust"
+                        || text_has_breaks
+                        || is_multi_par_authored)
+                {
+                    text_data.height
+                } else if let Some(ref info) = text_data.info {
+                    if info.height > 0 { info.height as u16 } else { measured_height }
+                } else {
+                    measured_height
+                };
                 Ok(Datum::Rect([0.0, 0.0, box_width as f64, box_height as f64], 0))
             }
             "height" => {
-                // For #adjust box type, always calculate from text measurement.
-                // For #fixed/#scroll, return stored height if set.
-                if text_data.box_type != "adjust" && text_data.height > 0 {
+                // Trust the stored `text_data.height` whenever it represents
+                // a laid-out total — that's the case for:
+                //   - non-#adjust members (lock-to-authored-size)
+                //   - #adjust members whose text has EXPLICIT line breaks
+                //     (\n / \r). Creation derives box_h from page_height
+                //     (Paige's doc_bottom = laid-out total) for these, and
+                //     re-measuring with our PFR metrics drifts from
+                //     Director (CS Junkbot credits member 171: stored
+                //     375 = Director's value, but our wrap-aware re-measure
+                //     produces 483).
+                // Wrap-only #adjust (single paragraph, no \n — member 82
+                // recycler help) still falls through to the dynamic
+                // measurement, since stored text_info.height there is the
+                // single-line authored value (~85), smaller than Director's
+                // laid-out 108.
+                // Members authored with multi-paragraph data (par_runs.len()
+                // > 1) also trust the stored value: Director keeps the
+                // authored layout height immutable through `.text = …`
+                // writes, so Junkbot's level-name list reports 331 even
+                // when Lingo has temporarily overwritten the text with a
+                // single line.
+                let text_has_breaks = text_data.text.contains('\n')
+                    || text_data.text.contains('\r');
+                let is_multi_par_authored = text_data.par_runs.len() > 1;
+                if text_data.height > 0
+                    && (text_data.box_type != "adjust"
+                        || text_has_breaks
+                        || is_multi_par_authored)
+                {
                     Ok(Datum::Int(text_data.height as i32))
                 } else {
                     let font = if !text_data.font.is_empty() {
@@ -427,7 +514,25 @@ impl TextMemberHandlers {
                         } else {
                             text_data.text.chars().filter(|c| *c == '\r' || *c == '\n').count() + 1
                         };
-                        let line_h = (nominal as f32 * 1.4).round() as u16;
+                        // See `.rect` getter for the rationale —
+                        // `min(cell_h, nominal × 1.5)` caps pixel-padded
+                        // PFR atlases without regressing tight-cell ones.
+                        let cell_h = if font.char_widths.is_some() {
+                            font.char_height.saturating_sub(1)
+                        } else {
+                            font.char_height
+                        };
+                        let nominal_capped = (nominal as f32 * 1.5).round() as u16;
+                        // Trust the member's fixed_line_space when set —
+                        // `cell_h = char_h - 1` runs one pixel hotter than
+                        // the authored stride for PFR pixel fonts (e.g.
+                        // fixed_line_space=21 → cell_h=22), inflating
+                        // single-line height to fixed_line_space+1.
+                        let line_h = if text_data.fixed_line_space > 0 {
+                            text_data.fixed_line_space
+                        } else {
+                            cell_h.min(nominal_capped)
+                        };
                         // See `.rect` getter for rationale on folding
                         // top_spacing + bottom_spacing into line_step.
                         let line_step = (if text_data.fixed_line_space > 0 {
@@ -1404,7 +1509,9 @@ impl TextMemberHandlers {
 
                 } // end bitmap glyph else branch
 
-                let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+                // Text `.image` snapshots are produced per-call and not owned
+                // by any cast member; let the DatumRef refcount free them.
+                let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
                 Ok(Datum::BitmapRef(bitmap_ref))
             }
             "rtf" => {
@@ -1581,9 +1688,32 @@ impl TextMemberHandlers {
             "fontstyle" => borrow_member_mut(
                 member_ref,
                 |player| {
+                    // Lingo accepts fontStyle as a list of symbols
+                    // (`[#plain, #bold]`), a single symbol (`#plain`), or a
+                    // bare string (`"plain"`). The previous unwrap() on
+                    // `to_list()` panicked for the latter two — Coke Studios'
+                    // InfoStandObject does `oDescMember.fontStyle = "plain"`
+                    // which caused the displayDescription handler to abort
+                    // mid-flow and the description sprite never finished
+                    // wiring up.
                     let mut item_strings = Vec::new();
-                    for x in value.to_list().unwrap() {
-                        item_strings.push(player.get_datum(x).string_value()?);
+                    match value {
+                        Datum::List(_, items, _) => {
+                            for x in items {
+                                item_strings.push(player.get_datum(&x).string_value()?);
+                            }
+                        }
+                        Datum::Symbol(s) | Datum::String(s) => {
+                            item_strings.push(s.clone());
+                        }
+                        _ => {
+                            // Best-effort: try string conversion, otherwise empty.
+                            if let Ok(s) = value.string_value() {
+                                if !s.is_empty() {
+                                    item_strings.push(s);
+                                }
+                            }
+                        }
                     }
                     Ok(item_strings)
                 },
