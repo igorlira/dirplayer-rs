@@ -98,7 +98,12 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
                 PaletteRef::BuiltIn(get_system_default_palette()),
             );
             render_stage_to_bitmap(player, &mut new_bitmap, None);
-            let bitmap_id = player.bitmap_manager.add_bitmap(new_bitmap);
+            // Ephemeral: a fresh stage snapshot per call. Once no DatumRef
+            // wraps it (e.g. after the script's `(the stage).image` Lingo
+            // expression goes out of scope) the bitmap is freed. RemoteControl
+            // CameraScreen scripts call this every frame — without ephemeral
+            // tracking each call leaks ~movie_w*movie_h*4 bytes forever.
+            let bitmap_id = player.bitmap_manager.add_ephemeral_bitmap(new_bitmap);
             Ok(Datum::BitmapRef(bitmap_id))
         }
         "name" => Ok(Datum::String("stage".to_string())),

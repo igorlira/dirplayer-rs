@@ -639,7 +639,11 @@ impl CastMemberRefHandlers {
                             let palettes = player.movie.cast_manager.palettes();
                             bitmap.flood_fill((0, 0), fill, &palettes);
                         }
-                        let bitmap_id = player.bitmap_manager.add_bitmap(bitmap);
+                        // Vector shape `.image` rasterizes the shape into a
+                        // fresh bitmap that isn't tied to any cast member's
+                        // image_ref — refcount via DatumRef so it's freed
+                        // when the script's reference goes away.
+                        let bitmap_id = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
                         return Ok(Datum::BitmapRef(bitmap_id));
                     } else if prop == "rect" {
                         let w = vs.width().ceil() as i32;

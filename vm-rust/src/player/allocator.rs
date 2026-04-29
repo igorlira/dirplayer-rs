@@ -228,7 +228,14 @@ pub trait DatumAllocatorTrait {
     fn alloc_datum(&mut self, datum: Datum) -> Result<DatumRef, ScriptError>;
     fn get_datum(&self, id: &DatumRef) -> &Datum;
     fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum;
-    fn on_datum_ref_dropped(&mut self, id: DatumId);
+    /// Free the arena entry for `id`. If the freed entry was holding an
+    /// ephemeral `Datum::BitmapRef`, returns that `BitmapRef` so the caller
+    /// can run `bitmap_manager.decref_ephemeral(...)` outside of the
+    /// allocator's borrow. Returning `None` means no bitmap work is owed.
+    fn on_datum_ref_dropped(
+        &mut self,
+        id: DatumId,
+    ) -> Option<crate::player::bitmap::manager::BitmapRef>;
 }
 
 pub trait ScriptInstanceAllocatorTrait {
@@ -404,16 +411,31 @@ impl DatumAllocator {
         self.int_dealloc_count = 0;
     }
 
-    fn dealloc_datum(&mut self, id: DatumId) {
+    /// Free arena slot `id`. Returns the ephemeral `BitmapRef` (if any) that
+    /// the freed entry was holding, so the caller can run
+    /// `bitmap_manager.decref_ephemeral` after returning — keeps the bitmap
+    /// manager hop outside of the allocator's own borrow.
+    fn dealloc_datum(
+        &mut self,
+        id: DatumId,
+    ) -> Option<crate::player::bitmap::manager::BitmapRef> {
+        let mut bitmap_to_decref = None;
         if let Some(entry) = self.datums.get(id) {
             if unsafe { *entry.ref_count.get() } == u32::MAX {
-                return; // Pooled/immortal entry, never free
+                return None; // Pooled/immortal entry, never free
             }
-            if matches!(&entry.datum, Datum::Int(_)) {
-                self.int_dealloc_count += 1;
+            match &entry.datum {
+                Datum::Int(_) => {
+                    self.int_dealloc_count += 1;
+                }
+                Datum::BitmapRef(bm_ref) => {
+                    bitmap_to_decref = Some(*bm_ref);
+                }
+                _ => {}
             }
         }
         self.datums.remove(id);
+        bitmap_to_decref
     }
 
     fn dealloc_script_instance(&mut self, id: ScriptInstanceId) {
@@ -489,6 +511,15 @@ impl DatumAllocatorTrait for DatumAllocator {
         }
 
         let is_int = matches!(&datum, Datum::Int(_));
+        // Capture the bitmap ref (if any) BEFORE moving `datum` into the
+        // entry — we incref ephemeral bitmaps so they survive as long as at
+        // least one arena entry references them. Cast-member-owned bitmaps
+        // aren't in `ephemeral_refs` so the incref is a no-op for them.
+        let bitmap_to_incref = if let Datum::BitmapRef(bm_ref) = &datum {
+            Some(*bm_ref)
+        } else {
+            None
+        };
         let entry = DatumRefEntry {
             id: 0,
             ref_count: UnsafeCell::new(1), // Start at 1 to avoid the extra increment in from_id
@@ -500,6 +531,18 @@ impl DatumAllocatorTrait for DatumAllocator {
         let ref_count_ptr = entry.ref_count.get();
         if is_int {
             self.int_alloc_count += 1;
+        }
+        if let Some(bm_ref) = bitmap_to_incref {
+            // Reach the bitmap manager via PLAYER_OPT. The allocator and
+            // bitmap manager are both fields of DirPlayer; we touch the
+            // bitmap manager AFTER finishing the allocator's own arena work
+            // so the two &mut borrows don't overlap.
+            unsafe {
+                if let Some(player) = crate::player::PLAYER_OPT.as_mut() {
+                    let player_ptr = player as *mut crate::player::DirPlayer;
+                    (*player_ptr).bitmap_manager.incref_ephemeral(bm_ref);
+                }
+            }
         }
         Ok(DatumRef::Ref(id, ref_count_ptr))
     }
@@ -527,8 +570,11 @@ impl DatumAllocatorTrait for DatumAllocator {
     }
 
     #[inline]
-    fn on_datum_ref_dropped(&mut self, id: DatumId) {
-        self.dealloc_datum(id);
+    fn on_datum_ref_dropped(
+        &mut self,
+        id: DatumId,
+    ) -> Option<crate::player::bitmap::manager::BitmapRef> {
+        self.dealloc_datum(id)
     }
 }
 

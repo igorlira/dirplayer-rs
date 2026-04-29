@@ -223,37 +223,51 @@ fn blend_pixel(
         36 => {
             blend_color_alpha(dst, src, effective_alpha)
         }
-        // 37 = Light (Lighten)
-        // Pick the higher of src and dst for each channel.
-        // bg_color pixels are transparent (skipped).
+        // 37 = Lightest
+        // Compares the *whole* RGB pixels in src and dst by luminance and
+        // returns the brighter pixel intact — NOT a per-channel max (that
+        // would invent a colour neither source had, e.g. (200,0,0) vs
+        // (0,0,200) becoming (200,0,200) magenta). bg_color in src is
+        // transparent (skipped).
         37 => {
             if src == bg_color {
                 dst
             } else {
-                let r = src.0.max(dst.0);
-                let g = src.1.max(dst.1);
-                let b = src.2.max(dst.2);
+                let src_luma = (src.0 as u32) * 299
+                    + (src.1 as u32) * 587
+                    + (src.2 as u32) * 114; // 0..255_000
+                let dst_luma = (dst.0 as u32) * 299
+                    + (dst.1 as u32) * 587
+                    + (dst.2 as u32) * 114;
+                let chosen = if src_luma >= dst_luma { src } else { dst };
                 if blend_alpha >= 0.999 {
-                    (r, g, b)
+                    chosen
                 } else {
-                    blend_color_alpha(dst, (r, g, b), blend_alpha)
+                    blend_color_alpha(dst, chosen, blend_alpha)
                 }
             }
         }
-        // 39 = Dark (Darken)
-        // Pick the lower of src and dst for each channel.
-        // bg_color pixels are transparent (skipped).
+        // 39 = Darkest
+        // Compares the *whole* RGB pixels in src and dst by luminance and
+        // returns the darker pixel intact. Per-channel min would drive
+        // pixels toward black even when neither source was that dark
+        // (CS RemoteControlCamera CRT showed this — colour came out
+        // muddy/near-black). bg_color in src is transparent (skipped).
         39 => {
             if src == bg_color {
                 dst
             } else {
-                let r = src.0.min(dst.0);
-                let g = src.1.min(dst.1);
-                let b = src.2.min(dst.2);
+                let src_luma = (src.0 as u32) * 299
+                    + (src.1 as u32) * 587
+                    + (src.2 as u32) * 114;
+                let dst_luma = (dst.0 as u32) * 299
+                    + (dst.1 as u32) * 587
+                    + (dst.2 as u32) * 114;
+                let chosen = if src_luma <= dst_luma { src } else { dst };
                 if blend_alpha >= 0.999 {
-                    (r, g, b)
+                    chosen
                 } else {
-                    blend_color_alpha(dst, (r, g, b), blend_alpha)
+                    blend_color_alpha(dst, chosen, blend_alpha)
                 }
             }
         }

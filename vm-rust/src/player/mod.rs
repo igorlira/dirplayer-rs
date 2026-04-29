@@ -3962,7 +3962,10 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
             let bitmap_ref = player.get_datum(datum).to_bitmap_ref().unwrap();
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
             let new_bitmap = bitmap.clone();
-            let new_bitmap_ref = player.bitmap_manager.add_bitmap(new_bitmap);
+            // `duplicate(...)` on a Datum::BitmapRef produces an unowned copy.
+            // It is freed once the wrapping DatumRef goes away (or persists
+            // for as long as something holds it via refcount).
+            let new_bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(new_bitmap);
             Datum::BitmapRef(new_bitmap_ref)
         }),
         _ => reserve_player_ref(|player| player.get_datum(datum).clone()),

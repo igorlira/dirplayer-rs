@@ -298,7 +298,11 @@ impl FieldMemberHandlers {
                             top_spacing,
                         );
 
-                        let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+                        // Field `.image` returns a freshly rasterized snapshot
+                        // of the text. Each call rasterizes again, so the
+                        // bitmap isn't anchored — let the DatumRef refcount
+                        // free it when the script drops the value.
+                        let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
                         Ok(Datum::BitmapRef(bitmap_ref))
                     }
                     _ => unreachable!(),

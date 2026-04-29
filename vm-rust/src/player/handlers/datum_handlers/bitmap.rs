@@ -259,8 +259,9 @@ impl BitmapDatumHandlers {
                 &params,
             );
 
-            // Add the new bitmap to the manager and return a reference
-            let new_bitmap_ref = player.bitmap_manager.add_bitmap(cropped_bitmap);
+            // Ephemeral: `bitmap.duplicate(rect)` produces a fresh bitmap not
+            // owned by any cast member. Free when the wrapping DatumRef drops.
+            let new_bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(cropped_bitmap);
             Ok(player.alloc_datum(Datum::BitmapRef(new_bitmap_ref)))
         })
     }
@@ -309,7 +310,9 @@ impl BitmapDatumHandlers {
                 alpha_bitmap.data.fill(255);
             }
 
-            let new_ref = player.bitmap_manager.add_bitmap(alpha_bitmap);
+            // Ephemeral: `bitmap.extractAlpha()` returns a fresh derived bitmap
+            // not owned by a cast member. Free when the wrapping DatumRef drops.
+            let new_ref = player.bitmap_manager.add_ephemeral_bitmap(alpha_bitmap);
             Ok(player.alloc_datum(Datum::BitmapRef(new_ref)))
         })
     }

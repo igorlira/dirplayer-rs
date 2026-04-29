@@ -1621,7 +1621,11 @@ impl FontMemberHandlers {
                                     );
                                 }
 
-                                let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+                                // Text member `.image` rasterizes fresh each
+                                // call; refcount via DatumRef so the snapshot
+                                // is freed when the script's reference drops.
+                                let bitmap_ref =
+                                    player.bitmap_manager.add_ephemeral_bitmap(bitmap);
                                 Ok(Datum::BitmapRef(bitmap_ref))
                             }
                             _ => unreachable!(),

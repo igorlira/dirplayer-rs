@@ -619,7 +619,12 @@ impl Shockwave3dMemberHandlers {
                 );
                 bitmap.data = rgba_data;
                 bitmap.use_alpha = true;
-                let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+                // Offscreen 3D snapshot — not stored in w3d_frame_buffers, so
+                // it has no other owner. Refcount through the DatumRef so the
+                // snapshot is freed once the script releases it. The cached
+                // path above (w3d_frame_buffers) returns an anchored bitmap
+                // and bypasses this branch.
+                let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
                 Ok(Datum::BitmapRef(bitmap_ref))
             }
             "backgroundColor" => {
