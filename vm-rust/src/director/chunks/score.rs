@@ -186,19 +186,25 @@ impl ScoreFrameChannelData {
                 .map_err(|e| format!("Failed to read back_color_b: {:?}", e))?;
         }
 
-        // D8+ rotation/skew fields
+        // D8+ rotation/skew fields. Each is a 4-byte i32 fixed-point value
+        // scaled by 100 (e.g. 25° → stored 2500, -26° → -2600, 337° → 33700).
+        // The previous parser split each 4-byte field into two u16s and
+        // labeled the high half "reserved_28" / "reserved_32" while reading
+        // the low half as i16 / 100. That works for angles in
+        // [-327.67°, +327.67°] (the i16 range), but overflows wrap large
+        // positive angles into negatives — e.g. FurniFactory clock display's
+        // skew=337 was being read as 0x000083A4 → low half 0x83A4 = -31836 →
+        // /100 = -318.36, instead of the correct 337. Reading the full i32
+        // matches Director (also confirms the C# PgWalkStyle parser's wider
+        // field width).
         if sz >= 36 {
-            reserved_28 = reader.read_u16()
-                .map_err(|e| format!("Failed to read reserved_28: {:?}", e))?;
-            let rotation_raw = reader.read_u16()
-                .map_err(|e| format!("Failed to read rotation: {:?}", e))? as i16;
+            let rotation_raw = reader.read_u32()
+                .map_err(|e| format!("Failed to read rotation: {:?}", e))? as i32;
             if rotation_raw != 0 {
                 rotation_angle = rotation_raw as f64 / 100.0;
             }
-            reserved_32 = reader.read_u16()
-                .map_err(|e| format!("Failed to read reserved_32: {:?}", e))?;
-            let skew_raw = reader.read_u16()
-                .map_err(|e| format!("Failed to read skew: {:?}", e))? as i16;
+            let skew_raw = reader.read_u32()
+                .map_err(|e| format!("Failed to read skew: {:?}", e))? as i32;
             if skew_raw != 0 {
                 skew_angle = skew_raw as f64 / 100.0;
             }
