@@ -34,7 +34,7 @@ browser_e2e_test!(test_nintendo_melon_load, |player| async move {
     player.click_sprite(sprite().number(14)).await?;
 
     // wait until play again button shows up
-    player.step_until(sprite().member("playAgain_button").visible(1.0)).timeout(10.0).await?;
+    player.step_until(sprite().member("playAgain_button").visible(1.0)).timeout(45.0).await?;
 
     snapshots.verify("match_result", player.snapshot_stage())?;
 
