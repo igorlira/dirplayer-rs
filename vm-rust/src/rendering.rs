@@ -900,6 +900,52 @@ fn render_filmloop_from_channel_data(
 
         match &member.member_type {
             CastMemberType::Bitmap(bitmap_member) => {
+                // Director rule: filmloop child sprites ALWAYS render with
+                // their OWN authored ink/fore/bgColor. The outer sprite's ink
+                // applies to the composited filmloop bitmap as a whole (at
+                // the stage layer), it does NOT cascade down to override
+                // individual child inks.
+                let (ink, sprite_color, sprite_bg_color) = {
+                    let fore_is_rgb = (data.color_flag & 0x1) != 0
+                        || data.fore_color_g != 0
+                        || data.fore_color_b != 0;
+                    let fg = if fore_is_rgb {
+                        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
+                    } else {
+                        ColorRef::PaletteIndex(data.fore_color)
+                    };
+                    let bg = if fore_is_rgb {
+                        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
+                    } else {
+                        ColorRef::PaletteIndex(data.back_color)
+                    };
+                    // Mask off bit 7 (stretch flag) from the ink byte.
+                    ((data.ink as u32) & 0x3F, fg, bg)
+                };
+
+                // For ink 9 (Mask), the mask bitmap is the next cast member
+                // (cast_member + 1) in the same library. Resolve and clone it
+                // before taking the mutable borrow on bitmap_manager below.
+                let ink9_mask = if ink == 9 {
+                    let mask_ref = CastMemberRef {
+                        cast_lib: if data.cast_lib == 65535 { filmloop_cast_lib } else { data.cast_lib as i32 },
+                        cast_member: data.cast_member as i32 + 1,
+                    };
+                    player.movie.cast_manager
+                        .find_filmloop_inner_member(&mask_ref)
+                        .and_then(|m| {
+                            if let CastMemberType::Bitmap(bm) = &m.member_type {
+                                Some(bm.image_ref)
+                            } else {
+                                None
+                            }
+                        })
+                        .and_then(|img_ref| player.bitmap_manager.get_bitmap(img_ref))
+                        .cloned()
+                } else {
+                    None
+                };
+
                 let sprite_bitmap = player
                     .bitmap_manager
                     .get_bitmap_mut(bitmap_member.image_ref);
@@ -944,14 +990,6 @@ fn render_filmloop_from_channel_data(
                     src_rect.left, src_rect.top, src_rect.right, src_rect.bottom,
                     dst_rect.left, dst_rect.top, dst_rect.right, dst_rect.bottom
                 );
-
-                // Director behavior: Film loop internal sprites use the PARENT sprite's
-                // ink, color, and bgColor - not their own stored values.
-                // This is because film loops are just sequences of cast members rendered
-                // through the parent sprite's properties.
-                let sprite_color = parent_color.clone();
-                let sprite_bg_color = parent_bg_color.clone();
-                let ink = parent_ink;
 
                 // Filmloop blend: inverted 0-255 scale (0 → 100%, 127 → ~50%)
                 // 255 is treated as default/opaque (same as shape/vector paths)
@@ -1044,7 +1082,7 @@ fn render_filmloop_from_channel_data(
                     original_dst_rect: Some(sprite_rect.clone()),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None,
+                    ink9_mask_bitmap: ink9_mask.as_ref(),
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -1112,11 +1150,25 @@ fn render_filmloop_from_channel_data(
                         ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
                     };
 
+                    let fore_is_rgb = (data.color_flag & 0x1) != 0
+                        || data.fore_color_g != 0
+                        || data.fore_color_b != 0;
+                    let child_color = if fore_is_rgb {
+                        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
+                    } else {
+                        ColorRef::PaletteIndex(data.fore_color)
+                    };
+                    let child_bg = if fore_is_rgb {
+                        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
+                    } else {
+                        ColorRef::PaletteIndex(data.back_color)
+                    };
+
                     let params = CopyPixelsParams {
                         blend,
                         ink,
-                        color: parent_color.clone(),
-                        bg_color: parent_bg_color.clone(),
+                        color: child_color,
+                        bg_color: child_bg,
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
@@ -1188,11 +1240,25 @@ fn render_filmloop_from_channel_data(
                         ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
                     };
 
+                    let fore_is_rgb = (data.color_flag & 0x1) != 0
+                        || data.fore_color_g != 0
+                        || data.fore_color_b != 0;
+                    let child_color = if fore_is_rgb {
+                        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
+                    } else {
+                        ColorRef::PaletteIndex(data.fore_color)
+                    };
+                    let child_bg = if fore_is_rgb {
+                        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
+                    } else {
+                        ColorRef::PaletteIndex(data.back_color)
+                    };
+
                     let params = CopyPixelsParams {
                         blend,
                         ink,
-                        color: parent_color.clone(),
-                        bg_color: parent_bg_color.clone(),
+                        color: child_color,
+                        bg_color: child_bg,
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
@@ -1261,6 +1327,103 @@ fn render_filmloop_from_channel_data(
                         );
                     }
                 }
+            }
+            CastMemberType::FilmLoop(inner_film_loop) => {
+                // Nested filmloop child: render the inner filmloop into its
+                // own bitmap at its natural size, then composite onto the
+                // parent filmloop's working bitmap using the resolved
+                // ink/fore/bgColor (child's own when parent_ink==0, else
+                // parent override).
+                let inner_initial_rect = inner_film_loop.initial_rect.clone();
+
+                let (child_ink, child_color, child_bg_color) = if parent_ink == 0 {
+                    let fore_is_rgb = (data.color_flag & 0x1) != 0
+                        || data.fore_color_g != 0
+                        || data.fore_color_b != 0;
+                    let fg = if fore_is_rgb {
+                        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
+                    } else {
+                        ColorRef::PaletteIndex(data.fore_color)
+                    };
+                    let bg = if fore_is_rgb {
+                        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
+                    } else {
+                        ColorRef::PaletteIndex(data.back_color)
+                    };
+                    ((data.ink as u32) & 0x3F, fg, bg)
+                } else {
+                    (parent_ink, parent_color.clone(), parent_bg_color.clone())
+                };
+
+                let inner_w = inner_initial_rect.width().max(1);
+                let inner_h = inner_initial_rect.height().max(1);
+
+                let mut inner_bitmap = Bitmap::new(
+                    inner_w as u16,
+                    inner_h as u16,
+                    32,
+                    32,
+                    8,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                inner_bitmap.use_alpha = true;
+                inner_bitmap.data.fill(0);
+
+                // Pass ink=0 down recursively so every grandchild renders with
+                // its OWN authored ink (matte/bgTrans/mask/add‑pin). The
+                // child_ink applies only at the composite step below, on the
+                // already-rendered inner bitmap.
+                render_score_to_bitmap_with_offset(
+                    player,
+                    &ScoreRef::FilmLoop(sprite_member_ref.clone()),
+                    &mut inner_bitmap,
+                    None,
+                    IntRect::from_size(0, 0, inner_w, inner_h),
+                    (inner_initial_rect.left, inner_initial_rect.top),
+                    Some(FilmLoopParentProps {
+                        ink: 0,
+                        color: child_color.clone(),
+                        bg_color: child_bg_color.clone(),
+                    }),
+                );
+
+                let blend = crate::player::score::convert_raw_blend(data.blend, player.movie.dir_version);
+
+                // Mirror the Bitmap arm's flip handling so nested filmloops
+                // honor the child sprite's flipH/flipV bits.
+                let flip_h = data.flip_h();
+                let flip_v = data.flip_v();
+                let dst_rect = {
+                    let mut r = sprite_rect.clone();
+                    if flip_h { std::mem::swap(&mut r.left, &mut r.right); }
+                    if flip_v { std::mem::swap(&mut r.top, &mut r.bottom); }
+                    r
+                };
+
+                let params = CopyPixelsParams {
+                    blend,
+                    ink: child_ink,
+                    color: child_color,
+                    bg_color: child_bg_color,
+                    mask_image: None,
+                    is_text_rendering: false,
+                    rotation: data.rotation,
+                    skew: data.skew,
+                    sprite: None,
+                    mask_offset: (0, 0),
+                    original_dst_rect: Some(sprite_rect.clone()),
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
+                    ink9_mask_bitmap: None,
+                };
+
+                bitmap.copy_pixels_with_params(
+                    &palettes,
+                    &inner_bitmap,
+                    dst_rect,
+                    IntRect::from_size(0, 0, inner_w, inner_h),
+                    &params,
+                );
             }
             _ => {
                 // Other member types not yet supported in filmloop rendering
