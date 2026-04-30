@@ -356,6 +356,7 @@ impl BitmapDatumHandlers {
                     for i in (3..bitmap.data.len()).step_by(4) {
                         bitmap.data[i] = alpha;
                     }
+                    bitmap.use_alpha = true;
                     // bitmap.version += 1;
 
                     Ok(player.alloc_datum(datum_bool(true)))
@@ -397,6 +398,7 @@ impl BitmapDatumHandlers {
                             }
                         }
                     }
+                    bitmap.use_alpha = true;
 
                     Ok(player.alloc_datum(datum_bool(true)))
                 }
