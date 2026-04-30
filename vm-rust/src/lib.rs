@@ -233,6 +233,147 @@ pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
     }));
 }
 
+/// Dump every authored child sprite inside a filmloop member to the browser
+/// console. Lingo can't reach a filmloop's child sprites directly (the
+/// member.media is opaque), so this exposes the parsed score state
+/// dirplayer-rs already holds in memory. Resolves keyframes the same way
+/// `render_filmloop_from_channel_data` does (most-recent frame_idx per
+/// channel up to current_frame). Call from the JS console:
+///   `vm.player_print_filmloop_sprites(2, 145)` for the spiderweb filmloop.
+#[wasm_bindgen]
+pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
+    use crate::player::{cast_member::CastMemberType, reserve_player_ref};
+    use crate::player::score::get_channel_number_from_index;
+    reserve_player_ref(|player| {
+        let member_ref = CastMemberRef { cast_lib, cast_member };
+        let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+            web_sys::console::warn_1(&format!(
+                "[filmloop-dump] member {}:{} not found", cast_lib, cast_member
+            ).into());
+            return;
+        };
+        let CastMemberType::FilmLoop(film) = &member.member_type else {
+            web_sys::console::warn_1(&format!(
+                "[filmloop-dump] member {}:{} ('{}') is not a filmloop",
+                cast_lib, cast_member, member.name
+            ).into());
+            return;
+        };
+
+        let frame = film.current_frame;
+        let frame_idx_target = frame.saturating_sub(1);
+        let init_data = &film.score.channel_initialization_data;
+
+        // Resolve active sprite per channel: most-recent frame_idx <= target
+        let mut latest: std::collections::HashMap<u16, (u32, &crate::director::chunks::score::ScoreFrameChannelData)> =
+            std::collections::HashMap::new();
+        for (frame_idx, channel_idx, data) in init_data.iter() {
+            if *channel_idx < 6 { continue; }
+            if data.cast_member == 0 { continue; }
+            if *frame_idx > frame_idx_target { continue; }
+            latest
+                .entry(*channel_idx)
+                .and_modify(|(f, d)| if *frame_idx > *f { *f = *frame_idx; *d = data; })
+                .or_insert((*frame_idx, data));
+        }
+        let mut entries: Vec<_> = latest.into_iter().collect();
+        entries.sort_by_key(|(ch, _)| *ch);
+
+        web_sys::console::warn_1(&format!(
+            "[filmloop-dump] member {}:{} '{}' frame={} init_data_entries={} active_channels={}",
+            cast_lib, cast_member, member.name,
+            frame, init_data.len(), entries.len()
+        ).into());
+
+        // Raw dump of ALL channel_init_data entries (no frame/filter), so we
+        // can see channels that activate later, "reverse ink" companions, etc.
+        let mut all_raw: Vec<_> = init_data.iter().collect();
+        all_raw.sort_by_key(|(f, c, _)| (*c, *f));
+        for (f, c, d) in all_raw.iter().take(80) {
+            let ilib = if d.cast_lib == 65535 { cast_lib } else { d.cast_lib as i32 };
+            let nm = player.movie.cast_manager
+                .find_filmloop_inner_member(&CastMemberRef { cast_lib: ilib, cast_member: d.cast_member as i32 })
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| "<no_member>".into());
+            web_sys::console::warn_1(&format!(
+                "[filmloop-raw]   f={} ch={} ink={} blend={} member=({},{}) '{}' size={}x{}",
+                f, c, d.ink, d.blend, ilib, d.cast_member, nm, d.width, d.height
+            ).into());
+        }
+
+        for (channel_idx, (frame_idx, data)) in entries {
+            let channel_num = get_channel_number_from_index(channel_idx as u32);
+            let resolved_lib = if data.cast_lib == 65535 { cast_lib } else { data.cast_lib as i32 };
+            let sprite_ref = CastMemberRef { cast_lib: resolved_lib, cast_member: data.cast_member as i32 };
+            let inner = player.movie.cast_manager.find_filmloop_inner_member(&sprite_ref);
+            let (mname, mtype, bm_info) = match inner {
+                Some(m) => {
+                    let info = if let CastMemberType::Bitmap(bm) = &m.member_type {
+                        let bmp = player.bitmap_manager.get_bitmap(bm.image_ref);
+                        match bmp {
+                            Some(b) => format!(" bm={}x{} bd={} obd={} use_alpha={} pal={:?}",
+                                b.width, b.height, b.bit_depth, b.original_bit_depth,
+                                b.use_alpha, b.palette_ref),
+                            None => " bm=<no_data>".into(),
+                        }
+                    } else {
+                        String::new()
+                    };
+                    (m.name.clone(), format!("{:?}", m.member_type.member_type_id()), info)
+                }
+                None => ("<not found>".into(), "<none>".into(), String::new()),
+            };
+            web_sys::console::warn_1(&format!(
+                "[filmloop-dump]   ch={} ink={} blend={} member=({},{}) '{}' [{}]{} pos=({},{}) size={}x{} flipH={} flipV={} fore/back=({}/{}) color_flag={} kf_frame={}",
+                channel_num,
+                data.ink,
+                data.blend,
+                resolved_lib, data.cast_member,
+                mname, mtype, bm_info,
+                data.pos_x, data.pos_y,
+                data.width, data.height,
+                data.flip_h(), data.flip_v(),
+                data.fore_color, data.back_color,
+                data.color_flag,
+                frame_idx
+            ).into());
+
+            // If the child is itself a filmloop, dump one level deeper so we
+            // can see what bitmaps it ultimately contains.
+            if let Some(m) = inner {
+                if let CastMemberType::FilmLoop(inner_film) = &m.member_type {
+                    let inner_target = inner_film.current_frame.saturating_sub(1);
+                    let mut inner_latest: std::collections::HashMap<u16, (u32, &crate::director::chunks::score::ScoreFrameChannelData)> =
+                        std::collections::HashMap::new();
+                    for (f, c, d) in inner_film.score.channel_initialization_data.iter() {
+                        if *c < 6 || d.cast_member == 0 || *f > inner_target { continue; }
+                        inner_latest
+                            .entry(*c)
+                            .and_modify(|(ef, ed)| if *f > *ef { *ef = *f; *ed = d; })
+                            .or_insert((*f, d));
+                    }
+                    let mut inner_entries: Vec<_> = inner_latest.into_iter().collect();
+                    inner_entries.sort_by_key(|(c, _)| *c);
+                    for (ic, (ifr, id)) in inner_entries {
+                        let icn = get_channel_number_from_index(ic as u32);
+                        let ilib = if id.cast_lib == 65535 { resolved_lib } else { id.cast_lib as i32 };
+                        let inested_ref = CastMemberRef { cast_lib: ilib, cast_member: id.cast_member as i32 };
+                        let (inn_name, inn_type) = match player.movie.cast_manager.find_filmloop_inner_member(&inested_ref) {
+                            Some(im) => (im.name.clone(), format!("{:?}", im.member_type.member_type_id())),
+                            None => ("<not found>".into(), "<none>".into()),
+                        };
+                        web_sys::console::warn_1(&format!(
+                            "[filmloop-dump]     >> nested ch={} ink={} member=({},{}) '{}' [{}] size={}x{} fore/back=({}/{}) color_flag={} kf_frame={}",
+                            icn, id.ink, ilib, id.cast_member, inn_name, inn_type,
+                            id.width, id.height, id.fore_color, id.back_color, id.color_flag, ifr
+                        ).into());
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[wasm_bindgen]
 pub fn mouse_down(x: f64, y: f64) {
     // Invert the stage auto-scale so mouseH/mouseV land in movie coordinates,
