@@ -292,90 +292,52 @@ pub fn render_preview_bitmap(
         CastMemberType::Font(font_member) => {
             let font_name = font_member.font_info.name.clone();
             let font_style = font_member.font_info.style;
-
-            // Resolve font: if a size override is requested and the member has PFR data,
-            // re-rasterize from THIS member's PFR data at the requested size.
-            // Otherwise use the member's own bitmap_ref directly.
-            let pfr_data = font_member.pfr_data.clone();
-            let pfr_parsed = font_member.pfr_parsed.clone();
-            let bitmap_ref = font_member.bitmap_ref;
-            let member_char_width = font_member.char_width;
-            let member_char_height = font_member.char_height;
-            let member_grid_columns = font_member.grid_columns;
-            let member_grid_rows = font_member.grid_rows;
-            let member_first_char_num = font_member.first_char_num;
-            let member_char_widths = font_member.char_widths.clone();
             let member_font_size = font_member.font_info.size;
-            let font_info = font_member.font_info.clone();
 
-            let font: Rc<BitmapFont> =
-                if let (Some(req_size), Some(raw), Some(parsed)) = (preview_font_size, &pfr_data, &pfr_parsed) {
-                    // PFR font with size override — rasterize this member's data at requested size
-                    if let Some(f) = player.font_manager.rasterize_pfr_at_size(
-                        raw, parsed, &font_name, font_style, req_size, &mut player.bitmap_manager,
-                    ) {
-                        f
-                    } else if let Some(br) = bitmap_ref {
-                        // Rasterization failed — fall back to member's existing bitmap
-                        Rc::new(BitmapFont {
-                            bitmap_ref: br,
-                            char_width: member_char_width.unwrap_or(8),
-                            char_height: member_char_height.unwrap_or(12),
-                            grid_columns: member_grid_columns.unwrap_or(16),
-                            grid_rows: member_grid_rows.unwrap_or(8),
-                            grid_cell_width: member_char_width.unwrap_or(8),
-                            grid_cell_height: member_char_height.unwrap_or(12),
-                            first_char_num: member_first_char_num.unwrap_or(32),
-                            char_offset_x: 0,
-                            char_offset_y: 0,
-                            font_name: font_name.clone(),
-                            font_size: member_font_size,
-                            font_style,
-                            char_widths: member_char_widths.clone(),
-                            pfr_native_size: 0,
-                        })
-                    } else {
-                        return None;
+            // Resolve the font through the same path the text member's `image`
+            // getter uses (`get_font_with_cast_and_bitmap`). That function
+            // takes care of: PFR rasterisation at the requested preview size,
+            // cast-scoped lookup, and falling back to existing rasterised
+            // entries — so the dev preview shows exactly the glyphs Director
+            // would use when rendering text in this font at this size.
+            let req_size = preview_font_size.or(if member_font_size > 0 { Some(member_font_size) } else { None });
+            let font: Rc<BitmapFont> = player.font_manager
+                .get_font_with_cast_and_bitmap(
+                    &font_name,
+                    &player.movie.cast_manager,
+                    &mut player.bitmap_manager,
+                    req_size,
+                    None,
+                )
+                .or_else(|| {
+                    let name_lower = font_name.to_lowercase();
+                    for (key, font) in player.font_manager.font_cache.iter() {
+                        if key.to_lowercase() == name_lower
+                            || key.to_lowercase().starts_with(&format!("{}_", name_lower))
+                        {
+                            return Some(font.clone());
+                        }
                     }
-                } else if let Some(br) = bitmap_ref {
-                    // Use member's own bitmap (no size override or no PFR data)
-                    Rc::new(BitmapFont {
-                        bitmap_ref: br,
-                        char_width: member_char_width.unwrap_or(8),
-                        char_height: member_char_height.unwrap_or(12),
-                        grid_columns: member_grid_columns.unwrap_or(16),
-                        grid_rows: member_grid_rows.unwrap_or(8),
-                        grid_cell_width: member_char_width.unwrap_or(8),
-                        grid_cell_height: member_char_height.unwrap_or(12),
-                        first_char_num: member_first_char_num.unwrap_or(32),
-                        char_offset_x: 0,
-                        char_offset_y: 0,
-                        font_name: font_name.clone(),
-                        font_size: member_font_size,
-                        font_style,
-                        char_widths: member_char_widths.clone(),
-                        pfr_native_size: 0,
-                    })
-                } else {
-                    // No bitmap_ref, no PFR — try font manager lookup
-                    if let Some(f) = player.font_manager.get_font_by_info(&font_info) {
-                        Rc::new(f.clone())
-                    } else if let Some(f) = player.font_manager.get_system_font() {
-                        f
-                    } else {
-                        return None;
-                    }
-                };
+                    None
+                })
+                .or_else(|| player.font_manager.get_system_font())?;
 
             // Get system font for rendering character code labels
             let system_font = player.font_manager.get_system_font();
 
-            let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref)?;
+            let font_bitmap_opt = player.bitmap_manager.get_bitmap(font.bitmap_ref).cloned();
 
+            let preview_size = preview_font_size.unwrap_or(font.font_size).max(8);
+
+            // Cell size is driven by the PFR-rasterized glyph dimensions at
+            // the requested preview size. If the rasteriser failed (no PFR
+            // data, or rasterize_pfr_at_size returned None) we fall back to
+            // the member's native cell size, with a floor based on
+            // preview_size so cells aren't collapsed too small to be useful.
             let cols = 16u16;
             let rows = 16u16;
-            let cell_w = font.char_width.max(1);
-            let cell_h = font.char_height.max(1);
+            let cell_w = (font.char_width as u16).max(preview_size + 4);
+            let cell_h = (font.char_height as u16).max((preview_size as f32 * 1.4) as u16);
 
             // Layout: each cell = grid_line(1px) + label_height + glyph_height
             let label_h: u16 = if system_font.is_some() { 10 } else { 0 };
@@ -405,11 +367,16 @@ pub fn render_preview_bitmap(
                 bitmap.fill_rect(x, 0, x + grid_w as i32, height as i32, grid_color, palettes, 1.0);
             }
 
+            // Glyph copy: in `is_text_rendering` mode, black source pixels
+            // are remapped to `color` (foreground) and white source pixels
+            // are dropped. The default Director bitmap atlas is black-on-white,
+            // so we want foreground=BLACK on the white preview background —
+            // *not* white-on-white which previously rendered invisible glyphs.
             let draw_params = CopyPixelsParams { mask_offset: (0, 0),
                 blend: 100,
                 ink: 0,
-                color: ColorRef::PaletteIndex(255),
-                bg_color: ColorRef::PaletteIndex(0),
+                color: ColorRef::Rgb(0, 0, 0),
+                bg_color: ColorRef::Rgb(255, 255, 255),
                 mask_image: None,
                 is_text_rendering: true,
                 rotation: 0.0,
@@ -461,18 +428,70 @@ pub fn render_preview_bitmap(
                     }
                 }
 
-                // Draw the character glyph below the label
+                // Draw the character glyph below the label.
+                // Prefer the PFR / bitmap-atlas path so we show the AUTHORED
+                // glyphs (the cast's actual font, not the browser's installed
+                // version of "Verdana"/"Arial"/etc.). If the font has no
+                // bitmap atlas at all (outline-only system fonts) we fall back
+                // to Canvas2D so something visible still renders.
                 let glyph_y = cell_y + label_h as i32;
-                bitmap_font_copy_char(
-                    &font,
-                    font_bitmap,
-                    char_code as u8,
-                    &mut bitmap,
-                    cell_x,
-                    glyph_y,
-                    palettes,
-                    &draw_params,
-                );
+                let has_bitmap_atlas = font_bitmap_opt
+                    .as_ref()
+                    .map(|b| b.width > 0 && b.height > 0)
+                    .unwrap_or(false)
+                    && font.char_width > 0
+                    && font.char_height > 0;
+
+                let mut rendered = false;
+                if has_bitmap_atlas {
+                    if let Some(ref font_bitmap) = font_bitmap_opt {
+                        if (char_code as u8) >= font.first_char_num {
+                            bitmap_font_copy_char(
+                                &font,
+                                font_bitmap,
+                                char_code as u8,
+                                &mut bitmap,
+                                cell_x,
+                                glyph_y,
+                                palettes,
+                                &draw_params,
+                            );
+                            rendered = true;
+                        }
+                    }
+                }
+
+                if !rendered {
+                    let printable = char_code >= 32 && char_code != 127;
+                    if printable {
+                        if let Some(ch) = char::from_u32(char_code as u32) {
+                            let display_name = font_name.split('_').next().unwrap_or(&font_name);
+                            let mut style = HtmlStyle::default();
+                            style.font_face = Some(display_name.to_string());
+                            style.font_size = Some(preview_size as i32);
+                            style.color = Some(0); // black
+                            style.bold = matches!(font_style, 1 | 3);
+                            style.italic = matches!(font_style, 2 | 3);
+                            let span = StyledSpan { text: ch.to_string(), style };
+                            let _ = FontMemberHandlers::render_native_text_to_bitmap(
+                                &mut bitmap,
+                                &[span],
+                                cell_x + 2,
+                                glyph_y + 1,
+                                cell_w as i32 - 4,
+                                cell_h as i32 - 2,
+                                TextAlignment::Center,
+                                cell_w as i32 - 4,
+                                false,
+                                None,
+                                cell_h,
+                                0,
+                                0,
+                                &[],
+                            );
+                        }
+                    }
+                }
             }
             Some(bitmap)
         }
