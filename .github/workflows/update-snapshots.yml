@@ -32,6 +32,8 @@ env:
   TEST_ASSETS_URL: ${{ secrets.TEST_ASSETS_URL }}
   HABBO_V7_USERNAME: ${{ secrets.HABBO_V7_USERNAME }}
   HABBO_V7_PASSWORD: ${{ secrets.HABBO_V7_PASSWORD }}
+  HABBO_V7_INFO_HOST: ${{ secrets.HABBO_V7_INFO_HOST }}
+  HABBO_V7_INFO_PORT: ${{ secrets.HABBO_V7_INFO_PORT }}
 
 jobs:
   update:
