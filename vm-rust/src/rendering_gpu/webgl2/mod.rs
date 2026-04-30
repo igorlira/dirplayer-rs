@@ -3877,7 +3877,12 @@ impl WebGL2Renderer {
 
         // Get bitmap data to check version
         let bitmap = player.bitmap_manager.get_bitmap(image_ref)?;
-        if bitmap.data.is_empty() {
+        // Skip rendering for empty bitmaps (data empty OR zero dimensions).
+        // Director's empty cast members (e.g. cc.jukebox.catalog.add.btn.dim
+        // — placeholder bitmaps with rect 0,0,0,0) are rendered as nothing in
+        // Shockwave; without the dimension guard dirplayer-rs's WebGL2 path
+        // would fall through and paint the sprite's rect as a solid white bar.
+        if bitmap.data.is_empty() || bitmap.width == 0 || bitmap.height == 0 {
             return None;
         }
 
