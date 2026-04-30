@@ -932,7 +932,7 @@ impl TypeHandlers {
             // Both bit_depth and original_bit_depth are set to 32 so all rendering
             // paths (matte, ink, colorize) treat this as a standard 32-bit bitmap.
             let storage_depth = if bit_depth == 24 { 32 } else { bit_depth };
-            let bitmap = Bitmap::new(
+            let mut bitmap = Bitmap::new(
                 width,
                 height,
                 storage_depth,
@@ -940,6 +940,11 @@ impl TypeHandlers {
                 alpha_depth,
                 palette_ref,
             );
+            // When image() is created with an alpha channel, treat that
+            // embedded alpha as active for subsequent rendering/compositing.
+            if storage_depth == 32 && alpha_depth > 0 {
+                bitmap.use_alpha = true;
+            }
             // `image(w, h, depth)` builds a fresh bitmap not yet owned by any
             // cast member; release it when the wrapping DatumRef drops.
             let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
