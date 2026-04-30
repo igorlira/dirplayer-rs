@@ -1739,9 +1739,14 @@ impl Bitmap {
             _ => 0, // Director default
         }; 
 
+        // ink == 8 is Director's Matte ink: always run the matte logic
+        // regardless of the per-member trim_white_space flag. The matte is
+        // flood-filled from the edges so only bg-connected regions become
+        // transparent, which is exactly Matte ink's documented behaviour.
         let is_matte_bitmap =
             src.trim_white_space
-            || params.is_text_rendering;
+            || params.is_text_rendering
+            || ink == 8;
 
         let use_grayscale_as_alpha = match src.palette_ref {
             PaletteRef::BuiltIn(palette) => {

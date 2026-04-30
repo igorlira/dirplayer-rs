@@ -642,6 +642,33 @@ pub fn compute_filmloop_initial_rect_with_members(
     Some(result)
 }
 
+/// Resolve a filmloop child sprite's authored fore/bg colors from its
+/// `ScoreFrameChannelData`. Mirrors `score.rs`'s `match data.color_flag`
+/// table (0 = both palette, 1 = fg RGB, 2 = bg RGB, 3 = both RGB) so we
+/// don't accidentally treat an authored palette index as RGB just because
+/// the parser populated the unrelated `_g`/`_b` channel bytes.
+fn resolve_filmloop_child_colors(
+    data: &crate::director::chunks::score::ScoreFrameChannelData,
+) -> (ColorRef, ColorRef) {
+    let (fore_is_rgb, back_is_rgb) = match data.color_flag {
+        1 => (true, false),
+        2 => (false, true),
+        3 => (true, true),
+        _ => (false, false),
+    };
+    let fg = if fore_is_rgb {
+        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
+    } else {
+        ColorRef::PaletteIndex(data.fore_color)
+    };
+    let bg = if back_is_rgb {
+        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
+    } else {
+        ColorRef::PaletteIndex(data.back_color)
+    };
+    (fg, bg)
+}
+
 /// Render a filmloop directly from its channel_initialization_data.
 /// This is needed because filmloop Score.channels are not populated with sprite data
 /// like the main stage score. Instead, we read sprite info directly from channel_initialization_data.
@@ -906,19 +933,7 @@ fn render_filmloop_from_channel_data(
                 // the stage layer), it does NOT cascade down to override
                 // individual child inks.
                 let (ink, sprite_color, sprite_bg_color) = {
-                    let fore_is_rgb = (data.color_flag & 0x1) != 0
-                        || data.fore_color_g != 0
-                        || data.fore_color_b != 0;
-                    let fg = if fore_is_rgb {
-                        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
-                    } else {
-                        ColorRef::PaletteIndex(data.fore_color)
-                    };
-                    let bg = if fore_is_rgb {
-                        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
-                    } else {
-                        ColorRef::PaletteIndex(data.back_color)
-                    };
+                    let (fg, bg) = resolve_filmloop_child_colors(&data);
                     // Mask off bit 7 (stretch flag) from the ink byte.
                     ((data.ink as u32) & 0x3F, fg, bg)
                 };
@@ -997,13 +1012,18 @@ fn render_filmloop_from_channel_data(
 
                 // Only use matte mask for inks that support it:
                 // - Ink 0 (copy): for trimWhiteSpace edge transparency (indexed and 16-bit)
-                // - Ink 8 (matte): always uses matte (indexed only)
+                // - Ink 8 (matte): always uses matte (indexed AND 16-bit; 32-bit
+                //   without embedded alpha also needs it — drawing.rs has its
+                //   own flood-fill path for that case).
                 // - Ink 7, 36 (color-key): do NOT use matte - they have their own
                 //   bgColor-based transparency that conflicts with matte logic
                 let is_indexed = src_bitmap.original_bit_depth <= 8;
                 let is_16bit = src_bitmap.original_bit_depth == 16;
+                let is_32bit_no_alpha =
+                    src_bitmap.original_bit_depth == 32 && !src_bitmap.use_alpha;
                 let should_use_matte = (is_indexed && (ink == 0 || ink == 8))
-                    || (is_16bit && ink == 0);
+                    || (is_16bit && (ink == 0 || ink == 8))
+                    || (is_32bit_no_alpha && ink == 8);
 
                 let mask = if should_use_matte {
                     if src_bitmap.matte.is_none() {
@@ -1100,15 +1120,7 @@ fn render_filmloop_from_channel_data(
                 }
 
                 // Get sprite foreground color from channel data
-                let fore_is_rgb = (data.color_flag & 0x1) != 0
-                    || data.fore_color_g != 0
-                    || data.fore_color_b != 0;
-
-                let sprite_color = if fore_is_rgb {
-                    ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
-                } else {
-                    ColorRef::PaletteIndex(data.fore_color)
-                };
+                let (sprite_color, _) = resolve_filmloop_child_colors(&data);
 
                 // Build a temporary sprite for draw_shape_with_sprite
                 let mut temp_sprite = Sprite::new(channel_num as usize);
@@ -1150,19 +1162,7 @@ fn render_filmloop_from_channel_data(
                         ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
                     };
 
-                    let fore_is_rgb = (data.color_flag & 0x1) != 0
-                        || data.fore_color_g != 0
-                        || data.fore_color_b != 0;
-                    let child_color = if fore_is_rgb {
-                        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
-                    } else {
-                        ColorRef::PaletteIndex(data.fore_color)
-                    };
-                    let child_bg = if fore_is_rgb {
-                        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
-                    } else {
-                        ColorRef::PaletteIndex(data.back_color)
-                    };
+                    let (child_color, child_bg) = resolve_filmloop_child_colors(&data);
 
                     let params = CopyPixelsParams {
                         blend,
@@ -1240,19 +1240,7 @@ fn render_filmloop_from_channel_data(
                         ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
                     };
 
-                    let fore_is_rgb = (data.color_flag & 0x1) != 0
-                        || data.fore_color_g != 0
-                        || data.fore_color_b != 0;
-                    let child_color = if fore_is_rgb {
-                        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
-                    } else {
-                        ColorRef::PaletteIndex(data.fore_color)
-                    };
-                    let child_bg = if fore_is_rgb {
-                        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
-                    } else {
-                        ColorRef::PaletteIndex(data.back_color)
-                    };
+                    let (child_color, child_bg) = resolve_filmloop_child_colors(&data);
 
                     let params = CopyPixelsParams {
                         blend,
@@ -1337,19 +1325,7 @@ fn render_filmloop_from_channel_data(
                 let inner_initial_rect = inner_film_loop.initial_rect.clone();
 
                 let (child_ink, child_color, child_bg_color) = if parent_ink == 0 {
-                    let fore_is_rgb = (data.color_flag & 0x1) != 0
-                        || data.fore_color_g != 0
-                        || data.fore_color_b != 0;
-                    let fg = if fore_is_rgb {
-                        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
-                    } else {
-                        ColorRef::PaletteIndex(data.fore_color)
-                    };
-                    let bg = if fore_is_rgb {
-                        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
-                    } else {
-                        ColorRef::PaletteIndex(data.back_color)
-                    };
+                    let (fg, bg) = resolve_filmloop_child_colors(&data);
                     ((data.ink as u32) & 0x3F, fg, bg)
                 } else {
                     (parent_ink, parent_color.clone(), parent_bg_color.clone())
