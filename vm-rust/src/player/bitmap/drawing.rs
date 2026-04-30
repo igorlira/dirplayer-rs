@@ -2539,6 +2539,86 @@ impl Bitmap {
                 }
 
                 // ----------------------------------------------------------
+                // Ink 33 (Add Pin): on the actual stage, Director adds src to
+                // dst (clamped at 255), so a dim halo pixel like (50,50,50)
+                // turns brick (120,90,80) into (170,140,130) — visibly
+                // lighter. We can't compute that here because the filmloop
+                // is rendered into its OWN bitmap before being composited
+                // onto the stage via alpha-blend. Plain alpha-blend of dim
+                // src darkens brick instead of brightening it.
+                //
+                // Approximation: scale each src pixel up so its peak channel
+                // hits 255 (preserves hue), and use the original peak as
+                // alpha. When alpha-blended onto stage, dim halo pixels
+                // become "bright but translucent" — `brick*(1-a) + bright*a`
+                // pulls toward white/the hue, which matches Add Pin's
+                // saturate-to-white behaviour visually without needing a
+                // real additive composite path.
+                if !params.is_text_rendering && ink == 33
+                    && self.bit_depth == 32 && self.use_alpha
+                {
+                    let src_max = sr.max(sg).max(sb);
+                    if src_max == 0 {
+                        continue; // pure black: no additive contribution
+                    }
+                    let idx = (dst_y as usize * self.width as usize + dst_x as usize) * 4;
+                    if idx + 3 < self.data.len() {
+                        let dr = self.data[idx];
+                        let dg = self.data[idx + 1];
+                        let db = self.data[idx + 2];
+                        let da = self.data[idx + 3];
+
+                        if da > 0 {
+                            // OFF state already drew here. Apply Director Add
+                            // Pin per spec: src RGB added to dst, clamped at
+                            // 255. The moodlight's cyan ray is unchanged where
+                            // ON's bg is black (sr+0 = sr), and brightens
+                            // toward white where ON's white halo passes over it.
+                            self.data[idx] = ((dr as u16 + sr as u16).min(255)) as u8;
+                            self.data[idx + 1] = ((dg as u16 + sg as u16).min(255)) as u8;
+                            self.data[idx + 2] = ((db as u16 + sb as u16).min(255)) as u8;
+                            self.data[idx + 3] = da.max(src_max);
+                        } else {
+                            // Empty area. We can't do real additive against
+                            // brick (rendered later in compositing), so we
+                            // scale src up to peak brightness (preserves hue)
+                            // and use src_max as alpha — when alpha-blended
+                            // onto stage, this pulls brick toward the bright
+                            // hue, approximating Add Pin's "saturate-to-white"
+                            // visual. Without scaling, dim grey halo pixels
+                            // would DARKEN the warm brick instead of
+                            // brightening it.
+                            let scale = 255.0 / src_max as f32;
+                            self.data[idx] = ((sr as f32 * scale).min(255.0)) as u8;
+                            self.data[idx + 1] = ((sg as f32 * scale).min(255.0)) as u8;
+                            self.data[idx + 2] = ((sb as f32 * scale).min(255.0)) as u8;
+                            // Bright halo pixels write opaque; dim ones get
+                            // a 2x boost so the soft fade reads on stage.
+                            self.data[idx + 3] = if src_max >= 128 {
+                                255
+                            } else {
+                                ((src_max as u32) * 2).min(255) as u8
+                            };
+                        }
+                    }
+                    continue;
+                }
+
+                // Ink 36/37/39 with auto-detected edge bg: skip when src
+                // matches the most common edge color (handles custom-palette
+                // bitmaps where bg_color_resolved is wrong).
+                if !params.is_text_rendering
+                    && (ink == 36 || ink == 37 || ink == 39)
+                    && sa == 255
+                {
+                    if let Some(edge_bg) = edge_matte_color {
+                        if (sr, sg, sb) == edge_bg {
+                            continue;
+                        }
+                    }
+                }
+
+                // ----------------------------------------------------------
                 // 2. Matte / Mask grayscale white = transparent
                 // ----------------------------------------------------------
                 if !params.is_text_rendering
