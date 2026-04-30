@@ -1509,6 +1509,25 @@ impl TextMemberHandlers {
 
                 } // end bitmap glyph else branch
 
+                // Honour `member.antialias = 0` by thresholding the bitmap's
+                // alpha channel to binary (0 or 255). Director with antialias
+                // disabled produces crisp 1-bit text; coverage-as-alpha (what
+                // Canvas2D and the PFR rasterizer both emit) shows up as a
+                // faded grey halo around the strokes when later composited
+                // via `[#ink: 36]`. The Coke Studios jukebox catalog disables
+                // AA explicitly (see cataloglist script line 85) and expects
+                // sharp text — without the threshold the catalog list looks
+                // washed out compared to Shockwave.
+                if !text_data.anti_alias && bitmap.bit_depth == 32 {
+                    let threshold = text_data.info.as_ref()
+                        .map(|i| i.anti_alias_threshold as u8)
+                        .unwrap_or(128)
+                        .max(1);
+                    for i in (3..bitmap.data.len()).step_by(4) {
+                        bitmap.data[i] = if bitmap.data[i] >= threshold { 255 } else { 0 };
+                    }
+                }
+
                 // Text `.image` snapshots are produced per-call and not owned
                 // by any cast member; let the DatumRef refcount free them.
                 let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
