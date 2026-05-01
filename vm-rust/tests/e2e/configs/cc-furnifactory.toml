@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_coca-cola/furnifactory/FurniFactory.dcr"
+
+[test]
+suite = "coca_cola"

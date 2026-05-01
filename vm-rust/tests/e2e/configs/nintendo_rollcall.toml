@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_nintendo/RollCall.dcr"
+
+[test]
+suite = "nintendo"

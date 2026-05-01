@@ -4,13 +4,16 @@ import {
   set_stage_size,
   player_create_canvas,
   mouse_move,
+  mouse_move_delta,
   mouse_down,
   mouse_up,
   key_down,
   key_up,
+  wants_pointer_lock,
   player_set_picking_mode,
   player_get_sprite_at,
   player_set_debug_selected_channel,
+  is_sprite_editable_field,
 } from "vm-rust";
 import { useAppDispatch } from "../../store/hooks";
 import { channelSelected } from "../../store/uiSlice";
@@ -39,6 +42,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [scale, setScale] = useState(1);
   const [pickingMode, setPickingMode] = useState(false);
+  const hiddenInputRef = useRef<HTMLInputElement | null>(null);
   const dispatch = useAppDispatch();
 
   const onContainerRef = useCallback(
@@ -64,6 +68,42 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     set_stage_size(width, height);
   }, [width, height]);
 
+  // Handle pointer-locked mouse movement (events fire on document, not the div)
+  useEffect(() => {
+    const handleLockedMouseMove = (e: MouseEvent) => {
+      if (document.pointerLockElement) {
+        if (!wants_pointer_lock()) {
+          document.exitPointerLock();
+          return;
+        }
+        mouse_move_delta(e.movementX, e.movementY);
+      }
+    };
+    // Handle keyboard during pointer lock (focus may be on canvas, not the div)
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (document.pointerLockElement) {
+        // Don't prevent ESC — browser needs it to exit pointer lock
+        if (e.key !== "Escape") e.preventDefault();
+        if (!e.repeat) {
+          key_down(e.key, e.keyCode);
+        }
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (document.pointerLockElement) {
+        key_up(e.key, e.keyCode);
+      }
+    };
+    document.addEventListener("mousemove", handleLockedMouseMove);
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("keyup", handleKeyUp);
+    return () => {
+      document.removeEventListener("mousemove", handleLockedMouseMove);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keyup", handleKeyUp);
+    };
+  }, []);
+
   useEffect(() => {
     player_set_picking_mode(pickingMode);
   }, [pickingMode]);
@@ -74,7 +114,6 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     const y = e.clientY - rect.top;
 
     if (pickingMode) {
-      // Always forward mouse_move so the renderer can track the cursor for hover highlight
       if (name === "move") {
         mouse_move(x, y);
       }
@@ -90,10 +129,30 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
 
     switch (name) {
       case "move":
-        mouse_move(x, y);
+        if (!document.pointerLockElement) {
+          mouse_move(x, y);
+        }
         break;
       case "down":
-        mouse_down(x, y);
+        {
+          const spriteId = player_get_sprite_at(x, y);
+          const isEditable = spriteId > 0 && is_sprite_editable_field(spriteId);
+          mouse_down(x, y);
+          if (isEditable) {
+            e.preventDefault();
+            hiddenInputRef.current?.focus();
+          } else if (document.activeElement === hiddenInputRef.current) {
+            hiddenInputRef.current?.blur();
+            (e.currentTarget as HTMLElement).focus();
+          }
+        }
+        if (wants_pointer_lock() && !document.pointerLockElement) {
+          const target = e.currentTarget as HTMLElement;
+          const canvas = target.querySelector("canvas");
+          if (canvas) {
+            canvas.requestPointerLock();
+          }
+        }
         break;
       case "up":
         mouse_up(x, y);
@@ -104,7 +163,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   return (
     <div className={styles.container} ref={onContainerRef}>
       <div
-        style={{ transform: scale !== 1 ? `scale(${scale})` : undefined, cursor: pickingMode ? 'crosshair' : undefined }}
+        style={{ transform: scale !== 1 ? `scale(${scale})` : undefined, cursor: pickingMode ? 'crosshair' : undefined, touchAction: 'manipulation' }}
         tabIndex={0}
         id="stage_canvas_container"
         onPointerMove={(e) => onMouseEvent('move', e)}
@@ -117,6 +176,72 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         }}
         onKeyUp={e => key_up(e.key, e.keyCode)}
       ></div>
+      {/* Hidden input for mobile virtual keyboard support.
+          When an editable field sprite is tapped, this input receives focus
+          to trigger the mobile keyboard. Key events are forwarded to WASM.
+          pointer-events:none ensures it never intercepts stage touches. */}
+      <input
+        ref={hiddenInputRef}
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: '1px',
+          height: '1px',
+          opacity: 0.01,
+          pointerEvents: 'none',
+          zIndex: -1,
+        }}
+        type="text"
+        inputMode="text"
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        onKeyDown={e => {
+          // Handle special keys that don't produce input events.
+          // Allow browser key-repeat through to wasm so holding e.g. Backspace
+          // continuously deletes characters at the browser's repeat cadence
+          // — exactly the behaviour users expect from an editable field. The
+          // outer canvas handler still blocks repeats because Lingo's
+          // keyPressed() polling drives held game keys, but the hidden input
+          // is only focused when an editable text/field sprite is active so
+          // letting repeats through here is safe.
+          const special = ['Enter', 'Backspace', 'Tab', 'ArrowUp', 'ArrowDown',
+                           'ArrowLeft', 'ArrowRight', 'Escape', 'Delete'];
+          if (special.includes(e.key)) {
+            e.preventDefault();
+            key_down(e.key, e.keyCode);
+          }
+          // Regular characters flow through to onInput below
+        }}
+        onKeyUp={e => {
+          key_up(e.key, e.keyCode);
+        }}
+        onInput={e => {
+          // Catch characters from virtual keyboards (and desktop as fallback).
+          // Virtual keyboards may not fire individual keyDown events for characters.
+          const input = e.currentTarget;
+          const value = input.value;
+          if (value) {
+            // Use toUpperCase().charCodeAt(0) to match JS keyCode convention
+            // (e.g. 'a' → 65 not 97) so the keyboard_map maps correctly.
+            const chars = value.split('');
+            for (let i = 0; i < chars.length; i++) {
+              key_down(chars[i], chars[i].toUpperCase().charCodeAt(0));
+            }
+            input.value = '';
+            // Defer key_up so the async keyDown command handler can read
+            // keyboard state (the key, the keyCode) before it's cleared.
+            // key_down() sets state immediately but the handler runs async.
+            setTimeout(() => {
+              for (let i = 0; i < chars.length; i++) {
+                key_up(chars[i], chars[i].toUpperCase().charCodeAt(0));
+              }
+            }, 100);
+          }
+        }}
+      />
       {showControls && (
         <div className={styles.controlBar}>
           <button

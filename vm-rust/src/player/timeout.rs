@@ -26,10 +26,18 @@ impl TimeoutManager {
     }
 
     pub fn add_timeout(&mut self, timeout: Timeout) {
-        // Cancel the old timeout if one exists with the same name,
-        // so it stops firing in fire_pending_timeouts.
+        // Fully cancel the old timeout if one exists with the same name —
+        // both flag it as un-scheduled AND dispatch clear_timeout to the JS
+        // side so the underlying setInterval stops. Previously only the
+        // is_scheduled flag was flipped, leaking the JS interval. Each
+        // re-add without an explicit forget()/clear stacked another active
+        // setInterval for the same name; CS's CD-request window hits this
+        // because Lingo's `timeout("CDplayer").forget()` (capital CD) doesn't
+        // match the parser-stored `"cdplayer"` (lowercase) and the close
+        // doesn't clean up — every reopen accumulates another parallel
+        // interval, making the countdown appear N× faster after N opens.
         if let Some(old) = self.timeouts.get_mut(&timeout.name) {
-            old.is_scheduled = false;
+            old.cancel();
         }
         self.timeouts.insert(timeout.name.to_owned(), timeout);
     }

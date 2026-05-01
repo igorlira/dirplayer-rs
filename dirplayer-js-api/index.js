@@ -91,6 +91,28 @@ export function onExternalEvent(event) {
   if (vmCallbacks?.onExternalEvent) {
     vmCallbacks.onExternalEvent(event);
   } else {
-    console.log('🔔 externalEvent:', event);
+    console.log('externalEvent:', event);
+  }
+}
+
+export function onFlashMemberLoaded(castLib, castMember, swfData, width, height) {
+  if (vmCallbacks?.onFlashMemberLoaded) {
+    vmCallbacks.onFlashMemberLoaded(castLib, castMember, swfData, width, height);
+  } else {
+    console.log('Flash member loaded:', castLib, castMember, width, height, swfData.length, 'bytes');
+  }
+}
+
+export function onFlashMemberUnloaded(castLib, castMember) {
+  if (vmCallbacks?.onFlashMemberUnloaded) {
+    vmCallbacks.onFlashMemberUnloaded(castLib, castMember);
+  } else {
+    console.log('Flash member unloaded:', castLib, castMember);
+  }
+}
+
+export function onStageSizeChanged(width, height, center) {
+  if (vmCallbacks?.onStageSizeChanged) {
+    vmCallbacks.onStageSizeChanged(width, height, center);
   }
 }

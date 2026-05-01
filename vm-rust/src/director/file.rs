@@ -343,13 +343,20 @@ fn read_casts(
         if cast_list.is_some() {
             let cast_list = cast_list.unwrap();
             for cast_entry in &cast_list.entries {
-                let cast = get_cast_chunk_for_cast(
-                    reader,
-                    chunk_container,
-                    rifx,
-                    key_table,
-                    &cast_entry.id,
-                );
+                // External casts (with file_path) have their data in separate .cct files,
+                // not in this movie file. Skip CAS* lookup to avoid false matches
+                // when the external entry shares a cast_id with an internal cast.
+                let cast = if !cast_entry.file_path.is_empty() {
+                    None
+                } else {
+                    get_cast_chunk_for_cast(
+                        reader,
+                        chunk_container,
+                        rifx,
+                        key_table,
+                        &cast_entry.id,
+                    )
+                };
                 if cast.is_none() && cast_entry.file_path.is_empty() {
                     // Cast has no CAS* chunk AND no file_path - this is unusual
                     // It should either be internal (has CAS*) or external (has file_path)
@@ -869,6 +876,7 @@ fn read_after_burner_map(
         // info!("Loading ILS resource {}: '{}', {} bytes", res_id, fourcc_to_string(info.fourcc), info.len);
         cached_chunk_views.insert(res_id, ils_reader.read_bytes(info.len).unwrap().to_vec());
     }
+
     return Ok(ils_body_offset);
 }
 
@@ -945,11 +953,9 @@ fn read_memory_map(
             reader.jmp(entry_start + extra);
         }
 
-        // Skip free and junk entries
-        if fourcc == FOURCC("free") || fourcc == FOURCC("junk") {
-            continue;
-        }
-
+        // Include free/junk entries in chunk_info — their data may still be
+        // at the original offset and referenced by the Key Table. The Director
+        // player accesses reclaimed entries when the Key Table still points to them.
         let info = ChunkInfo {
             id: i,
             fourcc,
@@ -1040,14 +1046,19 @@ fn read_chunk_data(reader: &mut BinaryReader, fourcc: u32, len: u32) -> Result<V
         use_len = valid_len;
     }
 
-    // validate chunk
+    // validate chunk - allow null-byte variants (e.g., CAS\0 for CASt)
     if fourcc != valid_fourcc {
-        return Err(format!(
-            "At offset 0x{:x} expected '{}' chunk but got '{}'",
-            offset,
-            fourcc_to_string(fourcc),
-            fourcc_to_string(valid_fourcc),
-        ));
+        let a = fourcc.to_be_bytes();
+        let b = valid_fourcc.to_be_bytes();
+        let close_match = (0..4).all(|i| a[i] == b[i] || a[i] == 0 || b[i] == 0);
+        if !close_match {
+            return Err(format!(
+                "At offset 0x{:x} expected '{}' chunk but got '{}'",
+                offset,
+                fourcc_to_string(fourcc),
+                fourcc_to_string(valid_fourcc),
+            ));
+        }
     }
 
     if use_len != valid_len {
@@ -1091,9 +1102,31 @@ fn get_chunk_data(
     // let after_burned = self.after_burned;
     match chunk_container.chunk_info.get(&id) {
         Some(info) => {
-            if fourcc != info.fourcc {
+            // Allow chunks where the FOURCC has a null byte replacing a character
+            // (e.g., CAS\0 matching CASt). Some Director files use null-terminated FOURCCs.
+            // Also allow "free"/"junk" entries — the data may still be valid at the
+            // original offset even though the mmap slot was reclaimed.
+            let is_reclaimed = info.fourcc == FOURCC("free") || info.fourcc == FOURCC("junk");
+            let fourcc_match = if is_reclaimed {
+                true // Trust the Key Table's fourcc over the mmap's "free"/"junk" marker
+            } else if fourcc != info.fourcc {
+                // Mask: if either FOURCC has a zero byte in any position, ignore that position
+                let a = fourcc.to_be_bytes();
+                let b = info.fourcc.to_be_bytes();
+                let mut match_count = 0;
+                for i in 0..4 {
+                    if a[i] == b[i] || a[i] == 0 || b[i] == 0 {
+                        match_count += 1;
+                    }
+                }
+                match_count == 4
+            } else {
+                true
+            };
+            if !fourcc_match {
                 return Err(format_args!(
-                    "Expected chunk ${id} to be '{}', but is actually '{}'",
+                    "At offset 0x{:x} expected '{}' chunk but got '{}'",
+                    id,
                     fourcc_to_string(fourcc),
                     fourcc_to_string(info.fourcc)
                 )

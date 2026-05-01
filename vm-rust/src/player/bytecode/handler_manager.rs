@@ -160,6 +160,8 @@ pub fn dump_execution_history_on_error(error_message: &str) {
     }
 }
 
+// trace_output is imported from crate::player
+
 #[derive(Clone)]
 pub struct BytecodeHandlerContext {
     pub scope_ref: ScopeRef,

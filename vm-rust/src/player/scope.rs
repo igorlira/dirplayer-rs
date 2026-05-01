@@ -22,6 +22,8 @@ pub struct Scope {
     pub stack: Vec<DatumRef>,
     pub passed: bool,
     pub generation: u64,
+    /// Cached handler-level instance for get_prop/set_prop (avoids ancestor chain walk per access)
+    pub cached_handler_instance: Option<ScriptInstanceRef>,
 }
 
 pub struct ScopeResult {
@@ -52,12 +54,14 @@ impl Scope {
             stack: vec![],
             passed: false,
             generation: 0,
+            cached_handler_instance: None,
         }
     }
 
     pub fn reset(&mut self) {
         self.script_ref = INVALID_CAST_MEMBER_REF;
         self.receiver = None;
+        self.cached_handler_instance = None;
         self.handler_name_id = 0;
         self.args.clear();
         self.bytecode_index = 0;

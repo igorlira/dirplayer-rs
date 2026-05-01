@@ -54,24 +54,11 @@ pub enum CursorRef {
     Member(Vec<i32>),
 }
 
-pub const AP_BLEND: u32 = 1 << 0;
-pub const AP_WIDTH: u32 = 1 << 1;
-pub const AP_HEIGHT: u32 = 1 << 2;
-pub const AP_LOC: u32 = 1 << 3;
-pub const AP_MEMBER: u32 = 1 << 4;
-pub const AP_INK: u32 = 1 << 5;
-pub const AP_FORE_COLOR: u32 = 1 << 6;
-pub const AP_BACK_COLOR: u32 = 1 << 7;
-pub const AP_MOVEABLE: u32 = 1 << 8;
-pub const AP_EDITABLE: u32 = 1 << 9;
-
-
 #[derive(Clone)]
 pub struct Sprite {
     pub number: usize,
     pub name: String,
     pub puppet: bool,
-    pub auto_puppet: u32,
     pub visible: bool,
     pub stretch: i32,
     pub loc_h: i32,
@@ -101,6 +88,8 @@ pub struct Sprite {
     pub fore_color: i32,
     pub has_fore_color: bool,
     pub has_back_color: bool,
+    pub has_visible_mod: bool,
+    pub has_blend_mod: bool,
     pub has_size_tweened: bool,
     pub has_size_changed: bool,
     pub bitmap_size_owned_by_sprite: bool,
@@ -114,6 +103,10 @@ pub struct Sprite {
     pub base_skew: f64,
     pub base_color: ColorRef,
     pub base_bg_color: ColorRef,
+    /// Active camera name(s) for Shockwave3D sprites (set via sprite.camera(1) = ...)
+    pub w3d_camera: Option<String>,
+    /// Additional cameras for multi-camera rendering (index 2+)
+    pub w3d_cameras: Vec<String>,
 }
 
 /// Threshold for detecting skew flip (in degrees)
@@ -131,6 +124,18 @@ pub fn is_skew_flip(skew: f64) -> bool {
 }
 
 impl Sprite {
+    /// Blend value for rendering. When visible was explicitly set via Lingo
+    /// and the sprite is visible, blend=0 is treated as 100 (fully opaque).
+    /// The stored blend value stays unchanged for Lingo property reads.
+    #[inline]
+    pub fn effective_blend(&self) -> i32 {
+        if self.has_visible_mod && self.visible && self.blend == 0 && !self.has_blend_mod {
+            100
+        } else {
+            self.blend
+        }
+    }
+
     /// Check if this sprite has a skew flip transform
     #[inline]
     pub fn has_skew_flip(&self) -> bool {
@@ -142,7 +147,6 @@ impl Sprite {
             number,
             name: "".to_owned(),
             puppet: false,
-            auto_puppet: 0,
             visible: true,
             stretch: 0,
             loc_h: 0,
@@ -172,6 +176,8 @@ impl Sprite {
             fore_color: 255,
             has_fore_color: false,
             has_back_color: false,
+            has_visible_mod: false,
+            has_blend_mod: false,
             has_size_tweened: false,
             has_size_changed: false,
             bitmap_size_owned_by_sprite: false,
@@ -184,6 +190,8 @@ impl Sprite {
             base_skew: 0.0,
             base_color: ColorRef::PaletteIndex(255),
             base_bg_color: ColorRef::PaletteIndex(0),
+            w3d_camera: None,
+            w3d_cameras: Vec::new(),
         }
     }
 
@@ -199,7 +207,6 @@ impl Sprite {
     pub fn reset(&mut self) {
         self.name = "".to_owned();
         self.puppet = false;
-        self.auto_puppet = 0;
         self.visible = true;
         self.stretch = 0;
         self.loc_h = 0;
@@ -227,6 +234,7 @@ impl Sprite {
         self.fore_color = 255;
         self.has_fore_color = false;
         self.has_back_color = false;
+        self.has_visible_mod = false;
         self.has_size_tweened = false;
         self.has_size_changed = false;
         self.bitmap_size_owned_by_sprite = false;

@@ -1,12 +1,11 @@
 use async_std::channel::Receiver;
+use itertools::Itertools;
 use log::{warn, debug};
-use std::collections::HashSet;
 
 use crate::{
     director::lingo::datum::{Datum, VarRef},
     player::{
         handlers::datum_handlers::player_call_datum_handler, player_is_playing, reserve_player_mut,
-        Score,
     },
 };
 
@@ -66,28 +65,17 @@ pub fn player_dispatch_event_to_sprite(
     args: &Vec<DatumRef>,
     sprite_num: u16,
 ) {
-    let instance_ids = reserve_player_ref(|player| {
+    let instance_ids = reserve_player_mut(|player| {
         // Check the cache first — it may contain extra instances added
         // via scriptInstanceList.add() (e.g. goal parent scripts).
-        if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite_num as i16)).cloned() {
-            let datum = player.get_datum(&cached_ref).clone();
-            if let Datum::List(_, item_refs, _) = datum {
-                let mut ids = vec![];
-                for item_ref in &item_refs {
-                    if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
-                        ids.push(id.clone());
-                    }
-                }
-                return Some(ids);
-            }
-        }
-        let sprite = player.movie.score.get_sprite(sprite_num as i16);
-        if let Some(sprite) = sprite {
-            let instance_ids = sprite.script_instance_list.clone();
-            Some(instance_ids)
-        } else {
-            None
-        }
+        let fallback = player
+            .movie
+            .score
+            .get_sprite(sprite_num as i16)
+            .map(|sprite| sprite.script_instance_list.clone());
+        fallback.map(|fallback| {
+            player.get_sprite_script_instance_ids(sprite_num as i16, fallback.as_slice())
+        })
     });
     if instance_ids.is_none() {
         return;
@@ -107,26 +95,18 @@ pub async fn player_dispatch_event_to_sprite_targeted(
     args: &Vec<DatumRef>,
     sprite_num: u16,
 ) {
-    let instance_ids = reserve_player_ref(|player| {
+    let instance_ids = reserve_player_mut(|player| {
         // Check the cache first — it may contain extra instances added
         // via scriptInstanceList.add() (e.g. goal parent scripts).
-        if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite_num as i16)).cloned() {
-            let datum = player.get_datum(&cached_ref).clone();
-            if let Datum::List(_, item_refs, _) = datum {
-                let mut ids = vec![];
-                for item_ref in &item_refs {
-                    if let Datum::ScriptInstanceRef(id) = player.get_datum(item_ref) {
-                        ids.push(id.clone());
-                    }
-                }
-                return Some(ids);
-            }
-        }
-        player
+        
+        let fallback = player
             .movie
             .score
             .get_sprite(sprite_num as i16)
-            .map(|sprite| sprite.script_instance_list.clone())
+            .map(|sprite| sprite.script_instance_list.clone());
+        fallback.map(|fallback| {
+            player.get_sprite_script_instance_ids(sprite_num as i16, fallback.as_slice())
+        })
     });
     let Some(instance_ids) = instance_ids else {
         return;
@@ -364,7 +344,7 @@ pub async fn player_invoke_global_event(
 
     let active_instance_scripts = reserve_player_mut(|player| {
         let mut active_instance_scripts: Vec<ScriptInstanceRef> = vec![];
-        active_instance_scripts.extend(player.movie.score.get_active_script_instance_list());
+        active_instance_scripts.extend(player.active_stage_script_instance_ids());
         for global in player.get_hydrated_globals().values() {
             match global {
                 Datum::VarRef(VarRef::ScriptInstance(script_instance_ref)) => {
@@ -442,12 +422,32 @@ pub async fn player_dispatch_movie_callback(
 
 pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
     warn!("Starting event loop");
+    // Snapshot the player generation this loop belongs to. If the generation
+    // changes (another test reset the player), this loop is stale and must
+    // exit so it can't dispatch events on the new player's state.
+    let generation = unsafe { crate::player::PLAYER_GENERATION };
+
     while !rx.is_closed() {
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Event loop stopped (generation changed)");
+            return;
+        }
         let item = match rx.recv().await {
             Ok(item) => item,
             Err(_) => break, // Channel closed (sender dropped)
         };
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Event loop stopped after recv (generation changed)");
+            return;
+        }
         player_wait_available().await;
+        // After the semaphore yield, re-check generation before touching any
+        // player state — a reset during the yield would make this dispatch
+        // stale and any handler call would run on the new player.
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Event loop stopped after semaphore (generation changed)");
+            return;
+        }
         if !player_is_playing().await {
             continue;
         }
@@ -499,7 +499,7 @@ pub async fn player_dispatch_event_beginsprite(
     handler_name: &str,
     args: &Vec<DatumRef>
 ) -> Result<Vec<(ScoreRef, u32)>, ScriptError> {
-    let (mut sprite_instances, mut frame_instances, all_channels) =
+    let (sprite_instances, frame_instances, all_channels) =
         reserve_player_mut(|player| {
             let mut sprite_instances: Vec<(ScoreRef, usize, ScriptInstanceRef)> = Vec::new();
             let mut frame_instances: Vec<(usize, ScriptInstanceRef)> = Vec::new();
@@ -508,73 +508,86 @@ pub async fn player_dispatch_event_beginsprite(
             // Collect stage sprites - include all entered sprites with behaviors,
             // not just those in sprite_spans. Sprites initialized from channel_initialization_data
             // (D6+ path) also need beginSprite dispatched.
-            let filtered_channels: Vec<_> = player.movie.score.channels.iter()
-                .filter(|channel| !channel.sprite.script_instance_list.is_empty())
-                .filter(|channel| channel.sprite.entered)
-                .filter(|channel| {
-                    channel.sprite.script_instance_list.iter().all(|script_ref| {
-                        player
-                            .allocator
-                            .get_script_instance_entry(script_ref.id())
-                            .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
+            for channel_number in player.active_stage_behavior_channels() {
+                let Some((number, entered, fallback)) = player
+                    .movie
+                    .score
+                    .channels
+                    .get(channel_number)
+                    .map(|channel| {
+                        (
+                            channel.number,
+                            channel.sprite.entered,
+                            channel.sprite.script_instance_list.clone(),
+                        )
                     })
-                })
-                .collect();
+                else {
+                    continue;
+                };
 
-            for channel in filtered_channels {
-                let instances = channel.sprite.script_instance_list.clone();
+                if !entered {
+                    continue;
+                }
 
-                if channel.number == 0 {
+                let instances = player.get_sprite_script_instance_ids(number as i16, fallback.as_slice());
+                if instances.is_empty() || instances.iter().any(|script_ref| {
+                    player
+                        .allocator
+                        .get_script_instance_entry(script_ref.id())
+                        .map_or(true, |entry| entry.script_instance.begin_sprite_called)
+                }) {
+                    continue;
+                }
+
+                if number == 0 {
                     // Frame behavior (channel 0)
                     frame_instances.extend(
-                        instances.into_iter().map(|inst| (channel.number, inst))
+                        instances.into_iter().map(|inst| (number, inst))
                     );
                 } else {
                     // Sprite behaviors (channel > 0) - include ScoreRef::Stage
                     sprite_instances.extend(
-                        instances.into_iter().map(|inst| (ScoreRef::Stage, channel.number, inst))
+                        instances
+                            .into_iter()
+                            .map(|inst| (ScoreRef::Stage, number, inst))
                     );
                 }
 
-                all_channels.push((ScoreRef::Stage, channel.number as u32));
+                all_channels.push((ScoreRef::Stage, number as u32));
             }
 
             // Collect filmloop sprites
             let active_filmloops = player.get_active_filmloop_scores();
-            for (member_ref, filmloop_score) in active_filmloops {
-                // Get the filmloop's current frame
-                let filmloop_current_frame = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
-                    Some(member) => {
-                        if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                            film_loop.current_frame
-                        } else {
-                            continue; // Not a filmloop, skip
+            for (member_ref, filmloop_current_frame) in active_filmloops {
+                let Some(filmloop_score) = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .and_then(|member| match &member.member_type {
+                        super::cast_member::CastMemberType::FilmLoop(film_loop) => {
+                            Some(&film_loop.score)
                         }
-                    }
-                    None => continue, // Member not found, skip
-                };
-
-                let active_filmloop_channels: HashSet<u32> = filmloop_score.sprite_spans
-                    .iter()
-                    .filter(|span| Score::is_span_in_frame(span, filmloop_current_frame))
-                    .map(|span| span.channel_number as u32)
-                    .collect();
-
-                let filtered_filmloop_channels: Vec<_> = filmloop_score.channels.iter()
-                    .filter(|channel| !channel.sprite.script_instance_list.is_empty())
-                    .filter(|channel| channel.sprite.entered)
-                    .filter(|channel| active_filmloop_channels.contains(&(channel.number as u32)))
-                    .filter(|channel| {
-                        channel.sprite.script_instance_list.iter().all(|script_ref| {
-                            player
-                                .allocator
-                                .get_script_instance_entry(script_ref.id())
-                                .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
-                        })
+                        _ => None,
                     })
-                    .collect();
+                else {
+                    continue;
+                };
+                for channel_number in filmloop_score.active_channel_numbers_for_frame(filmloop_current_frame) {
+                    let Some(channel) = filmloop_score.channels.get(channel_number) else {
+                        continue;
+                    };
+                    if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered {
+                        continue;
+                    }
+                    if channel.sprite.script_instance_list.iter().any(|script_ref| {
+                        player
+                            .allocator
+                            .get_script_instance_entry(script_ref.id())
+                            .map_or(true, |entry| entry.script_instance.begin_sprite_called)
+                    }) {
+                        continue;
+                    }
 
-                for channel in filtered_filmloop_channels {
                     let instances = channel.sprite.script_instance_list.clone();
 
                     // Filmloop sprites go into sprite_instances (they don't have frame behaviors)
@@ -595,7 +608,7 @@ pub async fn player_dispatch_event_beginsprite(
     if sprite_instances.is_empty() && frame_instances.is_empty() {
         return Ok(Vec::new());
     }
-    
+
     if frame_instances.len() > 0 {
         let _ = player_invoke_frame_and_movie_scripts(
             handler_name,
@@ -665,13 +678,11 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
                 }
             };
 
-            for channel in score.channels.iter() {
-                // Skip if channel is not active in current frame (for sprite channels)
-                if !sprite_nums.contains(&(channel.number as u32)) {
+            for channel_number in sprite_nums.iter().copied().unique() {
+                let Some(channel) = score.channels.get(channel_number as usize) else {
                     continue;
-                }
+                };
 
-                // Skip channels with no sprite instances
                 if channel.sprite.script_instance_list.is_empty() {
                     continue;
                 }
@@ -682,10 +693,8 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
                 );
 
                 if channel.number > 0 {
-                    // Sprite channels (only those active in current frame)
                     sprite_tuple.push(entry);
                 } else {
-                    // Frame channel (number == 0, always included)
                     frame_tuple.push(entry);
                 }
             }
@@ -761,49 +770,66 @@ pub async fn dispatch_event_to_all_behaviors(
         return;
     }
     // Include ScoreRef to track which score context each sprite belongs to
-    let (sprite_behaviors, frame_behaviors) = reserve_player_mut(|player| {
+    let (sprite_behaviors, _frame_behaviors) = reserve_player_mut(|player| {
         let mut sprites: Vec<(ScoreRef, usize, Vec<ScriptInstanceRef>)> = Vec::new();
         let mut frames = Vec::new();
 
-        // Collect stage sprites - include all entered sprites with behaviors,
-        // not just those in sprite_spans. Sprites initialized from channel_initialization_data
-        // (D6+ path) also need event dispatch.
-        for channel in player.movie.score.channels.iter() {
-            if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered {
+        for channel_number in player.active_stage_behavior_channels() {
+            let Some((number, entered, puppet, fallback)) = player
+                .movie
+                .score
+                .channels
+                .get(channel_number)
+                .map(|channel| {
+                    (
+                        channel.number,
+                        channel.sprite.entered,
+                        channel.sprite.puppet,
+                        channel.sprite.script_instance_list.clone(),
+                    )
+                })
+            else {
+                continue;
+            };
+
+            if !entered && !puppet {
                 continue;
             }
-            let behaviors = channel.sprite.script_instance_list.clone();
-            if channel.number > 0 {
-                sprites.push((ScoreRef::Stage, channel.number, behaviors));
-            } else if channel.number == 0 {
-                frames.push((channel.number, behaviors));  // Store tuple with channel number
+
+            let behaviors =
+                player.get_sprite_script_instance_ids(number as i16, fallback.as_slice());
+            if behaviors.is_empty() {
+                continue;
+            }
+
+            if number > 0 {
+                sprites.push((ScoreRef::Stage, number, behaviors));
+            } else if number == 0 {
+                frames.push((number, behaviors));  // Store tuple with channel number
             }
         }
 
         // Collect filmloop sprites
         let active_filmloops = player.get_active_filmloop_scores();
-        for (member_ref, filmloop_score) in active_filmloops {
-            // Get the filmloop's current frame
-            let filmloop_current_frame = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
-                Some(member) => {
-                    if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                        film_loop.current_frame
-                    } else {
-                        continue; // Not a filmloop, skip
+        for (member_ref, filmloop_current_frame) in active_filmloops {
+            let Some(filmloop_score) = player
+                .movie
+                .cast_manager
+                .find_member_by_ref(&member_ref)
+                .and_then(|member| match &member.member_type {
+                    super::cast_member::CastMemberType::FilmLoop(film_loop) => {
+                        Some(&film_loop.score)
                     }
-                }
-                None => continue, // Member not found, skip
+                    _ => None,
+                })
+            else {
+                continue;
             };
-
-            let active_filmloop_channels: HashSet<u32> = filmloop_score.sprite_spans
-                .iter()
-                .filter(|span| Score::is_span_in_frame(span, filmloop_current_frame))
-                .map(|span| span.channel_number as u32)
-                .collect();
-
-            for channel in filmloop_score.channels.iter() {
-                if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered ||
-                    !active_filmloop_channels.contains(&(channel.number as u32)) {
+            for channel_number in filmloop_score.active_channel_numbers_for_frame(filmloop_current_frame) {
+                let Some(channel) = filmloop_score.channels.get(channel_number) else {
+                    continue;
+                };
+                if channel.sprite.script_instance_list.is_empty() || !channel.sprite.entered {
                     continue;
                 }
                 let behaviors = channel.sprite.script_instance_list.clone();

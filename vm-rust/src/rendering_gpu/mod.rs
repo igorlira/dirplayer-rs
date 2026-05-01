@@ -32,6 +32,11 @@ pub trait Renderer {
     /// Draw the main stage frame
     fn draw_frame(&mut self, player: &mut DirPlayer);
 
+    /// Reset per-movie state (texture caches, rendered-text cache, any
+    /// scene-level GPU data). Call between tests so sprites from a previous
+    /// movie don't leak into the next one. Default: no-op.
+    fn reset_for_new_movie(&mut self) {}
+
     /// Draw the preview frame (member preview)
     fn draw_preview_frame(&mut self, player: &mut DirPlayer);
 
@@ -136,6 +141,13 @@ impl Renderer for DynamicRenderer {
         match self {
             DynamicRenderer::Canvas2D(r) => r.draw_frame(player),
             DynamicRenderer::WebGL2(r) => r.draw_frame(player),
+        }
+    }
+
+    fn reset_for_new_movie(&mut self) {
+        match self {
+            DynamicRenderer::Canvas2D(r) => r.reset_for_new_movie(),
+            DynamicRenderer::WebGL2(r) => r.reset_for_new_movie(),
         }
     }
 

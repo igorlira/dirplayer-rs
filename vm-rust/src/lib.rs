@@ -7,7 +7,7 @@ pub mod rendering_gpu;
 pub mod utils;
 
 use async_std::task::spawn_local;
-use log::debug;
+use log::{debug, warn};
 use js_api::JsApi;
 use num::ToPrimitive;
 use utils::set_panic_hook;
@@ -20,6 +20,7 @@ pub mod director;
 
 use player::{
     cast_lib::{cast_member_ref, CastMemberRef},
+    cast_member::CastMemberType,
     commands::{player_dispatch, PlayerVMCommand},
     datum_ref::DatumId,
     eval::eval_lingo_command,
@@ -52,6 +53,11 @@ pub fn set_external_params(params: js_sys::Object) {
 #[wasm_bindgen]
 pub fn set_base_path(path: String) {
     player_dispatch(PlayerVMCommand::SetBasePath(path));
+}
+
+#[wasm_bindgen]
+pub fn set_movie_path_override(path: String) {
+    player_dispatch(PlayerVMCommand::SetMoviePathOverride(path));
 }
 
 #[wasm_bindgen]
@@ -179,6 +185,36 @@ pub fn get_break_on_error() -> bool {
     reserve_player_ref(|player| player.break_on_error)
 }
 
+/// Returns the trace log file path and content as a JS object { path, content },
+/// or null if no trace log file is set or empty.
+#[wasm_bindgen]
+pub fn get_trace_log() -> JsValue {
+    use player::xtra::fileio::FILEIO_XTRA_MANAGER_OPT;
+
+    let (path, data) = reserve_player_ref(|player| {
+        let path = player.movie.trace_log_file.clone();
+        if path.is_empty() {
+            return (String::new(), Vec::new());
+        }
+        let manager = unsafe { FILEIO_XTRA_MANAGER_OPT.as_ref() };
+        let data = manager
+            .and_then(|mgr| mgr.virtual_fs.get(&path))
+            .cloned()
+            .unwrap_or_default();
+        (path, data)
+    });
+
+    if path.is_empty() || data.is_empty() {
+        return JsValue::NULL;
+    }
+
+    let obj = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&obj, &"path".into(), &path.into());
+    let content = String::from_utf8_lossy(&data);
+    let _ = js_sys::Reflect::set(&obj, &"content".into(), &content.as_ref().into());
+    obj.into()
+}
+
 #[wasm_bindgen]
 pub fn set_stage_size(width: u32, height: u32) {
     player_dispatch(PlayerVMCommand::SetStageSize(width, height));
@@ -197,45 +233,197 @@ pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
     }));
 }
 
+/// Dump every authored child sprite inside a filmloop member to the browser
+/// console. Lingo can't reach a filmloop's child sprites directly (the
+/// member.media is opaque), so this exposes the parsed score state
+/// dirplayer-rs already holds in memory. Resolves keyframes the same way
+/// `render_filmloop_from_channel_data` does (most-recent frame_idx per
+/// channel up to current_frame). Call from the JS console:
+///   `vm.player_print_filmloop_sprites(2, 145)` for the spiderweb filmloop.
+#[wasm_bindgen]
+pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
+    use crate::player::{cast_member::CastMemberType, reserve_player_ref};
+    use crate::player::score::get_channel_number_from_index;
+    reserve_player_ref(|player| {
+        let member_ref = CastMemberRef { cast_lib, cast_member };
+        let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+            web_sys::console::warn_1(&format!(
+                "[filmloop-dump] member {}:{} not found", cast_lib, cast_member
+            ).into());
+            return;
+        };
+        let CastMemberType::FilmLoop(film) = &member.member_type else {
+            web_sys::console::warn_1(&format!(
+                "[filmloop-dump] member {}:{} ('{}') is not a filmloop",
+                cast_lib, cast_member, member.name
+            ).into());
+            return;
+        };
+
+        let frame = film.current_frame;
+        let frame_idx_target = frame.saturating_sub(1);
+        let init_data = &film.score.channel_initialization_data;
+
+        // Resolve active sprite per channel: most-recent frame_idx <= target
+        let mut latest: std::collections::HashMap<u16, (u32, &crate::director::chunks::score::ScoreFrameChannelData)> =
+            std::collections::HashMap::new();
+        for (frame_idx, channel_idx, data) in init_data.iter() {
+            if *channel_idx < 6 { continue; }
+            if data.cast_member == 0 { continue; }
+            if *frame_idx > frame_idx_target { continue; }
+            latest
+                .entry(*channel_idx)
+                .and_modify(|(f, d)| if *frame_idx > *f { *f = *frame_idx; *d = data; })
+                .or_insert((*frame_idx, data));
+        }
+        let mut entries: Vec<_> = latest.into_iter().collect();
+        entries.sort_by_key(|(ch, _)| *ch);
+
+        web_sys::console::warn_1(&format!(
+            "[filmloop-dump] member {}:{} '{}' frame={} init_data_entries={} active_channels={}",
+            cast_lib, cast_member, member.name,
+            frame, init_data.len(), entries.len()
+        ).into());
+
+        // Raw dump of ALL channel_init_data entries (no frame/filter), so we
+        // can see channels that activate later, "reverse ink" companions, etc.
+        let mut all_raw: Vec<_> = init_data.iter().collect();
+        all_raw.sort_by_key(|(f, c, _)| (*c, *f));
+        for (f, c, d) in all_raw.iter().take(80) {
+            let ilib = if d.cast_lib == 65535 { cast_lib } else { d.cast_lib as i32 };
+            let nm = player.movie.cast_manager
+                .find_filmloop_inner_member(&CastMemberRef { cast_lib: ilib, cast_member: d.cast_member as i32 })
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| "<no_member>".into());
+            web_sys::console::warn_1(&format!(
+                "[filmloop-raw]   f={} ch={} ink={} blend={} member=({},{}) '{}' size={}x{}",
+                f, c, d.ink, d.blend, ilib, d.cast_member, nm, d.width, d.height
+            ).into());
+        }
+
+        for (channel_idx, (frame_idx, data)) in entries {
+            let channel_num = get_channel_number_from_index(channel_idx as u32);
+            let resolved_lib = if data.cast_lib == 65535 { cast_lib } else { data.cast_lib as i32 };
+            let sprite_ref = CastMemberRef { cast_lib: resolved_lib, cast_member: data.cast_member as i32 };
+            let inner = player.movie.cast_manager.find_filmloop_inner_member(&sprite_ref);
+            let (mname, mtype, bm_info) = match inner {
+                Some(m) => {
+                    let info = if let CastMemberType::Bitmap(bm) = &m.member_type {
+                        let bmp = player.bitmap_manager.get_bitmap(bm.image_ref);
+                        match bmp {
+                            Some(b) => format!(" bm={}x{} bd={} obd={} use_alpha={} pal={:?}",
+                                b.width, b.height, b.bit_depth, b.original_bit_depth,
+                                b.use_alpha, b.palette_ref),
+                            None => " bm=<no_data>".into(),
+                        }
+                    } else {
+                        String::new()
+                    };
+                    (m.name.clone(), format!("{:?}", m.member_type.member_type_id()), info)
+                }
+                None => ("<not found>".into(), "<none>".into(), String::new()),
+            };
+            web_sys::console::warn_1(&format!(
+                "[filmloop-dump]   ch={} ink={} blend={} member=({},{}) '{}' [{}]{} pos=({},{}) size={}x{} flipH={} flipV={} fore/back=({}/{}) color_flag={} kf_frame={}",
+                channel_num,
+                data.ink,
+                data.blend,
+                resolved_lib, data.cast_member,
+                mname, mtype, bm_info,
+                data.pos_x, data.pos_y,
+                data.width, data.height,
+                data.flip_h(), data.flip_v(),
+                data.fore_color, data.back_color,
+                data.color_flag,
+                frame_idx
+            ).into());
+
+            // If the child is itself a filmloop, dump one level deeper so we
+            // can see what bitmaps it ultimately contains.
+            if let Some(m) = inner {
+                if let CastMemberType::FilmLoop(inner_film) = &m.member_type {
+                    let inner_target = inner_film.current_frame.saturating_sub(1);
+                    let mut inner_latest: std::collections::HashMap<u16, (u32, &crate::director::chunks::score::ScoreFrameChannelData)> =
+                        std::collections::HashMap::new();
+                    for (f, c, d) in inner_film.score.channel_initialization_data.iter() {
+                        if *c < 6 || d.cast_member == 0 || *f > inner_target { continue; }
+                        inner_latest
+                            .entry(*c)
+                            .and_modify(|(ef, ed)| if *f > *ef { *ef = *f; *ed = d; })
+                            .or_insert((*f, d));
+                    }
+                    let mut inner_entries: Vec<_> = inner_latest.into_iter().collect();
+                    inner_entries.sort_by_key(|(c, _)| *c);
+                    for (ic, (ifr, id)) in inner_entries {
+                        let icn = get_channel_number_from_index(ic as u32);
+                        let ilib = if id.cast_lib == 65535 { resolved_lib } else { id.cast_lib as i32 };
+                        let inested_ref = CastMemberRef { cast_lib: ilib, cast_member: id.cast_member as i32 };
+                        let (inn_name, inn_type) = match player.movie.cast_manager.find_filmloop_inner_member(&inested_ref) {
+                            Some(im) => (im.name.clone(), format!("{:?}", im.member_type.member_type_id())),
+                            None => ("<not found>".into(), "<none>".into()),
+                        };
+                        web_sys::console::warn_1(&format!(
+                            "[filmloop-dump]     >> nested ch={} ink={} member=({},{}) '{}' [{}] size={}x{} fore/back=({}/{}) color_flag={} kf_frame={}",
+                            icn, id.ink, ilib, id.cast_member, inn_name, inn_type,
+                            id.width, id.height, id.fore_color, id.back_color, id.color_flag, ifr
+                        ).into());
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[wasm_bindgen]
 pub fn mouse_down(x: f64, y: f64) {
-    // Update mouse state immediately so the mouseH/the mouseV/the stillDown
-    // reflect real state even during long-running script handlers
+    // Invert the stage auto-scale so mouseH/mouseV land in movie coordinates,
+    // matching where sprites live in Lingo-facing state. No-op when scale=1.
+    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
+    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
     reserve_player_mut(|player| {
-        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.mouse_loc = (ix, iy);
         player.movie.mouse_down = true;
     });
-    player_dispatch(PlayerVMCommand::MouseDown((
-        x.to_i32().unwrap(),
-        y.to_i32().unwrap(),
-    )));
+    player_dispatch(PlayerVMCommand::MouseDown((ix, iy)));
 }
 
 #[wasm_bindgen]
 pub fn mouse_up(x: f64, y: f64) {
-    // Update mouse state immediately so the mouseH/the mouseV/the stillDown
-    // reflect real state even during long-running script handlers
+    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
+    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
     reserve_player_mut(|player| {
-        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.mouse_loc = (ix, iy);
         player.movie.mouse_down = false;
     });
-    player_dispatch(PlayerVMCommand::MouseUp((
-        x.to_i32().unwrap(),
-        y.to_i32().unwrap(),
-    )));
+    player_dispatch(PlayerVMCommand::MouseUp((ix, iy)));
 }
 
 #[wasm_bindgen]
 pub fn mouse_move(x: f64, y: f64) {
-    // Update mouse_loc immediately so the mouseH/the mouseV reflect real
-    // position even during long-running script handlers (same pattern as key_down/key_up)
+    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
+    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
     reserve_player_mut(|player| {
-        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.mouse_loc = (ix, iy);
     });
-    player_dispatch(PlayerVMCommand::MouseMove((
-        x.to_i32().unwrap(),
-        y.to_i32().unwrap(),
-    )));
+    player_dispatch(PlayerVMCommand::MouseMove((ix, iy)));
+}
+
+/// Check if the game wants pointer lock (for FPS mouse look)
+#[wasm_bindgen]
+pub fn wants_pointer_lock() -> bool {
+    reserve_player_ref(|player| player.wants_pointer_lock)
+}
+
+/// Mouse move with delta values (for pointer lock mode)
+/// The delta is added to the current mouse_loc (which the game resets to center each frame)
+#[wasm_bindgen]
+pub fn mouse_move_delta(dx: f64, dy: f64) {
+    reserve_player_mut(|player| {
+        player.mouse_loc.0 -= dx.to_i32().unwrap();
+        player.mouse_loc.1 += dy.to_i32().unwrap();
+    });
+    let (x, y) = reserve_player_ref(|player| player.mouse_loc);
+    player_dispatch(PlayerVMCommand::MouseMove((x, y)));
 }
 
 #[wasm_bindgen]
@@ -270,9 +458,25 @@ pub fn player_set_picking_mode(enabled: bool) {
 #[wasm_bindgen]
 pub fn player_get_sprite_at(x: f64, y: f64) -> i32 {
     reserve_player_ref(|player| {
-        get_sprite_at(player, x as i32, y as i32, false)
+        let (mx, my) = crate::player::stage::canvas_to_movie_coords(player, x, y);
+        get_sprite_at(player, mx as i32, my as i32, false)
             .map(|n| n as i32)
             .unwrap_or(0)
+    })
+}
+
+/// Check if a sprite is an editable field member (for mobile keyboard focus)
+#[wasm_bindgen]
+pub fn is_sprite_editable_field(sprite_id: i32) -> bool {
+    reserve_player_ref(|player| {
+        let sprite = player.movie.score.get_sprite(sprite_id as i16);
+        let member = sprite
+            .and_then(|s| s.member.as_ref())
+            .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
+        member.map_or(false, |m| match &m.member_type {
+            CastMemberType::Field(f) => f.editable,
+            _ => false,
+        })
     })
 }
 
@@ -407,6 +611,236 @@ pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
     });
 }
 
+/// Receive a rendered Flash frame from JavaScript (Ruffle) and store it as a bitmap.
+/// This allows Flash content to be composited into the Director stage rendering pipeline.
+#[wasm_bindgen]
+pub fn update_flash_frame(cast_lib: i32, cast_member: i32, width: u32, height: u32, rgba_data: &[u8]) {
+    use player::bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette};
+
+    let expected_len = (width * height * 4) as usize;
+    if rgba_data.len() != expected_len {
+        warn!(
+            "update_flash_frame: expected {} bytes, got {}",
+            expected_len, rgba_data.len()
+        );
+        return;
+    }
+
+    let mut bitmap = Bitmap::new(
+        width as u16,
+        height as u16,
+        32,
+        32,
+        8, // alpha depth
+        PaletteRef::BuiltIn(get_system_default_palette()),
+    );
+    bitmap.data = rgba_data.to_vec();
+    bitmap.use_alpha = true;
+
+    unsafe {
+        if let Some(player) = PLAYER_OPT.as_mut() {
+            let key = (cast_lib, cast_member);
+            if let Some(&existing_ref) = player.flash_frame_buffers.get(&key) {
+                if existing_ref == 0 {
+                    // Sentinel value — first real frame, allocate new bitmap
+                    let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+                    player.flash_frame_buffers.insert(key, bitmap_ref);
+                } else {
+                    // Replace existing bitmap to reuse the BitmapRef
+                    player.bitmap_manager.replace_bitmap(existing_ref, bitmap);
+                }
+            } else {
+                // No entry at all — allocate a new bitmap
+                let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+                player.flash_frame_buffers.insert(key, bitmap_ref);
+            }
+        }
+    }
+}
+
+// Flash-to-Lingo callback mechanism
+#[wasm_bindgen]
+pub fn trigger_lingo_callback(sprite_num: i32, handler_name: String, args: JsValue) -> bool {
+    use director::lingo::datum::Datum;
+
+    let arg_refs = if js_sys::Array::is_array(&args) {
+        let array = js_sys::Array::from(&args);
+        let mut refs = Vec::new();
+        for i in 0..array.length() {
+            let item = array.get(i);
+            let datum = if let Some(s) = item.as_string() {
+                Datum::String(s)
+            } else if let Some(n) = item.as_f64() {
+                Datum::Float(n)
+            } else {
+                Datum::Void
+            };
+            refs.push(player::player_alloc_datum(datum));
+        }
+        refs
+    } else {
+        let datum = if let Some(s) = args.as_string() {
+            Datum::String(s)
+        } else if let Some(n) = args.as_f64() {
+            Datum::Float(n)
+        } else {
+            Datum::Void
+        };
+        vec![player::player_alloc_datum(datum)]
+    };
+
+    player_dispatch_with_result(PlayerVMCommand::TriggerFlashCallback {
+        sprite_num,
+        handler_name,
+        args: arg_refs,
+    })
+}
+
+/// Convert a JsValue to a DatumRef, handling objects as PropLists
+fn js_value_to_datum_ref(item: &JsValue) -> player::datum_ref::DatumRef {
+    js_value_to_datum_ref_with_flash(item, 1, 1)
+}
+
+fn js_value_to_datum_ref_with_flash(item: &JsValue, flash_cast_lib: i32, flash_cast_member: i32) -> player::datum_ref::DatumRef {
+    use director::lingo::datum::{Datum, DatumType};
+
+    if item.is_null() || item.is_undefined() {
+        return player::player_alloc_datum(Datum::Void);
+    }
+    if let Some(s) = item.as_string() {
+        return player::player_alloc_datum(Datum::String(s));
+    }
+    if let Some(n) = item.as_f64() {
+        if n.fract() == 0.0 && n >= i32::MIN as f64 && n <= i32::MAX as f64 {
+            return player::player_alloc_datum(Datum::Int(n as i32));
+        } else {
+            return player::player_alloc_datum(Datum::Float(n));
+        }
+    }
+    if let Some(b) = item.as_bool() {
+        return player::player_alloc_datum(Datum::Int(if b { 1 } else { 0 }));
+    }
+    // Check for arrays before objects (arrays are also objects in JS)
+    if js_sys::Array::is_array(item) {
+        let array = js_sys::Array::from(item);
+        let mut items = std::collections::VecDeque::new();
+        for i in 0..array.length() {
+            let val = array.get(i);
+            items.push_back(js_value_to_datum_ref_with_flash(&val, flash_cast_lib, flash_cast_member));
+        }
+        // Use XmlChildNodes type for 0-based indexing (Flash arrays are 0-based)
+        return player::player_alloc_datum(Datum::List(DatumType::XmlChildNodes, items, false));
+    }
+    if item.is_object() {
+        let obj = js_sys::Object::from(item.clone());
+
+        // Check for __dirplayer_stored_path - this is a Flash object reference
+        if let Ok(stored_path) = js_sys::Reflect::get(&obj, &JsValue::from_str("__dirplayer_stored_path")) {
+            if let Some(path) = stored_path.as_string() {
+                let flash_ref = director::lingo::datum::FlashObjectRef::from_path_with_member(&path, flash_cast_lib, flash_cast_member);
+                return player::player_alloc_datum(Datum::FlashObjectRef(flash_ref));
+            }
+        }
+
+        // Convert JS object to PropList
+        let entries = js_sys::Object::entries(&obj);
+        let mut props: std::collections::VecDeque<(player::datum_ref::DatumRef, player::datum_ref::DatumRef)> = std::collections::VecDeque::new();
+        let mut flash_type: Option<String> = None;
+
+        for i in 0..entries.length() {
+            let entry = js_sys::Array::from(&entries.get(i));
+            let key = entry.get(0).as_string().unwrap_or_default();
+            let val = entry.get(1);
+
+            if key == "#type" {
+                flash_type = val.as_string();
+                continue;
+            }
+
+            let key_ref = player::player_alloc_datum(Datum::Symbol(key));
+            let val_ref = js_value_to_datum_ref_with_flash(&val, flash_cast_lib, flash_cast_member);
+            props.push_back((key_ref, val_ref));
+        }
+
+        // Store the type as a #type property if present
+        if let Some(t) = flash_type {
+            let key_ref = player::player_alloc_datum(Datum::Symbol("#type".to_string()));
+            let val_ref = player::player_alloc_datum(Datum::String(t));
+            props.push_front((key_ref, val_ref));
+        }
+
+        return player::player_alloc_datum(Datum::PropList(props, false));
+    }
+    player::player_alloc_datum(Datum::Void)
+}
+
+#[wasm_bindgen]
+pub fn trigger_lingo_callback_on_script(cast_lib: i32, cast_member: i32, handler_name: String, args: String, flash_cast_lib: i32, flash_cast_member: i32) -> bool {
+    use director::lingo::datum::Datum;
+
+    let args_js_value = match js_sys::JSON::parse(&args) {
+        Ok(val) => val,
+        Err(_) => return false,
+    };
+
+    let mut arg_refs = Vec::new();
+
+    // Prepend oCaller (the calling object reference) - Director handlers expect this as first arg
+    arg_refs.push(player::player_alloc_datum(Datum::Void));
+
+    if js_sys::Array::is_array(&args_js_value) {
+        let array = js_sys::Array::from(&args_js_value);
+        for i in 0..array.length() {
+            let item = array.get(i);
+            let datum_ref = js_value_to_datum_ref_with_flash(&item, flash_cast_lib, flash_cast_member);
+            arg_refs.push(datum_ref);
+        }
+    } else {
+        return false;
+    }
+
+
+    player_dispatch_with_result(PlayerVMCommand::TriggerLingoCallbackOnScript {
+        cast_lib,
+        cast_member,
+        handler_name,
+        args: arg_refs,
+    })
+}
+
+#[wasm_bindgen]
+pub fn set_lingo_script_property(cast_lib: i32, cast_member: i32, prop_name: String, value: JsValue) -> bool {
+    use director::lingo::datum::Datum;
+
+    let datum = if let Some(s) = value.as_string() {
+        Datum::String(s)
+    } else if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n >= i32::MIN as f64 && n <= i32::MAX as f64 {
+            Datum::Int(n as i32)
+        } else {
+            Datum::Float(n)
+        }
+    } else if let Some(b) = value.as_bool() {
+        Datum::Int(if b { 1 } else { 0 })
+    } else {
+        Datum::Void
+    };
+
+    let value_ref = player::player_alloc_datum(datum);
+
+    player_dispatch_with_result(PlayerVMCommand::SetLingoScriptProperty {
+        cast_lib,
+        cast_member,
+        prop_name,
+        value: value_ref,
+    })
+}
+
+fn player_dispatch_with_result(command: PlayerVMCommand) -> bool {
+    player_dispatch(command);
+    true
+}
+
 // Eval command bypasses the command queue to allow evaluating expressions
 // while a breakpoint is active (e.g., inspecting variables in the debugger).
 
@@ -481,6 +915,274 @@ pub fn get_renderer_backend() -> String {
             "none".to_string()
         }
     })
+}
+
+/// Download raw W3D/IFX data for external testing
+#[wasm_bindgen(js_name = "exportW3dRaw")]
+pub fn export_w3d_raw(cast_lib: i32, cast_member: i32) {
+    reserve_player_ref(|player| {
+        let member_ref = CastMemberRef { cast_lib, cast_member };
+        let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
+            Some(m) => m,
+            None => return,
+        };
+        let w3d = match member.member_type.as_shockwave3d() {
+            Some(w) => w,
+            None => return,
+        };
+        // Find IFX start in the raw data
+        let data = &w3d.w3d_data;
+        let ifx_magic = [0x49u8, 0x46, 0x58, 0x00];
+        let offset = (0..data.len().min(256)).find(|&i| i + 4 <= data.len() && data[i..i+4] == ifx_magic);
+        if let Some(off) = offset {
+            let ifx_data = &data[off..];
+            trigger_browser_download(&format!("member_{}_{}.w3d", cast_lib, cast_member), ifx_data, "application/octet-stream");
+            debug!("Exported {} bytes of IFX data (offset {} in {} byte XMED)", ifx_data.len(), off, data.len());
+        } else {
+            debug!("No IFX magic found in W3D data");
+        }
+    });
+}
+
+#[wasm_bindgen(js_name = "exportW3dObj")]
+pub fn export_w3d_obj(cast_lib: i32, cast_member: i32) {
+    reserve_player_ref(|player| {
+        let member_ref = CastMemberRef { cast_lib, cast_member };
+        let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
+            Some(m) => m,
+            None => {
+                web_sys::console::error_1(&format!("Member {}:{} not found", cast_lib, cast_member).into());
+                return;
+            }
+        };
+        let w3d = match member.member_type.as_shockwave3d() {
+            Some(w) => w,
+            None => {
+                web_sys::console::error_1(&"Not a Shockwave3D member".into());
+                return;
+            }
+        };
+        let scene = match &w3d.parsed_scene {
+            Some(s) => s,
+            None => {
+                web_sys::console::error_1(&"No parsed 3D scene".into());
+                return;
+            }
+        };
+
+        let name = if member.name.is_empty() {
+            format!("member_{}_{}", cast_lib, cast_member)
+        } else {
+            member.name.replace(' ', "_")
+        };
+
+        // Build ZIP containing OBJ + MTL + GLB + textures
+        let mtl_filename = format!("{}.mtl", name);
+        let obj_data = scene.export_obj_with_mtl(&mtl_filename);
+        let mtl_data = scene.export_mtl(&mtl_filename);
+        let glb_data = crate::director::chunks::w3d::gltf_export::export_glb(scene);
+
+        let obj_filename = format!("{}.obj", name);
+        let glb_filename = format!("{}.glb", name);
+        let zip_data = build_zip_with_glb(
+            &obj_filename, obj_data.as_bytes(),
+            &mtl_filename, mtl_data.as_bytes(),
+            &glb_filename, &glb_data,
+            &scene.texture_images,
+        );
+
+        trigger_browser_download(&format!("{}.zip", name), &zip_data, "application/zip");
+
+        debug!(
+            "Exported {}.obj ({} bytes), {}.mtl ({} bytes), {}.glb ({} bytes), {} textures",
+            name, obj_data.len(), name, mtl_data.len(), name, glb_data.len(), scene.texture_images.len()
+        );
+    });
+}
+
+/// List all Shockwave3D members in the movie (for use with exportW3dObj)
+#[wasm_bindgen(js_name = "listW3dMembers")]
+pub fn list_w3d_members() -> String {
+    reserve_player_ref(|player| {
+        let mut result = String::new();
+        for (lib_idx, cast) in player.movie.cast_manager.casts.iter().enumerate() {
+            for (_, member) in cast.members.iter() {
+                if member.member_type.as_shockwave3d().is_some() {
+                    let line = format!(
+                        "castLib {}  member {} \"{}\"  (call wasm.exportW3dObj({}, {}) to download)\n",
+                        lib_idx + 1, member.number, member.name,
+                        lib_idx + 1, member.number
+                    );
+                    result.push_str(&line);
+                }
+            }
+        }
+        if result.is_empty() {
+            result = "No Shockwave3D members found.".to_string();
+        }
+        debug!("{}", result);
+        result
+    })
+}
+
+/// Build a minimal uncompressed ZIP file containing OBJ + MTL + textures
+fn build_zip_with_glb(
+    obj_name: &str, obj_data: &[u8],
+    mtl_name: &str, mtl_data: &[u8],
+    glb_name: &str, glb_data: &[u8],
+    textures: &std::collections::HashMap<String, Vec<u8>>,
+) -> Vec<u8> {
+    let mut files: Vec<(String, &[u8])> = Vec::new();
+    files.push((obj_name.to_string(), obj_data));
+    files.push((mtl_name.to_string(), mtl_data));
+    files.push((glb_name.to_string(), glb_data));
+
+    for (tex_name, image_data) in textures {
+        let ext = if image_data.len() >= 2 && image_data[0] == 0xFF && image_data[1] == 0xD8 {
+            "jpg"
+        } else if image_data.len() >= 2 && image_data[0] == 0x89 && image_data[1] == 0x50 {
+            "png"
+        } else {
+            "bin"
+        };
+        files.push((format!("{}.{}", tex_name, ext), image_data));
+    }
+
+    let mut zip = Vec::new();
+    let mut central_dir = Vec::new();
+    let mut offsets: Vec<u32> = Vec::new();
+
+    // Write local file headers + data
+    for (name, data) in &files {
+        offsets.push(zip.len() as u32);
+        let name_bytes = name.as_bytes();
+        let crc = crc32(data);
+
+        // Local file header (0x04034b50)
+        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
+        zip.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        zip.extend_from_slice(&0u16.to_le_bytes());  // flags
+        zip.extend_from_slice(&0u16.to_le_bytes());  // compression (0=stored)
+        zip.extend_from_slice(&0u16.to_le_bytes());  // mod time
+        zip.extend_from_slice(&0u16.to_le_bytes());  // mod date
+        zip.extend_from_slice(&crc.to_le_bytes());   // crc32
+        zip.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed size
+        zip.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes()); // name length
+        zip.extend_from_slice(&0u16.to_le_bytes());  // extra length
+        zip.extend_from_slice(name_bytes);
+        zip.extend_from_slice(data);
+    }
+
+    // Write central directory
+    let cd_offset = zip.len() as u32;
+    for (i, (name, data)) in files.iter().enumerate() {
+        let name_bytes = name.as_bytes();
+        let crc = crc32(data);
+
+        central_dir.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // signature
+        central_dir.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        central_dir.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        central_dir.extend_from_slice(&0u16.to_le_bytes());  // flags
+        central_dir.extend_from_slice(&0u16.to_le_bytes());  // compression
+        central_dir.extend_from_slice(&0u16.to_le_bytes());  // mod time
+        central_dir.extend_from_slice(&0u16.to_le_bytes());  // mod date
+        central_dir.extend_from_slice(&crc.to_le_bytes());   // crc32
+        central_dir.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed size
+        central_dir.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncompressed size
+        central_dir.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes()); // name length
+        central_dir.extend_from_slice(&0u16.to_le_bytes());  // extra length
+        central_dir.extend_from_slice(&0u16.to_le_bytes());  // comment length
+        central_dir.extend_from_slice(&0u16.to_le_bytes());  // disk number
+        central_dir.extend_from_slice(&0u16.to_le_bytes());  // internal attrs
+        central_dir.extend_from_slice(&0u32.to_le_bytes());  // external attrs
+        central_dir.extend_from_slice(&offsets[i].to_le_bytes()); // local header offset
+        central_dir.extend_from_slice(name_bytes);
+    }
+
+    zip.extend_from_slice(&central_dir);
+
+    // End of central directory
+    zip.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]); // signature
+    zip.extend_from_slice(&0u16.to_le_bytes());  // disk number
+    zip.extend_from_slice(&0u16.to_le_bytes());  // cd disk number
+    zip.extend_from_slice(&(files.len() as u16).to_le_bytes()); // entries on disk
+    zip.extend_from_slice(&(files.len() as u16).to_le_bytes()); // total entries
+    zip.extend_from_slice(&(central_dir.len() as u32).to_le_bytes()); // cd size
+    zip.extend_from_slice(&cd_offset.to_le_bytes()); // cd offset
+    zip.extend_from_slice(&0u16.to_le_bytes());  // comment length
+
+    zip
+}
+
+/// Simple CRC32 (used for ZIP file entries)
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFFFFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+fn trigger_browser_download(filename: &str, data: &[u8], mime_type: &str) {
+    use js_sys::{Array, Uint8Array};
+    use wasm_bindgen::JsCast;
+
+    let uint8_array = Uint8Array::new_with_length(data.len() as u32);
+    uint8_array.copy_from(data);
+
+    let array = Array::new();
+    array.push(&uint8_array.buffer());
+
+    let mut options = web_sys::BlobPropertyBag::new();
+    options.type_(mime_type);
+
+    let blob = match web_sys::Blob::new_with_buffer_source_sequence_and_options(&array, &options) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    let url = match web_sys::Url::create_object_url_with_blob(&blob) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return,
+    };
+    let document = match window.document() {
+        Some(d) => d,
+        None => return,
+    };
+    let a = match document.create_element("a") {
+        Ok(el) => el,
+        Err(_) => return,
+    };
+
+    let _ = a.set_attribute("href", &url);
+    let _ = a.set_attribute("download", filename);
+    let _ = a.set_attribute("style", "display:none");
+
+    let body = match document.body() {
+        Some(b) => b,
+        None => return,
+    };
+    let _ = body.append_child(&a);
+
+    if let Some(html_el) = a.dyn_ref::<web_sys::HtmlElement>() {
+        html_el.click();
+    }
+
+    let _ = body.remove_child(&a);
+    let _ = web_sys::Url::revoke_object_url(&url);
 }
 
 // ============================================================================

@@ -1,0 +1,195 @@
+name: Update E2E Snapshots
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch (or tag/SHA) to run tests against."
+        required: true
+        type: string
+      glob:
+        description: 'Paths to update, relative to the snapshots submodule. Git pathspec glob — use `**` to match any number of components (e.g. `habbo_v7/**`, `**/browser/**/*`). `**` updates everything.'
+        required: true
+        type: string
+      suite:
+        description: "Which test suite to run."
+        required: false
+        type: choice
+        options: [both, native, browser]
+        default: both
+      submodule_branch:
+        description: "Branch of the snapshots submodule to push to."
+        required: false
+        type: string
+        default: main
+
+concurrency:
+  group: update-snapshots-${{ inputs.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TEST_ASSETS_URL: ${{ secrets.TEST_ASSETS_URL }}
+  HABBO_V7_USERNAME: ${{ secrets.HABBO_V7_USERNAME }}
+  HABBO_V7_PASSWORD: ${{ secrets.HABBO_V7_PASSWORD }}
+  HABBO_V7_INFO_HOST: ${{ secrets.HABBO_V7_INFO_HOST }}
+  HABBO_V7_INFO_PORT: ${{ secrets.HABBO_V7_INFO_PORT }}
+
+jobs:
+  update:
+    name: Update snapshots
+    runs-on: ubuntu-latest
+    # Gates the run behind manual approval from reviewers configured on this
+    # environment.
+    environment: snapshot-updates
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: true
+          fetch-depth: 0
+          # Must be able to push to BOTH this repo and the snapshots submodule.
+          token: ${{ secrets.SUBMODULE_WRITE_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C vm-rust/tests/snapshots/reference config user.name "github-actions[bot]"
+          git -C vm-rust/tests/snapshots/reference config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install Rust wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen-cli
+        if: inputs.suite != 'native'
+        run: |
+          VER=$(cargo metadata --manifest-path vm-rust/Cargo.toml --format-version 1 | \
+            python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; print(next(p['version'] for p in pkgs if p['name']=='wasm-bindgen'))")
+          cargo install wasm-bindgen-cli --version "$VER"
+
+      - uses: actions/setup-node@v4
+        if: inputs.suite != 'native'
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install npm dependencies
+        if: inputs.suite != 'native'
+        run: npm ci
+
+      - name: Install Playwright browsers
+        if: inputs.suite != 'native'
+        run: npx playwright install --with-deps chromium
+      
+      - name: Build and copy Ruffle
+        working-directory: ./vm-rust
+        run: npm run build-ruffle && npm run copy-ruffle
+      
+      - name: Download test assets
+        run: |
+          if [ -z "$TEST_ASSETS_URL" ]; then
+            echo "::error::TEST_ASSETS_URL secret is not set"
+            exit 1
+          fi
+          curl -fSL "$TEST_ASSETS_URL" -o assets.zip
+          unzip -qo assets.zip -d public/
+
+      - name: Cargo fetch
+        working-directory: ./vm-rust
+        run: cargo fetch
+
+      - name: Update native snapshots
+        if: inputs.suite == 'both' || inputs.suite == 'native'
+        working-directory: ./vm-rust
+        env:
+          SNAPSHOT_UPDATE: "1"
+        run: cargo test --test mod -- e2e --nocapture
+
+      - name: Update browser snapshots
+        if: inputs.suite == 'both' || inputs.suite == 'browser'
+        env:
+          SNAPSHOT_UPDATE: "1"
+        run: node scripts/run-browser-tests.mjs
+
+      - name: Filter by glob, commit and push submodule
+        id: submodule
+        working-directory: vm-rust/tests/snapshots/reference
+        env:
+          GLOB: ${{ inputs.glob }}
+          SOURCE_REF: ${{ inputs.ref }}
+          TARGET_BRANCH: ${{ inputs.submodule_branch }}
+        run: |
+          set -euo pipefail
+
+          PATTERN="${GLOB:-**}"
+          echo "Snapshot filter pattern: $PATTERN"
+          echo "All working-tree changes in submodule:"
+          git status --short || true
+
+          # Stage only paths matching the glob. Git's :(glob) pathspec supports
+          # `**` for matching any number of path components (vs raw shell glob
+          # which doesn't descend).
+          git add -- ":(glob)$PATTERN"
+
+          # Discard everything that wasn't staged. `--keep-index` moves unstaged
+          # tracked changes into the stash; `--include-untracked` moves new
+          # files too. Dropping the stash forgets them. Stash push exits non-
+          # zero when there's nothing to stash, so chain with `|| true`.
+          git stash push --keep-index --include-untracked --quiet \
+            -m "unmatched-${GITHUB_RUN_ID}" && git stash drop --quiet || true
+
+          if git diff --cached --quiet; then
+            echo "::notice::No snapshot changes matched '$PATTERN'. Nothing to commit."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Matched files (up to 50):"
+          git diff --cached --name-only | head -50
+
+          {
+            echo "### Snapshot changes"
+            echo ""
+            echo "Pattern: \`$PATTERN\`"
+            echo ""
+            echo '```'
+            git diff --cached --name-only | head -200
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          git commit -m "Update snapshots for ${SOURCE_REF} (pattern: ${PATTERN})"
+          git push origin "HEAD:refs/heads/${TARGET_BRANCH}"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Bump submodule pointer on parent branch
+        if: steps.submodule.outputs.changed == 'true'
+        env:
+          SOURCE_REF: ${{ inputs.ref }}
+          GLOB: ${{ inputs.glob }}
+          SHA: ${{ steps.submodule.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          # Only push back when the source ref is actually a branch. Tags or
+          # raw SHAs have nowhere to push to, so skip the parent bump.
+          BRANCH="${SOURCE_REF#refs/heads/}"
+          if ! git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "::warning::Source ref '$SOURCE_REF' is not a branch on origin; skipping parent bump. New submodule SHA: $SHA"
+            exit 0
+          fi
+
+          git add vm-rust/tests/snapshots/reference
+          if git diff --cached --quiet; then
+            echo "Submodule pointer already matches on parent branch."
+            exit 0
+          fi
+
+          SHORT="${SHA:0:12}"
+          git commit -m "Bump snapshots to ${SHORT} (pattern: ${GLOB:-**})"
+          git push origin "HEAD:refs/heads/${BRANCH}"

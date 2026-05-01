@@ -53,7 +53,7 @@ pub mod testing;
 pub mod testing_browser;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -71,10 +71,12 @@ use async_std::{
     task::spawn_local,
 };
 use cast_manager::CastPreloadReason;
-use cast_member::{CastMemberType, CastMemberTypeId};
+use cast_member::CastMemberType;
 use datum_ref::DatumRef;
 use fxhash::FxHashMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
+use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::wasm_bindgen;
 use log::{debug, error, warn};
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use net_manager::NetManager;
@@ -83,6 +85,7 @@ use score::{get_score_sprite_mut, ScoreRef};
 use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
+use xtra::fileio::{FileIoXtraManager, FILEIO_XTRA_MANAGER_OPT};
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
 use rand::SeedableRng;
@@ -105,13 +108,14 @@ use crate::{
         geometry::IntRect,
         profiling::get_profiler_report,
         scope::Scope,
-        events::{player_dispatch_event_beginsprite,
+        events::{player_dispatch_event_beginsprite, player_invoke_event_to_instances,
         dispatch_event_to_all_behaviors, player_invoke_frame_and_movie_scripts, dispatch_system_event_to_timeouts,
         player_invoke_targeted_event},
     },
     rendering::with_renderer_mut,
     utils::{get_base_url, get_elapsed_ticks},
 };
+use url::Url;
 
 use self::{
     bitmap::manager::BitmapRef,
@@ -151,13 +155,32 @@ fn trace_output(player: &DirPlayer, message: &str) {
     player.console.write_line(message);
     let trace_log_file = &player.movie.trace_log_file;
     if trace_log_file.is_empty() {
-        // Use the same output as 'put' command, but without the "-- " prefix
-        // since trace messages already have their own prefixes (-->, ==, etc.)
         JsApi::dispatch_debug_message(message);
     } else {
-        // TODO: Append to file
-        // For now, output to message window with file indicator
-        JsApi::dispatch_debug_message(&format!("[{}] {}", trace_log_file, message));
+        // Append to file via FileIO virtual filesystem
+        let manager = unsafe { FILEIO_XTRA_MANAGER_OPT.as_mut() };
+        if let Some(mgr) = manager {
+            let entry = mgr.virtual_fs.entry(trace_log_file.to_string()).or_insert_with(Vec::new);
+            entry.extend_from_slice(message.as_bytes());
+            entry.push(b'\n');
+        }
+        // Emit file-append event for Electron/local file writing
+        dispatch_file_write_event(trace_log_file, message);
+    }
+}
+
+pub fn dispatch_file_write_event(file_path: &str, content: &str) {
+    let window = web_sys::window();
+    if let Some(window) = window {
+        let event_init = web_sys::CustomEventInit::new();
+        let detail = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&detail, &"filePath".into(), &file_path.into());
+        let _ = js_sys::Reflect::set(&detail, &"content".into(), &content.into());
+        let _ = js_sys::Reflect::set(&detail, &"append".into(), &true.into());
+        event_init.set_detail(&detail);
+        if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict("dirplayer:fileWrite", &event_init) {
+            let _ = window.dispatch_event(&event);
+        }
     }
 }
 
@@ -201,10 +224,17 @@ pub struct DirPlayer {
     pub timeout_manager: TimeoutManager,
     pub title: String,
     pub bg_color: ColorRef,
+    pub stage_draw_rect: Option<[f64; 4]>,
+    pub center_stage: bool,
     pub keyboard_focus_sprite: i16,
     pub text_selection_start: u16,
     pub text_selection_end: u16,
     pub mouse_loc: (i32, i32),
+    pub wants_pointer_lock: bool,
+    pub cursor_is_hidden: bool,
+    /// Track parent DatumRef for chained property access (transform.position.z = value)
+    /// (vector DatumRef, parent transform DatumRef, sub-property name)
+    pub transform_sub_refs: Vec<(DatumRef, DatumRef, String)>,
     pub last_mouse_down_time: i64,
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
@@ -241,8 +271,13 @@ pub struct DirPlayer {
     pub system_start_time: chrono::DateTime<chrono::Local>, // For ticks & milliSeconds (system uptime)
     pub handler_stack_depth: usize,
     pub in_frame_script: bool,
+    /// Flash frame buffers: maps (cast_lib, cast_member) to BitmapRef in bitmap_manager
+    pub flash_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
+    /// Cached rendered 3D scene bitmaps (populated during sprite rendering, read by world.image)
+    pub w3d_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
     pub in_enter_frame: bool,
     pub in_prepare_frame: bool,
+    pub in_step_frame: bool,
     pub in_event_dispatch: bool,
     pub command_handler_yielding: bool, // Pauses frame loop when a command handler (keyDown) needs updateStage to yield
     pub in_mouse_command: bool, // Pauses frame loop during mouse handlers; updateStage renders without yielding
@@ -250,7 +285,10 @@ pub struct DirPlayer {
     pub last_nothing_yield_ms: f64, // Timestamp of last nothing() yield for time-throttled rendering
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
+    pub stage_dirty: bool, // Set when any sprite property changes; cleared after render
+    pub preview_dirty: bool, // Set when preview member/settings change; cleared after preview render
     pub has_frame_changed_in_go: bool,
+    pub go_same_frame: bool,
     pub go_direction: u8,
     pub is_getting_property_descriptions: bool,
     pub is_initializing_behavior_props: bool,
@@ -268,16 +306,32 @@ pub struct DirPlayer {
     /// True while a net movie transition is in progress.
     /// Prevents the event loop from dispatching external events during the transition.
     pub is_in_transition: bool,
+    pub actor_list_generation: u64,
+    pub behavior_channel_cache_generation: u64,
+    pub active_stage_filmloop_cache_generation: u64,
     pub rng: rand::rngs::SmallRng,
     /// Cache of allocated scriptInstanceList datums per sprite.
     /// Ensures that `sprite.scriptInstanceList.add(x)` modifies the live list
     /// rather than a copy. Keyed by sprite number.
     pub script_instance_list_cache: FxHashMap<i16, DatumRef>,
+    /// Reverse lookup from cached scriptInstanceList datum id to sprite number.
+    pub script_instance_list_cache_owner: FxHashMap<usize, i16>,
+    /// Mutation generation per cached scriptInstanceList.
+    pub script_instance_list_generation: FxHashMap<i16, u64>,
+    /// Parsed script instance ids keyed by sprite and cache generation.
+    pub script_instance_list_ids_cache: FxHashMap<i16, (u64, Vec<ScriptInstanceRef>)>,
+    /// Cached stage channels with active behaviors for the current frame.
+    pub active_stage_behavior_channels_cache: Option<(u32, u64, Vec<usize>)>,
+    /// Cached visible filmloop members currently present on the stage for a frame.
+    pub active_stage_filmloop_members_cache: Option<(u32, u64, Vec<CastMemberRef>)>,
     /// Set by `sprite_get_prop` when a property returns a pre-allocated DatumRef
     /// (e.g. cached scriptInstanceList). Callers should check this before
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
     pub last_sprite_prop_ref: Option<DatumRef>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
+    /// Optional fake movie path override. When set, `the moviePath` and `the movieName`
+    /// return values derived from this path, while actual file fetching uses the real URL.
+    pub movie_path_override: Option<String>,
     pub console: console::ConsoleBuffer,
 }
 
@@ -328,9 +382,11 @@ impl DirPlayer {
                 click_loc: (0,0),
                 frame_script_instance: None,
                 frame_script_member: None,
+                sound_device: String::new(),
             },
             net_manager: NetManager {
                 base_path: None,
+                override_base_path: None,
                 tasks: HashMap::new(),
                 task_states: HashMap::new(),
                 shared_state: Arc::new(Mutex::new(NetManagerSharedState::new())),
@@ -354,8 +410,13 @@ impl DirPlayer {
             timeout_manager: TimeoutManager::new(),
             title: "".to_string(),
             bg_color: ColorRef::Rgb(0, 0, 0),
+            stage_draw_rect: None,
+            center_stage: true,
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
+            wants_pointer_lock: false,
+            cursor_is_hidden: false,
+            transform_sub_refs: Vec::new(),
             last_mouse_down_time: 0,
             is_double_click: false,
             mouse_down_sprite: 0,
@@ -390,8 +451,11 @@ impl DirPlayer {
             system_start_time: now - chrono::Duration::days(8), // Simulated system start
             handler_stack_depth: 0,
             in_frame_script: false,
+            flash_frame_buffers: HashMap::new(),
+            w3d_frame_buffers: HashMap::new(),
             in_enter_frame: false,
             in_prepare_frame: false,
+            in_step_frame: false,
             in_event_dispatch: false,
             command_handler_yielding: false,
             in_mouse_command: false,
@@ -399,7 +463,10 @@ impl DirPlayer {
             last_nothing_yield_ms: 0.0,
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
+            stage_dirty: true,
+            preview_dirty: true,
             has_frame_changed_in_go: false,
+            go_same_frame: false,
             go_direction: 0,
             is_getting_property_descriptions: false,
             is_initializing_behavior_props: false,
@@ -410,15 +477,59 @@ impl DirPlayer {
             delay_until: None,
             pending_goto_net_movie: None,
             is_in_transition: false,
+            actor_list_generation: 0,
+            behavior_channel_cache_generation: 0,
+            active_stage_filmloop_cache_generation: 0,
             script_instance_list_cache: FxHashMap::default(),
+            script_instance_list_cache_owner: FxHashMap::default(),
+            script_instance_list_generation: FxHashMap::default(),
+            script_instance_list_ids_cache: FxHashMap::default(),
+            active_stage_behavior_channels_cache: None,
+            active_stage_filmloop_members_cache: None,
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
+            movie_path_override: None,
             console: console::ConsoleBuffer::new(),
             rng: rand::rngs::SmallRng::seed_from_u64(0),
         };
 
         result.reset();
         result
+    }
+
+    /// Pre-dispatch Flash members for all active sprites so they start loading
+    /// before Lingo scripts try to access them.
+    pub fn pre_dispatch_flash_members(&mut self) {
+        for channel in &self.movie.score.channels {
+            if let Some(member_ref) = &channel.sprite.member {
+                let flash_key = (member_ref.cast_lib, member_ref.cast_member);
+                if self.flash_frame_buffers.contains_key(&flash_key) {
+                    continue;
+                }
+                if let Some(member) = self.movie.cast_manager.find_member_by_ref(member_ref) {
+                    if let CastMemberType::Flash(flash_member) = &member.member_type {
+                        if crate::rendering::has_swf_signature(&flash_member.data) {
+                            let data = flash_member.data.clone();
+                            let w = channel.sprite.width.max(1) as u32;
+                            let h = channel.sprite.height.max(1) as u32;
+                            debug!(
+                                "[Flash] Pre-dispatching {}:{} ({}x{}, {} bytes)",
+                                member_ref.cast_lib, member_ref.cast_member,
+                                w, h, data.len()
+                            );
+                            JsApi::dispatch_flash_member_loaded(
+                                member_ref.cast_lib,
+                                member_ref.cast_member,
+                                &data,
+                                w,
+                                h,
+                            );
+                            self.flash_frame_buffers.insert(flash_key, 0);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub async fn load_movie_from_file(&mut self, path: &str) {
@@ -455,6 +566,29 @@ impl DirPlayer {
                 &mut self.dir_cache,
             )
             .await;
+
+        // Apply fake movie path override if set (moviePath/movieName use this,
+        // but net_manager.base_path stays real for actual file fetching)
+        if let Some(ref override_path) = self.movie_path_override {
+            if !override_path.is_empty() {
+                if let Ok(url) = Url::parse(override_path) {
+                    self.movie.base_path = get_base_url(&url).to_string();
+                    if let Some(name) = url.path_segments().and_then(|s| s.last()) {
+                        self.movie.file_name = name.to_string();
+                    }
+                } else {
+                    // Treat as a plain path
+                    if let Some(pos) = override_path.rfind('/') {
+                        self.movie.base_path = override_path[..pos].to_string();
+                        self.movie.file_name = override_path[pos + 1..].to_string();
+                    } else {
+                        self.movie.file_name = override_path.clone();
+                    }
+                }
+                // Store the fake base path on net_manager so it can resolve override paths
+                self.net_manager.override_base_path = Some(self.movie.base_path.clone());
+            }
+        }
 
         self.bg_color = self.movie.stage_color_ref.clone();
 
@@ -513,47 +647,30 @@ impl DirPlayer {
                 channel.sprite.entered = false;
                 channel.sprite.script_instance_list.clear();
             }
-            self.script_instance_list_cache.clear();
+            self.clear_script_instance_list_caches();
         }
-        
-        // Track which film loop members we've already processed to avoid calling
-        // begin_sprites multiple times for the same film loop (when multiple channels
-        // use the same film loop member)
-        let mut processed_film_loops: std::collections::HashSet<CastMemberRef> = std::collections::HashSet::new();
 
-        for channel in self.movie.score.channels.iter() {
-            let member_ref = channel.sprite.member.as_ref();
-            let member_type = member_ref
-                .and_then(|x| self.movie.cast_manager.find_member_by_ref(&x))
-                .map(|x| x.member_type.member_type_id());
-
-            match member_type {
-                Some(CastMemberTypeId::FilmLoop) => {
-                    let member_ref_clone = member_ref.unwrap().clone();
-
-                    // Skip if we've already processed this film loop member
-                    if processed_film_loops.contains(&member_ref_clone) {
-                        continue;
-                    }
-                    processed_film_loops.insert(member_ref_clone.clone());
-
-                    let film_loop = match self
-                        .movie
-                        .cast_manager
-                        .find_mut_member_by_ref(member_ref.unwrap())
-                        .and_then(|m| m.member_type.as_film_loop_mut())
-                    {
-                        Some(fl) => fl,
-                        None => continue,
-                    };
-                    // Use filmloop's own current_frame instead of movie's current_frame
-                    let current_frame = film_loop.current_frame;
-                    film_loop.score.begin_sprites(ScoreRef::FilmLoop(member_ref_clone), current_frame);
-                    film_loop.score.apply_tween_modifiers(current_frame);
-                }
-                _ => {}
-            }
+        self.invalidate_active_stage_filmloop_cache();
+        let active_filmloops = self.active_stage_filmloop_member_refs();
+        for member_ref in active_filmloops {
+            let film_loop = match self
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+                .and_then(|m| m.member_type.as_film_loop_mut())
+            {
+                Some(fl) => fl,
+                None => continue,
+            };
+            // Use filmloop's own current_frame instead of movie's current_frame
+            let current_frame = film_loop.current_frame;
+            film_loop
+                .score
+                .begin_sprites(ScoreRef::FilmLoop(member_ref.clone()), current_frame);
+            film_loop.score.apply_tween_modifiers(current_frame);
         }
+
+        self.invalidate_behavior_channel_cache();
     }
 
     pub async fn end_all_sprites(&mut self) -> Vec<(ScoreRef, u32)> {
@@ -565,82 +682,52 @@ impl DirPlayer {
             .end_sprites(ScoreRef::Stage, self.movie.current_frame, next_frame).await;
         all_ended_sprite_nums.extend(ended_sprite_nums.iter().map(|&x| (ScoreRef::Stage, x)));
 
-        for channel in self.movie.score.channels.iter() {
-            let member_ref = channel.sprite.member.as_ref();
-            let member_type = member_ref
-                .and_then(|x| self.movie.cast_manager.find_member_by_ref(&x))
-                .map(|x| x.member_type.member_type_id());
+        let active_filmloops = self.active_stage_filmloop_member_refs();
+        for member_ref in active_filmloops {
+            let score_ref = ScoreRef::FilmLoop(member_ref.clone());
+            let film_loop = match self
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+                .and_then(|m| m.member_type.as_film_loop_mut())
+            {
+                Some(fl) => fl,
+                None => continue,
+            };
 
-            match member_type {
-                Some(CastMemberTypeId::FilmLoop) => {
-                    let score_ref = ScoreRef::FilmLoop(member_ref.unwrap().clone());
-                    let film_loop = match self
-                        .movie
-                        .cast_manager
-                        .find_mut_member_by_ref(member_ref.unwrap())
-                        .and_then(|m| m.member_type.as_film_loop_mut())
-                    {
-                        Some(fl) => fl,
-                        None => continue,
-                    };
+            let filmloop_current_frame = film_loop.current_frame;
+            let filmloop_next_frame = filmloop_current_frame + 1;
 
-                    // Calculate filmloop's next frame
-                    let filmloop_current_frame = film_loop.current_frame;
-                    let filmloop_next_frame = filmloop_current_frame + 1;
-
-                    let ended_sprite_nums = film_loop
-                        .score
-                        .end_sprites(score_ref.clone(), filmloop_current_frame, filmloop_next_frame).await;
-                    all_ended_sprite_nums.extend(
-                        ended_sprite_nums
-                            .iter()
-                            .map(|&x| (score_ref.clone(), x)),
-                    );
-                }
-                _ => {}
-            }
+            let ended_sprite_nums = film_loop
+                .score
+                .end_sprites(score_ref.clone(), filmloop_current_frame, filmloop_next_frame).await;
+            all_ended_sprite_nums.extend(
+                ended_sprite_nums
+                    .iter()
+                    .map(|&x| (score_ref.clone(), x)),
+            );
         }
         // for sprite_num in ended_sprite_nums.iter() {
         //   let sprite = self.movie.score.get_sprite_mut(*sprite_num as i16);
         //   sprite.exited = true;
         // }
+        self.invalidate_behavior_channel_cache();
+        self.invalidate_active_stage_filmloop_cache();
         all_ended_sprite_nums
     }
 
     /// Get all active filmloop scores with their member references.
-    /// Returns a vector of tuples containing (member_ref, score_ref).
+    /// Returns a vector of tuples containing (member_ref, current_frame).
     /// Only includes filmloops that are currently visible on stage.
     /// Deduplicates filmloops - each unique filmloop is only returned once even if used in multiple sprites.
-    pub fn get_active_filmloop_scores(&self) -> Vec<(CastMemberRef, &score::Score)> {
-        let mut active_filmloops = Vec::new();
-        let mut seen_members = std::collections::HashSet::new();
+    pub fn get_active_filmloop_scores(&mut self) -> Vec<(CastMemberRef, u32)> {
+        let member_refs = self.active_stage_filmloop_member_refs();
+        let mut active_filmloops = Vec::with_capacity(member_refs.len());
 
-        for channel in self.movie.score.channels.iter() {
-            // Skip if sprite is not active/entered
-            if !channel.sprite.entered || channel.sprite.exited {
-                continue;
-            }
-
-            let member_ref = match channel.sprite.member.as_ref() {
-                Some(r) => r,
-                None => continue,
-            };
-
-            // Skip if we've already seen this filmloop member
-            if !seen_members.insert(member_ref.clone()) {
-                continue;
-            }
-
-            let member_type = match self.movie.cast_manager.find_member_by_ref(&member_ref) {
-                Some(member) => member.member_type.member_type_id(),
-                None => continue,
-            };
-
-            if member_type == cast_member::CastMemberTypeId::FilmLoop {
-                if let Some(member) = self.movie.cast_manager.find_member_by_ref(&member_ref) {
-                    if let cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                        active_filmloops.push((member_ref.clone(), &film_loop.score));
-                    }
+        for member_ref in member_refs {
+            if let Some(member) = self.movie.cast_manager.find_member_by_ref(&member_ref) {
+                if let cast_member::CastMemberType::FilmLoop(film_loop) = &member.member_type {
+                    active_filmloops.push((member_ref, film_loop.current_frame));
                 }
             }
         }
@@ -803,6 +890,7 @@ impl DirPlayer {
         if !self.is_playing {
             return;
         }
+        self.stage_dirty = true;
 
         let prev_frame = self.movie.current_frame;
         let next_frame = self.get_next_frame();
@@ -852,7 +940,8 @@ impl DirPlayer {
         // netManager.clear();
         debug!("Resetting score");
         self.movie.score.reset();
-        self.script_instance_list_cache.clear();
+        self.clear_script_instance_list_caches();
+        self.invalidate_active_stage_filmloop_cache();
         self.movie.current_frame = 1;
         // TODO cancel breakpoints
         self.current_breakpoint = None;
@@ -878,8 +967,9 @@ impl DirPlayer {
 
     pub fn initialize_globals(&mut self) {
         // Initialize the actorList as a global variable
-        let actor_list_datum = self.alloc_datum(Datum::List(DatumType::List, vec![], false));
+        let actor_list_datum = self.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
         self.globals.insert("actorList".to_string(), actor_list_datum);
+        self.actor_list_generation = 0;
 
         // Mathematical constant
         let pi_datum = self.alloc_datum(Datum::Float(std::f64::consts::PI));
@@ -895,6 +985,9 @@ impl DirPlayer {
         // String constants
         let return_datum = self.alloc_datum(Datum::String("\r".to_string()));
         self.globals.insert("RETURN".to_string(), return_datum);
+
+        let enter_datum = self.alloc_datum(Datum::String("\x03".to_string()));
+        self.globals.insert("ENTER".to_string(), enter_datum);
         
         let quote_datum = self.alloc_datum(Datum::String("\"".to_string()));
         self.globals.insert("QUOTE".to_string(), quote_datum);
@@ -917,6 +1010,326 @@ impl DirPlayer {
     #[inline]
     pub fn alloc_datum(&mut self, datum: Datum) -> DatumRef {
         return self.allocator.alloc_datum(datum).unwrap();
+    }
+
+    /// Sync cached scriptInstanceList back to sprite's Vec for a given sprite.
+    /// Call this before reading script_instance_list on sprites that may have been
+    /// modified via .add() on the cached Datum::List.
+    pub fn sync_script_instance_list(&mut self, sprite_id: i16) {
+        if self.script_instance_list_cache.contains_key(&sprite_id) {
+            let existing_ids = self
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .map(|sprite| sprite.script_instance_list.clone())
+                .unwrap_or_default();
+            let synced_ids = self.get_sprite_script_instance_ids(sprite_id, &existing_ids);
+            let sprite = self.movie.score.get_sprite_mut(sprite_id);
+            sprite.script_instance_list = synced_ids;
+        }
+    }
+
+    /// Sync ALL cached scriptInstanceLists back to sprite Vecs.
+    pub fn sync_all_script_instance_lists(&mut self) {
+        let sprite_ids: Vec<i16> = self.script_instance_list_cache.keys().cloned().collect();
+        for sprite_id in sprite_ids {
+            self.sync_script_instance_list(sprite_id);
+        }
+    }
+
+    pub fn cache_script_instance_list(
+        &mut self,
+        sprite_id: i16,
+        list_ref: DatumRef,
+        initial_ids: Vec<ScriptInstanceRef>,
+    ) {
+        self.remove_script_instance_list_cache(sprite_id);
+        let generation = *self.script_instance_list_generation.entry(sprite_id).or_insert(0);
+        self.script_instance_list_cache_owner
+            .insert(list_ref.unwrap(), sprite_id);
+        self.script_instance_list_cache
+            .insert(sprite_id, list_ref);
+        self.script_instance_list_ids_cache
+            .insert(sprite_id, (generation, initial_ids));
+    }
+
+    pub fn remove_script_instance_list_cache(&mut self, sprite_id: i16) {
+        if let Some(cached_ref) = self.script_instance_list_cache.remove(&sprite_id) {
+            self.script_instance_list_cache_owner.remove(&cached_ref.unwrap());
+        }
+        self.script_instance_list_generation.remove(&sprite_id);
+        self.script_instance_list_ids_cache.remove(&sprite_id);
+    }
+
+    pub fn clear_script_instance_list_caches(&mut self) {
+        self.script_instance_list_cache.clear();
+        self.script_instance_list_cache_owner.clear();
+        self.script_instance_list_generation.clear();
+        self.script_instance_list_ids_cache.clear();
+        self.invalidate_behavior_channel_cache();
+    }
+
+    pub fn note_script_instance_list_mutation(&mut self, datum_ref: &DatumRef) {
+        if let Some(sprite_id) = self
+            .script_instance_list_cache_owner
+            .get(&datum_ref.unwrap())
+            .copied()
+        {
+            let generation = self.script_instance_list_generation.entry(sprite_id).or_insert(0);
+            *generation = generation.wrapping_add(1);
+            self.script_instance_list_ids_cache.remove(&sprite_id);
+            self.refresh_stage_behavior_channel_cache_entry(sprite_id);
+        }
+    }
+
+    pub fn invalidate_behavior_channel_cache(&mut self) {
+        self.behavior_channel_cache_generation =
+            self.behavior_channel_cache_generation.wrapping_add(1);
+        self.active_stage_behavior_channels_cache = None;
+    }
+
+    pub fn invalidate_active_stage_filmloop_cache(&mut self) {
+        self.active_stage_filmloop_cache_generation =
+            self.active_stage_filmloop_cache_generation.wrapping_add(1);
+        self.active_stage_filmloop_members_cache = None;
+    }
+
+    pub fn get_sprite_script_instance_ids(
+        &mut self,
+        sprite_id: i16,
+        fallback: &[ScriptInstanceRef],
+    ) -> Vec<ScriptInstanceRef> {
+        let Some(cached_ref) = self.script_instance_list_cache.get(&sprite_id).cloned() else {
+            return fallback.to_vec();
+        };
+
+        let generation = *self.script_instance_list_generation.get(&sprite_id).unwrap_or(&0);
+        if let Some((cached_generation, ids)) = self.script_instance_list_ids_cache.get(&sprite_id)
+        {
+            if *cached_generation == generation {
+                return ids.clone();
+            }
+        }
+
+        let ids = match self.get_datum(&cached_ref) {
+            Datum::List(_, item_refs, _) => item_refs
+                .iter()
+                .filter_map(|item_ref| match self.get_datum(item_ref) {
+                    Datum::ScriptInstanceRef(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => fallback.to_vec(),
+        };
+
+        self.script_instance_list_ids_cache
+            .insert(sprite_id, (generation, ids.clone()));
+        ids
+    }
+
+    pub fn sprite_has_script_instance_ids(
+        &self,
+        sprite_id: i16,
+        fallback: &[ScriptInstanceRef],
+    ) -> bool {
+        if !fallback.is_empty() {
+            return true;
+        }
+
+        self.script_instance_list_cache
+            .get(&sprite_id)
+            .is_some_and(|cached_ref| {
+                matches!(self.get_datum(cached_ref), Datum::List(_, items, _) if !items.is_empty())
+            })
+    }
+
+    pub fn refresh_stage_behavior_channel_cache_entry(&mut self, sprite_id: i16) {
+        let channel_number = sprite_id as usize;
+        let should_include = self
+            .movie
+            .score
+            .channels
+            .get(channel_number)
+            .is_some_and(|channel| {
+                (channel.sprite.entered || channel.sprite.puppet)
+                    && self.sprite_has_script_instance_ids(
+                        sprite_id,
+                        &channel.sprite.script_instance_list,
+                    )
+            });
+
+        let Some((_, _, channels)) = self.active_stage_behavior_channels_cache.as_mut() else {
+            return;
+        };
+
+        match channels.binary_search(&channel_number) {
+            Ok(index) if !should_include => {
+                channels.remove(index);
+            }
+            Err(index) if should_include => {
+                channels.insert(index, channel_number);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn active_stage_behavior_channels(&mut self) -> Vec<usize> {
+        let frame_num = self.movie.current_frame;
+        let generation = self.behavior_channel_cache_generation;
+
+        if let Some((cached_frame, cached_generation, channels)) =
+            &self.active_stage_behavior_channels_cache
+        {
+            if *cached_frame == frame_num && *cached_generation == generation {
+                return channels.clone();
+            }
+        }
+
+        let channels: Vec<usize> = self
+            .movie
+            .score
+            .channels
+            .iter()
+            .filter(|channel| channel.sprite.entered || channel.sprite.puppet)
+            .filter(|channel| {
+                self.sprite_has_script_instance_ids(
+                    channel.number as i16,
+                    &channel.sprite.script_instance_list,
+                )
+            })
+            .map(|channel| channel.number)
+            .collect();
+
+        self.active_stage_behavior_channels_cache =
+            Some((frame_num, generation, channels.clone()));
+        channels
+    }
+
+    pub fn active_stage_filmloop_member_refs(&mut self) -> Vec<CastMemberRef> {
+        let frame_num = self.movie.current_frame;
+        let generation = self.active_stage_filmloop_cache_generation;
+        if let Some((cached_frame, cached_generation, member_refs)) =
+            &self.active_stage_filmloop_members_cache
+        {
+            if *cached_frame == frame_num && *cached_generation == generation {
+                return member_refs.clone();
+            }
+        }
+
+        let mut channel_numbers = self.movie.score.active_channel_numbers_for_frame(frame_num);
+        let mut seen_channels = channel_numbers
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        for channel in self.movie.score.channels.iter() {
+            if channel.number != 0
+                && channel.sprite.puppet
+                && channel.sprite.visible
+                && seen_channels.insert(channel.number)
+            {
+                channel_numbers.push(channel.number);
+            }
+        }
+
+        let mut member_refs = Vec::new();
+        let mut seen_members = std::collections::HashSet::new();
+        for channel_number in channel_numbers {
+            let Some(channel) = self.movie.score.channels.get(channel_number) else {
+                continue;
+            };
+
+            if channel.number == 0 || !channel.sprite.visible {
+                continue;
+            }
+            let Some(member_ref) = channel.sprite.member.as_ref() else {
+                continue;
+            };
+
+            if !seen_members.insert(member_ref.clone()) {
+                continue;
+            }
+
+            let is_filmloop = self
+                .movie
+                .cast_manager
+                .find_member_by_ref(member_ref)
+                .is_some_and(|member| {
+                    member.member_type.member_type_id() == cast_member::CastMemberTypeId::FilmLoop
+                });
+            if is_filmloop {
+                member_refs.push(member_ref.clone());
+            }
+        }
+
+        self.active_stage_filmloop_members_cache =
+            Some((frame_num, generation, member_refs.clone()));
+        member_refs
+    }
+
+    pub fn active_stage_script_instance_ids(&mut self) -> Vec<ScriptInstanceRef> {
+        let mut channel_numbers = self.active_stage_behavior_channels();
+        let frame_channel_is_active = self
+            .movie
+            .score
+            .active_channel_numbers_for_frame(self.movie.current_frame)
+            .contains(&0);
+        if frame_channel_is_active && !channel_numbers.contains(&0) {
+            channel_numbers.push(0);
+        }
+
+        let mut receivers = Vec::new();
+        for channel_number in channel_numbers {
+            let Some(fallback) = self
+                .movie
+                .score
+                .channels
+                .get(channel_number)
+                .map(|channel| channel.sprite.script_instance_list.clone())
+            else {
+                continue;
+            };
+            receivers.extend(
+                self.get_sprite_script_instance_ids(channel_number as i16, fallback.as_slice()),
+            );
+        }
+        receivers
+    }
+
+    pub fn note_actor_list_mutation(&mut self, datum_ref: &DatumRef) {
+        if self.globals.get("actorList").is_some_and(|actor_list_ref| actor_list_ref == datum_ref) {
+            self.actor_list_generation = self.actor_list_generation.wrapping_add(1);
+        }
+    }
+
+    pub fn actor_list_stepframe_snapshot(&self) -> (VecDeque<DatumRef>, HashSet<usize>, u64) {
+        let actor_list_ref = self
+            .globals
+            .get("actorList")
+            .cloned()
+            .unwrap_or(DatumRef::Void);
+        match self.get_datum(&actor_list_ref) {
+            Datum::List(_, items, _) => {
+                let snapshot = items.clone();
+                let active_ids = items.iter().map(|actor_ref| actor_ref.unwrap()).collect();
+                (snapshot, active_ids, self.actor_list_generation)
+            }
+            _ => (VecDeque::new(), HashSet::new(), self.actor_list_generation),
+        }
+    }
+
+    pub fn actor_list_active_ids(&self) -> (HashSet<usize>, u64) {
+        let actor_list_ref = self
+            .globals
+            .get("actorList")
+            .cloned()
+            .unwrap_or(DatumRef::Void);
+        match self.get_datum(&actor_list_ref) {
+            Datum::List(_, items, _) => (
+                items.iter().map(|actor_ref| actor_ref.unwrap()).collect(),
+                self.actor_list_generation,
+            ),
+            _ => (HashSet::new(), self.actor_list_generation),
+        }
     }
 
     fn datum_leak_scan(&self) -> String {
@@ -987,19 +1400,8 @@ impl DirPlayer {
                         ));
                     }
                 }
-                Datum::Point(arr) => {
-                    let nc: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
-                    if nc > 0 {
-                        growing_containers.push((format!("OLD Point #{} (rc={}) +{} new", cid, rc, nc), nc));
-                        for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } }
-                    }
-                }
-                Datum::Rect(arr) => {
-                    let nc: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
-                    if nc > 0 {
-                        growing_containers.push((format!("OLD Rect #{} (rc={}) +{} new", cid, rc, nc), nc));
-                        for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } }
-                    }
+                Datum::Point(..) | Datum::Rect(..) => {
+                    // Inline storage - no DatumRef children to track
                 }
                 _ => {}
             }
@@ -1024,15 +1426,9 @@ impl DirPlayer {
                     }
                     c
                 }
-                Datum::Point(arr) => {
-                    let c: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
-                    if c > 0 { for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } } }
-                    c
-                }
-                Datum::Rect(arr) => {
-                    let c: usize = arr.iter().filter(|r| ref_id(r).map_or(false, |id| new_datum_ids.contains(&id))).count();
-                    if c > 0 { for r in arr { if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) { accounted.insert(id); } } }
-                    c
+                Datum::Point(..) | Datum::Rect(..) => {
+                    // Inline storage - no DatumRef children to track
+                    0
                 }
                 _ => 0,
             };
@@ -1257,6 +1653,12 @@ impl DirPlayer {
                 web_sys::console::log_1(&stats.clone().into());
                 Ok(self.alloc_datum(Datum::String(stats)))
             },
+            "systemDate" => {
+                let date_id = self.allocator.get_free_script_instance_id();
+                let date_obj = crate::player::handlers::datum_handlers::date::DateObject::new(date_id);
+                self.date_objects.insert(date_id, date_obj);
+                Ok(self.alloc_datum(Datum::DateRef(date_id)))
+            },
             "stage" => Ok(self.alloc_datum(Datum::Stage)),
             "time" => Ok(self.alloc_datum(Datum::String(
                 chrono::Local::now().format("%H:%M %p").to_string(),
@@ -1276,9 +1678,7 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::Int(frame_tempo as i32)))
             },
             "mouseLoc" => {
-                let x_ref = self.alloc_datum(Datum::Int(self.mouse_loc.0));
-                let y_ref = self.alloc_datum(Datum::Int(self.mouse_loc.1));
-                Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
+                Ok(self.alloc_datum(Datum::Point([self.mouse_loc.0 as f64, self.mouse_loc.1 as f64], 0)))
             },
             "mouseH" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
             "mouseV" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
@@ -1347,9 +1747,9 @@ impl DirPlayer {
                     .clone())
             },
             "clickOn" => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
-            "environment" => {
+            "environment" | "environmentPropList" => {
                 // Build the environment property list
-                let props = vec![
+                let props = VecDeque::from(vec![
                     (
                         self.alloc_datum(Datum::Symbol("shockMachine".to_string())),
                         self.alloc_datum(Datum::Int(0))
@@ -1364,7 +1764,11 @@ impl DirPlayer {
                     ),
                     (
                         self.alloc_datum(Datum::Symbol("runMode".to_string())),
-                        self.alloc_datum(Datum::String("Plugin".to_string()))
+                        self.alloc_datum(Datum::String(
+                            self.external_params.get("_runMode")
+                                .cloned()
+                                .unwrap_or_else(|| "Plugin".to_string())
+                        ))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol("colorDepth".to_string())),
@@ -1406,20 +1810,18 @@ impl DirPlayer {
                         self.alloc_datum(Datum::Symbol("trialTime".to_string())),
                         self.alloc_datum(Datum::Int(0))
                     ),
-                ];
+                ]);
                 Ok(self.alloc_datum(Datum::PropList(props, false)))
             },
             "clickLoc" => {
-                let x_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.0));
-                let y_ref = self.alloc_datum(Datum::Int(self.movie.click_loc.1));
-                Ok(self.alloc_datum(Datum::Point([x_ref, y_ref])))
+                Ok(self.alloc_datum(Datum::Point([self.movie.click_loc.0 as f64, self.movie.click_loc.1 as f64], 0)))
             },
             "markerList" => {
                 let labels: Vec<_> = self.movie.score.frame_labels
                     .iter()
                     .map(|fl| (fl.label.clone(), fl.frame_num))
                     .collect();
-                let props: Vec<(DatumRef, DatumRef)> = labels
+                let props: VecDeque<(DatumRef, DatumRef)> = labels
                     .into_iter()
                     .map(|(label, frame_num)| {
                         let label = self.alloc_datum(Datum::String(label));
@@ -1431,15 +1833,21 @@ impl DirPlayer {
             },
             "xtraList" => {
                 let xtra_names = xtra::manager::get_registered_xtra_names();
-                let xtra_list: Vec<DatumRef> = xtra_names
+                let xtra_list: VecDeque<DatumRef> = xtra_names
                     .iter()
                     .map(|name| {
                         let name_key = self.alloc_datum(Datum::Symbol("name".to_string()));
                         let name_val = self.alloc_datum(Datum::String(name.to_string()));
-                        self.alloc_datum(Datum::PropList(vec![(name_key, name_val)], false))
+                        self.alloc_datum(Datum::PropList(VecDeque::from(vec![(name_key, name_val)]), false))
                     })
                     .collect();
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
+            },
+            "runMode" => {
+                let mode = self.external_params.get("_runMode")
+                    .cloned()
+                    .unwrap_or_else(|| "Plugin".to_string());
+                Ok(self.alloc_datum(Datum::String(mode)))
             },
             _ => {
                 let datum = self.movie.get_prop(prop)?;
@@ -1452,7 +1860,54 @@ impl DirPlayer {
         match prop {
             "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
             "productVersion" => Ok(self.alloc_datum(Datum::String("10.1".to_string()))), // TODO
+            "runMode" => {
+                let mode = self.external_params.get("_runMode")
+                    .cloned()
+                    .unwrap_or_else(|| "Plugin".to_string());
+                Ok(self.alloc_datum(Datum::String(mode)))
+            }
+            // Key state properties (also accessible via _key.optionDown etc.)
+            "optionDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+            "commandDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_command_down()))),
+            "controlDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_control_down()))),
+            "shiftDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_shift_down()))),
+            "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+            "keyCode" => Ok(self.alloc_datum(Datum::Int(self.keyboard_manager.key_code() as i32))),
+            "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
             _ => Err(ScriptError::new(format!("Unknown player prop {}", prop))),
+        }
+    }
+
+    fn get_mouse_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
+        match prop {
+            "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
+            "mouseLoc" => {
+                Ok(self.alloc_datum(Datum::Point([self.mouse_loc.0 as f64, self.mouse_loc.1 as f64], 0)))
+            }
+            _ => Err(ScriptError::new(format!("Unknown _mouse prop {}", prop))),
+        }
+    }
+
+    fn set_mouse_prop(&mut self, prop: &str, value_ref: &DatumRef) -> Result<(), ScriptError> {
+        match prop {
+            "mouseLoc" => {
+                let value = self.get_datum(value_ref).clone();
+                match value {
+                    Datum::Point(vals, _flags) => {
+                        let x = vals[0] as i32;
+                        let y = vals[1] as i32;
+                        self.mouse_loc = (x, y);
+                        // Game is programmatically warping the mouse — this is the FPS mouselook pattern.
+                        // Only request pointer lock if cursor is hidden AND 3D content is active.
+                        if self.cursor_is_hidden && !self.w3d_frame_buffers.is_empty() {
+                            self.wants_pointer_lock = true;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(ScriptError::new("mouseLoc requires a point value".to_string())),
+                }
+            }
+            _ => Err(ScriptError::new(format!("Cannot set _mouse prop {}", prop))),
         }
     }
 
@@ -1463,8 +1918,8 @@ impl DirPlayer {
                 self.movie.item_delimiter = (value.string_value()?).chars().next().unwrap();
                 Ok(())
             }
-            "traceScript" => {
-                // TODO
+            "traceScript" | "debugPlaybackEnabled" => {
+                // Accepted, no-op
                 Ok(())
             }
             _ => Err(ScriptError::new(format!("Cannot set player prop {}", prop))),
@@ -1481,7 +1936,8 @@ impl DirPlayer {
             "timeoutLapsed" => Ok(Datum::Int(0)),
             "soundEnabled" => Ok(Datum::Int(1)),
             "soundLevel" => Ok(Datum::Int(7)), // max volume
-            "beepOn" | "centerStage" | "fixStageSize" => Ok(Datum::Int(0)),
+            "beepOn" | "fixStageSize" => Ok(Datum::Int(0)),
+            "centerStage" => Ok(datum_bool(self.center_stage)),
             "exitLock" => Ok(datum_bool(self.movie.exit_lock)),
             "key" => Ok(Datum::String(self.keyboard_manager.key())),
             "keyPressed" => Ok(Datum::String(self.keyboard_manager.key_pressed())),
@@ -1542,7 +1998,10 @@ impl DirPlayer {
                 Ok(())
             },
             "centerStage" => {
-                // TODO
+                self.center_stage = value.int_value()? != 0;
+                crate::player::stage::apply_stage_draw_rect(self);
+                let (w, h) = crate::player::stage::stage_canvas_dims(self);
+                crate::js_api::JsApi::dispatch_stage_size_changed(w, h, self.center_stage);
                 Ok(())
             },
             "actorList" => {
@@ -1552,6 +2011,7 @@ impl DirPlayer {
                         let new_actor_list =
                             self.alloc_datum(Datum::List(list_type, list_items, sorted));
                         self.globals.insert("actorList".to_string(), new_actor_list);
+                        self.actor_list_generation = self.actor_list_generation.wrapping_add(1);
                         Ok(())
                     }
                     _ => Err(ScriptError::new("actorList must be a list".to_string())),
@@ -1566,6 +2026,7 @@ impl DirPlayer {
         if err.code == ScriptErrorCode::Abort {
             return;
         }
+        web_sys::console::error_1(&format!("[!!] play failed with error: {}", err.message).into());
         warn!("[!!] play failed with error: {}", err.message);
         self.stop();
 
@@ -1617,11 +2078,20 @@ impl DirPlayer {
     }
 
     pub fn pop_scope(&mut self) {
-        self.scope_count -= 1;
+        // Guard against underflow. A stale handler resuming from an async JS
+        // callback after a test reset (Ruffle init, MP3 decode, fetch) can
+        // decrement scope_count on a freshly-reset player. A wrapping subtract
+        // would drive `scope_count` to u32::MAX-N and poison every later
+        // `scope_count - 1` index computation.
+        if self.scope_count > 0 {
+            self.scope_count -= 1;
+        } else {
+            warn!("pop_scope called with scope_count=0 (stale handler?)");
+        }
     }
 
     pub fn current_scope_ref(&self) -> ScopeRef {
-        (self.scope_count - 1) as ScopeRef
+        self.scope_count.saturating_sub(1) as ScopeRef
     }
 
     // Lingo: sound(channelNum)
@@ -1725,28 +2195,9 @@ impl DirPlayer {
     pub async fn update_filmloop_frames(&mut self) -> Vec<(CastMemberRef, u32, u32)> {
         let mut changed_filmloops = Vec::new();
 
-        // First, collect unique filmloop member refs from active sprites.
-        // Use `visible` filter (not `entered && !exited`) because filmloop sprites
-        // may not have entered/exited flags set properly in all game states
-        // (e.g., during `go to the frame` loops).
-        let unique_filmloop_refs: Vec<CastMemberRef> = {
-            let mut seen = std::collections::HashSet::new();
-            self.movie
-                .score
-                .channels
-                .iter()
-                .filter(|channel| channel.sprite.visible && channel.sprite.member.is_some())
-                .filter_map(|channel| channel.sprite.member.clone())
-                .filter(|member_ref| {
-                    // Only include each unique member_ref once
-                    let key = (member_ref.cast_lib, member_ref.cast_member);
-                    seen.insert(key)
-                })
-                .collect()
-        };
-
         // Collect active filmloop refs with their current and next frames
-        let active_filmloops: Vec<(CastMemberRef, u32, u32)> = unique_filmloop_refs
+        let active_filmloops: Vec<(CastMemberRef, u32, u32)> = self
+            .active_stage_filmloop_member_refs()
             .into_iter()
             .filter_map(|member_ref| {
                 self.movie
@@ -1756,22 +2207,7 @@ impl DirPlayer {
                         if let CastMemberType::FilmLoop(film_loop) = &m.member_type {
                             let current = film_loop.current_frame;
 
-                            // Calculate frame_count considering multiple sources:
-                            let span_max = film_loop.score.sprite_spans.iter()
-                                .map(|span| span.end_frame)
-                                .max()
-                                .unwrap_or(1);
-                            let init_data_max = film_loop.score.channel_initialization_data.iter()
-                                .map(|(frame_idx, _, _)| frame_idx + 1)
-                                .max()
-                                .unwrap_or(1);
-                            let keyframes_max = film_loop.score.keyframes_cache.values()
-                                .filter_map(|channel_kf| channel_kf.path.as_ref())
-                                .flat_map(|path_kf| path_kf.keyframes.iter())
-                                .map(|kf| kf.frame)
-                                .max()
-                                .unwrap_or(1);
-                            let frame_count = span_max.max(init_data_max).max(keyframes_max);
+                            let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
 
                             let next = current + 1;
                             let should_loop = (film_loop.info.loops & 0x20) == 0;
@@ -1809,91 +2245,36 @@ impl DirPlayer {
                 vec![]
             };
             
-            // Mark ended sprites as exited
             if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                 if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                     for sprite_num in ended_sprites {
-                        if let sprite = film_loop.score.get_sprite_mut(sprite_num as i16) {
-                            sprite.exited = true;
-                        }
+                        let sprite = film_loop.score.get_sprite_mut(sprite_num as i16);
+                        sprite.exited = true;
                     }
-                }
-            }
-            
-            // Update frame number
-            if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                     film_loop.current_frame = new_frame;
-                }
-            }
-            
-            // Begin new sprites
-            if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                     film_loop.score.begin_sprites(score_ref.clone(), new_frame);
-                }
-            }
-            
-            // CRITICAL FIX: Apply keyframe/tween data for the new frame
-            if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                     film_loop.score.apply_tween_modifiers(new_frame);
                 }
             }
             
             changed_filmloops.push((member_ref, old_frame, new_frame));
         }
-        
+
+        if !changed_filmloops.is_empty() {
+            self.invalidate_behavior_channel_cache();
+        }
+
         changed_filmloops
     }
 
     /// Just advance frame counters - actual sprite management happens in update_filmloop_frames
     fn advance_filmloop_frames(&mut self) {
-        // Note: We don't require entered && !exited here because filmloop sprites
-        // may not have those flags set properly. Instead, we advance any filmloop
-        // sprite that has a valid member and is visible.
-        let active_filmloop_refs: Vec<CastMemberRef> = self
-            .movie
-            .score
-            .channels
-            .iter()
-            .filter(|channel| channel.sprite.visible && channel.sprite.member.is_some())
-            .filter_map(|channel| channel.sprite.member.clone())
-            .filter(|member_ref| {
-                self.movie
-                    .cast_manager
-                    .find_member_by_ref(member_ref)
-                    .map(|m| m.member_type.member_type_id() == CastMemberTypeId::FilmLoop)
-                    .unwrap_or(false)
-            })
-            .collect();
+        let active_filmloop_refs = self.active_stage_filmloop_member_refs();
 
         for member_ref in active_filmloop_refs {
             if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                 if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                    // Calculate frame_count considering multiple sources:
-                    // 1. sprite_spans end frames
-                    let span_max = film_loop.score.sprite_spans.iter()
-                        .map(|span| span.end_frame)
-                        .max()
-                        .unwrap_or(1);
-
-                    // 2. channel_initialization_data max frame (0-based, so +1)
-                    let init_data_max = film_loop.score.channel_initialization_data.iter()
-                        .map(|(frame_idx, _, _)| frame_idx + 1)
-                        .max()
-                        .unwrap_or(1);
-
-                    // 3. path keyframes max frame from keyframes_cache
-                    let keyframes_max = film_loop.score.keyframes_cache.values()
-                        .filter_map(|channel_kf| channel_kf.path.as_ref())
-                        .flat_map(|path_kf| path_kf.keyframes.iter())
-                        .map(|kf| kf.frame)
-                        .max()
-                        .unwrap_or(1);
-
-                    // Use the maximum of all sources
-                    let frame_count = span_max.max(init_data_max).max(keyframes_max);
+                    let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
 
                     let old_frame = film_loop.current_frame;
                     film_loop.current_frame += 1;
@@ -1974,7 +2355,7 @@ pub async fn player_call_global_handler(
 ) -> Result<DatumRef, ScriptError> {
     let receiver_handler = unsafe {
         // let player_opt = PLAYER_LOCK.try_read().unwrap();
-        let player = PLAYER_OPT.as_ref().unwrap();
+        let player = PLAYER_OPT.as_mut().unwrap();
 
         let mut receiver_handler = None;
 
@@ -1998,9 +2379,7 @@ pub async fn player_call_global_handler(
 
             if receiver_handler.is_none() {
                 receiver_handler = player
-                    .movie
-                    .score
-                    .get_active_script_instance_list()
+                    .active_stage_script_instance_ids()
                     .iter()
                     .find_map(|instance_receiver_ref| {
                         let script_instance =
@@ -2152,7 +2531,6 @@ pub async fn player_call_script_handler_raw_args(
         }
     });
 
-    // Track handler depth and frame script execution
     reserve_player_mut(|player| {
         player.handler_stack_depth += 1;
         if is_frame_script {
@@ -2351,7 +2729,7 @@ pub async fn player_call_script_handler_raw_args(
                 }
                 // Cleanup on error
                 reserve_player_mut(|player| {
-                    player.handler_stack_depth -= 1;
+                    player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
                     if is_frame_script {
                         player.in_frame_script = false;
                     }
@@ -2403,7 +2781,7 @@ pub async fn player_call_script_handler_raw_args(
                 }
                 // Cleanup on error
                 reserve_player_mut(|player| {
-                    player.handler_stack_depth -= 1;
+                    player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
                     if is_frame_script {
                         player.in_frame_script = false;
                     }
@@ -2442,7 +2820,7 @@ pub async fn player_call_script_handler_raw_args(
 
     // Cleanup after successful execution
     reserve_player_mut(|player| {
-        player.handler_stack_depth -= 1;
+        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
         if is_frame_script {
             player.in_frame_script = false;
         }
@@ -2494,14 +2872,27 @@ async fn stop_movie_sequence() {
 /// Shared by `play()` and `transition_to_net_movie`.
 async fn run_movie_init_sequence() {
     // prepareMovie
+    debug!(">>> Dispatching prepareMovie");
     dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
 
     if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
+        web_sys::console::error_1(&format!("prepareMovie FAILED: {}", err.message).into());
         if err.code != ScriptErrorCode::Abort {
             reserve_player_mut(|player| player.on_script_error(&err));
         }
         return;
     }
+    debug!(">>> prepareMovie completed successfully");
+
+    // Log bPreloadCasts state after prepareMovie
+    reserve_player_ref(|player| {
+        let val = player.globals.get("bPreloadCasts");
+        let desc = match val {
+            Some(r) => format!("{}", player.get_datum(r).type_str()),
+            None => "NOT SET".to_string(),
+        };
+        debug!(">>> bPreloadCasts after prepareMovie: {}", desc);
+    });
 
     player_wait_available().await;
 
@@ -2520,25 +2911,37 @@ async fn run_movie_init_sequence() {
 
     // Collect behaviors that need initialization
     let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
-        player
-            .movie
-            .score
-            .channels
-            .iter()
-            .flat_map(|ch| {
-                let sprite_num = ch.sprite.number as u32;
-                ch.sprite.script_instance_list
-                    .iter()
-                    .filter(|behavior_ref| {
-                        if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
-                            !entry.script_instance.begin_sprite_called
-                        } else {
-                            false
-                        }
-                    })
-                    .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
-            })
-            .collect()
+        let mut behaviors = Vec::new();
+        for channel_number in player.active_stage_behavior_channels() {
+            let Some((sprite_num, fallback)) = player
+                .movie
+                .score
+                .channels
+                .get(channel_number)
+                .map(|channel| {
+                    (
+                        channel.sprite.number as u32,
+                        channel.sprite.script_instance_list.clone(),
+                    )
+                })
+            else {
+                continue;
+            };
+
+            for behavior_ref in player.get_sprite_script_instance_ids(
+                sprite_num as i16,
+                fallback.as_slice(),
+            ) {
+                if player
+                    .allocator
+                    .get_script_instance_entry(behavior_ref.id())
+                    .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
+                {
+                    behaviors.push((behavior_ref, sprite_num));
+                }
+            }
+        }
+        behaviors
     });
 
     for (behavior_ref, sprite_num) in &behaviors_to_init {
@@ -2614,45 +3017,56 @@ async fn run_movie_init_sequence() {
 
     player_wait_available().await;
 
-    // stepFrame to actorList
-    let actor_list_snapshot = reserve_player_ref(|player| {
-        let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-        let actor_list_datum = player.get_datum(&actor_list_ref);
-        match actor_list_datum {
-            Datum::List(_, items, _) => items.clone(),
-            _ => vec![],
-        }
+    // stepFrame to actorList — gate on in_step_frame to prevent re-entry.
+    let step_frame_entered = reserve_player_mut(|player| {
+        if player.in_step_frame { return true; }
+        player.in_step_frame = true;
+        false
     });
+    if !step_frame_entered {
+        let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
+            reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
 
-    for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-        let still_active = reserve_player_ref(|player| {
-            let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-            let actor_list_datum = player.get_datum(&actor_list_ref);
-            match actor_list_datum {
-                Datum::List(_, items, _) => items.contains(&actor_ref),
-                _ => false,
-            }
-        });
+        for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
+            let still_active = active_actor_ids.contains(&actor_ref.unwrap());
 
-        if still_active {
-            let result =
-                player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+            if still_active {
+                let result =
+                    player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
 
-            if let Err(err) = result {
-                if err.code == ScriptErrorCode::Abort {
+                if let Err(err) = result {
+                    if err.code == ScriptErrorCode::Abort {
+                        reserve_player_mut(|player| {
+                            player.is_in_frame_update = false;
+                            player.in_step_frame = false;
+                        });
+                        return;
+                    }
+                    error!("⚠ stepFrame[{}] error: {}", idx, err.message);
                     reserve_player_mut(|player| {
+                        player.on_script_error(&err);
                         player.is_in_frame_update = false;
+                        player.in_step_frame = false;
                     });
                     return;
                 }
-                error!("⚠ stepFrame[{}] error: {}", idx, err.message);
-                reserve_player_mut(|player| {
-                    player.on_script_error(&err);
-                    player.is_in_frame_update = false;
+
+                let refreshed_active_ids = reserve_player_ref(|player| {
+                    if player.actor_list_generation != actor_list_generation {
+                        Some(player.actor_list_active_ids())
+                    } else {
+                        None
+                    }
                 });
-                return;
+
+                if let Some((next_active_actor_ids, next_actor_list_generation)) = refreshed_active_ids
+                {
+                    active_actor_ids = next_active_actor_ids;
+                    actor_list_generation = next_actor_list_generation;
+                }
             }
         }
+        reserve_player_mut(|player| { player.in_step_frame = false; });
     }
 
     reserve_player_mut(|player| {
@@ -2748,7 +3162,7 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     // 3. Load the new movie data (preserving globals and allocator)
     reserve_player_mut(|player| {
         player.movie.score.reset();
-        player.script_instance_list_cache.clear();
+        player.clear_script_instance_list_caches();
         player.movie.frame_script_instance = None;
         player.movie.frame_script_member = None;
         player.movie.current_frame = 1;
@@ -2800,6 +3214,11 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     });
 }
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = "isFlashLoading", catch)]
+    fn is_flash_loading() -> Result<bool, wasm_bindgen::JsValue>;
+}
 /// Execute one complete frame cycle: run frame scripts, then advance to the next frame.
 /// Returns (is_playing, is_script_paused) so callers can check if the movie is still running.
 ///
@@ -2911,8 +3330,22 @@ pub async fn run_single_frame() -> (bool, bool) {
         return (is_playing, is_script_paused);
     }
 
+    // Check if delay() is in effect
+    let is_delayed = reserve_player_mut(|player| {
+        if let Some(until) = player.delay_until {
+            if chrono::Local::now() < until {
+                true
+            } else {
+                player.delay_until = None;
+                false
+            }
+        } else {
+            false
+        }
+    });
+
     let skip_frame = reserve_player_ref(|player| player.command_handler_yielding || player.in_mouse_command);
-    if skip_frame {
+    if skip_frame || is_delayed {
         return (is_playing, is_script_paused);
     }
 
@@ -2929,6 +3362,13 @@ pub async fn run_single_frame() -> (bool, bool) {
 
     // Relay exitFrame to timeout targets
     dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
+
+    let mut stayed_on_same_frame = false;
+
+    // Clear stale go_same_frame from previous frame's processing
+    reserve_player_mut(|player| {
+        player.go_same_frame = false;
+    });
 
     if has_player_frame_changed {
         player_wait_available().await;
@@ -2955,8 +3395,12 @@ pub async fn run_single_frame() -> (bool, bool) {
             });
         }
 
+        // go() already performed end_all_sprites + advance_frame + begin_all_sprites,
+        // so we only clear the flag here.
         (is_playing, is_script_paused) = reserve_player_mut(|player| {
             player.has_player_frame_changed = false;
+            player.go_same_frame = false;
+            player.has_frame_changed_in_go = false;
             (player.is_playing, player.is_script_paused)
         });
     } else {
@@ -2966,9 +3410,24 @@ pub async fn run_single_frame() -> (bool, bool) {
 
         player_wait_available().await;
 
-        let has_frame_changed = reserve_player_ref(|player| player.has_frame_changed_in_go);
+        let (has_frame_changed, go_same_frame) = reserve_player_ref(|player|
+            (player.has_frame_changed_in_go, player.go_same_frame));
 
-        if !has_frame_changed {
+        if go_same_frame {
+            // go(the frame) — stay on current frame, no advancement
+            reserve_player_mut(|player| {
+                player.go_same_frame = false;
+            });
+            stayed_on_same_frame = true;
+        } else if has_frame_changed {
+            // go(differentFrame) — go() already did end/begin/advance
+            reserve_player_mut(|player| {
+                player.has_frame_changed_in_go = false;
+                player.has_player_frame_changed = false;
+            });
+            stayed_on_same_frame = true;
+        } else {
+            // No go() called — normal frame advancement
             let ended_sprite_nums = reserve_player_mut_async(|player| {
                 Box::pin(async move {
                     player.end_all_sprites().await
@@ -2991,10 +3450,6 @@ pub async fn run_single_frame() -> (bool, bool) {
                 player.has_player_frame_changed = false;
                 (player.is_playing, player.is_script_paused)
             });
-        } else {
-            reserve_player_mut(|player| {
-                player.has_frame_changed_in_go = false;
-            });
         }
 
         player_wait_available().await;
@@ -3003,8 +3458,10 @@ pub async fn run_single_frame() -> (bool, bool) {
     player_wait_available().await;
 
     reserve_player_mut(|player| {
-        player.movie.frame_script_instance = None;
-        player.begin_all_sprites();
+        if !stayed_on_same_frame {
+            player.movie.frame_script_instance = None;
+            player.begin_all_sprites();
+        }
 
         player.movie.score.apply_tween_modifiers(player.movie.current_frame);
     });
@@ -3026,6 +3483,8 @@ pub async fn run_single_frame() -> (bool, bool) {
                     }
                 }
             }
+            // Filmloop frame changes require a redraw
+            player.stage_dirty = true;
         });
     }
 
@@ -3033,25 +3492,37 @@ pub async fn run_single_frame() -> (bool, bool) {
 
     // Collect behaviors that need initialization
     let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
-        player
-            .movie
-            .score
-            .channels
-            .iter()
-            .flat_map(|ch| {
-                let sprite_num = ch.sprite.number as u32;
-                ch.sprite.script_instance_list
-                    .iter()
-                    .filter(|behavior_ref| {
-                        if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
-                            !entry.script_instance.begin_sprite_called
-                        } else {
-                            false
-                        }
-                    })
-                    .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
-            })
-            .collect()
+        let mut behaviors = Vec::new();
+        for channel_number in player.active_stage_behavior_channels() {
+            let Some((sprite_num, fallback)) = player
+                .movie
+                .score
+                .channels
+                .get(channel_number)
+                .map(|channel| {
+                    (
+                        channel.sprite.number as u32,
+                        channel.sprite.script_instance_list.clone(),
+                    )
+                })
+            else {
+                continue;
+            };
+
+            for behavior_ref in player.get_sprite_script_instance_ids(
+                sprite_num as i16,
+                fallback.as_slice(),
+            ) {
+                if player
+                    .allocator
+                    .get_script_instance_entry(behavior_ref.id())
+                    .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
+                {
+                    behaviors.push((behavior_ref, sprite_num));
+                }
+            }
+        }
+        behaviors
     });
 
     // Initialize behavior default properties
@@ -3109,10 +3580,10 @@ pub async fn run_single_frame() -> (bool, bool) {
 
     for behavior_ref in &remaining_behaviors {
         let receivers = vec![behavior_ref.clone()];
-        let _ = player_invoke_targeted_event(
+        let _ = player_invoke_event_to_instances(
             &"beginSprite".to_string(),
             &vec![],
-            Some(&receivers),
+            &receivers,
         ).await;
     }
 
@@ -3146,7 +3617,6 @@ pub async fn run_frame_loop() {
 
     let generation = unsafe { PLAYER_GENERATION };
     let mut is_playing = true;
-    let mut last_frame_time = chrono::Local::now();
     while is_playing {
         // Exit if the player was reset (e.g. between tests)
         if unsafe { PLAYER_GENERATION } != generation {
@@ -3170,17 +3640,47 @@ pub async fn run_frame_loop() {
             (is_playing, _) = reserve_player_ref(|player| {
                 (player.is_playing, player.is_script_paused)
             });
-            last_frame_time = chrono::Local::now();
             continue;
         }
 
+        // Pre-dispatch Flash members for sprites on the current frame so they start
+        // loading before Lingo scripts try to access them.
+        reserve_player_mut(|player| {
+            player.pre_dispatch_flash_members();
+        });
+
+        // Wait for pending Flash/Ruffle instances to finish loading BEFORE running scripts.
+        if is_flash_loading().unwrap_or(false) {
+            debug!("[Flash] Waiting for Ruffle instance to finish loading...");
+            for _ in 0..150 {
+                timeout(Duration::from_millis(100), future::pending::<()>()).await.unwrap_err();
+                if !is_flash_loading().unwrap_or(false) {
+                    break;
+                }
+            }
+            debug!("[Flash] Ruffle instance ready, resuming frame loop.");
+        }
+
         // Run one frame cycle (scripts + advance)
-        let (playing, is_script_paused) = run_single_frame().await;
+        let (playing, _) = run_single_frame().await;
         is_playing = playing;
 
         if !is_playing {
             stop_movie_sequence().await;
             return;
+        }
+
+        // Also check after frame execution: if scripts tried to access a Flash
+        // instance that doesn't exist yet, wait for Ruffle to finish loading.
+        if is_flash_loading().unwrap_or(false) {
+            debug!("[Flash] Scripts accessed unready Flash instance, waiting...");
+            for _ in 0..150 {
+                timeout(Duration::from_millis(100), future::pending::<()>()).await.unwrap_err();
+                if !is_flash_loading().unwrap_or(false) {
+                    break;
+                }
+            }
+            debug!("[Flash] Ruffle instance ready, resuming frame loop.");
         }
 
         // Get the target frame delay based on cached tempo for current frame
@@ -3201,8 +3701,6 @@ pub async fn run_frame_loop() {
         .await
         .unwrap_err();
         player_wait_available().await;
-
-        last_frame_time = chrono::Local::now();
     }
 }
 
@@ -3297,6 +3795,7 @@ pub fn init_player() {
     unsafe {
         PLAYER_TX = Some(tx.clone());
         PLAYER_EVENT_TX = Some(event_tx.clone());
+        FILEIO_XTRA_MANAGER_OPT = Some(FileIoXtraManager::new());
         MULTIUSER_XTRA_MANAGER_OPT = Some(MultiuserXtraManager::new());
         XMLPARSER_XTRA_MANAGER_OPT = Some(XmlParserXtraManager::new());
     }
@@ -3393,6 +3892,15 @@ async fn player_ext_call<'a>(
                 });
                 return_value.clone()
             } else {
+                // Lingo's bare `return` yields Void. We must explicitly reset
+                // scope.return_value because a preceding extcall (e.g.
+                // `voidp(...)`) would have written its own result there, and
+                // without this reset a bare `return` leaks that stale value
+                // to the caller. See Coke Studios popup-positioning bug,
+                // where `me.closeWindow()` was leaking `voidp`'s Int(1).
+                reserve_player_mut(|player| {
+                    player.scopes.get_mut(scope_ref).unwrap().return_value = DatumRef::Void;
+                });
                 DatumRef::Void
             };
             (HandlerExecutionResult::Stop, return_value)
@@ -3416,7 +3924,7 @@ async fn player_ext_call<'a>(
 
     // Always decrement handler depth before returning
     reserve_player_mut(|player| {
-        player.handler_stack_depth -= 1;
+        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
     });
     
     result
@@ -3430,11 +3938,11 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
                 let (props, sorted) = player.get_datum(datum).to_map_tuple().unwrap();
                 (props.clone(), sorted)
             });
-            let mut new_props = Vec::new();
+            let mut new_props = VecDeque::new();
             for (key, value) in props {
                 let new_key = player_duplicate_datum(&key);
                 let new_value = player_duplicate_datum(&value);
-                new_props.push((new_key, new_value));
+                new_props.push_back((new_key, new_value));
             }
             Datum::PropList(new_props, sorted)
         }
@@ -3443,10 +3951,10 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
                 let (a, b, c) = player.get_datum(datum).to_list_tuple().unwrap();
                 (a.clone(), b.clone(), c)
             });
-            let mut new_list = Vec::new();
+            let mut new_list = VecDeque::new();
             for item in list {
                 let new_item = player_duplicate_datum(&item);
-                new_list.push(new_item);
+                new_list.push_back(new_item);
             }
             Datum::List(list_type.clone(), new_list, sorted)
         }
@@ -3454,7 +3962,10 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
             let bitmap_ref = player.get_datum(datum).to_bitmap_ref().unwrap();
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
             let new_bitmap = bitmap.clone();
-            let new_bitmap_ref = player.bitmap_manager.add_bitmap(new_bitmap);
+            // `duplicate(...)` on a Datum::BitmapRef produces an unowned copy.
+            // It is freed once the wrapping DatumRef goes away (or persists
+            // for as long as something holds it via refcount).
+            let new_bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(new_bitmap);
             Datum::BitmapRef(new_bitmap_ref)
         }),
         _ => reserve_player_ref(|player| player.get_datum(datum).clone()),

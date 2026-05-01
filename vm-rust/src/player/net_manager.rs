@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use async_std::sync::Mutex;
+use log::debug;
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use percent_encoding::percent_decode_str;
 use url::Url;
@@ -9,6 +10,9 @@ use super::net_task::{fetch_net_task, NetResult, NetTask, NetTaskState};
 
 pub struct NetManager {
     pub base_path: Option<Url>,
+    /// The fake movie base path set by movie_path_override (e.g. "C:\Games\MyMovie\").
+    /// When set, URLs starting with this prefix are resolved against base_path instead.
+    pub override_base_path: Option<String>,
     pub tasks: HashMap<u32, NetTask>,
     pub task_states: HashMap<u32, NetTaskState>,
     pub shared_state: Arc<Mutex<NetManagerSharedState>>,
@@ -155,6 +159,30 @@ impl NetManager {
             .decode_utf8()
             .map(|s| s.to_string())
             .unwrap_or(url);
+
+        // If movie_path_override is set, strip the fake base path prefix
+        // and resolve against the real base_path instead
+        let url = if let Some(ref override_base) = self.override_base_path {
+            let norm_url = url.replace('\\', "/");
+            let norm_override = override_base.replace('\\', "/");
+            let prefix = if norm_override.ends_with('/') {
+                norm_override.clone()
+            } else {
+                format!("{}/", norm_override)
+            };
+            if norm_url.to_lowercase().starts_with(&prefix.to_lowercase()) {
+                let relative = &norm_url[prefix.len()..];
+                debug!(
+                    "preload_net_thing: stripped override path '{}' -> '{}'",
+                    url, relative
+                );
+                relative.to_string()
+            } else {
+                url
+            }
+        } else {
+            url
+        };
 
         // Check if the task already exists (by original URL) and return it if found
         if let Some(existing_task) = find_task_with_url(&self.tasks, &url) {

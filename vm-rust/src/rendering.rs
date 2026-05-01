@@ -292,90 +292,52 @@ pub fn render_preview_bitmap(
         CastMemberType::Font(font_member) => {
             let font_name = font_member.font_info.name.clone();
             let font_style = font_member.font_info.style;
-
-            // Resolve font: if a size override is requested and the member has PFR data,
-            // re-rasterize from THIS member's PFR data at the requested size.
-            // Otherwise use the member's own bitmap_ref directly.
-            let pfr_data = font_member.pfr_data.clone();
-            let pfr_parsed = font_member.pfr_parsed.clone();
-            let bitmap_ref = font_member.bitmap_ref;
-            let member_char_width = font_member.char_width;
-            let member_char_height = font_member.char_height;
-            let member_grid_columns = font_member.grid_columns;
-            let member_grid_rows = font_member.grid_rows;
-            let member_first_char_num = font_member.first_char_num;
-            let member_char_widths = font_member.char_widths.clone();
             let member_font_size = font_member.font_info.size;
-            let font_info = font_member.font_info.clone();
 
-            let font: Rc<BitmapFont> =
-                if let (Some(req_size), Some(raw), Some(parsed)) = (preview_font_size, &pfr_data, &pfr_parsed) {
-                    // PFR font with size override — rasterize this member's data at requested size
-                    if let Some(f) = player.font_manager.rasterize_pfr_at_size(
-                        raw, parsed, &font_name, font_style, req_size, &mut player.bitmap_manager,
-                    ) {
-                        f
-                    } else if let Some(br) = bitmap_ref {
-                        // Rasterization failed — fall back to member's existing bitmap
-                        Rc::new(BitmapFont {
-                            bitmap_ref: br,
-                            char_width: member_char_width.unwrap_or(8),
-                            char_height: member_char_height.unwrap_or(12),
-                            grid_columns: member_grid_columns.unwrap_or(16),
-                            grid_rows: member_grid_rows.unwrap_or(8),
-                            grid_cell_width: member_char_width.unwrap_or(8),
-                            grid_cell_height: member_char_height.unwrap_or(12),
-                            first_char_num: member_first_char_num.unwrap_or(32),
-                            char_offset_x: 0,
-                            char_offset_y: 0,
-                            font_name: font_name.clone(),
-                            font_size: member_font_size,
-                            font_style,
-                            char_widths: member_char_widths.clone(),
-                            pfr_native_size: 0,
-                        })
-                    } else {
-                        return None;
+            // Resolve the font through the same path the text member's `image`
+            // getter uses (`get_font_with_cast_and_bitmap`). That function
+            // takes care of: PFR rasterisation at the requested preview size,
+            // cast-scoped lookup, and falling back to existing rasterised
+            // entries — so the dev preview shows exactly the glyphs Director
+            // would use when rendering text in this font at this size.
+            let req_size = preview_font_size.or(if member_font_size > 0 { Some(member_font_size) } else { None });
+            let font: Rc<BitmapFont> = player.font_manager
+                .get_font_with_cast_and_bitmap(
+                    &font_name,
+                    &player.movie.cast_manager,
+                    &mut player.bitmap_manager,
+                    req_size,
+                    None,
+                )
+                .or_else(|| {
+                    let name_lower = font_name.to_lowercase();
+                    for (key, font) in player.font_manager.font_cache.iter() {
+                        if key.to_lowercase() == name_lower
+                            || key.to_lowercase().starts_with(&format!("{}_", name_lower))
+                        {
+                            return Some(font.clone());
+                        }
                     }
-                } else if let Some(br) = bitmap_ref {
-                    // Use member's own bitmap (no size override or no PFR data)
-                    Rc::new(BitmapFont {
-                        bitmap_ref: br,
-                        char_width: member_char_width.unwrap_or(8),
-                        char_height: member_char_height.unwrap_or(12),
-                        grid_columns: member_grid_columns.unwrap_or(16),
-                        grid_rows: member_grid_rows.unwrap_or(8),
-                        grid_cell_width: member_char_width.unwrap_or(8),
-                        grid_cell_height: member_char_height.unwrap_or(12),
-                        first_char_num: member_first_char_num.unwrap_or(32),
-                        char_offset_x: 0,
-                        char_offset_y: 0,
-                        font_name: font_name.clone(),
-                        font_size: member_font_size,
-                        font_style,
-                        char_widths: member_char_widths.clone(),
-                        pfr_native_size: 0,
-                    })
-                } else {
-                    // No bitmap_ref, no PFR — try font manager lookup
-                    if let Some(f) = player.font_manager.get_font_by_info(&font_info) {
-                        Rc::new(f.clone())
-                    } else if let Some(f) = player.font_manager.get_system_font() {
-                        f
-                    } else {
-                        return None;
-                    }
-                };
+                    None
+                })
+                .or_else(|| player.font_manager.get_system_font())?;
 
             // Get system font for rendering character code labels
             let system_font = player.font_manager.get_system_font();
 
-            let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref)?;
+            let font_bitmap_opt = player.bitmap_manager.get_bitmap(font.bitmap_ref).cloned();
 
+            let preview_size = preview_font_size.unwrap_or(font.font_size).max(8);
+
+            // Cell size is driven by the PFR-rasterized glyph dimensions at
+            // the requested preview size. If the rasteriser failed (no PFR
+            // data, or rasterize_pfr_at_size returned None) we fall back to
+            // the member's native cell size, with a floor based on
+            // preview_size so cells aren't collapsed too small to be useful.
             let cols = 16u16;
             let rows = 16u16;
-            let cell_w = font.char_width.max(1);
-            let cell_h = font.char_height.max(1);
+            let cell_w = (font.char_width as u16).max(preview_size + 4);
+            let cell_h = (font.char_height as u16).max((preview_size as f32 * 1.4) as u16);
 
             // Layout: each cell = grid_line(1px) + label_height + glyph_height
             let label_h: u16 = if system_font.is_some() { 10 } else { 0 };
@@ -405,17 +367,25 @@ pub fn render_preview_bitmap(
                 bitmap.fill_rect(x, 0, x + grid_w as i32, height as i32, grid_color, palettes, 1.0);
             }
 
-            let draw_params = CopyPixelsParams {
+            // Glyph copy: in `is_text_rendering` mode, black source pixels
+            // are remapped to `color` (foreground) and white source pixels
+            // are dropped. The default Director bitmap atlas is black-on-white,
+            // so we want foreground=BLACK on the white preview background —
+            // *not* white-on-white which previously rendered invisible glyphs.
+            let draw_params = CopyPixelsParams { mask_offset: (0, 0),
                 blend: 100,
                 ink: 0,
-                color: ColorRef::PaletteIndex(255),
-                bg_color: ColorRef::PaletteIndex(0),
+                color: ColorRef::Rgb(0, 0, 0),
+                bg_color: ColorRef::Rgb(255, 255, 255),
                 mask_image: None,
                 is_text_rendering: true,
                 rotation: 0.0,
                 skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
+                bg_color_explicit: false,
+                fore_color_explicit: false,
+                ink9_mask_bitmap: None,
             };
 
             for char_code in 0u16..256 {
@@ -438,7 +408,11 @@ pub fn render_preview_bitmap(
                             rotation: 0.0,
                             skew: 0.0,
                             sprite: None,
+                            mask_offset: (0, 0),
                             original_dst_rect: None,
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
                         };
                         bitmap.draw_text(
                             &label,
@@ -454,18 +428,70 @@ pub fn render_preview_bitmap(
                     }
                 }
 
-                // Draw the character glyph below the label
+                // Draw the character glyph below the label.
+                // Prefer the PFR / bitmap-atlas path so we show the AUTHORED
+                // glyphs (the cast's actual font, not the browser's installed
+                // version of "Verdana"/"Arial"/etc.). If the font has no
+                // bitmap atlas at all (outline-only system fonts) we fall back
+                // to Canvas2D so something visible still renders.
                 let glyph_y = cell_y + label_h as i32;
-                bitmap_font_copy_char(
-                    &font,
-                    font_bitmap,
-                    char_code as u8,
-                    &mut bitmap,
-                    cell_x,
-                    glyph_y,
-                    palettes,
-                    &draw_params,
-                );
+                let has_bitmap_atlas = font_bitmap_opt
+                    .as_ref()
+                    .map(|b| b.width > 0 && b.height > 0)
+                    .unwrap_or(false)
+                    && font.char_width > 0
+                    && font.char_height > 0;
+
+                let mut rendered = false;
+                if has_bitmap_atlas {
+                    if let Some(ref font_bitmap) = font_bitmap_opt {
+                        if (char_code as u8) >= font.first_char_num {
+                            bitmap_font_copy_char(
+                                &font,
+                                font_bitmap,
+                                char_code as u8,
+                                &mut bitmap,
+                                cell_x,
+                                glyph_y,
+                                palettes,
+                                &draw_params,
+                            );
+                            rendered = true;
+                        }
+                    }
+                }
+
+                if !rendered {
+                    let printable = char_code >= 32 && char_code != 127;
+                    if printable {
+                        if let Some(ch) = char::from_u32(char_code as u32) {
+                            let display_name = font_name.split('_').next().unwrap_or(&font_name);
+                            let mut style = HtmlStyle::default();
+                            style.font_face = Some(display_name.to_string());
+                            style.font_size = Some(preview_size as i32);
+                            style.color = Some(0); // black
+                            style.bold = matches!(font_style, 1 | 3);
+                            style.italic = matches!(font_style, 2 | 3);
+                            let span = StyledSpan { text: ch.to_string(), style };
+                            let _ = FontMemberHandlers::render_native_text_to_bitmap(
+                                &mut bitmap,
+                                &[span],
+                                cell_x + 2,
+                                glyph_y + 1,
+                                cell_w as i32 - 4,
+                                cell_h as i32 - 2,
+                                TextAlignment::Center,
+                                cell_w as i32 - 4,
+                                false,
+                                None,
+                                cell_h,
+                                0,
+                                0,
+                                &[],
+                            );
+                        }
+                    }
+                }
             }
             Some(bitmap)
         }
@@ -550,7 +576,7 @@ pub fn compute_filmloop_initial_rect_with_members(
         // Get actual bitmap dimensions and registration point from the cast member.
         // The registration point is the anchor used for positioning - sprite_left = pos_x - reg_x.
         let (actual_width, actual_height, reg_x, reg_y) = if let Some(sprite_member) =
-            player.movie.cast_manager.find_member_by_ref(&sprite_member_ref)
+            player.movie.cast_manager.find_filmloop_inner_member(&sprite_member_ref)
         {
             match &sprite_member.member_type {
                 CastMemberType::Bitmap(bm) => {
@@ -614,6 +640,33 @@ pub fn compute_filmloop_initial_rect_with_members(
         result.width(), result.height()
     );
     Some(result)
+}
+
+/// Resolve a filmloop child sprite's authored fore/bg colors from its
+/// `ScoreFrameChannelData`. Mirrors `score.rs`'s `match data.color_flag`
+/// table (0 = both palette, 1 = fg RGB, 2 = bg RGB, 3 = both RGB) so we
+/// don't accidentally treat an authored palette index as RGB just because
+/// the parser populated the unrelated `_g`/`_b` channel bytes.
+fn resolve_filmloop_child_colors(
+    data: &crate::director::chunks::score::ScoreFrameChannelData,
+) -> (ColorRef, ColorRef) {
+    let (fore_is_rgb, back_is_rgb) = match data.color_flag {
+        1 => (true, false),
+        2 => (false, true),
+        3 => (true, true),
+        _ => (false, false),
+    };
+    let fg = if fore_is_rgb {
+        ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
+    } else {
+        ColorRef::PaletteIndex(data.fore_color)
+    };
+    let bg = if back_is_rgb {
+        ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b)
+    } else {
+        ColorRef::PaletteIndex(data.back_color)
+    };
+    (fg, bg)
 }
 
 /// Render a filmloop directly from its channel_initialization_data.
@@ -692,33 +745,28 @@ fn render_filmloop_from_channel_data(
                     .map(|(channel_idx, (frame_idx, data))| (frame_idx, channel_idx, data))
                     .collect();
 
-                // Calculate total frames from multiple sources:
-                // 1. channel_initialization_data max frame index
-                let init_data_max = film_loop_member.score.channel_initialization_data
-                    .iter()
-                    .map(|(frame_idx, _, _)| *frame_idx + 1)
-                    .max()
-                    .unwrap_or(1);
+                // Use cached total_frames or compute and cache it
+                let total_frames = film_loop_member.cached_total_frames.unwrap_or_else(|| {
+                    let init_data_max = film_loop_member.score.channel_initialization_data
+                        .iter()
+                        .map(|(frame_idx, _, _)| *frame_idx + 1)
+                        .max()
+                        .unwrap_or(1);
+                    let span_max = film_loop_member.score.sprite_spans
+                        .iter()
+                        .map(|span| span.end_frame)
+                        .max()
+                        .unwrap_or(1);
+                    let keyframes_max = film_loop_member.score.keyframes_cache.values()
+                        .filter_map(|channel_kf| channel_kf.path.as_ref())
+                        .flat_map(|path_kf| path_kf.keyframes.iter())
+                        .map(|kf| kf.frame)
+                        .max()
+                        .unwrap_or(1);
+                    init_data_max.max(span_max).max(keyframes_max)
+                });
 
-                // 2. sprite_spans end frames
-                let span_max = film_loop_member.score.sprite_spans
-                    .iter()
-                    .map(|span| span.end_frame)
-                    .max()
-                    .unwrap_or(1);
-
-                // 3. path keyframes max frame
-                let keyframes_max = film_loop_member.score.keyframes_cache.values()
-                    .filter_map(|channel_kf| channel_kf.path.as_ref())
-                    .flat_map(|path_kf| path_kf.keyframes.iter())
-                    .map(|kf| kf.frame)
-                    .max()
-                    .unwrap_or(1);
-
-                // Use the maximum of all sources
-                let total_frames = init_data_max.max(span_max).max(keyframes_max);
-
-                // Clone keyframes cache for path interpolation
+                // Arc clone is O(1) - just a reference count bump
                 let keyframes_cache = film_loop_member.score.keyframes_cache.clone();
 
                 (frame, data, total_frames, keyframes_cache)
@@ -755,11 +803,14 @@ fn render_filmloop_from_channel_data(
             cast_member: data.cast_member as i32,
         };
 
-        let member = player.movie.cast_manager.find_member_by_ref(&sprite_member_ref);
+        let member = player.movie.cast_manager.find_filmloop_inner_member(&sprite_member_ref);
         if member.is_none() {
-            debug!(
-                "  channel {}: member {}:{} not found",
-                channel_num, sprite_member_ref.cast_lib, sprite_member_ref.cast_member
+            warn!(
+                "[FILMLOOP-LOOKUP-FAIL] filmloop=({},{}) chan={} asked_for=({},{}) raw_cast_lib={}",
+                filmloop_cast_lib, member_ref.cast_member,
+                channel_num,
+                sprite_member_ref.cast_lib, sprite_member_ref.cast_member,
+                data.cast_lib,
             );
             continue;
         }
@@ -876,6 +927,40 @@ fn render_filmloop_from_channel_data(
 
         match &member.member_type {
             CastMemberType::Bitmap(bitmap_member) => {
+                // Director rule: filmloop child sprites ALWAYS render with
+                // their OWN authored ink/fore/bgColor. The outer sprite's ink
+                // applies to the composited filmloop bitmap as a whole (at
+                // the stage layer), it does NOT cascade down to override
+                // individual child inks.
+                let (ink, sprite_color, sprite_bg_color) = {
+                    let (fg, bg) = resolve_filmloop_child_colors(&data);
+                    // Mask off bit 7 (stretch flag) from the ink byte.
+                    ((data.ink as u32) & 0x3F, fg, bg)
+                };
+
+                // For ink 9 (Mask), the mask bitmap is the next cast member
+                // (cast_member + 1) in the same library. Resolve and clone it
+                // before taking the mutable borrow on bitmap_manager below.
+                let ink9_mask = if ink == 9 {
+                    let mask_ref = CastMemberRef {
+                        cast_lib: if data.cast_lib == 65535 { filmloop_cast_lib } else { data.cast_lib as i32 },
+                        cast_member: data.cast_member as i32 + 1,
+                    };
+                    player.movie.cast_manager
+                        .find_filmloop_inner_member(&mask_ref)
+                        .and_then(|m| {
+                            if let CastMemberType::Bitmap(bm) = &m.member_type {
+                                Some(bm.image_ref)
+                            } else {
+                                None
+                            }
+                        })
+                        .and_then(|img_ref| player.bitmap_manager.get_bitmap(img_ref))
+                        .cloned()
+                } else {
+                    None
+                };
+
                 let sprite_bitmap = player
                     .bitmap_manager
                     .get_bitmap_mut(bitmap_member.image_ref);
@@ -893,7 +978,21 @@ fn render_filmloop_from_channel_data(
                 // When bitmap dimensions differ from display dimensions (e.g. thin strips
                 // that Director stretches to fill the display rect), copy_pixels will
                 // handle the scaling automatically via its scale_x/scale_y computation.
-                let dst_rect = sprite_rect.clone();
+                //
+                // Filmloop inner sprites encode flipH/flipV as bit flags in the
+                // `unk5` byte of the score record (bit 5 = flipH, bit 6 = flipV
+                // — unused D7 editable/moveable byte repurposed in D8+). Wall
+                // posters that ship a pre-flipped pair (`leftwall X` vs
+                // `rightwall X`) rely on these bits. Invert the dst_rect
+                // corners to trigger copy_pixels' existing mirror path.
+                let flip_h = data.flip_h();
+                let flip_v = data.flip_v();
+                let dst_rect = {
+                    let mut r = sprite_rect.clone();
+                    if flip_h { std::mem::swap(&mut r.left, &mut r.right); }
+                    if flip_v { std::mem::swap(&mut r.top, &mut r.bottom); }
+                    r
+                };
 
                 // Check if bitmap has actual data
                 let has_data = !src_bitmap.data.is_empty();
@@ -907,29 +1006,24 @@ fn render_filmloop_from_channel_data(
                     dst_rect.left, dst_rect.top, dst_rect.right, dst_rect.bottom
                 );
 
-                // Director behavior: Film loop internal sprites use the PARENT sprite's
-                // ink, color, and bgColor - not their own stored values.
-                // This is because film loops are just sequences of cast members rendered
-                // through the parent sprite's properties.
-                let sprite_color = parent_color.clone();
-                let sprite_bg_color = parent_bg_color.clone();
-                let ink = parent_ink;
-
                 // Filmloop blend: inverted 0-255 scale (0 → 100%, 127 → ~50%)
                 // 255 is treated as default/opaque (same as shape/vector paths)
-                let blend = if data.blend == 255 { 100 } else {
-                    ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
-                };
+                let blend = crate::player::score::convert_raw_blend(data.blend, player.movie.dir_version);
 
                 // Only use matte mask for inks that support it:
                 // - Ink 0 (copy): for trimWhiteSpace edge transparency (indexed and 16-bit)
-                // - Ink 8 (matte): always uses matte (indexed only)
+                // - Ink 8 (matte): always uses matte (indexed AND 16-bit; 32-bit
+                //   without embedded alpha also needs it — drawing.rs has its
+                //   own flood-fill path for that case).
                 // - Ink 7, 36 (color-key): do NOT use matte - they have their own
                 //   bgColor-based transparency that conflicts with matte logic
                 let is_indexed = src_bitmap.original_bit_depth <= 8;
                 let is_16bit = src_bitmap.original_bit_depth == 16;
+                let is_32bit_no_alpha =
+                    src_bitmap.original_bit_depth == 32 && !src_bitmap.use_alpha;
                 let should_use_matte = (is_indexed && (ink == 0 || ink == 8))
-                    || (is_16bit && ink == 0);
+                    || (is_16bit && (ink == 0 || ink == 8))
+                    || (is_32bit_no_alpha && ink == 8);
 
                 let mask = if should_use_matte {
                     if src_bitmap.matte.is_none() {
@@ -993,10 +1087,22 @@ fn render_filmloop_from_channel_data(
                     bg_color: sprite_bg_color,
                     mask_image: mask.map(|m| m as &BitmapMask),
                     is_text_rendering: false,
-                    rotation: 0.0,
-                    skew: 0.0,
+                    // Carry the inner sprite's stored rotation / skew so
+                    // filmloops that mirror via Director's (rotation=180,
+                    // skew=180) trick render correctly — without this, wall
+                    // posters that ship both left/right filmloops with
+                    // mirrored inner sprites render unflipped.
+                    rotation: data.rotation,
+                    skew: data.skew,
                     sprite: None,
-                    original_dst_rect: Some(dst_rect.clone()),
+                    mask_offset: (0, 0),
+                    // Pass the non-inverted sprite_rect here — copy_pixels uses
+                    // it for scale_w/scale_h, which must stay positive. The
+                    // `dst_rect` argument carries the flip via swapped corners.
+                    original_dst_rect: Some(sprite_rect.clone()),
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
+                    ink9_mask_bitmap: ink9_mask.as_ref(),
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -1014,15 +1120,7 @@ fn render_filmloop_from_channel_data(
                 }
 
                 // Get sprite foreground color from channel data
-                let fore_is_rgb = (data.color_flag & 0x1) != 0
-                    || data.fore_color_g != 0
-                    || data.fore_color_b != 0;
-
-                let sprite_color = if fore_is_rgb {
-                    ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b)
-                } else {
-                    ColorRef::PaletteIndex(data.fore_color)
-                };
+                let (sprite_color, _) = resolve_filmloop_child_colors(&data);
 
                 // Build a temporary sprite for draw_shape_with_sprite
                 let mut temp_sprite = Sprite::new(channel_num as usize);
@@ -1064,17 +1162,23 @@ fn render_filmloop_from_channel_data(
                         ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
                     };
 
+                    let (child_color, child_bg) = resolve_filmloop_child_colors(&data);
+
                     let params = CopyPixelsParams {
                         blend,
                         ink,
-                        color: parent_color.clone(),
-                        bg_color: parent_bg_color.clone(),
+                        color: child_color,
+                        bg_color: child_bg,
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
+                        mask_offset: (0, 0),
                         original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
                     bitmap.draw_text(
@@ -1136,17 +1240,23 @@ fn render_filmloop_from_channel_data(
                         ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
                     };
 
+                    let (child_color, child_bg) = resolve_filmloop_child_colors(&data);
+
                     let params = CopyPixelsParams {
                         blend,
                         ink,
-                        color: parent_color.clone(),
-                        bg_color: parent_bg_color.clone(),
+                        color: child_color,
+                        bg_color: child_bg,
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
+                        mask_offset: (0, 0),
                         original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
                     bitmap.draw_text(
@@ -1161,6 +1271,135 @@ fn render_filmloop_from_channel_data(
                         text_member.top_spacing,
                     );
                 }
+            }
+            CastMemberType::Flash(_) => {
+                let flash_bitmap_ref = player
+                    .flash_frame_buffers
+                    .get(&(sprite_member_ref.cast_lib, sprite_member_ref.cast_member))
+                    .copied();
+
+                if let Some(&bitmap_ref) = flash_bitmap_ref.as_ref().filter(|&&r| r != 0) {
+                    let src_bitmap = player.bitmap_manager.get_bitmap(bitmap_ref);
+                    if let Some(src_bitmap) = src_bitmap {
+                        let src_rect = IntRect::from(0, 0, src_bitmap.width as i32, src_bitmap.height as i32);
+                        let dst_rect = sprite_rect.clone();
+
+                        let ink = parent_ink;
+                        let blend = if data.blend == 255 { 100 } else {
+                            ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
+                        };
+
+                        let params = CopyPixelsParams {
+                            blend,
+                            ink,
+                            color: parent_color.clone(),
+                            bg_color: parent_bg_color.clone(),
+                            mask_image: None,
+                            is_text_rendering: false,
+                            rotation: 0.0,
+                            skew: 0.0,
+                            sprite: None,
+                            mask_offset: (0, 0),
+                            original_dst_rect: Some(dst_rect.clone()),
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
+                        };
+
+                        bitmap.copy_pixels_with_params(
+                            &palettes,
+                            src_bitmap,
+                            dst_rect,
+                            src_rect,
+                            &params,
+                        );
+                    }
+                }
+            }
+            CastMemberType::FilmLoop(inner_film_loop) => {
+                // Nested filmloop child: render the inner filmloop into its
+                // own bitmap at its natural size, then composite onto the
+                // parent filmloop's working bitmap using the resolved
+                // ink/fore/bgColor (child's own when parent_ink==0, else
+                // parent override).
+                let inner_initial_rect = inner_film_loop.initial_rect.clone();
+
+                let (child_ink, child_color, child_bg_color) = if parent_ink == 0 {
+                    let (fg, bg) = resolve_filmloop_child_colors(&data);
+                    ((data.ink as u32) & 0x3F, fg, bg)
+                } else {
+                    (parent_ink, parent_color.clone(), parent_bg_color.clone())
+                };
+
+                let inner_w = inner_initial_rect.width().max(1);
+                let inner_h = inner_initial_rect.height().max(1);
+
+                let mut inner_bitmap = Bitmap::new(
+                    inner_w as u16,
+                    inner_h as u16,
+                    32,
+                    32,
+                    8,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                inner_bitmap.use_alpha = true;
+                inner_bitmap.data.fill(0);
+
+                // Pass ink=0 down recursively so every grandchild renders with
+                // its OWN authored ink (matte/bgTrans/mask/add‑pin). The
+                // child_ink applies only at the composite step below, on the
+                // already-rendered inner bitmap.
+                render_score_to_bitmap_with_offset(
+                    player,
+                    &ScoreRef::FilmLoop(sprite_member_ref.clone()),
+                    &mut inner_bitmap,
+                    None,
+                    IntRect::from_size(0, 0, inner_w, inner_h),
+                    (inner_initial_rect.left, inner_initial_rect.top),
+                    Some(FilmLoopParentProps {
+                        ink: 0,
+                        color: child_color.clone(),
+                        bg_color: child_bg_color.clone(),
+                    }),
+                );
+
+                let blend = crate::player::score::convert_raw_blend(data.blend, player.movie.dir_version);
+
+                // Mirror the Bitmap arm's flip handling so nested filmloops
+                // honor the child sprite's flipH/flipV bits.
+                let flip_h = data.flip_h();
+                let flip_v = data.flip_v();
+                let dst_rect = {
+                    let mut r = sprite_rect.clone();
+                    if flip_h { std::mem::swap(&mut r.left, &mut r.right); }
+                    if flip_v { std::mem::swap(&mut r.top, &mut r.bottom); }
+                    r
+                };
+
+                let params = CopyPixelsParams {
+                    blend,
+                    ink: child_ink,
+                    color: child_color,
+                    bg_color: child_bg_color,
+                    mask_image: None,
+                    is_text_rendering: false,
+                    rotation: data.rotation,
+                    skew: data.skew,
+                    sprite: None,
+                    mask_offset: (0, 0),
+                    original_dst_rect: Some(sprite_rect.clone()),
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
+                    ink9_mask_bitmap: None,
+                };
+
+                bitmap.copy_pixels_with_params(
+                    &palettes,
+                    &inner_bitmap,
+                    dst_rect,
+                    IntRect::from_size(0, 0, inner_w, inner_h),
+                    &params,
+                );
             }
             _ => {
                 // Other member types not yet supported in filmloop rendering
@@ -1376,14 +1615,32 @@ pub fn render_score_to_bitmap_with_offset(
 
         match &member.member_type {
             CastMemberType::Bitmap(bitmap_member) => {
-                let sprite_rect = {
-                    let sprite =
-                        get_score_sprite(&player.movie, score_source, channel_num).unwrap();
-                    let rect = get_concrete_sprite_rect(player, sprite);
-
-                    rect
-                };
+                let sprite =
+                    get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                let sprite_rect = get_concrete_sprite_rect(player, sprite);
                 let logical_rect = sprite_rect.clone();
+
+                // For ink 9 (Mask), find the mask bitmap BEFORE mutable borrow of bitmap_manager
+                let ink9_mask = if sprite.ink == 9 {
+                    sprite.member.as_ref().and_then(|mref| {
+                        let mask_ref = CastMemberRef {
+                            cast_lib: mref.cast_lib,
+                            cast_member: mref.cast_member + 1,
+                        };
+                        player.movie.cast_manager.find_member_by_ref(&mask_ref)
+                            .and_then(|m| {
+                                if let CastMemberType::Bitmap(bm) = &m.member_type {
+                                    Some(bm.image_ref)
+                                } else {
+                                    None
+                                }
+                            })
+                            .and_then(|img_ref| player.bitmap_manager.get_bitmap(img_ref))
+                            .cloned()
+                    })
+                } else {
+                    None
+                };
 
                 let sprite_bitmap = player
                     .bitmap_manager
@@ -1392,7 +1649,6 @@ pub fn render_score_to_bitmap_with_offset(
                     continue;
                 }
                 let src_bitmap = sprite_bitmap.unwrap();
-                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                 let mask = if should_matte_sprite(sprite.ink as u32) {
                     if src_bitmap.matte.is_none() {
                         src_bitmap.create_matte(&palettes);
@@ -1456,16 +1712,20 @@ pub fn render_score_to_bitmap_with_offset(
 
                 // 6) Params
                 let mut params = CopyPixelsParams {
-                    blend: sprite.blend,
+                    blend: sprite.effective_blend(),
                     ink: sprite.ink as u32,
                     color: sprite.color.clone(),
                     bg_color: sprite.bg_color.clone(),
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
                     mask_image: None,
                     is_text_rendering: false,
                     rotation: sprite.rotation,
                     skew: sprite.skew,
-                    sprite: Some(&sprite.clone()),
+                    sprite: Some(sprite),
+                    mask_offset: (0, 0),
                     original_dst_rect: Some(logical_rect),
+                    ink9_mask_bitmap: ink9_mask.as_ref(),
                 };
 
                 if let Some(mask) = mask {
@@ -1579,25 +1839,43 @@ pub fn render_score_to_bitmap_with_offset(
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
+                    // A cast member `.color` set to an RGB value wins over the sprite's
+                    // palette-index color — matches Director semantics and Coke Studios'
+                    // `sprite.color = paletteIndex(255)` + `member.color = rgb(...)` pattern
+                    // where the authored RGB must render.
+                    let text_color = if matches!(member.color, ColorRef::Rgb(..)) {
+                        member.color.clone()
+                    } else if let Some(fc) = field_member.fore_color.clone() {
+                        fc
+                    } else {
+                        sprite.color.clone()
+                    };
+
                     let params = CopyPixelsParams {
-                        blend: sprite.blend as i32,
+                        blend: sprite.effective_blend() as i32,
                         ink: sprite.ink as u32,
-                        color: sprite.color.clone(),
+                        color: text_color,
                         bg_color: sprite.bg_color.clone(),
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
+                        mask_offset: (0, 0),
                         original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
-                    bitmap.draw_text(
+                    bitmap.draw_text_wrapped(
                         &field_member.text,
                         &font,
                         font_bitmap,
                         sprite.loc_h,
                         sprite.loc_v,
+                        sprite.width,
+                        &field_member.alignment,
                         params,
                         &palettes,
                         field_member.fixed_line_space,
@@ -1756,7 +2034,11 @@ pub fn render_score_to_bitmap_with_offset(
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
+                        mask_offset: (0, 0),
                         original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
                     temp.draw_text_wrapped(
@@ -1817,6 +2099,7 @@ pub fn render_score_to_bitmap_with_offset(
                         field.fixed_line_space,
                         field.top_spacing,
                         0,
+                        &[],
                     ) {
                         console_warn!("Native text render error for Button: {:?}", e);
                     }
@@ -1916,7 +2199,11 @@ pub fn render_score_to_bitmap_with_offset(
                     rotation: 0.0,
                     skew: 0.0,
                     sprite: None,
+                    mask_offset: (0, 0),
                     original_dst_rect: None,
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
+                    ink9_mask_bitmap: None,
                 };
 
                 if let Some(mask) = mask {
@@ -2031,17 +2318,31 @@ pub fn render_score_to_bitmap_with_offset(
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
 
+                    // A cast member `.color` set to an RGB value wins over the sprite's
+                    // palette-index color — matches Director semantics and Coke Studios'
+                    // `new(#text)` + `myMember.color = rgb(...)` pattern where the authored
+                    // RGB must render even when Lingo also sets `sprite.color = paletteIndex(255)`.
+                    let text_color = if matches!(member.color, ColorRef::Rgb(..)) {
+                        member.color.clone()
+                    } else {
+                        sprite.color.clone()
+                    };
+
                     let params = CopyPixelsParams {
-                        blend: sprite.blend as i32,
+                        blend: sprite.effective_blend() as i32,
                         ink: sprite.ink as u32,
-                        color: sprite.color.clone(),
+                        color: text_color,
                         bg_color: sprite.bg_color.clone(),
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
                         skew: 0.0,
                         sprite: None,
+                        mask_offset: (0, 0),
                         original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None,
                     };
 
                     // Use styled text rendering if html_styled_spans is populated
@@ -2129,6 +2430,7 @@ pub fn render_score_to_bitmap_with_offset(
                             text_member.fixed_line_space,
                             text_member.top_spacing,
                             text_member.bottom_spacing,
+                            &text_member.tab_stops,
                         ) {
                             console_warn!("Native text render error for Text member: {:?}", e);
                         }
@@ -2256,7 +2558,11 @@ pub fn render_score_to_bitmap_with_offset(
                     rotation,
                     skew,
                     sprite: None,
+                    mask_offset: (0, 0),
                     original_dst_rect: Some(logical_rect),
+                    bg_color_explicit: false,
+                    fore_color_explicit: false,
+                    ink9_mask_bitmap: None,
                 };
 
                 // Debug: log filmloop bitmap properties before compositing
@@ -2280,6 +2586,77 @@ pub fn render_score_to_bitmap_with_offset(
                     IntRect::from_size(0, 0, width, height),
                     &params,
                 );
+            }
+            CastMemberType::Flash(flash_member) => {
+                // Render Flash content from frame buffer provided by Ruffle via JS bridge
+                let flash_bitmap_ref = player
+                    .flash_frame_buffers
+                    .get(&(member_ref.cast_lib, member_ref.cast_member))
+                    .copied();
+
+                if let Some(&bitmap_ref) = flash_bitmap_ref.as_ref().filter(|&&r| r != 0) {
+                    let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                    let rect = get_concrete_sprite_rect(player, sprite);
+                    let sprite_rect = IntRect::from(
+                        rect.left - offset.0,
+                        rect.top - offset.1,
+                        rect.right - offset.0,
+                        rect.bottom - offset.1,
+                    );
+
+                    let src_bitmap = player.bitmap_manager.get_bitmap(bitmap_ref);
+                    if let Some(src_bitmap) = src_bitmap {
+                        let src_rect = IntRect::from(0, 0, src_bitmap.width as i32, src_bitmap.height as i32);
+                        let dst_rect = sprite_rect;
+
+                        let params = CopyPixelsParams {
+                            blend: sprite.effective_blend(),
+                            ink: sprite.ink as u32,
+                            color: sprite.color.clone(),
+                            bg_color: sprite.bg_color.clone(),
+                            mask_image: None,
+                            is_text_rendering: false,
+                            rotation: sprite.rotation,
+                            skew: sprite.skew,
+                            sprite: Some(sprite),
+                            mask_offset: (0, 0),
+                            original_dst_rect: Some(dst_rect.clone()),
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
+                        };
+
+                        bitmap.copy_pixels_with_params(
+                            &palettes,
+                            src_bitmap,
+                            dst_rect,
+                            src_rect,
+                            &params,
+                        );
+                    }
+                } else if flash_bitmap_ref.is_none() && has_swf_signature(&flash_member.data) {
+                    // First time seeing this Flash member - notify JS to create Ruffle instance
+                    let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                    let w = sprite.width.max(1) as u32;
+                    let h = sprite.height.max(1) as u32;
+                    debug!(
+                        "  Flash channel {}: requesting Ruffle instance for member {}:{} ({}x{}, {} bytes SWF)",
+                        channel_num, member_ref.cast_lib, member_ref.cast_member, w, h, flash_member.data.len()
+                    );
+                    JsApi::dispatch_flash_member_loaded(
+                        member_ref.cast_lib,
+                        member_ref.cast_member,
+                        &flash_member.data,
+                        w,
+                        h,
+                    );
+                    // Insert a sentinel so we don't re-dispatch every frame
+                    // (The real BitmapRef will be set when update_flash_frame is called from JS)
+                    player.flash_frame_buffers.insert(
+                        (member_ref.cast_lib, member_ref.cast_member),
+                        0, // sentinel value - INVALID_BITMAP_REF
+                    );
+                }
             }
             _ => {}
         }
@@ -2472,7 +2849,7 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
                 cursor_bitmap.width as i32,
                 cursor_bitmap.height as i32,
             ),
-            &CopyPixelsParams {
+            &CopyPixelsParams { mask_offset: (0, 0),
                 blend: 100,
                 ink: 0,
                 bg_color: bitmap.get_bg_color_ref(),
@@ -2483,6 +2860,9 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
                 skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
+                bg_color_explicit: false,
+                fore_color_explicit: false,
+                ink9_mask_bitmap: None,
             },
         );
     }
@@ -2557,6 +2937,11 @@ impl PlayerCanvasRenderer {
     }
 
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
+        // Sync persistent Transform3d datums → node_transforms for in-place mutations
+        // (e.g. model.transform.position = vector(...) used by overlay/HUD scripts)
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
+
         // let time = chrono::Local::now().timestamp_millis() as i64;
         // let time_seconds = time as f64 / 1000.0;
         // let oscillated_r = 127.0 + 255.0 * (time_seconds * 2.0 * std::f32::consts::PI as f64).sin();
@@ -2604,7 +2989,7 @@ impl PlayerCanvasRenderer {
                 player.allocator.script_instance_count()
             );
 
-            let params = CopyPixelsParams {
+            let params = CopyPixelsParams { mask_offset: (0, 0),
                 blend: 100,
                 ink: 36,
                 color: bitmap.get_fg_color_ref(),
@@ -2615,6 +3000,9 @@ impl PlayerCanvasRenderer {
                 skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
+                bg_color_explicit: false,
+                fore_color_explicit: false,
+                ink9_mask_bitmap: None,
             };
 
             bitmap.draw_text(
@@ -2695,6 +3083,11 @@ impl Renderer for PlayerCanvasRenderer {
 thread_local! {
     pub static RENDERER_LOCK: RefCell<Option<DynamicRenderer>> = RefCell::new(None);
     pub static LAST_DRAW_MS: Cell<i64> = Cell::new(0);
+    /// Whether the persistent draw loop has already been spawned. The loop
+    /// itself picks up whatever renderer is currently in RENDERER_LOCK on
+    /// each rAF, so we only need one loop across the whole WASM lifetime —
+    /// dropping and recreating the renderer between tests must not respawn it.
+    pub static DRAW_LOOP_SPAWNED: Cell<bool> = Cell::new(false);
 }
 
 pub fn mark_frame_drawn() {
@@ -2725,7 +3118,12 @@ where
 
 pub fn draw_frame_immediate() {
     use crate::rendering_gpu::Renderer;
-    let tempo = reserve_player_ref(|player| player.current_frame_tempo as f64);
+    let (tempo, dirty) = reserve_player_ref(|player| {
+        (player.current_frame_tempo as f64, player.stage_dirty)
+    });
+    if !dirty {
+        return;
+    }
     let interval = if tempo > 0.0 {
         (60000.0 / tempo) as i64
     } else {
@@ -2734,7 +3132,10 @@ pub fn draw_frame_immediate() {
     if !was_frame_drawn_recently(interval) {
         with_renderer_mut(|renderer_lock| {
             if let Some(renderer) = renderer_lock {
-                reserve_player_mut(|player| renderer.draw_frame(player));
+                reserve_player_mut(|player| {
+                    renderer.draw_frame(player);
+                    player.stage_dirty = false;
+                });
             }
             mark_frame_drawn();
         });
@@ -2795,6 +3196,9 @@ pub fn player_set_preview_member_ref(cast_lib: i32, cast_num: i32) -> Result<(),
             }));
         }
     });
+    reserve_player_mut(|player| {
+        player.preview_dirty = true;
+    });
     Ok(())
 }
 
@@ -2805,6 +3209,9 @@ pub fn player_set_preview_font_size(size: u16) -> Result<(), JsValue> {
         if let Some(dynamic) = renderer_lock {
             dynamic.set_preview_font_size(if size > 0 { Some(size) } else { None });
         }
+    });
+    reserve_player_mut(|player| {
+        player.preview_dirty = true;
     });
     Ok(())
 }
@@ -3023,9 +3430,14 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
             };
 
             *renderer_lock = Some(dynamic_renderer);
-            spawn_local(async {
-                run_draw_loop().await;
-            });
+            // Only spawn the draw loop the first time. Later calls (after the
+            // renderer was dropped between movies) reuse the existing loop.
+            if !DRAW_LOOP_SPAWNED.with(|f| f.get()) {
+                DRAW_LOOP_SPAWNED.with(|f| f.set(true));
+                spawn_local(async {
+                    run_draw_loop().await;
+                });
+            }
         }
     });
 
@@ -3063,7 +3475,21 @@ async fn run_draw_loop() {
 
     let mut last_frame_ms = 0;
     let cb = Closure::<dyn FnMut()>::new(move || {
-        let mut player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+        // Player may be momentarily None while a test harness tears down the
+        // old player before allocating the new one. Skip drawing instead of
+        // panicking — the next rAF will pick it back up.
+        let player = match unsafe { PLAYER_OPT.as_mut() } {
+            Some(p) => p,
+            None => {
+                if let Ok(cb) = rc.try_borrow() {
+                    if let Some(cb) = cb.as_ref() {
+                        request_animation_frame(cb);
+                    }
+                }
+                return;
+            }
+        };
+        let mut player = player;
         let draw_fps = 24;
 
         let frame_interval = 1000 / draw_fps as i64;
@@ -3071,10 +3497,14 @@ async fn run_draw_loop() {
             last_frame_ms = Local::now().timestamp_millis();
             with_renderer_mut(|renderer_lock| {
                 if let Some(renderer) = renderer_lock {
-                    if !was_frame_drawn_recently(frame_interval) {
+                    if (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
                         renderer.draw_frame(&mut player);
+                        player.stage_dirty = false;
                     }
-                    renderer.draw_preview_frame(&mut player);
+                    if player.preview_dirty {
+                        renderer.draw_preview_frame(&mut player);
+                        player.preview_dirty = false;
+                    }
                 }
             });
         }
@@ -3088,4 +3518,13 @@ async fn run_draw_loop() {
     let cb = rc_clone.as_ref().borrow();
     let cb = cb.as_ref().unwrap();
     request_animation_frame(&cb);
+}
+
+/// Check if data starts with a valid SWF signature (FWS, CWS, or ZWS)
+pub fn has_swf_signature(data: &[u8]) -> bool {
+    if data.len() < 3 {
+        return false;
+    }
+    let sig = &data[0..3];
+    sig == b"FWS" || sig == b"CWS" || sig == b"ZWS"
 }

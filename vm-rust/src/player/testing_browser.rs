@@ -15,6 +15,24 @@ pub struct BrowserTestPlayer {}
 
 impl BrowserTestPlayer {
     pub async fn new() -> Self {
+        Self::reset_player().await;
+        BrowserTestPlayer {}
+    }
+
+    /// Fully tear down the current dirplayer and allocate a fresh one via
+    /// `DirPlayer::new()`. Called both by `BrowserTestPlayer::new()` (per-test
+    /// setup) and by `load_movie()` (per-movie setup) so every movie load
+    /// starts from a clean state — no leaked scopes, globals, timeouts, or
+    /// cached sprite textures from a previously loaded movie.
+    async fn reset_player() {
+        // Preserve external_params across the reset. Tests set these via
+        // `cfg.apply_external_params()` BEFORE calling `load_movie`, so a
+        // per-movie reset that discarded them would leave the new player
+        // without the credentials/args the test configured.
+        let preserved_external_params = unsafe {
+            PLAYER_OPT.as_ref().map(|p| p.external_params.clone()).unwrap_or_default()
+        };
+
         // Stop the current movie and clear all timeouts before resetting.
         unsafe {
             if let Some(player) = PLAYER_OPT.as_mut() {
@@ -24,13 +42,55 @@ impl BrowserTestPlayer {
         }
         crate::js_api::JsApi::dispatch_clear_timeouts();
 
+        // Bump the generation so any in-flight loops from the previous movie
+        // detect staleness on their next await and exit. Then drain: wait
+        // until no Lingo handler is still mid-execution on the OLD player.
+        // Without this, a handler that's at an async yield point (e.g. waiting
+        // on a frame tick) would resume AFTER we swap PLAYER_OPT and mutate
+        // the new player's scope stack, wrapping scope_count to an underflowed
+        // u32 and panicking on the next scope access.
+        unsafe {
+            crate::player::PLAYER_GENERATION += 1;
+        }
+        for _ in 0..120 {
+            let depth = unsafe { PLAYER_OPT.as_ref().map(|p| p.handler_stack_depth).unwrap_or(0) };
+            if depth == 0 {
+                break;
+            }
+            Self::next_frame().await;
+        }
+        // Give loops one more tick to process the generation-change and exit.
+        for _ in 0..4 {
+            Self::next_frame().await;
+        }
+
+        // Drop the persistent renderer entirely so every movie starts with a
+        // fresh WebGL2 context: no stale GL state (blend mode, color mask,
+        // bound textures), no accumulated trails FBO contents, no leftover
+        // shader/scene3d caches. `player_create_canvas` will rebuild it on
+        // the next `ensure_renderer()` call. The draw loop stays alive and
+        // picks up whatever renderer is currently in RENDERER_LOCK per rAF.
+        crate::rendering::with_renderer_mut(|renderer_lock| {
+            if let Some(renderer) = renderer_lock.take() {
+                // Remove the old canvas from the DOM so the new renderer's
+                // canvas replaces it (rather than being appended alongside).
+                match &renderer {
+                    crate::rendering_gpu::DynamicRenderer::WebGL2(r) => {
+                        let canvas = r.canvas();
+                        if let Some(parent) = canvas.parent_node() {
+                            let _ = parent.remove_child(canvas);
+                        }
+                    }
+                    _ => {}
+                }
+                drop(renderer);
+            }
+        });
+
         unsafe {
             if let Some(old) = PLAYER_OPT.take() {
                 std::mem::forget(old);
             }
-            // Increment generation so old frame/command loops from previous
-            // tests detect staleness and exit.
-            crate::player::PLAYER_GENERATION += 1;
 
             // Create fresh channels to disconnect any old command/event loops
             // from init_player(). This prevents them from holding the semaphore
@@ -56,10 +116,19 @@ impl BrowserTestPlayer {
         // Init logger (normally done by init_player which we skip in test mode)
         let _ = console_log::init_with_level(log::Level::Warn);
 
+        // Restore external_params on the freshly created player so any
+        // `cfg.apply_external_params()` call the test made before `load_movie`
+        // is preserved across the reset.
+        if !preserved_external_params.is_empty() {
+            unsafe {
+                if let Some(player) = PLAYER_OPT.as_mut() {
+                    player.external_params = preserved_external_params;
+                }
+            }
+        }
+
         // Load the system font (required for text rendering)
         crate::player::font::player_load_system_font("/assets/charmap-system.png").await;
-
-        BrowserTestPlayer {}
     }
 
     /// Wait for the next animation frame.
@@ -114,6 +183,11 @@ impl TestHarness for BrowserTestPlayer {
             let origin = web_sys::window().unwrap().location().origin().unwrap();
             format!("{}{}", origin, url)
         };
+
+        // Allocate a brand-new DirPlayer via DirPlayer::new() so every movie
+        // load starts from a clean slate — no scopes, globals, timeouts,
+        // datum allocations, or cached sprite textures from a prior movie.
+        Self::reset_player().await;
 
         unsafe {
             let player = PLAYER_OPT.as_mut().unwrap();

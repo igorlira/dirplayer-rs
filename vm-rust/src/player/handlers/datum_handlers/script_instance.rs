@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType},
     player::{
@@ -315,7 +316,7 @@ impl ScriptInstanceDatumHandlers {
             // getPropertyDescriptionList returns empty prop list if not implemented
             if handler_name == "getPropertyDescriptionList" {
                 return reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::PropList(vec![], false)))
+                    Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false)))
                 });
             }
 
@@ -520,11 +521,11 @@ impl ScriptInstanceDatumHandlers {
                 .cast_manager
                 .get_script_by_ref(&script_instance.script);
             if script.is_none() {
-                return Ok(player.alloc_datum(Datum::List(DatumType::List, vec![], false)));
+                return Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false)));
             }
             let script = script.unwrap();
             let handler_names = script.handler_names.clone();
-            let handler_name_datums = handler_names
+            let handler_name_datums: VecDeque<_> = handler_names
                 .iter()
                 .map(|name| player.alloc_datum(Datum::Symbol(name.clone())))
                 .collect();
@@ -551,7 +552,7 @@ impl ScriptInstanceDatumHandlers {
             // getPropertyDescriptionList returns empty prop list if not implemented
             "getPropertyDescriptionList" => {
                 reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::PropList(vec![], false)))
+                    Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false)))
                 })
             }
             // Director system events that should be silently ignored if not implemented
@@ -647,7 +648,7 @@ impl ScriptInstanceDatumHandlers {
 
                     if let Some(target_id) = target_id {
                         // Find and remove the instance from the list
-                        let new_items: Vec<DatumRef> = items.iter()
+                        let new_items: VecDeque<DatumRef> = items.iter()
                             .filter(|item| {
                                 match player.get_datum(item) {
                                     Datum::ScriptInstanceRef(item_ref) => **item_ref != target_id,

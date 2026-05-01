@@ -68,6 +68,10 @@ export default function VMProvider({ children, systemFontPath, wasmUrl }: VMProv
           await init({});
         }
         console.log("VM initialized");
+        // Dev convenience: expose the wasm module on `window.__vm` so debug
+        // helpers (e.g. `__vm.player_print_filmloop_sprites(2, 145)`) can
+        // be called straight from the browser console.
+        (window as any).__vm = wasm;
 
         // Step 3: Set system font
         const fontPath = systemFontPath || getFullPathFromOrigin("charmap-system.png");

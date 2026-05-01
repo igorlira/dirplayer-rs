@@ -27,31 +27,40 @@ impl BitmapDatumHandlers {
             "fill" => Self::fill(datum, args),
             "draw" => Self::draw(datum, args),
             "setPixel" => Self::set_pixel(datum, args),
+            "extractAlpha" => Self::extract_alpha(datum, args),
             "duplicate" => Self::duplicate(datum, args),
             "copyPixels" => Self::copy_pixels(datum, args),
-            "createMatte" => Self::create_matte(datum, args),
+            "createMatte" | "createMask" => Self::create_matte(datum, args),
             "trimWhiteSpace" => Self::trim_whitespace(datum, args),
             "getPixel" => Self::get_pixel(datum, args),
             "crop" => Self::crop(datum, args),
             "setAlpha" => Self::set_alpha(datum, args),
             "floodFill" => reserve_player_mut(|player| {
-                // Args: point, color
-                if args.len() != 2 {
+                // Args: point, color  OR  x, y, color
+                if args.len() != 2 && args.len() != 3 {
                     return Err(ScriptError::new(
-                        "floodFill requires 2 arguments".to_string(),
+                        "floodFill requires 2 or 3 arguments".to_string(),
                     ));
                 }
 
                 let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
 
-                let point_ref = player.get_datum(&args[0]).to_point()?;
-
-                let x = player.get_datum(&point_ref[0]).int_value()?;
-                let y = player.get_datum(&point_ref[1]).int_value()?;
+                let (x, y, color_arg_idx) = if args.len() == 3 {
+                    // floodFill(x, y, color)
+                    let x = player.get_datum(&args[0]).int_value()?;
+                    let y = player.get_datum(&args[1]).int_value()?;
+                    (x, y, 2)
+                } else {
+                    // floodFill(point, color)
+                    let (pt_vals, _flags) = player.get_datum(&args[0]).to_point_inline()?;
+                    let x = pt_vals[0] as i32;
+                    let y = pt_vals[1] as i32;
+                    (x, y, 1)
+                };
 
                 let point_tuple = (x, y);
 
-                let color_ref = player.get_datum(&args[1]).to_color_ref()?;
+                let color_ref = player.get_datum(&args[color_arg_idx]).to_color_ref()?;
 
                 // Get palettes once
                 let palettes = player.movie.cast_manager.palettes();
@@ -91,21 +100,71 @@ impl BitmapDatumHandlers {
 
     pub fn get_pixel(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let bitmap = player.get_datum(datum).to_bitmap_ref()?;
-            let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
-            let (x, y) = if args.len() == 1 {
-                let point = player.get_datum(&args[0]).to_point()?;
-                let x = player.get_datum(&point[0]).int_value()?;
-                let y = player.get_datum(&point[1]).int_value()?;
-                (x, y)
+            let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
+            let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
+            // Parse args: (point [, #integer]) or (x, y)
+            let first_is_point = matches!(player.get_datum(&args[0]), Datum::Point(..));
+            let (x, y, return_integer) = if first_is_point {
+                let (pt_vals, _flags) = player.get_datum(&args[0]).to_point_inline()?;
+                let x = pt_vals[0] as i32;
+                let y = pt_vals[1] as i32;
+                let return_integer = if args.len() > 1 {
+                    let flag = player.get_datum(&args[1]).string_value().unwrap_or_default();
+                    flag.eq_ignore_ascii_case("integer")
+                } else {
+                    false
+                };
+                (x, y, return_integer)
             } else {
                 let x = player.get_datum(&args[0]).int_value()?;
                 let y = player.get_datum(&args[1]).int_value()?;
-                (x, y)
+                (x, y, false)
             };
             let color = bitmap.get_pixel_color_ref(x as u16, y as u16);
-            let color_ref = player.alloc_datum(Datum::ColorRef(color));
-            Ok(color_ref)
+            if return_integer {
+                let palettes = player.movie.cast_manager.palettes();
+                let (r, g, b) = crate::player::bitmap::bitmap::resolve_color_ref(
+                    &palettes,
+                    &color,
+                    &bitmap.palette_ref,
+                    bitmap.original_bit_depth,
+                );
+                // Director's getPixel(pt, #integer) returns the pixel's value in
+                // the bitmap's native format, not always 24-bit RGB:
+                //   - 8-bit: palette index (0..255)
+                //   - 16-bit: RGB555 packed word (0..32767)
+                //   - 32-bit: 24-bit RGB (0..16_777_215)
+                // Many classic Lingo hit-test handlers compare getPixel against
+                // 16-bit color constants (e.g. 32767 for white / transparent marker);
+                // returning 24-bit RGB here broke pixel-accurate avatar click
+                // tests so clicks on transparent pixels registered as hits.
+                let int_color = match bitmap.original_bit_depth {
+                    1 | 2 | 4 | 8 => {
+                        if let crate::player::sprite::ColorRef::PaletteIndex(idx) = color {
+                            idx as i32
+                        } else {
+                            ((r as i32) << 16) | ((g as i32) << 8) | (b as i32)
+                        }
+                    }
+                    16 => {
+                        // Pack as RGB555 (Director's 16-bit format). The original
+                        // file may have had the high bit set (giving 65535 vs 32767
+                        // for white) but that bit is lost during decode; return the
+                        // 15-bit value which matches the common 32767 transparent
+                        // marker. Scripts that accept either 32767 or 65535 (which
+                        // is the standard hit-test idiom) work correctly.
+                        let r5 = (r as i32 >> 3) & 0x1F;
+                        let g5 = (g as i32 >> 3) & 0x1F;
+                        let b5 = (b as i32 >> 3) & 0x1F;
+                        (r5 << 10) | (g5 << 5) | b5
+                    }
+                    _ => ((r as i32) << 16) | ((g as i32) << 8) | (b as i32),
+                };
+                Ok(player.alloc_datum(Datum::Int(int_color)))
+            } else {
+                let color_ref = player.alloc_datum(Datum::ColorRef(color));
+                Ok(color_ref)
+            }
         })
     }
 
@@ -147,12 +206,12 @@ impl BitmapDatumHandlers {
             }
 
             let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
-            let rect_refs = player.get_datum(&args[0]).to_rect()?;
+            let (rect_vals, _flags) = player.get_datum(&args[0]).to_rect_inline()?;
 
-            let left = player.get_datum(&rect_refs[0]).int_value()?;
-            let top = player.get_datum(&rect_refs[1]).int_value()?;
-            let right = player.get_datum(&rect_refs[2]).int_value()?;
-            let bottom = player.get_datum(&rect_refs[3]).int_value()?;
+            let left = rect_vals[0] as i32;
+            let top = rect_vals[1] as i32;
+            let right = rect_vals[2] as i32;
+            let bottom = rect_vals[3] as i32;
 
             // Calculate cropped dimensions
             let crop_width = (right - left).max(0) as u16;
@@ -200,9 +259,61 @@ impl BitmapDatumHandlers {
                 &params,
             );
 
-            // Add the new bitmap to the manager and return a reference
-            let new_bitmap_ref = player.bitmap_manager.add_bitmap(cropped_bitmap);
+            // Ephemeral: `bitmap.duplicate(rect)` produces a fresh bitmap not
+            // owned by any cast member. Free when the wrapping DatumRef drops.
+            let new_bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(cropped_bitmap);
             Ok(player.alloc_datum(Datum::BitmapRef(new_bitmap_ref)))
+        })
+    }
+
+    pub fn extract_alpha(datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
+            let src = player
+                .bitmap_manager
+                .get_bitmap(*bitmap_ref)
+                .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+
+            let w = src.width;
+            let h = src.height;
+            let is_32bit = src.bit_depth == 32;
+
+            // Create an 8-bit grayscale bitmap for the alpha channel
+            let mut alpha_bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+                w, h, 32, 32, 0,
+                src.palette_ref.clone(),
+            );
+
+            if is_32bit {
+                // Extract alpha from 32-bit RGBA data (4 bytes per pixel, alpha = byte 3)
+                let row_bytes = w as usize * 4;
+                for y in 0..h as usize {
+                    for x in 0..w as usize {
+                        let src_idx = y * row_bytes + x * 4;
+                        let alpha = if src_idx + 3 < src.data.len() {
+                            src.data[src_idx + 3]
+                        } else {
+                            255
+                        };
+                        // Write grayscale: R=G=B=alpha, A=255
+                        let dst_idx = y * row_bytes + x * 4;
+                        if dst_idx + 3 < alpha_bitmap.data.len() {
+                            alpha_bitmap.data[dst_idx] = alpha;
+                            alpha_bitmap.data[dst_idx + 1] = alpha;
+                            alpha_bitmap.data[dst_idx + 2] = alpha;
+                            alpha_bitmap.data[dst_idx + 3] = 255;
+                        }
+                    }
+                }
+            } else {
+                // Non-32-bit: no alpha channel, return all-white (fully opaque)
+                alpha_bitmap.data.fill(255);
+            }
+
+            // Ephemeral: `bitmap.extractAlpha()` returns a fresh derived bitmap
+            // not owned by a cast member. Free when the wrapping DatumRef drops.
+            let new_ref = player.bitmap_manager.add_ephemeral_bitmap(alpha_bitmap);
+            Ok(player.alloc_datum(Datum::BitmapRef(new_ref)))
         })
     }
 
@@ -245,6 +356,7 @@ impl BitmapDatumHandlers {
                     for i in (3..bitmap.data.len()).step_by(4) {
                         bitmap.data[i] = alpha;
                     }
+                    bitmap.use_alpha = true;
                     // bitmap.version += 1;
 
                     Ok(player.alloc_datum(datum_bool(true)))
@@ -274,21 +386,19 @@ impl BitmapDatumHandlers {
                         .get_bitmap_mut(*bitmap_ref)
                         .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
 
-                    // Copy alpha values from the 8-bit image to the alpha channel of the 32-bit image
-                    // For 8-bit palette-indexed images, use raw byte value (palette index) as alpha.
-                    // In systemMac palette: index 0 = white (bg), index 255 = black (fg).
-                    // Director's setAlpha uses raw palette indices as alpha values directly.
+                    // Copy alpha values from the 8-bit image to the alpha channel of the 32-bit image.
+                    // Director's setAlpha uses raw palette indices as alpha values directly:
+                    // index 0 = transparent, index 255 = opaque.
                     for y in 0..height {
                         for x in 0..width {
-                            let alpha_idx = y as usize * width as usize + x as usize; // 1 byte per pixel for 8-bit
+                            let alpha_idx = y as usize * width as usize + x as usize;
                             let dst_idx = (y as usize * width as usize + x as usize) * 4 + 3;
-
                             if alpha_idx < alpha_data.len() && dst_idx < bitmap.data.len() {
                                 bitmap.data[dst_idx] = alpha_data[alpha_idx];
                             }
                         }
                     }
-                    // bitmap.version += 1;
+                    bitmap.use_alpha = true;
 
                     Ok(player.alloc_datum(datum_bool(true)))
                 }
@@ -319,11 +429,11 @@ impl BitmapDatumHandlers {
                     arg_pos += 1;
                     (*x1, y1, x2, y2)
                 }
-                Datum::Rect(rect_refs) => {
-                    let x1 = player.get_datum(&rect_refs[0]).int_value()?;
-                    let y1 = player.get_datum(&rect_refs[1]).int_value()?;
-                    let x2 = player.get_datum(&rect_refs[2]).int_value()?;
-                    let y2 = player.get_datum(&rect_refs[3]).int_value()?;
+                Datum::Rect(rect_vals, _flags) => {
+                    let x1 = rect_vals[0] as i32;
+                    let y1 = rect_vals[1] as i32;
+                    let x2 = rect_vals[2] as i32;
+                    let y2 = rect_vals[3] as i32;
                     (x1, y1, x2, y2)
                 }
                 _ => {
@@ -333,15 +443,34 @@ impl BitmapDatumHandlers {
                 }
             };
 
+            // Handle optional color argument before the prop list
+            // draw(x1, y1, x2, y2, [color,] propList)
+            let explicit_color = if arg_pos + 1 < args.len() {
+                let maybe_color = player.get_datum(&args[arg_pos]);
+                if matches!(maybe_color, Datum::ColorRef(_)) {
+                    let c = maybe_color.to_color_ref().ok();
+                    arg_pos += 1;
+                    c
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let draw_map = player.get_datum(&args[arg_pos]).to_map()?;
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
 
-            let color_ref = PropListUtils::get_by_concrete_key(
-                &draw_map,
-                &Datum::Symbol("color".to_owned()),
-                &player.allocator,
-            )?;
-            let color_ref = player.get_datum(&color_ref).to_color_ref()?;
+            let color_ref = if let Some(c) = explicit_color {
+                c
+            } else {
+                let cr = PropListUtils::get_by_concrete_key(
+                    &draw_map,
+                    &Datum::Symbol("color".to_owned()),
+                    &player.allocator,
+                )?;
+                player.get_datum(&cr).to_color_ref()?
+            };
             let palettes = player.movie.cast_manager.palettes();
             let color = resolve_color_ref(
                 &palettes,
@@ -395,9 +524,9 @@ impl BitmapDatumHandlers {
                 let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
 
                 let first_arg = player.get_datum(&args[0]);
-                let (x, y, color_obj_or_int) = if let Datum::Point(pt) = first_arg {
-                    let px = player.get_datum(&pt[0]).int_value()?;
-                    let py = player.get_datum(&pt[1]).int_value()?;
+                let (x, y, color_obj_or_int) = if let Datum::Point(pt_vals, _flags) = first_arg {
+                    let px = pt_vals[0] as i32;
+                    let py = pt_vals[1] as i32;
                     let color = player.get_datum(&args[1]);
                     (px, py, color)
                 } else {
@@ -425,14 +554,18 @@ impl BitmapDatumHandlers {
             let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
 
             if color_obj_or_int.is_int() {
-                if bit_depth != 8 {
-                    return Err(ScriptError::new(
-                        "Cannot set pixel with int color on non-8-bit bitmap".to_string(),
-                    ));
+                let int_value = color_obj_or_int.int_value()?;
+                if bit_depth == 8 {
+                    // 8-bit: treat as palette index → grayscale
+                    let idx = int_value as u8;
+                    bitmap.set_pixel(x, y, (idx, idx, idx), &palettes);
+                } else {
+                    // 16/32-bit: treat as packed RGB integer (r*65536 + g*256 + b)
+                    let r = ((int_value >> 16) & 0xFF) as u8;
+                    let g = ((int_value >> 8) & 0xFF) as u8;
+                    let b = (int_value & 0xFF) as u8;
+                    bitmap.set_pixel(x, y, (r, g, b), &palettes);
                 }
-
-                let int_value = color_obj_or_int.int_value()? as u8;
-                bitmap.set_pixel(x, y, (int_value, int_value, int_value), &palettes);
             } else {
                 let color = color_obj_or_int.to_color_ref()?;
                 let color = resolve_color_ref(&palettes, &color, &palette_ref, original_bit_depth);
@@ -447,7 +580,7 @@ impl BitmapDatumHandlers {
         reserve_player_mut(|player| {
             let bitmap = player.get_datum(datum);
             let (rect_i32, color_ref) = if args.len() == 2 {
-                let rect_refs = player.get_datum(&args[0]).to_rect()?;
+                let (rect_vals, _flags) = player.get_datum(&args[0]).to_rect_inline()?;
                 let params = player.get_datum(&args[1]);
                 let (color, shape) = match params {
                     Datum::ColorRef(color_ref) => (color_ref.clone(), "rect".to_string()),
@@ -488,10 +621,10 @@ impl BitmapDatumHandlers {
                     ));
                 }
 
-                let x1 = player.get_datum(&rect_refs[0]).int_value()?;
-                let y1 = player.get_datum(&rect_refs[1]).int_value()?;
-                let x2 = player.get_datum(&rect_refs[2]).int_value()?;
-                let y2 = player.get_datum(&rect_refs[3]).int_value()?;
+                let x1 = rect_vals[0] as i32;
+                let y1 = rect_vals[1] as i32;
+                let x2 = rect_vals[2] as i32;
+                let y2 = rect_vals[3] as i32;
 
                 ((x1, y1, x2, y2), color)
             } else if args.len() == 5 {
@@ -554,11 +687,11 @@ impl BitmapDatumHandlers {
                 src_bitmap_ref.to_bitmap_ref()?
             };
             let dest_rect_or_quad = player.get_datum(&args[1]);
-            let src_rect = player.get_datum(&args[2]).to_rect()?;
-            let sx1 = player.get_datum(&src_rect[0]).int_value()?;
-            let sy1 = player.get_datum(&src_rect[1]).int_value()?;
-            let sx2 = player.get_datum(&src_rect[2]).int_value()?;
-            let sy2 = player.get_datum(&src_rect[3]).int_value()?;
+            let (src_rect_vals, _flags) = player.get_datum(&args[2]).to_rect_inline()?;
+            let sx1 = src_rect_vals[0] as i32;
+            let sy1 = src_rect_vals[1] as i32;
+            let sx2 = src_rect_vals[2] as i32;
+            let sy2 = src_rect_vals[3] as i32;
             let param_list = args.get(3).map(|x| player.get_datum(x));
             let mut param_list_concrete = HashMap::new();
             if let Some(param_list) = param_list {
@@ -594,37 +727,29 @@ impl BitmapDatumHandlers {
             }
 
             let dest_rect = match dest_rect_or_quad {
-                Datum::Rect(rect_refs) => {
-                    let x1 = player.get_datum(&rect_refs[0]).int_value()?;
-                    let y1 = player.get_datum(&rect_refs[1]).int_value()?;
-                    let x2 = player.get_datum(&rect_refs[2]).int_value()?;
-                    let y2 = player.get_datum(&rect_refs[3]).int_value()?;
+                Datum::Rect(rect_vals, _flags) => {
+                    let x1 = rect_vals[0] as i32;
+                    let y1 = rect_vals[1] as i32;
+                    let x2 = rect_vals[2] as i32;
+                    let y2 = rect_vals[3] as i32;
                     IntRect::from_tuple((x1, y1, x2, y2))
                 }
                 Datum::List(_, list_val, _) => {
                     let p1 = {
-                        let p = player.get_datum(&list_val[0]).to_point()?;
-                        let x = player.get_datum(&p[0]).int_value()?;
-                        let y = player.get_datum(&p[1]).int_value()?;
-                        (x, y)
+                        let (pv, _f) = player.get_datum(&list_val[0]).to_point_inline()?;
+                        (pv[0] as i32, pv[1] as i32)
                     };
                     let p2 = {
-                        let p = player.get_datum(&list_val[1]).to_point()?;
-                        let x = player.get_datum(&p[0]).int_value()?;
-                        let y = player.get_datum(&p[1]).int_value()?;
-                        (x, y)
+                        let (pv, _f) = player.get_datum(&list_val[1]).to_point_inline()?;
+                        (pv[0] as i32, pv[1] as i32)
                     };
                     let p3 = {
-                        let p = player.get_datum(&list_val[2]).to_point()?;
-                        let x = player.get_datum(&p[0]).int_value()?;
-                        let y = player.get_datum(&p[1]).int_value()?;
-                        (x, y)
+                        let (pv, _f) = player.get_datum(&list_val[2]).to_point_inline()?;
+                        (pv[0] as i32, pv[1] as i32)
                     };
                     let p4 = {
-                        let p = player.get_datum(&list_val[3]).to_point()?;
-                        let x = player.get_datum(&p[0]).int_value()?;
-                        let y = player.get_datum(&p[1]).int_value()?;
-                        (x, y)
+                        let (pv, _f) = player.get_datum(&list_val[3]).to_point_inline()?;
+                        (pv[0] as i32, pv[1] as i32)
                     };
 
                     let dest_rect = IntRect::from_quad(p1, p2, p3, p4);
@@ -678,11 +803,7 @@ impl BitmapDatumHandlers {
             "width" => Ok(Datum::Int(width)),
             "height" => Ok(Datum::Int(height)),
             "rect" => {
-                let x0 = player.alloc_datum(Datum::Int(0));
-                let y0 = player.alloc_datum(Datum::Int(0));
-                let w  = player.alloc_datum(Datum::Int(width));
-                let h  = player.alloc_datum(Datum::Int(height));
-                 Ok(Datum::Rect([x0, y0, w, h]))
+                 Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0))
             }
             "depth" => Ok(Datum::Int(bitmap.bit_depth as i32)),
             "paletteRef" => {

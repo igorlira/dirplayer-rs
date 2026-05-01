@@ -14,7 +14,7 @@ use crate::{
             string_chunk::StringChunkUtils,
         },
         reserve_player_mut,
-        score::{sprite_get_prop, sprite_set_prop_from_lingo},
+        score::{sprite_get_prop, sprite_set_prop},
         script::{
             get_current_handler_def, get_current_variable_multiplier, get_obj_prop,
             player_set_obj_prop, script_get_prop, script_get_static_prop, script_set_prop,
@@ -63,6 +63,10 @@ impl GetSetUtils {
         match prop_name {
             "_player" => Ok(Datum::PlayerRef),
             "_movie" => Ok(Datum::MovieRef),
+            "_mouse" => Ok(Datum::MouseRef),
+            "_system" => Ok(Datum::MovieRef), // _system properties like randomSeed are movie-level
+            "_sound" => Ok(Datum::MovieRef),  // _sound properties like soundDevice are movie-level
+            "_key" => Ok(Datum::PlayerRef),    // _key properties handled via PlayerRef
             _ => Err(ScriptError::new(format!(
                 "Invalid top level prop: {}",
                 prop_name
@@ -99,9 +103,9 @@ impl GetSetBytecodeHandler {
 
     pub fn get_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
-        let (receiver, script_ref) = {
+        let (receiver, script_ref, cached) = {
             let scope = player.scopes.get(ctx.scope_ref).unwrap();
-            (scope.receiver.clone(), scope.script_ref.clone())
+            (scope.receiver.clone(), scope.script_ref.clone(), scope.cached_handler_instance.clone())
         };
         let name_id = player.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id).to_owned();
@@ -113,7 +117,13 @@ impl GetSetBytecodeHandler {
             // script runs with a child instance as receiver — e.g., when
             // `ancestor.getMember()` is called, `ancestor` should resolve to
             // the handler's own instance's ancestor, not the receiver's.
-            let handler_instance = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+            let handler_instance = if let Some(ref c) = cached {
+                c.clone()
+            } else {
+                let hi = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+                player.scopes.get_mut(ctx.scope_ref).unwrap().cached_handler_instance = Some(hi.clone());
+                hi
+            };
             script_get_prop(player, &handler_instance, &prop_name)?
         } else {
             script_get_static_prop(player, &script_ref, &prop_name)?
@@ -128,10 +138,10 @@ impl GetSetBytecodeHandler {
         let prop_name = ctx.get_name(name_id).to_owned();
 
         reserve_player_mut(|player| {
-            let (value_ref, receiver, script_ref) = {
+            let (value_ref, receiver, script_ref, cached) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 let value_ref = scope.stack.pop().unwrap();
-                (value_ref, scope.receiver.clone(), scope.script_ref.clone())
+                (value_ref, scope.receiver.clone(), scope.script_ref.clone(), scope.cached_handler_instance.clone())
             };
 
             match receiver {
@@ -143,7 +153,13 @@ impl GetSetBytecodeHandler {
                         )));
                     }
                     // Resolve on handler's owning instance level (see get_prop comment)
-                    let handler_instance = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+                    let handler_instance = if let Some(ref c) = cached {
+                        c.clone()
+                    } else {
+                        let hi = Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+                        player.scopes.get_mut(ctx.scope_ref).unwrap().cached_handler_instance = Some(hi.clone());
+                        hi
+                    };
                     script_set_prop(player, &handler_instance, &prop_name, &value_ref, false)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
@@ -262,7 +278,7 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap()
                     };
                     let sprite_num = player.get_datum(&datum_ref).int_value()?;
-                    sprite_set_prop_from_lingo(sprite_num as i16, prop_name, value)?;
+                    sprite_set_prop(sprite_num as i16, prop_name, value)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
                 0x07 => {
@@ -376,6 +392,20 @@ impl GetSetBytecodeHandler {
                             Ok(HandlerExecutionResult::Advance)
                         }
                     }
+                }
+                0x0a => {
+                    // Set property on a string chunk of a cast member
+                    // e.g. set the textStyle of line 1 of member "X" to "bold"
+                    // Stack: [zeros..., chunk_num, chunk_type, member_name, cast_lib, value, prop_id] (prop_id already popped)
+                    // Pop remaining stack items
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    // Pop: cast_lib(0), member_name, chunk_type(0), chunk_num(1), and 6 zeros
+                    for _ in 0..10 {
+                        if scope.stack.is_empty() { break; }
+                        scope.stack.pop();
+                    }
+                    warn!("kOpSet 0x0a (string chunk of member) not fully implemented, ignoring");
+                    Ok(HandlerExecutionResult::Advance)
                 }
                 _ => Err(ScriptError::new(format!(
                     "Invalid propertyType/propertyID for kOpSet: {}",
@@ -676,7 +706,23 @@ impl GetSetBytecodeHandler {
                             s_clone,
                         ))
                     }
-                    _ => get_obj_prop(player, &obj_ref, &prop_name.to_owned())?,
+                    _ => {
+                        let result = get_obj_prop(player, &obj_ref, &prop_name.to_owned())?;
+                        // Track sub-property refs for Transform3D compound assignment
+                        // (e.g., transform.position.z = value needs to write back to transform)
+                        let is_transform = matches!(obj_type, crate::director::lingo::datum::DatumType::Transform3d);
+                        let is_sub_prop = matches!(prop_name.as_str(), "position" | "rotation" | "scale" | "x" | "y" | "z");
+                        if is_transform && is_sub_prop {
+                            let result_type = player.get_datum(&result).type_enum();
+                            if matches!(result_type, crate::director::lingo::datum::DatumType::Vector) {
+                                if player.transform_sub_refs.len() > 32 {
+                                    player.transform_sub_refs.drain(0..16);
+                                }
+                                player.transform_sub_refs.push((result.clone(), obj_ref.clone(), prop_name.clone()));
+                            }
+                        }
+                        result
+                    }
                 },
                 crate::director::lingo::datum::DatumType::List => {
                     // Handle numeric indices for lists
@@ -755,7 +801,23 @@ impl GetSetBytecodeHandler {
                         get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
                     }
                 }
-                _ => get_obj_prop(player, &obj_ref, &prop_name.to_owned())?,
+                _ => {
+                    let result = get_obj_prop(player, &obj_ref, &prop_name.to_owned())?;
+                    // Track sub-property refs for Transform3D compound assignment
+                    // (e.g., transform.position.z = value needs to write back to transform)
+                    if matches!(obj_type, crate::director::lingo::datum::DatumType::Transform3d) {
+                        if matches!(prop_name.as_str(), "position" | "rotation" | "scale") {
+                            let result_type = player.get_datum(&result).type_enum();
+                            if matches!(result_type, crate::director::lingo::datum::DatumType::Vector) {
+                                if player.transform_sub_refs.len() > 32 {
+                                    player.transform_sub_refs.drain(0..16);
+                                }
+                                player.transform_sub_refs.push((result.clone(), obj_ref.clone(), prop_name.clone()));
+                            }
+                        }
+                    }
+                    result
+                },
             };
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();

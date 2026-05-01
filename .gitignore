@@ -29,6 +29,7 @@ yarn-error.log*
 
 .DS_Store
 public/dcr*
+public/ruffle*
 .vscode
 
 /dist-extension

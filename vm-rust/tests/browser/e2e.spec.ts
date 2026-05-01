@@ -140,7 +140,7 @@ test("browser e2e tests", async ({ page }) => {
   // Wait for all wasm tests to complete
   const handle = await page.waitForFunction(
     () => (window as any).__testResults as TestResults | null,
-    { timeout: 120_000 }
+    { timeout: 900_000 }
   );
   const testResults = (await handle.jsonValue()) as TestResults;
 

@@ -66,8 +66,15 @@ pub fn safe_string(s: &str) -> String {
     String::from_utf8_lossy(s.as_bytes()).into_owned()
 }
 
+#[cfg(target_arch = "wasm32")]
 pub fn safe_js_string(s: &str) -> JsValue {
     JsValue::from_str(&safe_string(s))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn safe_js_string(s: &str) -> JsValue {
+    let _ = s;
+    JsValue::NULL
 }
 
 #[wasm_bindgen(getter_with_clone)]
@@ -222,6 +229,9 @@ extern "C" {
     pub fn onDatumSnapshot(datum_id: DatumId, data: js_sys::Object);
     pub fn onScriptInstanceSnapshot(script_ref: ScriptInstanceId, data: js_sys::Object);
     pub fn onExternalEvent(event: &str);
+    pub fn onFlashMemberLoaded(cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32);
+    pub fn onFlashMemberUnloaded(cast_lib: i32, cast_member: i32);
+    pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
 }
 
 pub struct JsApi {}
@@ -253,6 +263,15 @@ impl JsApi {
     #[allow(dead_code)]
     pub fn dispatch_clear_timeouts() {
         onClearTimeouts();
+    }
+    pub fn dispatch_flash_member_loaded(cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32) {
+        onFlashMemberLoaded(cast_lib, cast_member, swf_data, width, height);
+    }
+    pub fn dispatch_flash_member_unloaded(cast_lib: i32, cast_member: i32) {
+        onFlashMemberUnloaded(cast_lib, cast_member);
+    }
+    pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
+        onStageSizeChanged(width, height, center);
     }
     pub fn dispatch_movie_loaded(dir_file: &DirectorFile) {
         let test = dir_file
@@ -1087,6 +1106,82 @@ impl JsApi {
                 let score_snapshot = Self::get_score_snapshot(player, &film_loop_data.score);
                 member_map.str_set("score", &score_snapshot.to_js_object());
             }
+            CastMemberType::Flash(flash_data) => {
+                member_map.str_set("regX", &JsValue::from(flash_data.reg_point.0));
+                member_map.str_set("regY", &JsValue::from(flash_data.reg_point.1));
+                member_map.str_set("dataSize", &JsValue::from(flash_data.data.len() as u32));
+                if let Some(ref info) = flash_data.flash_info {
+                    member_map.str_set("flashRectLeft", &JsValue::from(info.flash_rect.0));
+                    member_map.str_set("flashRectTop", &JsValue::from(info.flash_rect.1));
+                    member_map.str_set("flashRectRight", &JsValue::from(info.flash_rect.2));
+                    member_map.str_set("flashRectBottom", &JsValue::from(info.flash_rect.3));
+                    member_map.str_set("width", &JsValue::from(info.flash_rect.2 - info.flash_rect.0));
+                    member_map.str_set("height", &JsValue::from(info.flash_rect.3 - info.flash_rect.1));
+                    member_map.str_set("directToStage", &JsValue::from_bool(info.direct_to_stage));
+                    member_map.str_set("imageEnabled", &JsValue::from_bool(info.image_enabled));
+                    member_map.str_set("soundEnabled", &JsValue::from_bool(info.sound_enabled));
+                    member_map.str_set("pausedAtStart", &JsValue::from_bool(info.paused_at_start));
+                    member_map.str_set("loop", &JsValue::from_bool(info.loop_enabled));
+                    member_map.str_set("isStatic", &JsValue::from_bool(info.is_static));
+                    member_map.str_set("preload", &JsValue::from_bool(info.preload));
+                    member_map.str_set("centerRegPoint", &JsValue::from_bool(info.center_reg_point));
+                    member_map.str_set("buttonsEnabled", &JsValue::from_bool(info.buttons_enabled));
+                    member_map.str_set("actionsEnabled", &JsValue::from_bool(info.actions_enabled));
+                    member_map.str_set("fixedRate", &JsValue::from(info.fixed_rate));
+                    member_map.str_set("posterFrame", &JsValue::from(info.poster_frame));
+                    member_map.str_set("bufferSize", &JsValue::from(info.buffer_size));
+                    member_map.str_set("scale", &JsValue::from_f64(info.scale as f64));
+                    member_map.str_set("viewScale", &JsValue::from_f64(info.view_scale as f64));
+                    member_map.str_set("originH", &JsValue::from_f64(info.origin_h as f64));
+                    member_map.str_set("originV", &JsValue::from_f64(info.origin_v as f64));
+                    member_map.str_set("viewH", &JsValue::from_f64(info.view_h as f64));
+                    member_map.str_set("viewV", &JsValue::from_f64(info.view_v as f64));
+                    member_map.str_set("originMode", &safe_js_string(match info.origin_mode {
+                        crate::director::enums::FlashOriginMode::Center => "center",
+                        crate::director::enums::FlashOriginMode::TopLeft => "topLeft",
+                        crate::director::enums::FlashOriginMode::Point => "point",
+                    }));
+                    member_map.str_set("playbackMode", &safe_js_string(match info.playback_mode {
+                        crate::director::enums::FlashPlaybackMode::Normal => "normal",
+                        crate::director::enums::FlashPlaybackMode::Fixed => "fixed",
+                        crate::director::enums::FlashPlaybackMode::LockStep => "lockStep",
+                    }));
+                    member_map.str_set("scaleMode", &safe_js_string(match info.scale_mode {
+                        crate::director::enums::FlashScaleMode::ShowAll => "showAll",
+                        crate::director::enums::FlashScaleMode::NoScale => "noScale",
+                        crate::director::enums::FlashScaleMode::AutoSize => "autoSize",
+                        crate::director::enums::FlashScaleMode::ExactFit => "exactFit",
+                        crate::director::enums::FlashScaleMode::NoBorder => "noBorder",
+                    }));
+                    member_map.str_set("streamMode", &safe_js_string(match info.stream_mode {
+                        crate::director::enums::FlashStreamMode::Frame => "frame",
+                        crate::director::enums::FlashStreamMode::Idle => "idle",
+                        crate::director::enums::FlashStreamMode::Manual => "manual",
+                    }));
+                    member_map.str_set("quality", &safe_js_string(match info.quality {
+                        crate::director::enums::FlashQuality::AutoHigh => "autoHigh",
+                        crate::director::enums::FlashQuality::AutoMedium => "autoMedium",
+                        crate::director::enums::FlashQuality::AutoLow => "autoLow",
+                        crate::director::enums::FlashQuality::High => "high",
+                        crate::director::enums::FlashQuality::Medium => "medium",
+                        crate::director::enums::FlashQuality::Low => "low",
+                    }));
+                    member_map.str_set("eventPassMode", &safe_js_string(match info.event_pass_mode {
+                        crate::director::enums::FlashEventPassMode::PassAlways => "passAlways",
+                        crate::director::enums::FlashEventPassMode::PassButton => "passButton",
+                        crate::director::enums::FlashEventPassMode::PassNotButton => "passNotButton",
+                        crate::director::enums::FlashEventPassMode::PassNever => "passNever",
+                    }));
+                    member_map.str_set("clickMode", &safe_js_string(match info.click_mode {
+                        crate::director::enums::FlashClickMode::BoundingBox => "boundingBox",
+                        crate::director::enums::FlashClickMode::Opaque => "opaque",
+                        crate::director::enums::FlashClickMode::Object => "object",
+                    }));
+                    member_map.str_set("sourceFileName", &safe_js_string(&info.source_file_name));
+                    member_map.str_set("commonPlayer", &safe_js_string(&info.common_player));
+                    member_map.str_set("bgColor", &JsValue::from(info.bg_color));
+                }
+            }
             CastMemberType::Palette(palette) => {
                 let colors_array = js_sys::Array::new();
                 for color in palette.colors.iter() {
@@ -1097,6 +1192,45 @@ impl JsApi {
                     colors_array.push(&color_array);
                 }
                 member_map.str_set("colors", &colors_array);
+            }
+            CastMemberType::Shockwave3d(s3d_data) => {
+                let info = &s3d_data.info;
+                member_map.str_set("regX", &JsValue::from(info.reg_point.0));
+                member_map.str_set("regY", &JsValue::from(info.reg_point.1));
+                member_map.str_set("dataSize", &JsValue::from(s3d_data.w3d_data.len() as u32));
+                member_map.str_set("directToStage", &JsValue::from_bool(info.direct_to_stage));
+                member_map.str_set("animationEnabled", &JsValue::from_bool(info.animation_enabled));
+                member_map.str_set("preload", &JsValue::from_bool(info.preload));
+                member_map.str_set("loop", &JsValue::from_bool(info.loops));
+                member_map.str_set("duration", &JsValue::from(info.duration));
+                let rect = info.default_rect;
+                member_map.str_set("width", &JsValue::from(rect.2 - rect.0));
+                member_map.str_set("height", &JsValue::from(rect.3 - rect.1));
+                member_map.str_set("rectLeft", &JsValue::from(rect.0));
+                member_map.str_set("rectTop", &JsValue::from(rect.1));
+                member_map.str_set("rectRight", &JsValue::from(rect.2));
+                member_map.str_set("rectBottom", &JsValue::from(rect.3));
+                if let Some(pos) = info.camera_position {
+                    let arr = js_sys::Array::new();
+                    arr.push(&JsValue::from_f64(pos.0 as f64));
+                    arr.push(&JsValue::from_f64(pos.1 as f64));
+                    arr.push(&JsValue::from_f64(pos.2 as f64));
+                    member_map.str_set("cameraPosition", &arr);
+                }
+                if let Some(rot) = info.camera_rotation {
+                    let arr = js_sys::Array::new();
+                    arr.push(&JsValue::from_f64(rot.0 as f64));
+                    arr.push(&JsValue::from_f64(rot.1 as f64));
+                    arr.push(&JsValue::from_f64(rot.2 as f64));
+                    member_map.str_set("cameraRotation", &arr);
+                }
+                if let Some(bg) = info.bg_color {
+                    member_map.str_set("bgColor", &safe_js_string(&format!("rgb({},{},{})", bg.0, bg.1, bg.2)));
+                }
+                if let Some(ambient) = info.ambient_color {
+                    member_map.str_set("ambientColor", &safe_js_string(&format!("rgb({},{},{})", ambient.0, ambient.1, ambient.2)));
+                }
+                member_map.str_set("hasScene", &JsValue::from_bool(s3d_data.parsed_scene.is_some()));
             }
             _ => {}
         };
@@ -1554,6 +1688,9 @@ impl JsApi {
     #[allow(dead_code)]
     pub fn dispatch_clear_timeouts() {}
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
+    pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: &[u8], _: u32, _: u32) {}
+    pub fn dispatch_flash_member_unloaded(_: i32, _: i32) {}
+    pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}
     pub fn dispatch_cast_list_changed() {}
     pub fn dispatch_cast_member_list_changed(_: u32) {}
@@ -1707,36 +1844,36 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::SpriteRef(_) => {
             map.str_set("type", &safe_js_string("spriteRef"));
         }
-        Datum::Rect(arr) => {
-            let x1 = player.get_datum(&arr[0]);
-            let y1 = player.get_datum(&arr[1]);
-            let x2 = player.get_datum(&arr[2]);
-            let y2 = player.get_datum(&arr[3]);
-            
+        Datum::Rect(vals, flags) => {
+            let x1 = Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(*flags, 0));
+            let y1 = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
+            let x2 = Datum::inline_component_to_datum(vals[2], Datum::inline_is_float(*flags, 2));
+            let y2 = Datum::inline_component_to_datum(vals[3], Datum::inline_is_float(*flags, 3));
+
             map.str_set("type", &safe_js_string("Rect"));
-            map.str_set("left", &concrete_datum_to_js_bridge(x1, player, depth + 1));
-            map.str_set("top", &concrete_datum_to_js_bridge(y1, player, depth + 1));
-            map.str_set("right", &concrete_datum_to_js_bridge(x2, player, depth + 1));
-            map.str_set("bottom", &concrete_datum_to_js_bridge(y2, player, depth + 1));
+            map.str_set("left", &concrete_datum_to_js_bridge(&x1, player, depth + 1));
+            map.str_set("top", &concrete_datum_to_js_bridge(&y1, player, depth + 1));
+            map.str_set("right", &concrete_datum_to_js_bridge(&x2, player, depth + 1));
+            map.str_set("bottom", &concrete_datum_to_js_bridge(&y2, player, depth + 1));
             map.str_set("value", &safe_js_string(&format!(
                 "rect({}, {}, {}, {})",
-                format_numeric_value(x1, player),
-                format_numeric_value(y1, player),
-                format_numeric_value(x2, player),
-                format_numeric_value(y2, player)
+                if Datum::inline_is_float(*flags, 0) { format!("{:.4}", vals[0]) } else { format!("{}", vals[0] as i32) },
+                if Datum::inline_is_float(*flags, 1) { format!("{:.4}", vals[1]) } else { format!("{}", vals[1] as i32) },
+                if Datum::inline_is_float(*flags, 2) { format!("{:.4}", vals[2]) } else { format!("{}", vals[2] as i32) },
+                if Datum::inline_is_float(*flags, 3) { format!("{:.4}", vals[3]) } else { format!("{}", vals[3] as i32) },
             )));
         }
-        Datum::Point(arr) => {
-            let x = player.get_datum(&arr[0]);
-            let y = player.get_datum(&arr[1]);
-            
+        Datum::Point(vals, flags) => {
+            let x = Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(*flags, 0));
+            let y = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
+
             map.str_set("type", &safe_js_string("Point"));
-            map.str_set("x", &concrete_datum_to_js_bridge(x, player, depth + 1));
-            map.str_set("y", &concrete_datum_to_js_bridge(y, player, depth + 1));
+            map.str_set("x", &concrete_datum_to_js_bridge(&x, player, depth + 1));
+            map.str_set("y", &concrete_datum_to_js_bridge(&y, player, depth + 1));
             map.str_set("value", &safe_js_string(&format!(
                 "point({}, {})",
-                format_numeric_value(x, player),
-                format_numeric_value(y, player)
+                if Datum::inline_is_float(*flags, 0) { format!("{:.4}", vals[0]) } else { format!("{}", vals[0] as i32) },
+                if Datum::inline_is_float(*flags, 1) { format!("{:.4}", vals[1]) } else { format!("{}", vals[1] as i32) },
             )));
         }
         Datum::CursorRef(cursor_ref) => {
@@ -1809,6 +1946,9 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::MovieRef => {
             map.str_set("type", &safe_js_string("movieRef"));
         }
+        Datum::MouseRef => {
+            map.str_set("type", &safe_js_string("mouseRef"));
+        }
         Datum::SoundRef(sound_id) => {
             map.str_set("type", &safe_js_string("sound"));
             map.str_set("id", &JsValue::from(*sound_id));
@@ -1842,6 +1982,21 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
             map.str_set("type", &safe_js_string("javascript"));
             map.str_set("size", &JsValue::from(data.len() as f64));
             map.str_set("bytes", &js_sys::Uint8Array::from(&data[..]));
+        }
+        Datum::FlashObjectRef(flash_ref) => {
+            map.str_set("type", &safe_js_string("flashObject"));
+            map.str_set("value", &safe_js_string(&flash_ref.path));
+        }
+        Datum::Shockwave3dObjectRef(s3d_ref) => {
+            map.str_set("type", &safe_js_string("shockwave3dObject"));
+            map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", s3d_ref.object_type, s3d_ref.name)));
+        }
+        Datum::Transform3d(_) => {
+            map.str_set("type", &safe_js_string("transform"));
+        }
+        Datum::HavokObjectRef(hk_ref) => {
+            map.str_set("type", &safe_js_string("havokObject"));
+            map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", hk_ref.object_type, hk_ref.name)));
         }
     }
     return map.to_js_object();

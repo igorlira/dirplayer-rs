@@ -1,3 +1,7 @@
+use std::collections::VecDeque;
+
+use log::warn;
+
 use crate::{
     director::lingo::datum::{
         Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
@@ -53,20 +57,35 @@ impl StringDatumUtils {
             "ilk" => Ok(Datum::Symbol("string".to_owned())),
             "string" => Ok(Datum::String(value.to_owned())),
             "value" => {
-                // Strip Lingo comments and fix unbalanced brackets before parsing
-                let cleaned = strip_lingo_comments(value);
-                let cleaned = trim_unbalanced_brackets(cleaned.trim());
-                // Evaluate the string as a Lingo expression (prop lists, lists, numbers, etc.)
-                match try_eval_lingo_expr_static(cleaned) {
+                // Normalise (strip comments + trim unbalanced brackets) before
+                // parsing, then evaluate as a Lingo expression.
+                let cleaned = normalise_lingo_expr_for_value(value);
+                match try_eval_lingo_expr_static(cleaned.clone()) {
                     Ok(datum_ref) => {
                         reserve_player_ref(|player| Ok(player.get_datum(&datum_ref).clone()))
                     }
-                    Err(_) => Ok(Datum::String(value.to_owned())),
+                    Err(err) => {
+                        if !crate::player::handlers::types::is_expected_value_retry_fragment(
+                            value, &cleaned,
+                        ) {
+                            warn!(
+                                "[string.value] parse error → raw String — input={:?} cleaned={:?} err={}",
+                                value, cleaned, err.message
+                            );
+                        }
+                        Ok(Datum::String(value.to_owned()))
+                    }
                 }
             }
             "charToNum" => {
                 let code = value.chars().next().map_or(0, |c| c as i32);
                 Ok(Datum::Int(code))
+            }
+            "charSpacing" => Ok(Datum::Int(0)),
+            "char" => {
+                // String chunk type accessed as property — return the string itself
+                // so subsequent indexing (e.g., .char[1]) can work via character indexing
+                Ok(Datum::String(value.to_owned()))
             }
             "marker" => {
                 // Quirky director behavior:
@@ -161,7 +180,7 @@ impl StringDatumHandlers {
                 player.get_datum(&args[0]).string_value()?
             };
 
-            let parts: Vec<DatumRef> = value
+            let parts: VecDeque<DatumRef> = value
                 .split(&delimiter)
                 .map(|s| player.alloc_datum(Datum::String(s.to_string())))
                 .collect();
@@ -254,12 +273,21 @@ pub fn string_get_lines(value: &str) -> Vec<String> {
     value.split(line_break).map(|s| s.to_string()).collect()
 }
 
-/// Remove trailing unbalanced `]` and `)` from an expression string.
+/// Trim an expression string so all brackets/parens are matched.
+/// Handles both trailing unbalanced closers (stale `]`/`)`) AND trailing
+/// unclosed openers — the latter happens when Coke Studios' ElementManager
+/// splits elements XML at every `]` and feeds partial prop-list fragments
+/// like `[#member: "x", #fontStyle: [#bold]` to value(); the Lingo relies
+/// on a Void-on-failure retry, but we want the fragment to be normalised
+/// so pest doesn't shout on every attempt.
 fn trim_unbalanced_brackets(input: &str) -> String {
     let mut depth_square: i32 = 0;
     let mut depth_paren: i32 = 0;
     let mut in_string = false;
-    let mut last_balanced_end = 0;
+    // Track the last index where both depths were zero — i.e. a fully
+    // balanced prefix. We'll truncate to that point if the input never
+    // returns to balance by the end.
+    let mut last_fully_balanced_end = 0;
 
     for (i, ch) in input.char_indices() {
         if in_string {
@@ -274,11 +302,31 @@ fn trim_unbalanced_brackets(input: &str) -> String {
                 _ => {}
             }
         }
-        if depth_square >= 0 && depth_paren >= 0 {
-            last_balanced_end = i + ch.len_utf8();
+        let end = i + ch.len_utf8();
+        if depth_square == 0 && depth_paren == 0 && !in_string {
+            last_fully_balanced_end = end;
         }
     }
-    input[..last_balanced_end].trim().to_string()
+
+    // If the whole string is balanced, keep it. Otherwise truncate back
+    // to the last known balanced point (may be empty if input never
+    // balanced, in which case pest will error and the caller returns Void).
+    let end = if depth_square == 0 && depth_paren == 0 && !in_string {
+        input.len()
+    } else {
+        last_fully_balanced_end
+    };
+    input[..end].trim().to_string()
+}
+
+/// Public wrapper for the `.value` / `value()` input normalisation — runs
+/// `strip_lingo_comments` then `trim_unbalanced_brackets`. Both the
+/// property-form and function-form `value` should use this so partial /
+/// unbalanced inputs (from Lingo code that intentionally feeds fragments
+/// until one parses) don't dump a pest parse error to the console.
+pub fn normalise_lingo_expr_for_value(input: &str) -> String {
+    let cleaned = strip_lingo_comments(input);
+    trim_unbalanced_brackets(cleaned.trim())
 }
 
 /// Strip Lingo `--` comments from a string, respecting quoted strings.

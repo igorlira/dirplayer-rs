@@ -91,6 +91,24 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
         {memberSnapshot?.type === "font" && (
           <FontPreview />
         )}
+        {memberSnapshot?.type === "flash" && (
+          <div>
+            <p>{memberSnapshot.width}x{memberSnapshot.height}</p>
+            <p>Reg point: {memberSnapshot.regX}x{memberSnapshot.regY}</p>
+            <p>Data size: {memberSnapshot.dataSize} bytes</p>
+            {memberSnapshot.directToStage !== undefined && <p>Direct to stage: {String(memberSnapshot.directToStage)}</p>}
+            {memberSnapshot.sourceFileName && <p>Source: {memberSnapshot.sourceFileName}</p>}
+            {memberSnapshot.quality && <p>Quality: {memberSnapshot.quality}</p>}
+            {memberSnapshot.scaleMode && <p>Scale mode: {memberSnapshot.scaleMode}</p>}
+            {memberSnapshot.playbackMode && <p>Playback: {memberSnapshot.playbackMode}</p>}
+          </div>
+        )}
+        {memberSnapshot?.type === "shockwave3d" && (
+          <div>
+            <p>{memberSnapshot.width}x{memberSnapshot.height}</p>
+            <p>Reg point: {memberSnapshot.regX}x{memberSnapshot.regY}</p>
+          </div>
+        )}
         {memberSnapshot?.type === "palette" && <div>
           Ref id: {memberSnapshot.paletteRef}
           {memberSnapshot.colors && <div className={styles.paletteGrid}>

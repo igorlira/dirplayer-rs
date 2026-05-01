@@ -1,4 +1,9 @@
-mod habbo;
-mod furnifactory;
-mod worldbuilder;
+mod lego;
+mod sulake;
+mod coca_cola;
 mod hotwheels;
+mod nintendo;
+mod dirplayer_test_movies;
+mod misc;
+mod intel;
+mod havok_demo;

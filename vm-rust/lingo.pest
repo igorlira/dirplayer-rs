@@ -72,14 +72,14 @@ rgb_num_arg   = { digit{,3} }
 rgb_num_color = { ^"rgb" ~ "(" ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ ")" }
 rgb_str_color = { ^"rgb" ~ "(" ~ (string) ~ ")" }
 rgb_color     = { rgb_num_color | rgb_str_color }
-rect          = { ^"rect" ~ "(" ~ number ~ "," ~ number ~ "," ~ number ~ "," ~ number ~ ")" }
-point         = { ^"point" ~ "(" ~ number ~ "," ~ number ~ ")" }
+rect          = { ^"rect" ~ "(" ~ expr ~ "," ~ expr ~ "," ~ expr ~ "," ~ expr ~ ")" }
+point         = { ^"point" ~ "(" ~ expr ~ "," ~ expr ~ ")" }
 
 // CastLib references: "castLib 1" or "castLib "levels""
 castlib_ref = { &reserved_keyword ~ ^"castLib" ~ term_arg }
 
 // Member references: "member 5" or "member 5 of castLib 1"
-member_ref = { &reserved_keyword ~ ^"member" ~ term_arg ~ (^"of" ~ castlib_ref)? }
+member_ref = { &reserved_keyword ~ ^"member" ~ "(" ~ expr ~ "," ~ expr ~ ")" | &reserved_keyword ~ ^"member" ~ term_arg ~ (^"of" ~ castlib_ref)? }
 
 // Sprite references: "sprite 17"
 sprite_ref = { &reserved_keyword ~ ^"sprite" ~ term_arg }

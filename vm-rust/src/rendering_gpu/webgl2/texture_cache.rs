@@ -123,6 +123,13 @@ impl TextureCache {
         self.textures.remove(key)
     }
 
+    /// Drop every entry whose key references the given cast member. Used when a
+    /// member is erased or replaced so a subsequent allocation at the same slot
+    /// number doesn't hit a stale texture.
+    pub fn invalidate_for_member(&mut self, member_ref: &CastMemberRef) {
+        self.textures.retain(|k, _| k.member_ref != *member_ref);
+    }
+
     /// Clear all cached textures
     pub fn clear(&mut self) {
         self.textures.clear();
@@ -195,6 +202,14 @@ pub struct RenderedTextCacheKey {
     pub width: u32,
     /// Texture height
     pub height: u32,
+    /// True when a skew or rotation transform is active on the sprite. The
+    /// rasterizer pads the bitmap to the authored height instead of
+    /// shrinking to text content (or fill-scaling line spacing), so the
+    /// texture maps 1:1 onto the authored sprite_rect that gets sheared
+    /// into a parallelogram. Distinct cache entry from the flat-display
+    /// path so the same member can have both a tight texture (for ordinary
+    /// scenes) and a padded texture (when a sprite happens to be tilted).
+    pub keep_authored_height: bool,
 }
 
 impl RenderedTextCacheKey {
@@ -341,6 +356,10 @@ impl RenderedTextCacheKey {
             has_focus,
             width,
             height,
+            // Caller flips this after construction when the sprite has a
+            // skew/rotation transform so the cache distinguishes the
+            // authored-height-padded texture from the tight one.
+            keep_authored_height: false,
         }
     }
 }
@@ -419,6 +438,11 @@ impl RenderedTextCache {
     /// Advance to next frame (for LRU tracking)
     pub fn next_frame(&mut self) {
         self.current_frame += 1;
+    }
+
+    /// Drop every entry whose key references the given cast member.
+    pub fn invalidate_for_member(&mut self, member_ref: &CastMemberRef) {
+        self.textures.retain(|k, _| k.member_ref != *member_ref);
     }
 
     /// Clear all cached textures

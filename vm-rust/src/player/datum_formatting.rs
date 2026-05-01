@@ -65,26 +65,26 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         Datum::SpriteRef(sprite_ref) => {
             format!("(sprite {})", sprite_ref)
         }
-        Datum::Rect(refs) => {
-            let x1 = player.get_datum(&refs[0]);
-            let y1 = player.get_datum(&refs[1]);
-            let x2 = player.get_datum(&refs[2]);
-            let y2 = player.get_datum(&refs[3]);
+        Datum::Rect(vals, flags) => {
+            let x1 = Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(*flags, 0));
+            let y1 = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
+            let x2 = Datum::inline_component_to_datum(vals[2], Datum::inline_is_float(*flags, 2));
+            let y2 = Datum::inline_component_to_datum(vals[3], Datum::inline_is_float(*flags, 3));
             format!(
                 "rect({}, {}, {}, {})",
-                format_numeric_value(x1, player),
-                format_numeric_value(y1, player),
-                format_numeric_value(x2, player),
-                format_numeric_value(y2, player)
+                format_numeric_value(&x1, player),
+                format_numeric_value(&y1, player),
+                format_numeric_value(&x2, player),
+                format_numeric_value(&y2, player)
             )
         }
-        Datum::Point(refs) => {
-            let x = player.get_datum(&refs[0]);
-            let y = player.get_datum(&refs[1]);
+        Datum::Point(vals, flags) => {
+            let x = Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(*flags, 0));
+            let y = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
             format!(
                 "point({}, {})",
-                format_numeric_value(x, player),
-                format_numeric_value(y, player)
+                format_numeric_value(&x, player),
+                format_numeric_value(&y, player)
             )
         }
         Datum::SoundChannel(_) => {
@@ -149,6 +149,9 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         Datum::MovieRef => {
             format!("<_movie>")
         }
+        Datum::MouseRef => {
+            format!("<_mouse>")
+        }
         Datum::XmlRef(id) => {
             format!("<xml:{}>", id)
         }
@@ -174,6 +177,19 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         }
         Datum::JavaScript(data) => {
             format!("<javascript {} bytes>", data.len())
+        }
+        Datum::FlashObjectRef(fr) => {
+            format!("<Flash object: {}>", fr.path)
+        }
+        Datum::Shockwave3dObjectRef(sr) => {
+            format!("{}(\"{}\")", sr.object_type, sr.name)
+        }
+        Datum::Transform3d(m) => {
+            format!("transform({:.2},{:.2},{:.2},{:.2}, {:.2},{:.2},{:.2},{:.2}, {:.2},{:.2},{:.2},{:.2}, {:.2},{:.2},{:.2},{:.2})",
+                m[0],m[1],m[2],m[3], m[4],m[5],m[6],m[7], m[8],m[9],m[10],m[11], m[12],m[13],m[14],m[15])
+        }
+        Datum::HavokObjectRef(hr) => {
+            format!("{}(\"{}\")", hr.object_type, hr.name)
         }
     }
 }

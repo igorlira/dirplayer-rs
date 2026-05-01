@@ -25,9 +25,11 @@ use super::{
     },
     font::player_load_system_font,
     keyboard_events::{player_key_down, player_key_up},
+    handlers::datum_handlers::player_call_datum_handler,
     player_alloc_datum, player_call_script_handler, player_dispatch_global_event,
     player_is_playing, reserve_player_mut, reserve_player_ref,
     score::{concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at},
+    script_ref::ScriptInstanceRef,
     PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX,
 };
 
@@ -36,6 +38,7 @@ pub enum PlayerVMCommand {
     LoadMovieFromFile(String, bool),
     SetExternalParams(HashMap<String, String>),
     SetBasePath(String),
+    SetMoviePathOverride(String),
     SetSystemFontPath(String),
     SetStageSize(u32, u32),
     TimeoutTriggered(TimeoutRef),
@@ -46,6 +49,24 @@ pub enum PlayerVMCommand {
     KeyDown(String, u16),
     KeyUp(String, u16),
     TriggerAlertHook,
+    // Flash-to-Lingo callback mechanism
+    TriggerFlashCallback {
+        sprite_num: i32,
+        handler_name: String,
+        args: Vec<DatumRef>,
+    },
+    TriggerLingoCallbackOnScript {
+        cast_lib: i32,
+        cast_member: i32,
+        handler_name: String,
+        args: Vec<DatumRef>,
+    },
+    SetLingoScriptProperty {
+        cast_lib: i32,
+        cast_member: i32,
+        prop_name: String,
+        value: DatumRef,
+    },
 }
 
 pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
@@ -55,6 +76,7 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
             format!("SetExternalParams({:?})", params.keys().collect::<Vec<_>>())
         }
         PlayerVMCommand::SetBasePath(path) => format!("SetBasePath({})", path),
+        PlayerVMCommand::SetMoviePathOverride(path) => format!("SetMoviePathOverride({})", path),
         PlayerVMCommand::SetSystemFontPath(path) => format!("SetSystemFontPath({})", path),
         PlayerVMCommand::SetStageSize(width, height) => {
             format!("SetStageSize({}, {})", width, height)
@@ -69,6 +91,15 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         PlayerVMCommand::KeyDown(key, ..) => format!("KeyDown({})", key),
         PlayerVMCommand::KeyUp(key, ..) => format!("KeyUp({})", key),
         PlayerVMCommand::TriggerAlertHook => "TriggerAlertHook".to_string(),
+        PlayerVMCommand::TriggerFlashCallback { sprite_num, handler_name, .. } => {
+            format!("TriggerFlashCallback(sprite: {}, handler: {})", sprite_num, handler_name)
+        }
+        PlayerVMCommand::TriggerLingoCallbackOnScript { cast_lib, cast_member, handler_name, .. } => {
+            format!("TriggerLingoCallbackOnScript(cast_lib: {}, cast_member: {}, handler: {})", cast_lib, cast_member, handler_name)
+        }
+        PlayerVMCommand::SetLingoScriptProperty { cast_lib, cast_member, prop_name, .. } => {
+            format!("SetLingoScriptProperty(cast_lib: {}, cast_member: {}, prop: {})", cast_lib, cast_member, prop_name)
+        }
     }
 }
 
@@ -89,11 +120,24 @@ fn has_executable_callback(callback: &Option<ScriptReceiver>) -> bool {
 pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
     warn!("Starting command loop");
 
+    // Snapshot the player generation this loop belongs to. If the generation
+    // changes (another test reset the player), this loop is stale and must
+    // exit so it can't mutate the new player's state.
+    let generation = unsafe { crate::player::PLAYER_GENERATION };
+
     while !rx.is_closed() {
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Command loop stopped (generation changed)");
+            return;
+        }
         let item = match rx.recv().await {
             Ok(item) => item,
             Err(_) => break, // Channel closed (sender dropped)
         };
+        if unsafe { crate::player::PLAYER_GENERATION } != generation {
+            warn!("Command loop stopped after recv (generation changed)");
+            return;
+        }
         let result = run_player_command(item.command).await;
         match result {
             Ok(result) => {
@@ -148,7 +192,20 @@ pub async fn player_dispatch_async(command: PlayerVMCommand) -> Result<DatumRef,
 }
 
 pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, ScriptError> {
+    // Snapshot the generation this command belongs to. `player_wait_available`
+    // yields, and during that yield a new test can reset the player (bumping
+    // PLAYER_GENERATION). If that happens, this command is stale — executing
+    // it would mutate the new player's state (unbalancing scope push/pop,
+    // leaking timeouts, etc.). Bail with Abort so the outer command loop
+    // treats it as a normal cancellation.
+    let generation_at_entry = unsafe { crate::player::PLAYER_GENERATION };
     player_wait_available().await;
+    if unsafe { crate::player::PLAYER_GENERATION } != generation_at_entry {
+        return Err(crate::player::ScriptError::new_code(
+            crate::player::ScriptErrorCode::Abort,
+            "Command cancelled: player generation changed (test reset)".to_string(),
+        ));
+    }
     match command {
         PlayerVMCommand::SetExternalParams(params) => {
             reserve_player_mut(|player| {
@@ -159,6 +216,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             reserve_player_mut(|player| {
                 player.net_manager.set_base_path(Url::parse(&path)
                     .expect(&format!("Invalid base path URL: '{}'", path)));
+            });
+        }
+        PlayerVMCommand::SetMoviePathOverride(path) => {
+            reserve_player_mut(|player| {
+                player.movie_path_override = if path.is_empty() { None } else { Some(path) };
             });
         }
         PlayerVMCommand::SetSystemFontPath(path) => {
@@ -242,15 +304,40 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let mouse_down_script_active = reserve_player_ref(|player| {
                 has_executable_callback(&player.movie.mouse_down_script)
             });
+            // Capture click timestamp BEFORE the stepFrame flush below. The flush is
+            // async and variable in length (CS rooms have 50+ FurnitureItems in
+            // actorList, plus IsoScene.processRoomRollover doing pixel hit-tests),
+            // so reading `now` after it would add the flush duration to the
+            // inter-click delta and a fast double-click could be misclassified as
+            // two single clicks. CS's ACTION_TIMED_ANIMATION (and similar) reads
+            // `the doubleClick` to gate `toggleState()`, so a wrong flag silently
+            // breaks every animation-toggling action.
+            let click_now = Local::now().timestamp_millis().abs();
+            // Flush actorList stepFrame so cached rollover state (e.g. oMouseSquare)
+            // is fresh before the mouseDown handler reads it. On mobile/touch there's
+            // no prior mouse_move, so stepFrame hasn't run at the tap position yet.
+            // mouse_loc is already set synchronously by the JS-side mouse_down() call.
+            {
+                let actor_snapshot = reserve_player_ref(|player| {
+                    player.actor_list_stepframe_snapshot()
+                });
+                for (_idx, actor_ref) in actor_snapshot.0.iter().enumerate() {
+                    if actor_snapshot.1.contains(&actor_ref.unwrap()) {
+                        let _ = player_call_datum_handler(
+                            actor_ref, &"stepFrame".to_string(), &vec![],
+                        ).await;
+                    }
+                }
+            }
+
             if mouse_down_script_active {
                 reserve_player_mut(|player| {
-                    let now = Local::now().timestamp_millis().abs();
-                    let is_double_click = (now - player.last_mouse_down_time) < 500;
+                    let is_double_click = (click_now - player.last_mouse_down_time) < 500;
                     player.mouse_loc = (x, y);
                     player.movie.mouse_down = true;
                     player.movie.click_loc = (x, y);
                     player.is_double_click = is_double_click;
-                    player.last_mouse_down_time = now;
+                    player.last_mouse_down_time = click_now;
                 });
                 player_dispatch_movie_callback("mouseDown").await?;
                 return Ok(DatumRef::Void);
@@ -260,13 +347,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             // are detected. Non-scripted sprites (decorations, overlays) are skipped,
             // matching Director behavior.
             reserve_player_mut(|player| {
-                let now = Local::now().timestamp_millis().abs();
-                let is_double_click = (now - player.last_mouse_down_time) < 500;
+                let is_double_click = (click_now - player.last_mouse_down_time) < 500;
                 player.mouse_loc = (x, y);
                 player.movie.mouse_down = true;
                 player.movie.click_loc = (x, y);
                 player.is_double_click = is_double_click;
-                player.last_mouse_down_time = now;
+                player.last_mouse_down_time = click_now;
 
                 // "the clickOn" should return the topmost sprite at the click point
                 // regardless of whether it has a script — use unscripted lookup.
@@ -325,7 +411,6 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 // only sprites with behaviors or cast member scripts receive mouseDown.
                 let scripted_sprite = get_sprite_at(player, x, y, true);
                 if let Some(sprite_number) = scripted_sprite {
-                    debug!("MouseDown on sprite #{}", sprite_number);
                     player.mouse_down_sprite = sprite_number as i16;
                 } else {
                     player.mouse_down_sprite = -1;
@@ -363,7 +448,13 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let sprite_with_behaviors = reserve_player_ref(|player| {
                 if player.mouse_down_sprite > 0 {
                     let sprite = player.movie.score.get_sprite(player.mouse_down_sprite);
-                    if sprite.map_or(false, |s| !s.script_instance_list.is_empty()) {
+                    let has_behaviors = sprite.map_or(false, |s| {
+                        player.sprite_has_script_instance_ids(
+                            player.mouse_down_sprite,
+                            s.script_instance_list.as_slice(),
+                        )
+                    });
+                    if has_behaviors {
                         return Some(player.mouse_down_sprite as u16);
                     }
                 }
@@ -672,20 +763,31 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                         let mut new_h = x + off_x;
                         let mut new_v = y + off_y;
 
-                        // Apply constraint bounds
-                        let constraint_num = sprite.constraint;
-                        if constraint_num > 0 {
-                            // Constrain to the bounding rect of the constraint sprite
-                            if let Some(constraint_sprite) = player.movie.score.get_sprite(constraint_num as i16) {
-                                let bounds = get_concrete_sprite_rect(player, constraint_sprite);
-                                new_h = new_h.max(bounds.left).min(bounds.right);
-                                new_v = new_v.max(bounds.top).min(bounds.bottom);
+                        // Constraint bounds only apply to Shockwave3D members.
+                        // Regular 2D sprites can be dragged freely; bounds-clamping
+                        // them caused puzzle pieces to lock to a small area.
+                        let is_3d_member = sprite.member.as_ref()
+                            .and_then(|mref| player.movie.cast_manager.find_member_by_ref(mref))
+                            .map_or(false, |m| matches!(
+                                m.member_type,
+                                CastMemberType::Shockwave3d(_)
+                            ));
+                        if is_3d_member {
+                            let sprite = player.movie.score.get_sprite(drag_sprite_num).unwrap();
+                            let constraint_num = sprite.constraint;
+                            if constraint_num > 0 {
+                                // Constrain to the bounding rect of the constraint sprite
+                                if let Some(constraint_sprite) = player.movie.score.get_sprite(constraint_num as i16) {
+                                    let bounds = get_concrete_sprite_rect(player, constraint_sprite);
+                                    new_h = new_h.max(bounds.left).min(bounds.right);
+                                    new_v = new_v.max(bounds.top).min(bounds.bottom);
+                                }
+                            } else {
+                                // Constrain to stage
+                                let stage = &player.movie.rect;
+                                new_h = new_h.max(stage.left).min(stage.right);
+                                new_v = new_v.max(stage.top).min(stage.bottom);
                             }
-                        } else {
-                            // Constrain to stage
-                            let stage = &player.movie.rect;
-                            new_h = new_h.max(stage.left).min(stage.right);
-                            new_v = new_v.max(stage.top).min(stage.bottom);
                         }
 
                         let sprite = player.movie.score.get_sprite_mut(drag_sprite_num);
@@ -816,6 +918,88 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if let Some((receiver, handler, args)) = call_params {
                 player_call_script_handler(receiver, handler, &args).await?;
             }
+        }
+        PlayerVMCommand::TriggerFlashCallback { sprite_num, handler_name, args } => {
+            // Find the sprite and its script instances, call the matching handler
+            let call_params = reserve_player_mut(|player| {
+                if let Some(sprite) = player.movie.score.get_sprite(sprite_num as i16) {
+                    for script_instance_ref in &sprite.script_instance_list {
+                        let script_instance = player.allocator.get_script_instance(script_instance_ref);
+                        if let Some(script) = player.movie.cast_manager.get_script_by_ref(&script_instance.script) {
+                            if let Some(handler_ref) = script.get_own_handler_ref(&handler_name) {
+                                return Some((
+                                    Some(script_instance_ref.clone()),
+                                    handler_ref,
+                                    args.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                None
+            });
+
+            if let Some((receiver, handler, args)) = call_params {
+                player_call_script_handler(receiver, handler, &args).await?;
+            }
+        }
+        PlayerVMCommand::TriggerLingoCallbackOnScript { cast_lib, cast_member, handler_name, args } => {
+            use super::handlers::datum_handlers::script_instance::ScriptInstanceDatumHandlers;
+
+            let call_params = reserve_player_mut(|player| {
+                for (script_instance_id, script_instance_entry) in player.allocator.script_instances.iter() {
+                    let script_instance = &script_instance_entry.script_instance;
+
+                    if script_instance.script.cast_lib == cast_lib &&
+                       script_instance.script.cast_member == cast_member
+                    {
+                        if let Some(script) = player.movie.cast_manager.get_script_by_ref(&script_instance.script) {
+                            if let Some(handler_ref) = script.get_own_handler_ref(&handler_name) {
+                                let script_instance_ref = ScriptInstanceRef::from_id(
+                                    script_instance_id as u32,
+                                    script_instance_entry.ref_count.get()
+                                );
+                                return Some((
+                                    script_instance_ref,
+                                    handler_ref,
+                                    args.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                None
+            });
+
+            if let Some((receiver, handler, args)) = call_params {
+                let receiver_datum = player_alloc_datum(Datum::ScriptInstanceRef(receiver));
+                let _ = ScriptInstanceDatumHandlers::call_async(
+                    &receiver_datum,
+                    &handler.1,
+                    &args
+                ).await;
+            }
+        }
+        PlayerVMCommand::SetLingoScriptProperty { cast_lib, cast_member, prop_name, value } => {
+            use super::script::script_set_prop;
+
+            reserve_player_mut(|player| {
+                let mut matching_instances = Vec::new();
+
+                for (instance_id, instance_entry) in player.allocator.script_instances.iter() {
+                    let instance = &instance_entry.script_instance;
+                    if instance.script.cast_lib == cast_lib && instance.script.cast_member == cast_member {
+                        matching_instances.push(ScriptInstanceRef::from_id(
+                            instance_id as u32,
+                            instance_entry.ref_count.get()
+                        ));
+                    }
+                }
+
+                for instance_ref in matching_instances {
+                    let _ = script_set_prop(player, &instance_ref, &prop_name, &value, false);
+                }
+            });
         }
     }
     Ok(DatumRef::Void)

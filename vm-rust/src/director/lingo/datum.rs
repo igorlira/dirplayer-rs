@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -46,12 +47,17 @@ pub enum DatumType {
     Matte,
     PlayerRef,
     MovieRef,
+    MouseRef,
     XmlRef,
     DateRef,
     MathRef,
     Vector,
     Media,
     JavaScript,
+    FlashObjectRef,
+    Shockwave3dObjectRef,
+    Transform3d,
+    HavokObjectRef,
 }
 
 #[derive(Clone, PartialEq, FromPrimitive)]
@@ -65,10 +71,10 @@ pub enum StringChunkType {
 impl From<&str> for StringChunkType {
     fn from(s: &str) -> Self {
         match s {
-            "item" => StringChunkType::Item,
-            "word" => StringChunkType::Word,
-            "char" => StringChunkType::Char,
-            "line" => StringChunkType::Line,
+            "item" | "items"  => StringChunkType::Item,
+            "word" | "words"  => StringChunkType::Word,
+            "char" | "chars" => StringChunkType::Char,
+            "line" | "lines" => StringChunkType::Line,
             _ => panic!("Invalid string chunk type"),
         }
     }
@@ -117,6 +123,58 @@ pub type PropListPair = (DatumRef, DatumRef);
 pub type TimeoutRef = String;
 pub type XtraInstanceId = u32;
 
+#[derive(Clone, Debug)]
+pub struct FlashObjectRef {
+    pub path: String,
+    pub instance_id: u32,
+    pub cast_lib: i32,
+    pub cast_member: i32,
+}
+
+/// Reference to a Shockwave 3D object (model, shader, texture, camera, light, group, motion).
+/// The object_type + name identify the object within the member's W3dScene.
+#[derive(Clone, Debug)]
+pub struct Shockwave3dObjectRef {
+    /// The cast member that owns this 3D object
+    pub cast_lib: i32,
+    pub cast_member: i32,
+    /// Object type: "model", "shader", "texture", "camera", "light", "group", "motion", "modelResource"
+    pub object_type: String,
+    /// Object name within the scene
+    pub name: String,
+}
+
+/// Reference to a Havok physics object (rigidBody, spring, linearDashpot, angularDashpot, corrector).
+#[derive(Clone, Debug)]
+pub struct HavokObjectRef {
+    pub cast_lib: i32,
+    pub cast_member: i32,
+    /// "rigidBody", "spring", "linearDashpot", "angularDashpot", "corrector"
+    pub object_type: String,
+    /// Object name within the Havok scene
+    pub name: String,
+}
+
+impl FlashObjectRef {
+    pub fn from_path_with_member(path: &str, cast_lib: i32, cast_member: i32) -> Self {
+        Self {
+            path: path.to_string(),
+            instance_id: 0,
+            cast_lib,
+            cast_member,
+        }
+    }
+
+    pub fn from_path(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            instance_id: 0,
+            cast_lib: 0,
+            cast_member: 0,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum StringChunkSource {
     Datum(DatumRef),
@@ -132,8 +190,8 @@ pub enum Datum {
     StringChunk(StringChunkSource, StringChunkExpr, String),
     Void,
     VarRef(VarRef),
-    List(DatumType, Vec<DatumRef>, bool), // bool is for whether the list is sorted
-    PropList(Vec<PropListPair>, bool),    // bool is for whether the map is sorted
+    List(DatumType, VecDeque<DatumRef>, bool), // bool is for whether the list is sorted
+    PropList(VecDeque<PropListPair>, bool),    // bool is for whether the map is sorted
     Symbol(String),
     CastLib(u32),
     Stage,
@@ -141,8 +199,10 @@ pub enum Datum {
     ScriptInstanceRef(ScriptInstanceRef),
     CastMember(CastMemberRef),
     SpriteRef(i16),
-    Rect([DatumRef; 4]),
-    Point([DatumRef; 2]),
+    /// Inline rect: [left, top, right, bottom] with per-component int/float flags (bits 0-3).
+    Rect([f64; 4], u8),
+    /// Inline point: [x, y] with per-component int/float flags (bit 0 = x is float, bit 1 = y is float).
+    Point([f64; 2], u8),
     SoundChannel(u16),
     CursorRef(CursorRef),
     TimeoutRef(TimeoutRef),
@@ -164,6 +224,7 @@ pub enum Datum {
     Matte(Arc<BitmapMask>),
     PlayerRef,
     MovieRef,
+    MouseRef,
     XmlRef(u32),
     DateRef(u32),
     MathRef(u32),
@@ -171,6 +232,11 @@ pub enum Datum {
     Media(Media),
     Null,
     JavaScript(Vec<u8>),
+    FlashObjectRef(FlashObjectRef),
+    Shockwave3dObjectRef(Shockwave3dObjectRef),
+    /// 4x4 row-major transform matrix for Shockwave 3D
+    Transform3d([f64; 16]),
+    HavokObjectRef(HavokObjectRef),
 }
 
 impl DatumType {
@@ -218,6 +284,11 @@ impl DatumType {
             DatumType::Vector => "vector",
             DatumType::Media => "media",
             DatumType::JavaScript => "javascript",
+            DatumType::FlashObjectRef => "flash_object_ref",
+            DatumType::Shockwave3dObjectRef => "shockwave3d_object_ref",
+            DatumType::MouseRef => "mouse_ref",
+            DatumType::Transform3d => "transform",
+            DatumType::HavokObjectRef => "havok_object_ref",
         }
     }
 }
@@ -240,8 +311,8 @@ impl Datum {
             Datum::ScriptInstanceRef(_) => DatumType::ScriptInstanceRef,
             Datum::CastMember(_) => DatumType::CastMemberRef,
             Datum::SpriteRef(_) => DatumType::SpriteRef,
-            Datum::Rect(_) => DatumType::Rect,
-            Datum::Point(_) => DatumType::Point,
+            Datum::Rect(..) => DatumType::Rect,
+            Datum::Point(..) => DatumType::Point,
             Datum::SoundChannel(_) => DatumType::SoundChannel,
             Datum::SoundRef(_) => DatumType::SoundRef,
             Datum::CursorRef(_) => DatumType::CursorRef,
@@ -256,6 +327,7 @@ impl Datum {
             Datum::Matte(..) => DatumType::Matte,
             Datum::PlayerRef => DatumType::PlayerRef,
             Datum::MovieRef => DatumType::MovieRef,
+            Datum::MouseRef => DatumType::MouseRef,
             Datum::XmlRef(_) => DatumType::XmlRef,
             Datum::DateRef(_) => DatumType::DateRef,
             Datum::MathRef(_) => DatumType::MathRef,
@@ -263,6 +335,10 @@ impl Datum {
             Datum::Media(_) => DatumType::Media,
             Datum::Null => DatumType::Null,
             Datum::JavaScript(_) => DatumType::JavaScript,
+            Datum::FlashObjectRef(_) => DatumType::FlashObjectRef,
+            Datum::Shockwave3dObjectRef(_) => DatumType::Shockwave3dObjectRef,
+            Datum::Transform3d(_) => DatumType::Transform3d,
+            Datum::HavokObjectRef(_) => DatumType::HavokObjectRef,
         }
     }
 
@@ -276,11 +352,18 @@ impl Datum {
             Datum::String(s) => Ok(s.clone()),
             Datum::StringChunk(_, _, str_value) => Ok(str_value.to_owned()),
             Datum::Int(n) => Ok(n.to_string()),
+            Datum::Float(n) => Ok(n.to_string()),
             Datum::Symbol(s) => Ok(s.clone()),
             Datum::Vector(v) => Ok(format!("[{},{},{}]", v[0], v[1], v[2])),
-            Datum::Rect(r) => Ok(format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3])),
+            Datum::Rect(r, f) => {
+                let fmt = |i: usize| {
+                    if Datum::inline_is_float(*f, i) { format!("{:.4}", r[i]) } else { format!("{}", r[i] as i32) }
+                };
+                Ok(format!("({}, {}, {}, {})", fmt(0), fmt(1), fmt(2), fmt(3)))
+            },
             Datum::ColorRef(cr) => Ok(format!("{:?}", cr)),
             Datum::Void => Ok("VOID".to_string()),
+            Datum::FlashObjectRef(fr) => Ok(fr.path.clone()),
             Datum::CastMember(member_ref) => Ok(format!(
                 "(member {} of castLib {})", member_ref.cast_member, member_ref.cast_lib
             )),
@@ -298,7 +381,12 @@ impl Datum {
             Datum::Int(n) => Ok(Cow::Owned(n.to_string())),
             Datum::Symbol(s) => Ok(Cow::Borrowed(s)),
             Datum::Vector(v) => Ok(Cow::Owned(format!("[{},{},{}]", v[0], v[1], v[2]))),
-            Datum::Rect(r) => Ok(Cow::Owned(format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3]))),
+            Datum::Rect(r, f) => {
+                let fmt = |i: usize| {
+                    if Datum::inline_is_float(*f, i) { format!("{:.4}", r[i]) } else { format!("{}", r[i] as i32) }
+                };
+                Ok(Cow::Owned(format!("({}, {}, {}, {})", fmt(0), fmt(1), fmt(2), fmt(3))))
+            },
             Datum::ColorRef(cr) => Ok(Cow::Owned(format!("{:?}", cr))),
             Datum::Void => Ok(Cow::Borrowed("VOID")),
             _ => Err(ScriptError::new(format!(
@@ -420,6 +508,17 @@ impl Datum {
         }
     }
 
+    pub fn is_flash_object(&self) -> bool {
+        matches!(self, Datum::FlashObjectRef(_))
+    }
+
+    pub fn as_flash_object(&self) -> Option<&FlashObjectRef> {
+        match self {
+            Datum::FlashObjectRef(obj_ref) => Some(obj_ref),
+            _ => None,
+        }
+    }
+
     pub fn to_float(&self) -> Result<f64, ScriptError> {
         match self {
             Datum::Int(n) => Ok(*n as f64),
@@ -445,14 +544,14 @@ impl Datum {
         }
     }
 
-    pub fn to_list(&self) -> Result<&Vec<DatumRef>, ScriptError> {
+    pub fn to_list(&self) -> Result<&VecDeque<DatumRef>, ScriptError> {
         match self {
             Datum::List(_, items, _) => Ok(items),
             _ => Err(ScriptError::new("Cannot convert datum to list".to_string())),
         }
     }
 
-    pub fn to_list_tuple(&self) -> Result<(&DatumType, &Vec<DatumRef>, bool), ScriptError> {
+    pub fn to_list_tuple(&self) -> Result<(&DatumType, &VecDeque<DatumRef>, bool), ScriptError> {
         match self {
             Datum::List(t, items, sorted) => Ok((t, items, *sorted)),
             _ => Err(ScriptError::new("Cannot convert datum to list".to_string())),
@@ -461,7 +560,7 @@ impl Datum {
 
     pub fn to_list_mut(
         &mut self,
-    ) -> Result<(&mut DatumType, &mut Vec<DatumRef>, &mut bool), ScriptError> {
+    ) -> Result<(&mut DatumType, &mut VecDeque<DatumRef>, &mut bool), ScriptError> {
         match self {
             Datum::List(t, items, sorted) => Ok((t, items, sorted)),
             _ => Err(ScriptError::new("Cannot convert datum to list".to_string())),
@@ -469,21 +568,21 @@ impl Datum {
     }
 
     #[allow(dead_code)]
-    pub fn to_map(&self) -> Result<&Vec<(DatumRef, DatumRef)>, ScriptError> {
+    pub fn to_map(&self) -> Result<&VecDeque<(DatumRef, DatumRef)>, ScriptError> {
         match self {
             Datum::PropList(items, ..) => Ok(items),
             _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
         }
     }
 
-    pub fn to_map_tuple(&self) -> Result<(&Vec<(DatumRef, DatumRef)>, bool), ScriptError> {
+    pub fn to_map_tuple(&self) -> Result<(&VecDeque<(DatumRef, DatumRef)>, bool), ScriptError> {
         match self {
             Datum::PropList(items, sorted) => Ok((items, *sorted)),
             _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
         }
     }
 
-    pub fn to_map_mut(&mut self) -> Result<&mut Vec<(DatumRef, DatumRef)>, ScriptError> {
+    pub fn to_map_mut(&mut self) -> Result<&mut VecDeque<(DatumRef, DatumRef)>, ScriptError> {
         match self {
             Datum::PropList(items, ..) => Ok(items),
             _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
@@ -492,28 +591,25 @@ impl Datum {
 
     pub fn to_map_tuple_mut(
         &mut self,
-    ) -> Result<(&mut Vec<(DatumRef, DatumRef)>, &mut bool), ScriptError> {
+    ) -> Result<(&mut VecDeque<(DatumRef, DatumRef)>, &mut bool), ScriptError> {
         match self {
             Datum::PropList(items, sorted) => Ok((items, sorted)),
             _ => Err(ScriptError::new("Cannot convert datum to map".to_string())),
         }
     }
 
-    pub fn to_rect(&self) -> Result<[DatumRef; 4], ScriptError> {
+    pub fn to_rect_inline(&self) -> Result<([f64; 4], u8), ScriptError> {
         match self {
-            Datum::Rect(rect) => Ok(rect.clone()),
-            Datum::List(_, items, _) if items.len() == 4 => {
-                Ok([items[0].clone(), items[1].clone(), items[2].clone(), items[3].clone()])
-            }
+            Datum::Rect(vals, flags) => Ok((*vals, *flags)),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to rect".to_string(),
             )),
         }
     }
 
-    pub fn to_rect_mut(&mut self) -> Result<&mut [DatumRef; 4], ScriptError> {
+    pub fn to_rect_inline_mut(&mut self) -> Result<(&mut [f64; 4], &mut u8), ScriptError> {
         match self {
-            Datum::Rect(rect) => Ok(rect),
+            Datum::Rect(vals, flags) => Ok((vals, flags)),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to rect".to_string(),
             )),
@@ -547,18 +643,18 @@ impl Datum {
         }
     }
 
-    pub fn to_point(&self) -> Result<[DatumRef; 2], ScriptError> {
+    pub fn to_point_inline(&self) -> Result<([f64; 2], u8), ScriptError> {
         match self {
-            Datum::Point(point) => Ok(point.clone()),
+            Datum::Point(vals, flags) => Ok((*vals, *flags)),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to point".to_string(),
             )),
         }
     }
 
-    pub fn to_point_mut(&mut self) -> Result<&mut [DatumRef; 2], ScriptError> {
+    pub fn to_point_inline_mut(&mut self) -> Result<(&mut [f64; 2], &mut u8), ScriptError> {
         match self {
-            Datum::Point(point) => Ok(point),
+            Datum::Point(vals, flags) => Ok((vals, flags)),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to point".to_string(),
             )),
@@ -689,6 +785,9 @@ impl Datum {
     pub fn to_vector(&self) -> Result<[f64; 3], ScriptError> {
         match self {
             Datum::Vector(v) => Ok(*v),
+            Datum::Int(v) => Ok([*v as f64, *v as f64, *v as f64]),
+            Datum::Float(v) => Ok([*v, *v, *v]),
+            Datum::Void => Ok([0.0, 0.0, 0.0]),
             _ => Err(ScriptError::new(format!(
                 "Expected Vector, got {}",
                 self.type_str()
@@ -712,6 +811,62 @@ impl Datum {
             Datum::Int(value as i32)
         } else {
             Datum::Float(value as f64)
+        }
+    }
+
+    /// Read an inline point/rect component back as a Datum, respecting int/float flag.
+    pub fn inline_component_to_datum(val: f64, is_float: bool) -> Datum {
+        if is_float {
+            Datum::Float(val)
+        } else {
+            Datum::Int(val as i32)
+        }
+    }
+
+    /// Convert a Datum to an inline component value and float flag.
+    pub fn datum_to_inline_component(d: &Datum) -> Result<(f64, bool), ScriptError> {
+        match d {
+            Datum::Int(n) => Ok((*n as f64, false)),
+            Datum::Float(f) => Ok((*f, true)),
+            other => Err(ScriptError::new(format!(
+                "Point/Rect component must be numeric, got {}",
+                other.type_str()
+            ))),
+        }
+    }
+
+    /// Build a Point datum from two numeric Datums.
+    pub fn build_point(x: &Datum, y: &Datum) -> Result<Datum, ScriptError> {
+        let (xv, xf) = Datum::datum_to_inline_component(x)?;
+        let (yv, yf) = Datum::datum_to_inline_component(y)?;
+        let flags = (if xf { 1u8 } else { 0 }) | (if yf { 2u8 } else { 0 });
+        Ok(Datum::Point([xv, yv], flags))
+    }
+
+    /// Build a Rect datum from four numeric Datums.
+    pub fn build_rect(l: &Datum, t: &Datum, r: &Datum, b: &Datum) -> Result<Datum, ScriptError> {
+        let (lv, lf) = Datum::datum_to_inline_component(l)?;
+        let (tv, tf) = Datum::datum_to_inline_component(t)?;
+        let (rv, rf) = Datum::datum_to_inline_component(r)?;
+        let (bv, bf) = Datum::datum_to_inline_component(b)?;
+        let flags = (if lf { 1u8 } else { 0 })
+            | (if tf { 2u8 } else { 0 })
+            | (if rf { 4u8 } else { 0 })
+            | (if bf { 8u8 } else { 0 });
+        Ok(Datum::Rect([lv, tv, rv, bv], flags))
+    }
+
+    /// Check if component i is float in an inline flags byte.
+    pub fn inline_is_float(flags: u8, i: usize) -> bool {
+        (flags & (1 << i)) != 0
+    }
+
+    /// Set or clear the float flag for component i.
+    pub fn inline_set_float(flags: &mut u8, i: usize, is_float: bool) {
+        if is_float {
+            *flags |= 1 << i;
+        } else {
+            *flags &= !(1 << i);
         }
     }
 }

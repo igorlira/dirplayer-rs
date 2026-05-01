@@ -1,6 +1,4 @@
 use binary_reader::{BinaryReader, Endian};
-use web_sys::console;
-
 pub struct ThumChunk {
     pub raw_data: Vec<u8>,
 }

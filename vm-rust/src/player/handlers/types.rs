@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use itertools::Itertools;
 use log::{debug, warn};
 
@@ -70,10 +71,14 @@ impl TypeUtils {
             Datum::Matte(..) => Ok(vec!["image"]),
             Datum::PlayerRef => Ok(vec!["player"]),
             Datum::MovieRef => Ok(vec!["movie"]),
+            Datum::MouseRef => Ok(vec!["mouse"]),
             Datum::XmlRef(..) => Ok(vec!["xml"]),
             Datum::DateRef(..) => Ok(vec!["date"]),
             Datum::MathRef(..) => Ok(vec!["math"]),
             Datum::VarRef(..) => Ok(vec!["void"]), // VarRef should be dereferenced before checking ilk
+            Datum::FlashObjectRef(..) => Ok(vec!["instance"]),
+            Datum::Shockwave3dObjectRef(r) => Ok(vec![&r.object_type]),
+            Datum::Transform3d(..) => Ok(vec!["transform"]),
 
             _ => Err(ScriptError::new(format!(
                 "Getting ilk for unknown type: {}",
@@ -109,23 +114,18 @@ impl TypeUtils {
                 false,
                 formatted_key.clone(),
             )?,
-            Datum::Rect(arr) => {
+            Datum::Rect(vals, flags) => {
                 let index = prop_key.int_value()?; // 1..4
-                let idx = index - 1;
+                let idx = (index - 1) as usize;
 
-                if !(0..4).contains(&idx) {
+                if idx >= 4 {
                     return Err(ScriptError::new(format!(
                         "Rect index {} out of bounds (must be 1-4)",
                         index
                     )));
                 }
 
-                let val = player.get_datum(&arr[idx as usize]).float_value()?;
-                if val.fract() == 0.0 {
-                    player.alloc_datum(Datum::Int(val as i32))
-                } else {
-                    player.alloc_datum(Datum::Float(val))
-                }
+                player.alloc_datum(Datum::inline_component_to_datum(vals[idx], Datum::inline_is_float(*flags, idx)))
             }
             Datum::List(_, list, _) => {
                 let position = prop_key.int_value()?;
@@ -135,12 +135,12 @@ impl TypeUtils {
                 }
                 list[index as usize].clone()
             }
-            Datum::Point(arr) => {
+            Datum::Point(vals, flags) => {
                 let index = prop_key.int_value()?;
 
-                let (idx, label) = match index {
-                    1 => (0usize, "x"),
-                    2 => (1usize, "y"),
+                let idx = match index {
+                    1 => 0usize,
+                    2 => 1usize,
                     _ => {
                         return Err(ScriptError::new(format!(
                             "Invalid sub-prop position for point: {}",
@@ -149,12 +149,7 @@ impl TypeUtils {
                     }
                 };
 
-                let val = player.get_datum(&arr[idx]).float_value()?;
-                if val.fract() == 0.0 {
-                    player.alloc_datum(Datum::Int(val as i32))
-                } else {
-                    player.alloc_datum(Datum::Float(val))
-                }
+                player.alloc_datum(Datum::inline_component_to_datum(vals[idx], Datum::inline_is_float(*flags, idx)))
             }
             Datum::ScriptInstanceRef(instance_ref) => {
                 // Numeric index
@@ -250,6 +245,15 @@ impl TypeUtils {
                     }
                 }
             }
+            Datum::List(_, items, _) => {
+                let index = prop_key.int_value()?;
+                let idx = (index - 1) as usize;
+                if idx < items.len() {
+                    items[idx].clone()
+                } else {
+                    player.alloc_datum(Datum::Void)
+                }
+            }
             _ => {
                 web_sys::console::log_1(
                     &format!(
@@ -301,12 +305,26 @@ impl TypeUtils {
                 }
                 Ok(())
             }
+            DatumType::Rect => {
+                let position = player.get_datum(prop_key_ref).int_value()?;
+                let index = (position - 1) as usize;
+                if index >= 4 {
+                    return Err(ScriptError::new(format!("Rect index out of bounds: {position}")));
+                }
+                let new_val = player.get_datum(value_ref).clone();
+                let (component_val, is_float) = Datum::datum_to_inline_component(&new_val)?;
+                let (vals, flags) = player.get_datum_mut(datum_ref).to_rect_inline_mut()?;
+                vals[index] = component_val;
+                Datum::inline_set_float(flags, index, is_float);
+                Ok(())
+            }
             _ => {
-                return Err(ScriptError::new(format!(
-                    "Cannot set sub-prop `{}` on prop of type {}",
+                warn!(
+                    "⚠️ Cannot set sub-prop `{}` on prop of type {} (ignored)",
                     formatted_key,
                     datum_type.type_str()
-                )))
+                );
+                Ok(())
             }
         }
     }
@@ -405,10 +423,46 @@ impl TypeHandlers {
             }
         });
         match eval_expr {
-            Some(s) => eval_lingo_expr_runtime(s.to_owned()).await.or_else(|err| {
-                warn!("value() eval error, returning Void: {}", &err.message);
-                Ok(DatumRef::Void)
-            }),
+            Some(s) => {
+                // Match the string-property `.value` cleanup — Coke Studios'
+                // ElementManager splits elements XML at every "]" and feeds
+                // partial fragments to value() until one parses (the Lingo
+                // relies on Void-on-failure to drive its retry loop). Without
+                // normalising comments and unbalanced brackets here, every
+                // partial attempt dumps a pest parse error to the console.
+                use crate::player::handlers::datum_handlers::string::{
+                    normalise_lingo_expr_for_value,
+                };
+                let cleaned = normalise_lingo_expr_for_value(&s);
+                // TEMP diagnostic: log EVERY value() call that looks like a
+                // Lingo prop-list/list so we can confirm whether the Coke
+                // Studios ElementManager retry (concatenating the two halves
+                // of a split-by-"]" element) produces a valid parse.
+                let is_list_or_proplist_input = {
+                    let t = s.trim_start();
+                    t.starts_with("[#") || t.starts_with("[")
+                };
+                match eval_lingo_expr_runtime(cleaned.clone()).await {
+                    Ok(datum_ref) => {
+                        if is_list_or_proplist_input {
+                            debug!(
+                                "[value() OK] input={:?}",
+                                s.chars().take(140).collect::<String>()
+                            );
+                        }
+                        Ok(datum_ref)
+                    }
+                    Err(err) => {
+                        if !is_expected_value_retry_fragment(&s, &cleaned) {
+                            warn!(
+                                "[value()] parse error → Void — input={:?} cleaned={:?} err={}",
+                                s, cleaned, &err.message
+                            );
+                        }
+                        Ok(DatumRef::Void)
+                    }
+                }
+            }
             _ => Ok(args[0].clone()),
         }
     }
@@ -585,26 +639,8 @@ impl TypeHandlers {
 
             let x = player.get_datum(&args[0]).clone();
             let y = player.get_datum(&args[1]).clone();
-
-            let x_ref = match x {
-                Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
-                Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
-                other => return Err(ScriptError::new(format!(
-                    "Point component must be numeric, got {}",
-                    other.type_str()
-                ))),
-            };
-
-            let y_ref = match y {
-                Datum::Int(n) => player.alloc_datum(Datum::Int(n)),
-                Datum::Float(f) => player.alloc_datum(Datum::Float(f)),
-                other => return Err(ScriptError::new(format!(
-                    "Point component must be numeric, got {}",
-                    other.type_str()
-                ))),
-            };
-
-            Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+            let point = Datum::build_point(&x, &y)?;
+            Ok(player.alloc_datum(point))
         })
     }
 
@@ -614,44 +650,27 @@ impl TypeHandlers {
                 return Err(ScriptError::new("rect() requires 2 or 4 arguments".to_string()));
             }
 
-            // Helper (normal function, NOT a closure)
-            fn preserve_numeric(
-                player: &mut DirPlayer,
-                dref: &DatumRef,
-            ) -> Result<DatumRef, ScriptError> {
-                let d = player.get_datum(dref).clone();
-
-                match d {
-                    Datum::Int(n) => Ok(player.alloc_datum(Datum::Int(n))),
-                    Datum::Float(f) => Ok(player.alloc_datum(Datum::Float(f))),
-                    other => Err(ScriptError::new(format!(
-                        "Rect component must be numeric, got {}",
-                        other.type_str()
-                    ))),
-                }
-            }
-
             // Case 1: rect(left, top, right, bottom)
             if args.len() == 4 && player.get_datum(&args[0]).is_number() {
-                let left   = preserve_numeric(player, &args[0])?;
-                let top    = preserve_numeric(player, &args[1])?;
-                let right  = preserve_numeric(player, &args[2])?;
-                let bottom = preserve_numeric(player, &args[3])?;
-
-                return Ok(player.alloc_datum(Datum::Rect([left, top, right, bottom])));
+                let l = player.get_datum(&args[0]).clone();
+                let t = player.get_datum(&args[1]).clone();
+                let r = player.get_datum(&args[2]).clone();
+                let b = player.get_datum(&args[3]).clone();
+                let rect = Datum::build_rect(&l, &t, &r, &b)?;
+                return Ok(player.alloc_datum(rect));
             }
 
             // Case 2: rect(Point, Point)
             if args.len() == 2 {
-                let p1 = player.get_datum(&args[0]).to_point()?.clone();
-                let p2 = player.get_datum(&args[1]).to_point()?.clone();
+                let (p1, f1) = player.get_datum(&args[0]).to_point_inline()?;
+                let (p2, f2) = player.get_datum(&args[1]).to_point_inline()?;
 
-                let left   = preserve_numeric(player, &p1[0])?;
-                let top    = preserve_numeric(player, &p1[1])?;
-                let right  = preserve_numeric(player, &p2[0])?;
-                let bottom = preserve_numeric(player, &p2[1])?;
+                let flags = (if Datum::inline_is_float(f1, 0) { 1u8 } else { 0 })
+                    | (if Datum::inline_is_float(f1, 1) { 2u8 } else { 0 })
+                    | (if Datum::inline_is_float(f2, 0) { 4u8 } else { 0 })
+                    | (if Datum::inline_is_float(f2, 1) { 8u8 } else { 0 });
 
-                return Ok(player.alloc_datum(Datum::Rect([left, top, right, bottom])));
+                return Ok(player.alloc_datum(Datum::Rect([p1[0], p1[1], p2[0], p2[1]], flags)));
             }
 
             Err(ScriptError::new("Invalid rect() arguments".to_string()))
@@ -663,7 +682,14 @@ impl TypeHandlers {
             if args.len() == 1 {
                 let arg = player.get_datum(&args[0]);
                 if arg.is_int() {
-                    player.cursor = CursorRef::System(arg.int_value()?);
+                    let cursor_val = arg.int_value()?;
+                    player.cursor = CursorRef::System(cursor_val);
+                    if cursor_val == 200 || cursor_val == -1 {
+                        player.cursor_is_hidden = true;
+                    } else {
+                        player.cursor_is_hidden = false;
+                        player.wants_pointer_lock = false;
+                    }
                     Ok(DatumRef::Void)
                 } else if arg.is_list() {
                     let list = arg.to_list()?;
@@ -682,6 +708,8 @@ impl TypeHandlers {
                         members.push(slot);
                     }
                     player.cursor = CursorRef::Member(members);
+                    player.cursor_is_hidden = false;
+                    player.wants_pointer_lock = false;
                     Ok(DatumRef::Void)
                 } else {
                     Err(ScriptError::new("Invalid argument for cursor".to_string()))
@@ -713,7 +741,7 @@ impl TypeHandlers {
                             (cn, slot)
                         }
                         other => Err(ScriptError::new(format!(
-                            "Unsupported call location type: {}",
+                            "Unsupported new() location type: {}",
                             other.type_str()
                         )))?,
                     }
@@ -727,6 +755,7 @@ impl TypeHandlers {
                     &s,
                     &mut player.bitmap_manager,
                 )?;
+                player.movie.cast_manager.invalidate_member_name_cache();
                 Ok(player.alloc_datum(Datum::CastMember(member_ref)))
             }),
             DatumType::ScriptRef => {
@@ -807,7 +836,7 @@ impl TypeHandlers {
 
     pub fn list(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            Ok(player.alloc_datum(Datum::List(DatumType::List, args.clone(), false)))
+            Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(args.clone()), false)))
         })
     }
 
@@ -816,8 +845,8 @@ impl TypeHandlers {
             // TODO: Palette ref can be on args[3], need to handle it
             if args.len() < 3 {
                 return Err(ScriptError::new(
-          format!("image() expects at least 3 arguments: width, height, bitDepth, optional alphaDepth, got {}", args.len())
-        ));
+                    format!("image() expects at least 3 arguments: width, height, bitDepth, optional alphaDepth, got {}", args.len())
+                ));
             }
 
             let width_datum = player.get_datum(&args[0]);
@@ -884,11 +913,11 @@ impl TypeHandlers {
                     DatumType::CastMemberRef => {
                         // If the 4th argument is a cast member, then there's no alpha depth specified
                         palette_ref = match arg3 {
-              Datum::CastMember(m) => PaletteRef::Member(m.clone()),
-              _ => return Err(ScriptError::new(
-                format!("Invalid 4th argument type for image(): {}, expected int or palette", arg3.type_str())
-              )),
-            };
+                            Datum::CastMember(m) => PaletteRef::Member(m.clone()),
+                            _ => return Err(ScriptError::new(
+                                format!("Invalid 4th argument type for image(): {}, expected int or palette", arg3.type_str())
+                            )),
+                        };
                     }
                     _ => {
                         return Err(ScriptError::new(format!(
@@ -903,7 +932,7 @@ impl TypeHandlers {
             // Both bit_depth and original_bit_depth are set to 32 so all rendering
             // paths (matte, ink, colorize) treat this as a standard 32-bit bitmap.
             let storage_depth = if bit_depth == 24 { 32 } else { bit_depth };
-            let bitmap = Bitmap::new(
+            let mut bitmap = Bitmap::new(
                 width,
                 height,
                 storage_depth,
@@ -911,7 +940,14 @@ impl TypeHandlers {
                 alpha_depth,
                 palette_ref,
             );
-            let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+            // When image() is created with an alpha channel, treat that
+            // embedded alpha as active for subsequent rendering/compositing.
+            if storage_depth == 32 && alpha_depth > 0 {
+                bitmap.use_alpha = true;
+            }
+            // `image(w, h, depth)` builds a fresh bitmap not yet owned by any
+            // cast member; release it when the wrapping DatumRef drops.
+            let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
             Ok(player.alloc_datum(Datum::BitmapRef(bitmap_ref)))
         })
     }
@@ -937,8 +973,10 @@ impl TypeHandlers {
         reserve_player_mut(|player| {
             let xtra_name = player.get_datum(&args[0]).string_value()?;
             if is_xtra_registered(&xtra_name) {
+                debug!("Xtra '{}' registered OK", xtra_name);
                 Ok(player.alloc_datum(Datum::Xtra(xtra_name)))
             } else {
+                debug!("Xtra '{}' NOT registered", xtra_name);
                 Err(ScriptError::new(format!(
                     "Xtra {} is not registered",
                     xtra_name
@@ -953,19 +991,11 @@ impl TypeHandlers {
                 return Err(ScriptError::new("Union requires 2 arguments".to_string()));
             }
 
-            let left_refs = player.get_datum(&args[0]).to_rect()?;
-            let right_refs = player.get_datum(&args[1]).to_rect()?;
+            let (left_vals, _lf) = player.get_datum(&args[0]).to_rect_inline()?;
+            let (right_vals, _rf) = player.get_datum(&args[1]).to_rect_inline()?;
 
-            let rect_to_tuple = |rect: [DatumRef; 4]| -> Result<(i32, i32, i32, i32), ScriptError> {
-                let l = Datum::to_f64(player, &rect[0])? as i32;
-                let t = Datum::to_f64(player, &rect[1])? as i32;
-                let r = Datum::to_f64(player, &rect[2])? as i32;
-                let b = Datum::to_f64(player, &rect[3])? as i32;
-                Ok((l, t, r, b))
-            };
-
-            let left_tuple = rect_to_tuple(left_refs)?;
-            let right_tuple = rect_to_tuple(right_refs)?;
+            let left_tuple = (left_vals[0] as i32, left_vals[1] as i32, left_vals[2] as i32, left_vals[3] as i32);
+            let right_tuple = (right_vals[0] as i32, right_vals[1] as i32, right_vals[2] as i32, right_vals[3] as i32);
 
             let (l, t, r, b) = RectUtils::union(left_tuple, right_tuple);
             let rect = IntRect { left: l, top: t, right: r, bottom: b };
@@ -1005,6 +1035,45 @@ impl TypeHandlers {
                 }
             };
             Ok(player.alloc_datum(Datum::Vector([x, y, z])))
+        })
+    }
+
+    pub fn transform3d(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            // transform() with no args returns identity matrix
+            if args.is_empty() {
+                return Ok(player.alloc_datum(Datum::Transform3d([
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ])));
+            }
+            Err(ScriptError::new("transform() takes 0 arguments".into()))
+        })
+    }
+
+    pub fn date(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let date_id = player.allocator.get_free_script_instance_id();
+            let date_obj = if args.len() >= 3 {
+                let year = player.get_datum(&args[0]).int_value()?;
+                let month = player.get_datum(&args[1]).int_value()?;
+                let day = player.get_datum(&args[2]).int_value()?;
+                let js_date = js_sys::Date::new_0();
+                js_date.set_full_year(year as u32);
+                js_date.set_month((month - 1) as u32);
+                js_date.set_date(day as u32);
+                js_date.set_hours(0);
+                js_date.set_minutes(0);
+                js_date.set_seconds(0);
+                js_date.set_milliseconds(0);
+                DateObject::from_timestamp(date_id, js_date.get_time() as i64)
+            } else {
+                DateObject::new(date_id)
+            };
+            player.date_objects.insert(date_id, date_obj);
+            Ok(player.alloc_datum(Datum::DateRef(date_id)))
         })
     }
 
@@ -1149,8 +1218,10 @@ impl TypeHandlers {
             if args.len() == 0 {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
+            let args_vec;
             let args = if player.get_datum(&args[0]).is_list() {
-                player.get_datum(&args[0]).to_list()?
+                args_vec = Vec::from(player.get_datum(&args[0]).to_list()?.clone());
+                &args_vec
             } else {
                 args
             };
@@ -1169,8 +1240,10 @@ impl TypeHandlers {
             if args.len() == 0 {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
+            let args_vec;
             let args = if player.get_datum(&args[0]).is_list() {
-                player.get_datum(&args[0]).to_list()?
+                args_vec = Vec::from(player.get_datum(&args[0]).to_list()?.clone());
+                &args_vec
             } else {
                 args
             };
@@ -1201,21 +1274,11 @@ impl TypeHandlers {
                 return Err(ScriptError::new("Intersect requires 2 arguments".to_string()));
             }
 
-            let left_refs = player.get_datum(&args[0]).to_rect()?;
-            let right_refs = player.get_datum(&args[1]).to_rect()?;
+            let (left_vals, _lf) = player.get_datum(&args[0]).to_rect_inline()?;
+            let (right_vals, _rf) = player.get_datum(&args[1]).to_rect_inline()?;
 
-            let left = (
-                player.get_datum(&left_refs[0]).int_value()?,
-                player.get_datum(&left_refs[1]).int_value()?,
-                player.get_datum(&left_refs[2]).int_value()?,
-                player.get_datum(&left_refs[3]).int_value()?,
-            );
-            let right = (
-                player.get_datum(&right_refs[0]).int_value()?,
-                player.get_datum(&right_refs[1]).int_value()?,
-                player.get_datum(&right_refs[2]).int_value()?,
-                player.get_datum(&right_refs[3]).int_value()?,
-            );
+            let left = (left_vals[0] as i32, left_vals[1] as i32, left_vals[2] as i32, left_vals[3] as i32);
+            let right = (right_vals[0] as i32, right_vals[1] as i32, right_vals[2] as i32, right_vals[3] as i32);
 
             let (l, t, r, b) = RectUtils::intersect(left, right);
             let rect = IntRect { left: l, top: t, right: r, bottom: b };
@@ -1400,7 +1463,7 @@ impl TypeHandlers {
             let instance_list = match list_or_script_instance {
                 Datum::List(_, list, _) => list.to_owned(),
                 Datum::ScriptInstanceRef(_) => {
-                    vec![args[1].clone()]
+                    VecDeque::from(vec![args[1].clone()])
                 }
                 _ => {
                     return Err(ScriptError::new(format!(
@@ -1414,29 +1477,14 @@ impl TypeHandlers {
             let mut instance_datum_refs = vec![];
             for instance_ref in instance_list {
                 let original_me_ref = player.get_datum(&instance_ref).to_script_instance_ref()?;
-                original_me_list.push(original_me_ref.clone());
-                instance_datum_refs.push(instance_ref.clone());
 
                 // Determine which instance's ancestor to use:
-                //
-                // The key insight: we need to find the instance in the ancestor chain
-                // whose SCRIPT matches the current scope's script_ref. That tells us
-                // "which level" of the ancestor chain we're currently executing in.
-                // Then we get THAT instance's ancestor.
-                //
-                // Example: A (script=A) -> B (script=B) -> C (script=C)
-                // When A::start calls callAncestor(#start, me, ...):
-                //   - current_script_ref = A's script
-                //   - We find A in chain, get A's ancestor = B
-                // When B::start calls callAncestor(#start, me, ...):
-                //   - current_script_ref = B's script (because that's what we're executing)
-                //   - We find B in chain, get B's ancestor = C
+                // Walk the ancestor chain to find which instance's script matches
+                // the current scope's script_ref (i.e. "which level" we're at).
                 let ancestor_source = if let Some(ref script_ref) = current_script_ref {
-                    // Walk the ancestor chain to find which instance has the script
-                    // we're currently executing
                     let mut walk_ref = original_me_ref.clone();
                     let mut found = false;
-                    for _ in 0..100 { // Safety limit
+                    for _ in 0..100 {
                         let walk_instance = player.allocator.get_script_instance(&walk_ref);
                         if walk_instance.script == *script_ref {
                             found = true;
@@ -1448,22 +1496,23 @@ impl TypeHandlers {
                             break;
                         }
                     }
-                    if found {
-                        walk_ref
-                    } else {
-                        // Fallback: use original_me
-                        original_me_ref.clone()
-                    }
+                    if found { walk_ref } else { original_me_ref.clone() }
                 } else {
-                    // No script_ref, use original_me
                     original_me_ref.clone()
                 };
 
                 let instance = player.allocator.get_script_instance(&ancestor_source);
-                let ancestor = instance.ancestor.as_ref().ok_or_else(|| {
-                    ScriptError::new("Instance has no ancestor".to_string())
-                })?;
-                ancestor_list.push(ancestor.clone());
+                match instance.ancestor.as_ref() {
+                    Some(ancestor) => {
+                        ancestor_list.push(ancestor.clone());
+                        original_me_list.push(original_me_ref.clone());
+                        instance_datum_refs.push(instance_ref.clone());
+                    }
+                    None => {
+                        // No ancestor — callAncestor is a no-op in Director, return immediately
+                        return Ok((vec![], vec![], vec![], handler_name, vec![]));
+                    }
+                }
             }
             // Get extra arguments beyond the instance list (args[2..])
             // The instance itself will be prepended in each iteration
@@ -1535,7 +1584,8 @@ impl TypeHandlers {
 
         match object_type.to_lowercase().as_str() {
             "xml" => reserve_player_mut(|player| {
-                let xml_id = player.allocator.get_free_script_instance_id();
+                let xml_id = player.next_xml_id;
+                player.next_xml_id += 1;
                 let xml_doc = XmlDocument {
                     id: xml_id,
                     root_element: None,
@@ -1547,7 +1597,23 @@ impl TypeHandlers {
             }),
             "date" => reserve_player_mut(|player| {
                 let date_id = player.allocator.get_free_script_instance_id();
-                let date_obj = DateObject::new(date_id);
+                let date_obj = if args.len() >= 4 {
+                    // date(year, month, day)
+                    let year = player.get_datum(&args[1]).int_value()?;
+                    let month = player.get_datum(&args[2]).int_value()?;
+                    let day = player.get_datum(&args[3]).int_value()?;
+                    let js_date = js_sys::Date::new_0();
+                    js_date.set_full_year(year as u32);
+                    js_date.set_month((month - 1) as u32); // JS months are 0-based
+                    js_date.set_date(day as u32);
+                    js_date.set_hours(0);
+                    js_date.set_minutes(0);
+                    js_date.set_seconds(0);
+                    js_date.set_milliseconds(0);
+                    DateObject::from_timestamp(date_id, js_date.get_time() as i64)
+                } else {
+                    DateObject::new(date_id)
+                };
                 player.date_objects.insert(date_id, date_obj);
                 Ok(player.alloc_datum(Datum::DateRef(date_id)))
             }),
@@ -1560,7 +1626,7 @@ impl TypeHandlers {
             "object" => {
                 reserve_player_mut(|player| {
                     // Allocate an empty prop list, unsorted
-                    let obj = Datum::PropList(Vec::new(), false);
+                    let obj = Datum::PropList(VecDeque::new(), false);
                     Ok(player.alloc_datum(obj))
                 })
             }
@@ -1571,6 +1637,15 @@ impl TypeHandlers {
                     String::new()
                 };
                 reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(value))))
+            }
+            "array" => {
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::List(
+                        crate::director::lingo::datum::DatumType::XmlChildNodes,
+                        VecDeque::new(),
+                        false,
+                    )))
+                })
             }
             _ => Err(ScriptError::new(format!(
                 "newObject: Unsupported object type '{}'",
@@ -1676,4 +1751,27 @@ impl TypeHandlers {
             Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })))
         })
     }
+}
+
+/// Returns true if the given input/cleaned strings look like a Lingo
+/// "fragment retry" — i.e. a partial piece produced by code that splits a
+/// prop list at `]` characters (e.g. Coke Studios' ElementManager.parsewindow
+/// feeding `sElement = sElements.item[i] & "]"` to value() and relying on
+/// Void on failure to drive a retry loop). These fragments legitimately
+/// fail to parse on the first attempt and we don't want to warn on them.
+pub fn is_expected_value_retry_fragment(input: &str, cleaned: &str) -> bool {
+    let t = input.trim();
+    // Trivially just a close bracket
+    if t == "]" {
+        return true;
+    }
+    // Tail fragment after a split — starts with a property-list separator
+    if t.starts_with(',') || t.starts_with(':') {
+        return true;
+    }
+    // Opened bracket with no close — normalisation stripped it to nothing
+    if cleaned.is_empty() && (t.starts_with('[') || t.starts_with('(')) {
+        return true;
+    }
+    false
 }
