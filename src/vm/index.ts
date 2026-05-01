@@ -180,6 +180,49 @@ export interface ILingoLine {
   spans: ILingoSpan[]
 }
 
+export interface IFlashMemberSnapshot {
+  type: 'flash'
+  regX: number
+  regY: number
+  dataSize: number
+  width?: number
+  height?: number
+  directToStage?: boolean
+  imageEnabled?: boolean
+  soundEnabled?: boolean
+  pausedAtStart?: boolean
+  loop?: boolean
+  isStatic?: boolean
+  preload?: boolean
+  originMode?: string
+  playbackMode?: string
+  scaleMode?: string
+  streamMode?: string
+  quality?: string
+  eventPassMode?: string
+  clickMode?: string
+  sourceFileName?: string
+}
+
+export interface IShockwave3dMemberSnapshot {
+  type: 'shockwave3d'
+  regX: number
+  regY: number
+  dataSize: number
+  width: number
+  height: number
+  directToStage: boolean
+  animationEnabled: boolean
+  preload: boolean
+  loop: boolean
+  duration: number
+  cameraPosition?: [number, number, number]
+  cameraRotation?: [number, number, number]
+  bgColor?: string
+  ambientColor?: string
+  hasScene: boolean
+}
+
 export interface IFontMemberSnapshot {
   type: 'font'
 }
@@ -239,4 +282,4 @@ export interface ScoreSnapshot {
   channelInitData?: IScoreChannelInitData[]
 }
 
-export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IFontMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)
+export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IFontMemberSnapshot | IFlashMemberSnapshot | IShockwave3dMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)

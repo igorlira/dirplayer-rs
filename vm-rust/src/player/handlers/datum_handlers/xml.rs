@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     director::lingo::datum::Datum,
     player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
@@ -57,7 +59,10 @@ impl XmlParser {
             return Ok((None, HashMap::new()));
         }
 
-        let cursor = Cursor::new(content.as_bytes());
+        // Director's XML Xtra tolerates duplicate attributes (last wins).
+        // xml-rs errors out, so preprocess to drop earlier duplicates.
+        let cleaned = crate::player::xtra::xmlparser::dedup_duplicate_attributes(content);
+        let cursor = Cursor::new(cleaned.as_bytes());
         let parser = EventReader::new(cursor);
 
         let mut nodes: HashMap<u32, XmlNode> = HashMap::new();
@@ -872,7 +877,7 @@ impl XmlDatumHandlers {
                 }
 
                 // Check if it's a node
-                if let Some(node) = player.xml_nodes.get(&xml_id) {
+                if let Some(_node) = player.xml_nodes.get(&xml_id) {
                     let children = XmlHelper::get_node_children(player, xml_id);
                     if let Some(first_child) = children.first() {
                         return Ok(first_child.clone());
@@ -954,14 +959,14 @@ impl XmlDatumHandlers {
                         let root_ref = player.alloc_datum(Datum::XmlRef(root_id));
                         return Ok(player.alloc_datum(Datum::List(
                             crate::director::lingo::datum::DatumType::XmlChildNodes,
-                            vec![root_ref],
+                            VecDeque::from(vec![root_ref]),
                             false,
                         )));
                     } else {
                         // Document has no root element
                         return Ok(player.alloc_datum(Datum::List(
                             crate::director::lingo::datum::DatumType::XmlChildNodes,
-                            vec![],
+                            VecDeque::new(),
                             false,
                         )));
                     }
@@ -971,7 +976,7 @@ impl XmlDatumHandlers {
                 let children = XmlHelper::get_node_children(player, xml_id);
                 Ok(player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::XmlChildNodes,
-                    children,
+                    VecDeque::from(children),
                     false,
                 )))
             }

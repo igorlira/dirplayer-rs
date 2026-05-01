@@ -15,7 +15,8 @@ impl VectorDatumHandlers {
                 player.get_datum(&list[1]).float_value()?,
                 player.get_datum(&list[2]).float_value()?,
             ]),
-            _ => Err(ScriptError::new("Expected a vector".to_string())),
+            Datum::Void | Datum::Int(0) => Ok([0.0, 0.0, 0.0]),
+            _ => Err(ScriptError::new(format!("Expected a vector, got {}", datum.type_str()))),
         }
     }
 
@@ -33,6 +34,62 @@ impl VectorDatumHandlers {
         match handler_name {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
+            "duplicate" => reserve_player_mut(|player| {
+                let vec = Self::datum_to_vec(player, player.get_datum(datum))?;
+                Ok(player.alloc_datum(Datum::Vector(vec)))
+            }),
+            "distanceTo" => reserve_player_mut(|player| {
+                let a = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
+                let dx = a[0] - b[0];
+                let dy = a[1] - b[1];
+                let dz = a[2] - b[2];
+                Ok(player.alloc_datum(Datum::Float((dx*dx + dy*dy + dz*dz).sqrt())))
+            }),
+            "getNormalized" => reserve_player_mut(|player| {
+                let [x, y, z] = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let len = (x*x + y*y + z*z).sqrt();
+                if len > 1e-10 {
+                    Ok(player.alloc_datum(Datum::Vector([x/len, y/len, z/len])))
+                } else {
+                    Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0])))
+                }
+            }),
+            "normalize" => reserve_player_mut(|player| {
+                let [x, y, z] = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let len = (x*x + y*y + z*z).sqrt();
+                if len > 1e-10 {
+                    *player.get_datum_mut(datum) = Datum::Vector([x/len, y/len, z/len]);
+                }
+                Ok(DatumRef::Void)
+            }),
+            "crossProduct" | "cross" => reserve_player_mut(|player| {
+                let a = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
+                Ok(player.alloc_datum(Datum::Vector([
+                    a[1]*b[2] - a[2]*b[1],
+                    a[2]*b[0] - a[0]*b[2],
+                    a[0]*b[1] - a[1]*b[0],
+                ])))
+            }),
+            "dotProduct" | "dot" => reserve_player_mut(|player| {
+                let a = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
+                Ok(player.alloc_datum(Datum::Float(a[0]*b[0] + a[1]*b[1] + a[2]*b[2])))
+            }),
+            "angleBetween" => reserve_player_mut(|player| {
+                let a = Self::datum_to_vec(player, player.get_datum(datum))?;
+                let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
+                let len_a = (a[0]*a[0] + a[1]*a[1] + a[2]*a[2]).sqrt();
+                let len_b = (b[0]*b[0] + b[1]*b[1] + b[2]*b[2]).sqrt();
+                let angle = if len_a > 1e-10 && len_b > 1e-10 {
+                    let cos_angle = (a[0]*b[0] + a[1]*b[1] + a[2]*b[2]) / (len_a * len_b);
+                    cos_angle.clamp(-1.0, 1.0).acos().to_degrees()
+                } else {
+                    0.0
+                };
+                Ok(player.alloc_datum(Datum::Float(angle)))
+            }),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for vector"
             ))),
@@ -91,7 +148,7 @@ impl VectorDatumHandlers {
             "x" => Ok(Datum::Float(x)),
             "y" => Ok(Datum::Float(y)),
             "z" => Ok(Datum::Float(z)),
-            "magnitude" => Ok(Datum::Float((x * x + y * y + z * z).sqrt())),
+            "magnitude" | "length" => Ok(Datum::Float((x * x + y * y + z * z).sqrt())),
             "ilk" => Ok(Datum::Symbol("vector".to_string())),
             _ => Err(ScriptError::new(format!(
                 "Cannot get vector property {}",
@@ -131,6 +188,43 @@ impl VectorDatumHandlers {
         }
 
         *player.get_datum_mut(datum) = Datum::Vector(vec);
+
+        // Write back to parent transform if this vector came from transform.position/rotation
+        if let Some((_, parent_ref, sub_prop)) = player.transform_sub_refs.iter()
+            .find(|(vec_ref, _, _)| vec_ref == datum).cloned() {
+            if let Datum::Transform3d(m) = player.get_datum_mut(&parent_ref) {
+                match sub_prop.as_str() {
+                    "position" => {
+                        m[12] = vec[0]; m[13] = vec[1]; m[14] = vec[2];
+                    }
+                    "rotation" => {
+                        let pos = [m[12], m[13], m[14]];
+                        let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
+                        let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
+                        let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
+                        let rot = crate::player::handlers::datum_handlers::transform3d::euler_to_matrix(vec[0], vec[1], vec[2]);
+                        m[0] = rot[0]*sx;  m[1] = rot[1]*sx;  m[2] = rot[2]*sx;
+                        m[4] = rot[4]*sy;  m[5] = rot[5]*sy;  m[6] = rot[6]*sy;
+                        m[8] = rot[8]*sz;  m[9] = rot[9]*sz;  m[10] = rot[10]*sz;
+                        m[12] = pos[0]; m[13] = pos[1]; m[14] = pos[2];
+                    }
+                    "scale" => {
+                        // Set column lengths to new scale while preserving rotation direction
+                        let old_sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt().max(1e-10);
+                        let old_sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt().max(1e-10);
+                        let old_sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt().max(1e-10);
+                        let fx = vec[0] / old_sx;
+                        let fy = vec[1] / old_sy;
+                        let fz = vec[2] / old_sz;
+                        m[0] *= fx; m[1] *= fx; m[2] *= fx;
+                        m[4] *= fy; m[5] *= fy; m[6] *= fy;
+                        m[8] *= fz; m[9] *= fz; m[10] *= fz;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         Ok(())
     }
 

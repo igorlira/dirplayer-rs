@@ -141,7 +141,8 @@ impl CastDef {
                     );
                     // TODO script.setContext(this);
                     if let Some(script) = script {
-                        scripts.insert(i + 1, script);
+                        let key = script.script_number as u32 + 1;
+                        scripts.insert(key, script);
                     }
                 }
             }

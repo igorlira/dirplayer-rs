@@ -6,8 +6,10 @@
 //!
 //! This is work in progress - the renderer is not yet fully functional.
 
-mod context;
+pub mod context;
 mod geometry;
+pub mod mesh3d;
+pub mod scene3d;
 mod shaders;
 mod texture_cache;
 
@@ -26,10 +28,12 @@ use crate::player::{
     font::{measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference},
     geometry::IntRect,
     handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
-    score::{get_concrete_sprite_rect, get_sprite_at, ScoreRef},
+    score::{get_concrete_sprite_render_rect as get_concrete_sprite_rect, get_sprite_at, ScoreRef},
     sprite::{ColorRef, CursorRef, is_skew_flip},
-    DirPlayer,
+    datum_ref::DatumRef, DirPlayer,
 };
+use crate::director::lingo::datum::Datum;
+use crate::js_api::JsApi;
 use crate::rendering::{render_score_to_bitmap_with_offset, FilmLoopParentProps};
 
 pub use context::WebGL2Context;
@@ -37,6 +41,7 @@ pub use geometry::QuadGeometry;
 pub use shaders::{InkMode, ShaderManager};
 pub use texture_cache::{TextureCache, TextureCacheKey, RenderedTextCache, RenderedTextCacheKey};
 const DEBUG_WEBGL2_TEXT: bool = false;
+static SPRITE_DEBUG_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// WebGL2 hardware-accelerated renderer
 ///
@@ -86,6 +91,8 @@ pub struct WebGL2Renderer {
     trails_texture: Option<web_sys::WebGlTexture>,
     /// Size of the trails FBO texture
     trails_size: (u32, u32),
+    /// Shockwave 3D scene renderer
+    scene3d: scene3d::Scene3dRenderer,
 }
 
 impl WebGL2Renderer {
@@ -111,10 +118,11 @@ impl WebGL2Renderer {
 
         // Create WebGL2 context with pixel-perfect settings:
         // - antialias: false - disable MSAA to prevent sub-pixel blurring
-        // - alpha: false - stage is always opaque, no HTML page bleed-through
+        // - alpha: true - required for copyTexSubImage2D compatibility with
+        //   RGBA8 trails textures. Stage is cleared to opaque bg each frame.
         let context_options = js_sys::Object::new();
         js_sys::Reflect::set(&context_options, &"antialias".into(), &false.into())?;
-        js_sys::Reflect::set(&context_options, &"alpha".into(), &false.into())?;
+        js_sys::Reflect::set(&context_options, &"alpha".into(), &true.into())?;
 
         let gl = canvas
             .get_context_with_context_options("webgl2", &context_options)?
@@ -160,6 +168,7 @@ impl WebGL2Renderer {
             trails_fbo: None,
             trails_texture: None,
             trails_size: (0, 0),
+            scene3d: scene3d::Scene3dRenderer::new(),
         })
     }
 
@@ -209,10 +218,13 @@ impl WebGL2Renderer {
             None => return,
         };
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&tex));
+        // Use RGBA8 (sized) for the internal format. The default framebuffer
+        // may be RGBA8 or RGB8; copyTexSubImage2D requires a compatible format.
+        // RGBA8 matches the most common default framebuffer configuration.
         let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
             WebGl2RenderingContext::TEXTURE_2D,
             0,
-            WebGl2RenderingContext::RGBA as i32,
+            WebGl2RenderingContext::RGBA8 as i32,
             width as i32,
             height as i32,
             0,
@@ -309,6 +321,9 @@ impl WebGL2Renderer {
         if let Some(ref loc) = program.u_skew_flip {
             gl.uniform1f(Some(loc), 0.0);
         }
+        if let Some(ref loc) = program.u_skew {
+            gl.uniform1f(Some(loc), 0.0);
+        }
         if let Some(ref loc) = program.u_rotation_center {
             gl.uniform2f(Some(loc), 0.0, 0.0);
         }
@@ -324,6 +339,13 @@ impl WebGL2Renderer {
     /// Draw the current frame
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
         self.frame_count += 1;
+        // Increment sprite debug frame counter
+        let df = SPRITE_DEBUG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Sync persistent Transform3d datums → node_transforms for in-place mutations
+        // (e.g. model.transform.position = vector(...) used by overlay/HUD scripts)
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
 
         // Check if palettes changed and clear texture cache if so
         // This handles external cast loading where palette members may load after initial render
@@ -331,6 +353,15 @@ impl WebGL2Renderer {
         if current_palette_version != self.last_palette_version {
             self.texture_cache.clear();
             self.last_palette_version = current_palette_version;
+        }
+
+        // Evict textures for any cast members that were erased or replaced
+        // since the last frame. Cache keys are (castLib, memberNumber, ...), so
+        // if a new member ends up at the same slot number its sprite would
+        // otherwise hit the previous member's texture.
+        for member_ref in player.movie.cast_manager.drain_texture_invalidations() {
+            self.texture_cache.invalidate_for_member(&member_ref);
+            self.rendered_text_cache.invalidate_for_member(&member_ref);
         }
 
         // Clear with stage background color
@@ -450,6 +481,24 @@ impl WebGL2Renderer {
                 self.shader_manager.clear_active();
             }
         }
+
+        // Force the canvas alpha channel to 1.0 everywhere before present.
+        // The WebGL2 context uses `alpha: true` (needed for copyTexSubImage2D
+        // trails compatibility), which means per-pixel framebuffer alpha
+        // controls how the canvas composites with the page. Blend-mode sprites
+        // (e.g. ink 39 "Darkest" with sprite.blend=25 like cc.mixer.shadow)
+        // end up with alpha ≈ blend% in the framebuffer, and any non-dark
+        // element behind the canvas bleeds through, making the shadow render
+        // whitish. Clear only the alpha channel with colorMask so RGB stays
+        // untouched. The stage-bg clear at frame start already wrote alpha=1.0,
+        // but sprite draws then blended it down; this restores it.
+        {
+            let gl = self.context.gl();
+            gl.color_mask(false, false, false, true);
+            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+            gl.color_mask(true, true, true, true);
+        }
     }
 
     /// Draw the custom cursor sprite at the mouse position.
@@ -553,6 +602,11 @@ impl WebGL2Renderer {
         let gl = self.context.gl();
         self.context.set_blend_alpha();
 
+        // Set projection matrix (required after shader program switch)
+        if let Some(ref loc) = program.u_projection {
+            gl.uniform_matrix4fv_with_f32_array(Some(loc), false, &self.projection_matrix);
+        }
+
         // Bind texture
         gl.active_texture(WebGl2RenderingContext::TEXTURE0);
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
@@ -575,6 +629,9 @@ impl WebGL2Renderer {
             gl.uniform2f(Some(loc), 0.0, 0.0);
         }
         if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_skew {
             gl.uniform1f(Some(loc), 0.0);
         }
         if let Some(ref loc) = program.u_rotation {
@@ -653,7 +710,7 @@ impl WebGL2Renderer {
         let palettes = player.movie.cast_manager.palettes();
 
         // Set up copy parameters for text rendering with background transparent ink
-        let params = CopyPixelsParams {
+        let params = CopyPixelsParams { mask_offset: (0, 0),
             blend: 100,
             ink: 36, // Background transparent
             color: ColorRef::Rgb(0, 0, 0), // Black text
@@ -664,6 +721,9 @@ impl WebGL2Renderer {
             skew: 0.0,
             sprite: None,
             original_dst_rect: None,
+            bg_color_explicit: false,
+            fore_color_explicit: false,
+            ink9_mask_bitmap: None,
         };
 
         // Render text to the bitmap
@@ -747,6 +807,9 @@ impl WebGL2Renderer {
         }
         // No skew flip
         if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_skew {
             gl.uniform1f(Some(loc), 0.0);
         }
 
@@ -975,7 +1038,7 @@ impl WebGL2Renderer {
     /// Render a single sprite
     fn render_sprite(&mut self, player: &mut DirPlayer, channel_num: i16) {
         // Get sprite and member info
-        let (member_ref, mut sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height) = {
+        let (member_ref, mut sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height, w3d_camera, w3d_extra_cams) = {
             let score = &player.movie.score;
             let sprite = match score.get_sprite(channel_num) {
                 Some(s) => s,
@@ -987,12 +1050,20 @@ impl WebGL2Renderer {
                 None => return,
             };
 
+            let w3d_cam = sprite.w3d_camera.clone();
+            let w3d_extra_cams = sprite.w3d_cameras.clone();
+            if w3d_cam.is_some() || !w3d_extra_cams.is_empty() {
+                debug!(
+                    "[W3D-RENDER] sprite {} camera={:?} extras={:?}",
+                    channel_num, w3d_cam, w3d_extra_cams
+                );
+            }
             let rect = get_concrete_sprite_rect(player, sprite);
             (
                 member_ref,
                 rect,
                 sprite.ink,
-                sprite.blend,
+                sprite.effective_blend(),
                 sprite.flip_h,
                 sprite.flip_v,
                 sprite.rotation,
@@ -1005,8 +1076,20 @@ impl WebGL2Renderer {
                 (sprite.loc_h, sprite.loc_v),
                 sprite.width,
                 sprite.height,
+                w3d_cam,
+                w3d_extra_cams,
             )
         };
+
+        // Off-screen sprite culling: skip sprites entirely outside the viewport
+        {
+            let (stage_w, stage_h) = self.size;
+            if sprite_rect.right <= 0 || sprite_rect.bottom <= 0
+                || sprite_rect.left >= stage_w as i32 || sprite_rect.top >= stage_h as i32
+            {
+                return;
+            }
+        }
 
         // Determine what kind of texture we need based on member type
         enum TextureSource {
@@ -1031,6 +1114,11 @@ impl WebGL2Renderer {
                 word_wrap: bool,
                 border: u16,
                 box_drop_shadow: u16,
+                tab_stops: Vec<crate::player::cast_member::TabStop>,
+                /// Per-text-line line_spacing override from XMED par_runs.
+                /// One entry per text-line (split by \r/\n). Empty when
+                /// the member has no per-paragraph spacing data.
+                per_line_spacings: Vec<u16>,
             },
             FilmLoop {
                 initial_rect: IntRect,
@@ -1061,11 +1149,200 @@ impl WebGL2Renderer {
                 height: u32,
                 vector_member: crate::player::cast_member::VectorShapeMember,
             },
+            Shockwave3dScene {
+                width: u32,
+                height: u32,
+                member_key: (i32, i32),
+                scene: std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>,
+                runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
+                active_camera: Option<String>,
+                extra_cameras: Vec<String>,
+            },
         }
 
         // Set by filmloop logic: true when the stage sprite dimensions match the
         // filmloop's sprite-dim rect, meaning the score dimensions are intentional.
         let mut filmloop_sprite_dims_match = false;
+
+        // Handle Flash member dispatch before the texture_source borrow block
+        {
+            let flash_key = (member_ref.cast_lib, member_ref.cast_member);
+            if !player.flash_frame_buffers.contains_key(&flash_key) {
+                if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
+                    if let CastMemberType::Flash(flash_member) = &member.member_type {
+                        debug!(
+                            "Flash dispatch check {}:{} data_len={} first_bytes={:?}",
+                            member_ref.cast_lib, member_ref.cast_member,
+                            flash_member.data.len(),
+                            &flash_member.data[..3.min(flash_member.data.len())]
+                        );
+                        if crate::rendering::has_swf_signature(&flash_member.data) {
+                            let data = flash_member.data.clone();
+                            let w = sprite_width.max(1) as u32;
+                            let h = sprite_height.max(1) as u32;
+                            JsApi::dispatch_flash_member_loaded(
+                                member_ref.cast_lib,
+                                member_ref.cast_member,
+                                &data,
+                                w,
+                                h,
+                            );
+                            player.flash_frame_buffers.insert(flash_key, 0);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Resolve 1x1 placeholder textures in W3D scenes from cast member bitmaps.
+        // IFX stores 1x1 white placeholders for textures that should be loaded from cast members.
+        {
+            // Step 1: Collect placeholder names (immutable borrow of scene)
+            let placeholder_names: Vec<String> = {
+                let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                member.and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.parsed_scene.as_ref())
+                    .map(|scene| {
+                        scene.texture_images.iter()
+                            .filter(|(_, data)| data.len() == 12 && data[..8] == [1,0,0,0, 1,0,0,0])
+                            .map(|(name, _)| name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            // Step 2: Resolve each placeholder from cast member bitmaps
+            if !placeholder_names.is_empty() {
+                static PH_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                let ph_log = !PH_LOG.swap(true, std::sync::atomic::Ordering::Relaxed);
+                if ph_log {
+                    debug!(
+                        "[W3D-PH] {} placeholders to resolve", placeholder_names.len()
+                    );
+                }
+                let mut resolved: Vec<(String, Vec<u8>)> = Vec::new();
+                let palettes = player.movie.cast_manager.palettes();
+                for tex_name in &placeholder_names {
+                    let tex_name_str = tex_name.to_string();
+                    let found_ref = player.movie.cast_manager.find_member_ref_by_name(&tex_name_str);
+                    if ph_log && tex_name.contains("panel") {
+                        let status = match &found_ref {
+                            Some(r) => {
+                                let m = player.movie.cast_manager.find_member_by_ref(r);
+                                match m {
+                                    Some(m) => {
+                                        let bmp_size = match &m.member_type {
+                                            CastMemberType::Bitmap(bm) => {
+                                                player.bitmap_manager.get_bitmap(bm.image_ref)
+                                                    .map(|b| format!("{}x{}", b.width, b.height))
+                                                    .unwrap_or("no_bmp".into())
+                                            }
+                                            _ => format!("type={}", m.member_type.type_string()),
+                                        };
+                                        format!("found {}:{} '{}' {}", r.cast_lib, r.cast_member, m.name, bmp_size)
+                                    }
+                                    None => "ref_but_no_member".into(),
+                                }
+                            }
+                            None => "NOT_FOUND".into(),
+                        };
+                        debug!("[W3D-PH] '{}' -> {}", tex_name, status);
+                    }
+                    if let Some(src_ref) = found_ref {
+                        if let Some(src_member) = player.movie.cast_manager.find_member_by_ref(&src_ref) {
+                            if let CastMemberType::Bitmap(bmp_member) = &src_member.member_type {
+                                if let Some(bmp) = player.bitmap_manager.get_bitmap(bmp_member.image_ref) {
+                                    if bmp.width > 1 || bmp.height > 1 {
+                                        let w = bmp.width;
+                                        let h = bmp.height;
+                                        let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                                        for y in 0..h as usize {
+                                            for x in 0..w as usize {
+                                                let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
+                                                let idx = (y * w as usize + x) * 4;
+                                                rgba[idx] = r;
+                                                rgba[idx + 1] = g;
+                                                rgba[idx + 2] = b;
+                                                rgba[idx + 3] = a;
+                                            }
+                                        }
+                                        let mut tex_data = Vec::with_capacity(8 + rgba.len());
+                                        tex_data.extend_from_slice(&(w as u32).to_le_bytes());
+                                        tex_data.extend_from_slice(&(h as u32).to_le_bytes());
+                                        tex_data.extend_from_slice(&rgba);
+                                        resolved.push((tex_name.clone(), tex_data));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Step 3: Insert resolved textures into scene (mutable borrow)
+                if !resolved.is_empty() {
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some(scene) = w3d.scene_mut() {
+                                for (name, data) in resolved {
+                                    scene.texture_images.insert(name, data);
+                                    scene.texture_content_version += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Auto-advance: when a non-looping motion ends, play next queued motion
+        if self.scene3d.motion_ended {
+            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                    if !w3d.runtime_state.motion_queue.is_empty() {
+                        let next = w3d.runtime_state.motion_queue.remove(0);
+                        w3d.runtime_state.current_motion = Some(next.name);
+                        w3d.runtime_state.animation_loop = next.looped;
+                        w3d.runtime_state.animation_start_time = next.start_time;
+                        w3d.runtime_state.animation_end_time = next.end_time;
+                        w3d.runtime_state.animation_scale = next.scale;
+                        w3d.runtime_state.animation_time = if next.offset >= 0.0 { next.offset } else { 0.0 };
+                        w3d.runtime_state.animation_playing = true;
+                        w3d.runtime_state.motion_ended = false;
+                        self.scene3d.motion_ended = false;
+                    }
+                }
+            }
+        }
+
+        // Auto-start animation for Shockwave3D members with animationEnabled
+        // This triggers when the sprite first appears on stage during playback.
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                if w3d.info.animation_enabled
+                    && !w3d.runtime_state.animation_playing
+                    && w3d.runtime_state.current_motion.is_none()
+                {
+                    if let Some(scene) = w3d.parsed_scene.as_ref() {
+                        if let Some(first_motion) = scene.motions.first() {
+                            // Detect animation type: bones (skeleton) vs keyframe (node transforms)
+                            let has_skeleton = !scene.skeletons.is_empty()
+                                && scene.skeletons.iter().any(|s| s.bones.len() > 1);
+                            let anim_type = if has_skeleton { "bones" } else { "keyframe" };
+                            debug!(
+                                "[3D] animationEnabled: auto-starting {} motion '{}' (loop={})",
+                                anim_type, first_motion.name, w3d.info.loops
+                            );
+                            w3d.runtime_state.current_motion = Some(first_motion.name.clone());
+                            w3d.runtime_state.animation_playing = true;
+                            w3d.runtime_state.animation_loop = w3d.info.loops;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Note: persistent Transform3d datum → node_transforms sync is handled by
+        // set_node_transform() when properties are set. We do NOT sync here because
+        // worldPosition/pointAt update node_transforms directly, and overwriting from
+        // a stale persistent datum would undo those updates.
 
         let texture_source = {
             let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
@@ -1143,7 +1420,7 @@ impl WebGL2Renderer {
                         Some(font_member.preview_html_spans.as_slice())
                     };
 
-                    let cache_key = RenderedTextCacheKey::new_with_styled_spans(
+                    let mut cache_key = RenderedTextCacheKey::new_with_styled_spans(
                         member_ref.clone(),
                         text,
                         styled_spans_ref,
@@ -1162,6 +1439,8 @@ impl WebGL2Renderer {
                         font_member.fixed_line_space,
                         font_member.top_spacing,
                     );
+                    cache_key.keep_authored_height =
+                        skew.abs() > 0.001 || rotation.abs() > 0.1;
 
                     TextureSource::RenderedText {
                         cache_key,
@@ -1186,6 +1465,8 @@ impl WebGL2Renderer {
                         word_wrap: false,
                         border: 0,
                         box_drop_shadow: 0,
+                        tab_stops: Vec::new(),
+                        per_line_spacings: Vec::new(),
                     }
                 }
                 CastMemberType::Text(text_member) => {
@@ -1214,7 +1495,51 @@ impl WebGL2Renderer {
                     } else {
                         sprite_rect.width().max(1) as u32
                     };
-                    let height = sprite_rect.height().max(1) as u32;
+                    // Rasterize text at MEMBER-authored line bounds (lines ×
+                    // member.height) rather than `sprite_rect.height`. Director
+                    // stores the per-line authored height in `member.height`;
+                    // when a #fixed sprite stretches the member to a taller
+                    // box (CS / FurniFactory clock display: member 52×18
+                    // puppeted onto a 52×48 sprite), Director rasterizes the
+                    // glyphs at the small natural size and lets the texture
+                    // stretch into the larger sprite quad. Using
+                    // sprite_rect.height instead drew small glyphs at the
+                    // top of the parallelogram with the rest empty.
+                    let _line_count = text
+                        .replace("\r\n", "\n")
+                        .replace('\r', "\n")
+                        .split('\n')
+                        .count()
+                        .max(1) as i32;
+                    // For long wrapped HTML text the per-line × _line_count
+                    // formula doesn't fit (single-paragraph members have
+                    // `_line_count=1`), so we use a different source.
+                    //   - When the text has EXPLICIT line breaks AND
+                    //     `text_member.height` is set, the stored value is
+                    //     the laid-out total (Paige `doc_bottom` from
+                    //     XMED dword90, set in cast_member.rs creation).
+                    //     CS Junkbot credits (member 171): 375 matches
+                    //     Director, while sprite_rect.height inflates
+                    //     to 414 from a stale score frame.
+                    //   - For wrap-only members (member 82 recycler help,
+                    //     1 paragraph, 0 \n) the stored value is too small
+                    //     (~85 single-line authored), so we fall back to
+                    //     sprite_rect.height — which matches the dynamic
+                    //     measurement Director performs there (~108).
+                    let has_explicit_breaks = text.contains('\n') || text.contains('\r');
+                    let height = if long_wrapped_text
+                        && has_explicit_breaks
+                        && text_member.height > 0
+                    {
+                        text_member.height as u32
+                    } else if long_wrapped_text {
+                        sprite_rect.height().max(1) as u32
+                    } else if text_member.height > 0 {
+                        ((text_member.height as i32) * _line_count)
+                            .max(1) as u32
+                    } else {
+                        sprite_rect.height().max(1) as u32
+                    };
 
                     // Extract font properties from first styled span if available
                     let (font_name, font_size, font_style) = if !text_member.html_styled_spans.is_empty() {
@@ -1256,17 +1581,30 @@ impl WebGL2Renderer {
                         )
                     };
                     // Color priority for text:
-                    // 1. Sprite has explicit foreColor (tween/Lingo has_fore_color) -> override everything
-                    // 2. Non-default, non-black sprite.color (score frame data) -> matches non-WebGL2
-                    //    PFR bitmap rendering where params.color = sprite.color always wins
-                    // 3. Styled span color from XMED/HTML -> use per-span color
-                    // 4. CastMember.color (XMED foreColor preserved at member level) -> fallback
-                    // 5. Sprite.color (default palette) -> final fallback
-                    let text_fg_color = if has_fore_color {
+                    // 1. Non-default RGB sprite.color wins outright. Catches both
+                    //    score-frame-data tweens (FurniFactory animates sprite.color
+                    //    to Rgb(214,183,58) via the score; has_fore_color stays false
+                    //    because the flag only catches Lingo writes) AND explicit
+                    //    Lingo `sprite.color = rgb(...)` writes. Black is excluded
+                    //    so a sprite at its RGB default doesn't shadow member.color.
+                    // 2. CastMember `.color` set to RGB. Coke Studios does
+                    //    `sprite.color = paletteIndex(255)` (default-marker) +
+                    //    `member.color = rgb(...)`; member RGB wins over the
+                    //    sprite's palette default.
+                    // 3. Sprite has_fore_color (Lingo touched it, palette index).
+                    // 4. Non-default, non-black sprite.color (score palette index).
+                    // 5. Single styled-span color (XMED/HTML).
+                    // 6. Stored member.color (palette fallback).
+                    // 7. sprite.color as final fallback.
+                    let text_fg_color = if matches!(fg_color, ColorRef::Rgb(..))
+                        && fg_color != ColorRef::Rgb(0, 0, 0)
+                    {
+                        fg_color.clone()
+                    } else if matches!(member.color, ColorRef::Rgb(..)) {
+                        member.color.clone()
+                    } else if has_fore_color {
                         fg_color.clone()
                     } else if fg_color != ColorRef::PaletteIndex(255) && fg_color != ColorRef::Rgb(0, 0, 0) {
-                        // Non-default, non-black sprite.color always wins over XMED span colors
-                        // Matches non-WebGL2 PFR bitmap rendering: params.color = sprite.color
                         fg_color.clone()
                     } else if text_member.html_styled_spans.len() == 1 {
                         let style_color = text_member.html_styled_spans[0].style.color;
@@ -1277,13 +1615,11 @@ impl WebGL2Renderer {
                                 (c & 0xFF) as u8,
                             )
                         } else if member.color != ColorRef::PaletteIndex(255) {
-                            // Fallback to member's stored foreColor (from XMED)
                             member.color.clone()
                         } else {
                             fg_color.clone()
                         }
                     } else if member.color != ColorRef::PaletteIndex(255) {
-                        // Multi-span text with no explicit sprite color: use member foreColor
                         member.color.clone()
                     } else {
                         fg_color.clone()
@@ -1337,12 +1673,20 @@ impl WebGL2Renderer {
                         );
                     }
 
+                    // Use the FIRST span's size (the document default) as
+                    // the baseline for runtime_size_scale, NOT max(span sizes).
+                    // For multi-span members like CS Junkbot credits where
+                    // some spans intentionally use larger sizes (headings at
+                    // size=23, body at size=12), max would yield 23 and
+                    // scaling everything by `member.font_size/max = 12/23
+                    // ≈ 0.52` would shrink ALL spans — including the body
+                    // text — to half size. The first span is the document
+                    // default; if the member's font_size differs from THAT,
+                    // it indicates Lingo resized the member at runtime.
                     let initial_span_size = text_member
                         .html_styled_spans
                         .iter()
-                        .filter_map(|s| s.style.font_size)
-                        .filter(|s| *s > 0)
-                        .max()
+                        .find_map(|s| s.style.font_size.filter(|sz| *sz > 0))
                         .unwrap_or(0);
                     let runtime_size_scale = if text_member.font_size > 0
                         && initial_span_size > 0
@@ -1417,7 +1761,7 @@ impl WebGL2Renderer {
 
                     // Build cache key from the final styled spans that will actually be rendered.
                     let styled_spans_ref = styled_spans_with_defaults.as_ref().map(|s| s.as_slice());
-                    let cache_key = RenderedTextCacheKey::new_with_styled_spans(
+                    let mut cache_key = RenderedTextCacheKey::new_with_styled_spans(
                         member_ref.clone(),
                         text,
                         styled_spans_ref,
@@ -1436,6 +1780,111 @@ impl WebGL2Renderer {
                         text_member.fixed_line_space,
                         text_member.top_spacing,
                     );
+                    // For #fixed (and #limit/#scroll) text members the
+                    // authored member.height is the rendering box; content
+                    // longer than the box is clipped, never shrinks the
+                    // bitmap. Junkbot hint_text member 174 (#fixed) has
+                    // authored height=107 but only 2 source-text lines, so
+                    // measure_text returns ~34 — without keep_authored
+                    // the shrink branch crops to 34 and wraps body to ~5
+                    // visual lines that overflow off the bottom.
+                    //
+                    // Same logic applies to #adjust members whose text has
+                    // explicit \r/\n breaks (multi-paragraph authored
+                    // content): info_height represents the authored
+                    // multi-paragraph layout, content wraps at runtime
+                    // beyond the source-line count. Junkbot BossBot
+                    // member 137 (#adjust, info=224, 5 source lines) —
+                    // sum of per_line_spacings is 70 (5×14) but body
+                    // wraps to ~10 lines × 14 = 140 px. Without lock the
+                    // shrink branch crops the bitmap to 70 and ~6 wrapped
+                    // lines overflow.
+                    let box_type_unwrapped =
+                        text_member.box_type.trim_start_matches('#');
+                    let box_type_locked = box_type_unwrapped != "adjust";
+                    let text_has_breaks = text_member.text.contains('\r')
+                        || text_member.text.contains('\n');
+                    let multi_par_adjust_locked =
+                        box_type_unwrapped == "adjust" && text_has_breaks;
+                    cache_key.keep_authored_height =
+                        skew.abs() > 0.001
+                        || rotation.abs() > 0.1
+                        || box_type_locked
+                        || multi_par_adjust_locked;
+
+                    // Per-text-line line_spacing override from XMED par_runs.
+                    // Walk text positions for each line; for each, find the
+                    // par_run with largest position <= line_pos, and read
+                    // line_spacing from par_infos[run.par_info_index]. Empty
+                    // when the member has no per-paragraph spacing data, in
+                    // which case the renderer falls back to fixed_line_space.
+                    //
+                    // Only apply for text WITH explicit `\r`/`\n` breaks —
+                    // for wrap-only single-paragraph members (CS recycler
+                    // help) the par_run table covers a single text-line and
+                    // any non-default value would compress all wrap-induced
+                    // visual lines uniformly, clipping content.
+                    let text_has_breaks = text.contains('\n') || text.contains('\r');
+                    let _debug_member = cache_key.member_ref.cast_member;
+                    let _debug_text_len = text.len();
+                    let _debug_par_runs_len = text_member.par_runs.len();
+                    let _debug_par_infos_len = text_member.par_infos.len();
+                    let per_line_spacings: Vec<u16> = if text_has_breaks
+                        && !text_member.par_runs.is_empty()
+                        && !text_member.par_infos.is_empty()
+                    {
+                        let mut spacings = Vec::new();
+                        let mut line_start: u32 = 0;
+                        let mut idx: usize = 0;
+                        let chars: Vec<char> = text.chars().collect();
+                        loop {
+                            // Lookup par_info for line_start
+                            let mut active_idx: u16 = 0;
+                            let mut found = false;
+                            for run in &text_member.par_runs {
+                                if run.position <= line_start {
+                                    active_idx = run.par_info_index;
+                                    found = true;
+                                } else {
+                                    break;
+                                }
+                            }
+                            // Use the par_info's `line_spacing` verbatim,
+                            // including 0 ("auto"). The renderer's fallback
+                            // chain handles 0-entries by using the line's
+                            // dominant span font_size. Substituting any
+                            // non-zero par_info here was forcing members
+                            // with mostly-0 dword270 (Junkbot brick-info
+                            // member 139: only line 22 = 6, others = 0) to
+                            // use 6 for every line, which clobbered titles
+                            // (size-12) down to 6 and made the right column
+                            // crammed.
+                            let mut spacing = 0u16;
+                            if found {
+                                if let Some(pi) = text_member.par_infos.get(active_idx as usize) {
+                                    if pi.line_spacing > 0 {
+                                        spacing = pi.line_spacing as u16;
+                                    }
+                                }
+                            }
+                            spacings.push(spacing);
+                            // Advance to next line break
+                            while idx < chars.len() && chars[idx] != '\r' && chars[idx] != '\n' {
+                                idx += 1;
+                            }
+                            if idx >= chars.len() { break; }
+                            // Skip a single \r, \n, or \r\n pair
+                            if chars[idx] == '\r' && idx + 1 < chars.len() && chars[idx + 1] == '\n' {
+                                idx += 2;
+                            } else {
+                                idx += 1;
+                            }
+                            line_start = idx as u32;
+                        }
+                        spacings
+                    } else {
+                        Vec::new()
+                    };
 
                     TextureSource::RenderedText {
                         cache_key,
@@ -1456,6 +1905,8 @@ impl WebGL2Renderer {
                         word_wrap: effective_word_wrap,
                         border: 0,
                         box_drop_shadow: 0,
+                        tab_stops: text_member.tab_stops.clone(),
+                        per_line_spacings,
                     }
                 }
                 CastMemberType::Field(field_member) => {
@@ -1483,9 +1934,21 @@ impl WebGL2Renderer {
                     }
 
                     // Color priority for fields:
-                    // - If sprite has explicit foreColor (tween/Lingo), that overrides member colors
-                    // - Otherwise, prefer the member's own STXT/FieldInfo colors
-                    let effective_fg = if has_fore_color {
+                    // 1. Non-default RGB sprite color wins outright. Covers both
+                    //    score-frame-data tweens (FurniFactory; sprite.color = RGB but
+                    //    has_fore_color=false) and Lingo writes. Black is excluded so
+                    //    a sprite at default doesn't shadow member.color.
+                    // 2. Cast member `.color` set to RGB (CS convention).
+                    // 3. Sprite has_fore_color (Lingo touched it, palette index).
+                    // 4. STXT/FieldInfo fore_color (parse-time fallback).
+                    // 5. Sprite color as final fallback.
+                    let effective_fg = if matches!(fg_color, ColorRef::Rgb(..))
+                        && fg_color != ColorRef::Rgb(0, 0, 0)
+                    {
+                        fg_color.clone()
+                    } else if matches!(member.color, ColorRef::Rgb(..)) {
+                        member.color.clone()
+                    } else if has_fore_color {
                         fg_color.clone()
                     } else {
                         field_member.fore_color.clone()
@@ -1507,7 +1970,7 @@ impl WebGL2Renderer {
                     );
 
                     // Include focus state in cache key so cursor state changes invalidate cache
-                    let cache_key = RenderedTextCacheKey::new_with_focus(
+                    let mut cache_key = RenderedTextCacheKey::new_with_focus(
                         member_ref.clone(),
                         text,
                         ink,
@@ -1525,6 +1988,8 @@ impl WebGL2Renderer {
                         field_member.fixed_line_space,
                         field_member.top_spacing,
                     );
+                    cache_key.keep_authored_height =
+                        skew.abs() > 0.001 || rotation.abs() > 0.1;
 
                     TextureSource::RenderedText {
                         cache_key,
@@ -1545,6 +2010,8 @@ impl WebGL2Renderer {
                         word_wrap: field_member.word_wrap,
                         border: field_member.border,
                         box_drop_shadow: field_member.box_drop_shadow,
+                        tab_stops: Vec::new(),
+                        per_line_spacings: Vec::new(),
                     }
                 }
                 CastMemberType::Button(button_member) => {
@@ -1562,6 +2029,15 @@ impl WebGL2Renderer {
                         font_id: button_member.field.font_id,
                         alignment: button_member.field.alignment.clone(),
                         ink,
+                    }
+                }
+                CastMemberType::Flash(_) => {
+                    let key = (member_ref.cast_lib, member_ref.cast_member);
+                    match player.flash_frame_buffers.get(&key).copied() {
+                        Some(bitmap_ref) if bitmap_ref != 0 => {
+                            TextureSource::Bitmap { image_ref: bitmap_ref }
+                        }
+                        _ => return, // Not ready yet; dispatch handled below
                     }
                 }
                 CastMemberType::FilmLoop(film_loop) => {
@@ -1608,6 +2084,41 @@ impl WebGL2Renderer {
                         initial_rect,
                         width: width as u32,
                         height: height as u32,
+                    }
+                }
+                CastMemberType::Shockwave3d(w3d) => {
+                    if w3d.parsed_scene.is_none() {
+                        warn!(
+                            "[3D] Sprite {} member {}:{} has NO parsed_scene — W3D parsing failed or data is empty (w3d_data len={})",
+                            channel_num, member_ref.cast_lib, member_ref.cast_member, w3d.w3d_data.len()
+                        );
+                    }
+                    if let Some(ref parsed_scene) = w3d.parsed_scene {
+                        // FBO dimensions from sprite rect
+                        let (w, h) = (sprite_rect.width().max(1) as u32, sprite_rect.height().max(1) as u32);
+                        {
+                            static RECT_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if !RECT_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                debug!(
+                                    "[3D-RECT] sprite_rect=({},{},{},{}) fbo={}x{} loc=({},{}) sprite_wh=({},{}) regPt=({},{})",
+                                    sprite_rect.left, sprite_rect.top, sprite_rect.right, sprite_rect.bottom,
+                                    w, h, raw_loc.0, raw_loc.1, sprite_width, sprite_height,
+                                    w3d.info.reg_point.0, w3d.info.reg_point.1
+                                );
+                            }
+                        }
+                        let extra_cams = w3d_extra_cams.clone();
+                        TextureSource::Shockwave3dScene {
+                            width: w,
+                            height: h,
+                            member_key: (member_ref.cast_lib, member_ref.cast_member),
+                            scene: parsed_scene.clone(),
+                            runtime_state: w3d.runtime_state.clone(),
+                            active_camera: w3d_camera.clone(),
+                            extra_cameras: extra_cams,
+                        }
+                    } else {
+                        return;
                     }
                 }
                 _ => {
@@ -1681,6 +2192,10 @@ impl WebGL2Renderer {
                 // Shapes are rendered as 32-bit RGBA with alpha
                 (PaletteRef::BuiltIn(get_system_default_palette()), 32, true)
             }
+            TextureSource::Shockwave3dScene { .. } => {
+                // 3D scenes rendered as 32-bit RGBA
+                (PaletteRef::BuiltIn(get_system_default_palette()), 32, true)
+            }
         };
 
         // Resolve colors to RGB for shader uniforms and colorize
@@ -1708,14 +2223,19 @@ impl WebGL2Renderer {
         // - For indexed bitmaps with ink 36: foreColor tinting for monochrome-style bitmaps
         // Note: Ink 40 does NOT use foreColor tinting - it just uses color-key transparency
         let is_indexed = bitmap_bit_depth >= 1 && bitmap_bit_depth <= 8;
-        let is_ink36_indexed = is_indexed && (ink == 2 || ink == 36);
+        let is_ink36_indexed = is_indexed && ink == 36;
 
-        let colorize_params = if bitmap_bit_depth == 1 && (ink == 0 || (ink == 2 || ink == 36)) {
-            // 1-bit bitmaps with ink 0: ALWAYS apply foreColor/bgColor
-            // This is Director behavior - 1-bit bitmaps always use sprite colors
+        let colorize_params = if bitmap_bit_depth == 1 && (ink == 0 || ink == 36) {
+            // 1-bit bitmaps: apply foreColor/bgColor, but only when the sprite
+            // has explicitly set them OR the values differ from Director defaults
+            // (foreColor=black, bgColor=white). Otherwise the bitmap renders with
+            // its natural colors. Without this guard, a default-black foreColor
+            // would tint the bitmap solidly when it shouldn't be tinted at all.
+            let apply_fg = has_fore_color || fg_color_rgb != (0, 0, 0);
+            let apply_bg = has_back_color || bg_color_rgb != (255, 255, 255);
             Some((
-                true, // has_fore is always true for 1-bit bitmaps
-                true, // has_back is always true for 1-bit bitmaps
+                apply_fg,
+                apply_bg,
                 fg_color_rgb.0,
                 fg_color_rgb.1,
                 fg_color_rgb.2,
@@ -1723,13 +2243,12 @@ impl WebGL2Renderer {
                 bg_color_rgb.1,
                 bg_color_rgb.2,
             ))
-        } else if is_ink36_indexed {
-            // Ink 36 indexed: ALWAYS apply foreColor to foreground pixels (index 255 or black)
-            // This matches drawing.rs behavior where fg_color_resolved is always used
-            // Note: Ink 40 does NOT apply foreColor tinting - it just skips bgColor pixels
+        } else if is_ink36_indexed && has_fore_color {
+            // Ink 36 indexed: apply foreColor to foreground pixels (index 255 or black)
+            // Only when foreColor was explicitly set via Lingo/tweening
             Some((
-                true, // has_fore is always true for ink 36 indexed
-                true, // has_back is always true for ink 36 indexed
+                true,
+                true,
                 fg_color_rgb.0,
                 fg_color_rgb.1,
                 fg_color_rgb.2,
@@ -1742,6 +2261,10 @@ impl WebGL2Renderer {
             (bitmap_bit_depth == 32 && (ink == 0 || ink == 8 || ink == 9)) ||
             (bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && (ink == 0))
         ) {
+            // Bitmap colorization defaults: foreColor defaults to black (0,0,0),
+            // bgColor defaults to white (255,255,255). Only apply substitution when
+            // the sprite has EXPLICITLY set (has_*_color=true) AND the value differs
+            // from the default — so a sprite with defaults doesn't tint the bitmap.
             Some((
                 fg_color_rgb != (0, 0, 0) && has_fore_color,
                 bg_color_rgb != (255, 255, 255) && has_back_color,
@@ -1769,7 +2292,7 @@ impl WebGL2Renderer {
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
-                let sprite_bg_for_matte = if ink == 7 || ink == 8 || ink == 9 || ink == 37 || ink == 39 || ink == 40 || ink == 41 {
+                let sprite_bg_for_matte = if ink == 7 || ink == 8 || ink == 9 || ink == 36 || ink == 37 || ink == 39 || ink == 40 || ink == 41 {
                     Some(bg_color_rgb)
                 } else {
                     None
@@ -1784,7 +2307,7 @@ impl WebGL2Renderer {
                 // For inks that make bgColor pixels transparent (7, 8, 36, 40),
                 // if the solid foreground color matches the resolved bgColor,
                 // the entire shape would be invisible — skip rendering.
-                if ink == 3 || ink == 7 || ink == 8 || (ink == 2 || ink == 36) || ink == 40 {
+                if ink == 3 || ink == 7 || ink == 8 || ink == 36 || ink == 40 {
                     if (r, g, b) == bg_color_rgb {
                         return;
                     }
@@ -1810,17 +2333,39 @@ impl WebGL2Renderer {
                 word_wrap,
                 border,
                 box_drop_shadow,
+                ref tab_stops,
+                ref per_line_spacings,
             } => {
+                if text.contains('\t') || !tab_stops.is_empty() {
+                    warn!(
+                        "[webgl2 RenderedText] member={}:{} tabs={} has_tab={} text='{}'",
+                        cache_key.member_ref.cast_lib, cache_key.member_ref.cast_member,
+                        tab_stops.len(), text.contains('\t'),
+                        &text[..text.len().min(40)]
+                    );
+                }
                 // Check cache first
                 if let Some(cached) = self.rendered_text_cache.get(cache_key) {
-                    // Update sprite_rect to match cached texture dimensions
+                    // Update sprite_rect to match cached texture dimensions —
+                    // this lets text members visually crop to actual content
+                    // height when displayed flat. Skipped when a skew/rotation
+                    // transform is active: the texture is rendered at the
+                    // member-authored size (lines × member.height) so the
+                    // texture STRETCHES into the larger sprite quad — like
+                    // Director's #fixed members. Adjusting sprite_rect to the
+                    // smaller texture height would collapse the parallelogram
+                    // and erase the stretch (e.g. CS clock display had its
+                    // 52×48 quad cut to 52×36 with text at natural size,
+                    // instead of stretched into the full 52×48).
+                    let has_transform = skew.abs() > 0.001 || rotation.abs() > 0.1;
                     let actual_h = cached.height as i32;
-                    if actual_h != sprite_rect.height() {
+                    if actual_h != sprite_rect.height() && !has_transform {
                         sprite_rect = IntRect::from(
                             sprite_rect.left, sprite_rect.top,
                             sprite_rect.right, sprite_rect.top + actual_h,
                         );
                     }
+
                     cached.texture.clone()
                 } else {
                     // Render text to a bitmap and upload as texture
@@ -1846,10 +2391,15 @@ impl WebGL2Renderer {
                         word_wrap,
                         border,
                         box_drop_shadow,
+                        tab_stops,
+                        per_line_spacings.as_slice(),
                     ) {
                         Some((tex, _actual_w, actual_h)) => {
-                            // Update sprite_rect to match actual rendered dimensions
-                            if actual_h as i32 != sprite_rect.height() {
+                            // Update sprite_rect to match actual rendered dimensions.
+                            // Skipped when a transform is active — see comment on
+                            // the cached-path branch above for the same gate.
+                            let has_transform = skew.abs() > 0.001 || rotation.abs() > 0.1;
+                            if actual_h as i32 != sprite_rect.height() && !has_transform {
                                 sprite_rect = IntRect::from(
                                     sprite_rect.left, sprite_rect.top,
                                     sprite_rect.right, sprite_rect.top + actual_h as i32,
@@ -1862,44 +2412,66 @@ impl WebGL2Renderer {
                 }
             }
             TextureSource::FilmLoop { initial_rect, width, height, .. } => {
-                // Render the film loop's score to an offscreen bitmap
-                let mut filmloop_bitmap = Bitmap::new(
-                    width as u16,
-                    height as u16,
-                    32,
-                    32,
-                    8, // alpha_depth = 8 for transparency support
-                    PaletteRef::BuiltIn(get_system_default_palette()),
-                );
-                // Enable alpha channel for filmloop transparency
-                filmloop_bitmap.use_alpha = true;
-                // Clear to fully transparent (RGBA 0,0,0,0) so only rendered sprites are visible
-                filmloop_bitmap.data.fill(0);
+                // Cache filmloop textures per-frame: use the filmloop's current_frame as version
+                // so the cache hits when the frame hasn't changed, but re-renders on frame advance
+                let filmloop_frame = player.movie.cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .and_then(|cm| {
+                        if let CastMemberType::FilmLoop(fl) = &cm.member_type { Some(fl.current_frame) } else { None }
+                    })
+                    .unwrap_or(0);
 
-                // Render the film loop's score to the offscreen bitmap
-                render_score_to_bitmap_with_offset(
-                    player,
-                    &ScoreRef::FilmLoop(member_ref.clone()),
-                    &mut filmloop_bitmap,
-                    None, // debug_sprite_num
-                    IntRect::from_size(0, 0, width as i32, height as i32),
-                    (initial_rect.left, initial_rect.top),
-                    Some(FilmLoopParentProps {
-                        ink: ink as u32,
-                        color: fg_color.clone(),
-                        bg_color: bg_color.clone(),
-                    }),
-                );
-
-                // Upload the filmloop bitmap as a texture
-                let texture = match self.context.create_texture() {
-                    Ok(t) => t,
-                    Err(_) => return,
+                let cache_key = TextureCacheKey {
+                    member_ref: member_ref.clone(),
+                    ink: ink as i32,
+                    colorize: None,
+                    sprite_bg_color: None,
                 };
-                if self.context.upload_texture_rgba(&texture, width, height, &filmloop_bitmap.data).is_err() {
-                    return;
+
+                if !self.texture_cache.needs_update(&cache_key, filmloop_frame) {
+                    if let Some(cached) = self.texture_cache.get(&cache_key) {
+                        cached.texture.clone()
+                    } else {
+                        // Shouldn't happen, but fall through to render
+                        return;
+                    }
+                } else {
+                    // Render the film loop's score to an offscreen bitmap
+                    let mut filmloop_bitmap = Bitmap::new(
+                        width as u16,
+                        height as u16,
+                        32,
+                        32,
+                        8, // alpha_depth = 8 for transparency support
+                        PaletteRef::BuiltIn(get_system_default_palette()),
+                    );
+                    filmloop_bitmap.use_alpha = true;
+                    filmloop_bitmap.data.fill(0);
+
+                    render_score_to_bitmap_with_offset(
+                        player,
+                        &ScoreRef::FilmLoop(member_ref.clone()),
+                        &mut filmloop_bitmap,
+                        None,
+                        IntRect::from_size(0, 0, width as i32, height as i32),
+                        (initial_rect.left, initial_rect.top),
+                        Some(FilmLoopParentProps {
+                            ink: ink as u32,
+                            color: fg_color.clone(),
+                            bg_color: bg_color.clone(),
+                        }),
+                    );
+
+                    let texture = match self.context.create_texture() {
+                        Ok(t) => t,
+                        Err(_) => return,
+                    };
+                    if self.context.upload_texture_rgba(&texture, width, height, &filmloop_bitmap.data).is_err() {
+                        return;
+                    }
+                    self.texture_cache.insert(cache_key, texture.clone(), width, height, filmloop_frame);
+                    texture
                 }
-                texture
             }
             TextureSource::ButtonBitmap {
                 width, height, button_type, hilite, text,
@@ -2070,7 +2642,11 @@ impl WebGL2Renderer {
                             rotation: 0.0,
                             skew: 0.0,
                             sprite: None,
+                            mask_offset: (0, 0),
                             original_dst_rect: None,
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
                         };
                         btn_bitmap.draw_text_wrapped(
                             &text, font, font_bmp,
@@ -2124,6 +2700,7 @@ impl WebGL2Renderer {
                         0,
                         0,
                         0,
+                        &[],
                     ) {
                         warn!("Native text render error for Button (WebGL2): {:?}", e);
                     }
@@ -2238,17 +2815,112 @@ impl WebGL2Renderer {
                 }
                 texture
             }
+            TextureSource::Shockwave3dScene { width, height, member_key, scene, runtime_state, active_camera, extra_cameras } => {
+                // Render primary camera
+                self.scene3d.active_camera = active_camera;
+                if let Err(e) = self.scene3d.render_scene_with_state(
+                    &self.context, member_key, &scene, width, height, Some(&runtime_state)
+                ) {
+                    web_sys::console::error_1(&format!(
+                        "[3D] Render failed for member {:?} primary camera {:?}: {:?}",
+                        member_key, self.scene3d.active_camera, e
+                    ).into());
+                    return;
+                }
+
+                // Render additional cameras on top (multi-camera: skybox + game world)
+                if extra_cameras.is_empty() {
+                    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        warn!("[3D] No extra cameras — Main camera not added via addCamera");
+                    }
+                }
+                for cam_name in &extra_cameras {
+                    let should_clear = runtime_state.camera_clear_at_render
+                        .get(&cam_name.to_ascii_lowercase()).copied().unwrap_or(true);
+                    static CAM_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !CAM_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        debug!(
+                            "[W3D-MULTICAM] extra cam='{}' should_clear={} clear_map={:?}",
+                            cam_name, should_clear, runtime_state.camera_clear_at_render
+                        );
+                    }
+                    self.scene3d.active_camera = Some(cam_name.clone());
+                    if let Err(e) = self.scene3d.render_scene_with_state_ex(
+                        &self.context, member_key, &scene, width, height,
+                        Some(&runtime_state), should_clear,
+                    ) {
+                        web_sys::console::error_1(&format!(
+                            "[3D] Render failed for member {:?} extra camera {:?}: {:?}",
+                            member_key, self.scene3d.active_camera, e
+                        ).into());
+                        return;
+                    }
+                }
+
+                // TODO: Backdrops should render BEFORE 3D scene (need separate clear logic)
+                // For now, only overlays are rendered (on top of 3D scene)
+
+                // Render overlays on top of everything
+                for (_, overlays) in &runtime_state.camera_overlays {
+                    if !overlays.is_empty() {
+                        self.scene3d.render_overlays_to_fbo(
+                            &self.context, &member_key, overlays, width, height,
+                        );
+                    }
+                }
+
+                // Get the final FBO texture
+                let fbo_tex = match self.scene3d.fbo_texture.as_ref() {
+                    Some(tex) => tex.clone(),
+                    None => {
+                        warn!("[3D] No FBO texture for member {:?}", member_key);
+                        return;
+                    }
+                };
+
+                // Capture FBO pixels for world.image access (after releasing the scene3d borrow)
+                self.capture_w3d_frame(player, member_key, width, height);
+
+                // Unbind FBO so 2D compositor draws to the canvas, not the FBO
+                self.context.gl().bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+
+                // The 3D renderer changed the active GL program and VAO —
+                // restore 2D state so subsequent sprite draws work correctly
+                self.shader_manager.clear_active();
+                // Re-bind the 2D quad VAO (the 3D renderer unbound it)
+                self.quad.bind(self.context.gl());
+                // Restore viewport to full canvas size (3D renderer changed it to FBO size)
+                let canvas = self.context.gl().canvas().unwrap();
+                let canvas_el: web_sys::HtmlCanvasElement = canvas.dyn_into().unwrap();
+                self.context.gl().viewport(0, 0, canvas_el.width() as i32, canvas_el.height() as i32);
+
+                fbo_tex
+            }
         };
 
         // Select shader based on ink mode
         // For rendered text with ink 36: the text bitmap already has alpha=0 for background
         // and alpha>0 for text pixels (bg fill is suppressed for ink 36). Use Copy (alpha
         // blending) so the shader doesn't color-key text pixels that match bgColor.
-        let ink_mode = if is_rendered_text && (ink == 2 || ink == 36) {
+        // For indexed ink 36 bitmaps: transparency is baked into texture alpha,
+        // so use Copy shader (whose discard works reliably) instead of BackgroundTransparent
+        let is_ink36_indexed_baked = ink == 36 && bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8;
+        // For 32-bit bitmaps with use_alpha and ink 36: transparency is baked into texture
+        // alpha by bitmap_to_rgba (bgColor pixels → alpha=0). Use Copy shader to avoid
+        // the BackgroundTransparent shader's color-key discard which would incorrectly
+        // hide content pixels that match bgColor.
+        let is_ink36_alpha_baked = ink == 36 && bitmap_bit_depth == 32 && bitmap_use_alpha;
+        let text_needs_alpha = is_rendered_text && (ink == 36 || ink == 2 || bg_color_rgb == (255, 255, 255));
+        let ink_mode = if text_needs_alpha {
             InkMode::Copy
         } else if is_button_alpha_matte {
-            // Button bitmap with matte-like ink: fill was omitted, alpha channel
-            // encodes transparency. Use Copy (alpha blending) instead of color-keying.
+            InkMode::Copy
+        } else if is_ink36_indexed_baked || is_ink36_alpha_baked {
+            // Transparency baked into texture — use Copy shader for reliable discard
+            InkMode::Copy
+        } else if ink == 9 {
+            // Ink 9 (Mask): alpha baked from mask bitmap into texture — use Copy shader
             InkMode::Copy
         } else {
             InkMode::from_ink_number(ink)
@@ -2353,6 +3025,21 @@ impl WebGL2Renderer {
             gl.uniform1f(Some(loc), if has_skew_flip { 1.0 } else { 0.0 });
         }
 
+        // Continuous skew (`the skew of sprite`) — applied as a horizontal
+        // shear `x += y * tan(skew_radians)` around the registration point,
+        // before rotation. Suppressed when has_skew_flip is true so the
+        // special ±180° vertical-flip path (handled by u_skew_flip above)
+        // isn't doubled up — note that tan(180°) = 0 wouldn't actually
+        // shear, but the mode-switch keeps intent explicit.
+        if let Some(ref loc) = program.u_skew {
+            let skew_rad = if has_skew_flip {
+                0.0_f32
+            } else {
+                (skew as f32).to_radians()
+            };
+            gl.uniform1f(Some(loc), skew_rad);
+        }
+
         // Set rotation (convert degrees to radians)
         // Note: drawing.rs negates for inverse rotation (dst->src mapping),
         // but WebGL does forward rotation (vertex transformation), so no negation needed
@@ -2400,8 +3087,16 @@ impl WebGL2Renderer {
                 // For indexed ink 40 (2-8 bit): transparency is baked via RGB comparison with sprite's bgColor
                 // In both cases, disable shader color-key by setting tolerance to 0.
                 // For 16-bit and 32-bit: use small tolerance for floating-point RGB comparison.
-                let is_indexed_colorkey = bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && (ink == 37 || ink == 39 || ink == 40);
-                let tolerance = if bitmap_bit_depth == 1 || is_indexed_colorkey { 0.0 } else { 0.01 };
+                let is_indexed_ink40 = bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && (ink == 37 || ink == 39 || ink == 40);
+                // 16-bit bitmaps need higher tolerance due to RGB565 quantization:
+                // max error is ~4/255 ≈ 0.016, so use 0.02 to cover rounding
+                let tolerance = if bitmap_bit_depth == 1 || is_indexed_ink40 {
+                    0.0
+                } else if bitmap_bit_depth == 16 {
+                    0.02
+                } else {
+                    0.01
+                };
                 gl.uniform1f(Some(loc), tolerance);
             }
         }
@@ -2432,12 +3127,14 @@ impl WebGL2Renderer {
     ///
     /// Colorize parameters: (has_fore, has_back, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b)
     /// sprite_bg_color: The sprite's bgColor, used for ink 8 matte computation on indexed bitmaps
+    /// mask_bitmap: For ink 9 (Mask), the next cast member's bitmap used as grayscale alpha mask
     fn bitmap_to_rgba(
         bitmap: &Bitmap,
         palettes: &crate::player::bitmap::palette_map::PaletteMap,
         ink: i32,
         colorize: Option<(bool, bool, u8, u8, u8, u8, u8, u8)>,
         sprite_bg_color: Option<(u8, u8, u8)>,
+        mask_bitmap: Option<&Bitmap>,
     ) -> Vec<u8> {
         let width = bitmap.width as usize;
         let height = bitmap.height as usize;
@@ -2467,8 +3164,8 @@ impl WebGL2Renderer {
         };
 
         // Special flag for ink 36 indexed foreColor tinting
-        // For ink 36 indexed, ALWAYS tint foreground pixels with foreColor (has_fore is always true)
-        let ink36_indexed_tint = bitmap.original_bit_depth <= 8 && (ink == 2 || ink == 36);
+        // Only tint when foreColor was explicitly set (has_fore from colorize params)
+        let ink36_indexed_tint = bitmap.original_bit_depth <= 8 && ink == 36 && has_fore;
 
         // Check if backColor should be used (for interpolation)
         let use_back_color = match (bitmap.original_bit_depth, ink as u32) {
@@ -2531,6 +3228,9 @@ impl WebGL2Renderer {
         // For indexed: use palette index 0
         // For 16-bit/32-bit: use RGB comparison with bgColor (typically white)
         let should_use_matte_ink41 = ink == 41 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
+        // Ink 32 (Blend) applies blend percentage with matte-based background transparency
+        // Without matte, the white background would be visible at the blend percentage
+        let should_use_matte_ink32 = ink == 32 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
         // Ink 33 (Add Pin) uses COLOR-KEY transparency (ALL bgColor pixels transparent)
         // NOT flood-fill matte. See drawing.rs lines 160-163: if src == bg_color { dst }
         // Color-key comparison is handled in the shader, not texture matte.
@@ -2548,7 +3248,7 @@ impl WebGL2Renderer {
         // See drawing.rs lines 1210-1231 for 16-bit ink 36 handling
         // See drawing.rs lines 1421-1437 for 32-bit ink 36 handling
         let is_indexed_not_1bit = bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8;
-        let should_use_colorkey_ink36 = (ink == 2 || ink == 36) && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
+        let should_use_colorkey_ink36 = ink == 36 && (is_indexed_not_1bit || is_16bit || (is_32bit && !bitmap.use_alpha));
         // Ink 37 (Light) uses color-key transparency: skip bgColor pixels
         // For indexed bitmaps: bake transparency based on palette index
         // For 16-bit and 32-bit: use RGB color-key in shader
@@ -2566,7 +3266,7 @@ impl WebGL2Renderer {
         let is_ink39_indexed_transparent = ink == 39 && is_indexed_not_1bit;
         // Total: when to use matte (either pre-computed or on-the-fly)
         // Note: ink 33 uses color-key in shader, NOT matte
-        let should_use_matte = should_use_matte_ink7 || should_use_matte_ink8 || should_use_matte_ink9 || should_use_matte_ink41;
+        let should_use_matte = should_use_matte_ink0 || should_use_matte_ink7 || should_use_matte_ink8 || should_use_matte_ink9 || should_use_matte_ink32 || should_use_matte_ink41;
 
         // For ink 7, 8, 9, and 41, ALWAYS compute matte (flood-fill from edges)
         // This matches score rendering behavior where these inks use matte
@@ -2577,8 +3277,9 @@ impl WebGL2Renderer {
         let ink_8_needs_matte = ink == 8 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
         let ink_9_needs_matte = ink == 9 && (is_32bit && !bitmap.use_alpha);
         let ink_41_needs_matte = ink == 41 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
+        let ink_32_needs_matte = ink == 32 && (is_indexed || is_16bit || (is_32bit && !bitmap.use_alpha));
 
-        let needs_computed_matte = (bitmap.matte.is_none() || ink_7_needs_matte || ink_8_needs_matte || ink_9_needs_matte || ink_41_needs_matte)
+        let needs_computed_matte = (bitmap.matte.is_none() || ink_7_needs_matte || ink_8_needs_matte || ink_9_needs_matte || ink_32_needs_matte || ink_41_needs_matte)
             && should_use_matte
             && width > 0
             && height > 0
@@ -2587,6 +3288,8 @@ impl WebGL2Renderer {
                 (is_indexed && ink == 7)
                 // Indexed bitmaps ink 8: ALWAYS use matte (flood-fill transparency)
                 || (is_indexed && ink == 8)
+                // Indexed bitmaps ink 32: ALWAYS use matte (blend shouldn't show bg)
+                || (is_indexed && ink == 32)
                 // Indexed bitmaps ink 41: ALWAYS use matte (background shouldn't darken)
                 || (is_indexed && ink == 41)
                 // 16-bit bitmaps ink 7: ALWAYS use matte (flood-fill, not color-key)
@@ -2617,18 +3320,18 @@ impl WebGL2Renderer {
                 // - Other inks: use palette index 0 comparison (like bitmap.matte / create_matte())
                 //   This matches Director's standard behavior where index 0 is background.
                 // Note: Ink 33 uses shader color-key, NOT flood-fill matte
-                if ink == 7 || ink == 8 {
-                    // Ink 7 and 8: use RGB comparison with sprite's bgColor (matches Canvas2D behavior)
-                    // Canvas2D uses sprite's bgColor as the background color for flood-fill matte,
-                    // NOT the edge pixel color. This is critical for bitmaps with borders.
-                    // If sprite_bg_color is not provided, fall back to edge pixel color.
+                if ink == 7 {
+                    // Ink 7 (Not Ghost): use RGB comparison with sprite's bgColor
                     let bg_color_for_matte = sprite_bg_color.unwrap_or_else(|| {
                         bitmap.get_pixel_color(palettes, 0, 0)
                     });
 
                     Some(Self::compute_edge_matte_mask_rgb(bitmap, palettes, bg_color_for_matte, width, height))
                 } else {
-                    // Ink 41 and other inks: use palette index comparison (background = index 0)
+                    // Ink 8 (Matte), Ink 41, and others: use palette index 0 as background.
+                    // This matches Canvas2D's create_matte() which uses get_bg_color_ref() = PaletteIndex(0).
+                    // For custom palettes, palette index 0 is the transparent/background color —
+                    // using sprite_bg_color (RGB) here would fail to match for non-default palettes.
                     Some(Self::compute_edge_matte_mask_indexed(bitmap, width, height))
                 }
             } else if is_32bit {
@@ -2697,7 +3400,24 @@ impl WebGL2Renderer {
                 // Special handling for ink 37/39/40 indexed bitmaps (2-8 bit):
                 // Compare RGB against sprite's bgColor (like drawing.rs lines 203-209)
                 // This matches Canvas2D: if src == bg_color, skip (transparent)
-                let is_indexed_colorkey_bg = if is_ink40_indexed_transparent || is_ink37_indexed_transparent || is_ink39_indexed_transparent {
+                // Ink 9 (Mask): use the mask bitmap's grayscale as alpha
+                // Black=opaque(255), white=transparent(0), grays=partial
+                let ink9_mask_alpha: Option<u8> = if ink == 9 {
+                    if let Some(ref mask_bmp) = mask_bitmap {
+                        let mx = (x as u16).min(mask_bmp.width.saturating_sub(1));
+                        let my = (y as u16).min(mask_bmp.height.saturating_sub(1));
+                        let (mr, mg, mb) = mask_bmp.get_pixel_color(palettes, mx, my);
+                        // Grayscale luminance → invert: black(0)=opaque(255), white(255)=transparent(0)
+                        let gray = ((mr as u16 + mg as u16 + mb as u16) / 3) as u8;
+                        Some(255 - gray)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let is_ink40_indexed_bg = if is_ink40_indexed_transparent || is_ink37_indexed_transparent || is_ink39_indexed_transparent {
                     if let Some(bg_color) = sprite_bg_color {
                         // Compare this pixel's RGB against sprite's bgColor
                         (r, g, b) == bg_color
@@ -2708,7 +3428,10 @@ impl WebGL2Renderer {
                     false
                 };
 
-                let a = if is_1bit_transparent || is_indexed_colorkey_bg {
+                let a = if let Some(mask_a) = ink9_mask_alpha {
+                    // Ink 9 (Mask): use mask bitmap's inverted grayscale as alpha
+                    mask_a
+                } else if is_1bit_transparent || is_ink40_indexed_bg {
                     // 1-bit or ink 37/39/40 indexed background pixel
                     0
                 } else if ink == 0 && use_embedded_alpha {
@@ -2734,8 +3457,31 @@ impl WebGL2Renderer {
                 } else if use_embedded_alpha {
                     // 32-bit with use_alpha (non-ink-0): use embedded alpha directly, ignore any matte
                     let index = (y * width + x) * 4;
-                    if index + 3 < bitmap.data.len() {
+                    let embedded_a = if index + 3 < bitmap.data.len() {
                         bitmap.data[index + 3]
+                    } else {
+                        255
+                    };
+                    // For ink 36 (BgTransparent): also color-key bgColor pixels
+                    if ink == 36 {
+                        if let Some(bg) = sprite_bg_color {
+                            if (r, g, b) == bg {
+                                0 // bgColor pixel → transparent
+                            } else {
+                                embedded_a
+                            }
+                        } else {
+                            embedded_a
+                        }
+                    } else {
+                        embedded_a
+                    }
+                } else if should_use_colorkey_ink36 {
+                    // Ink 36: bake bgColor transparency into texture alpha
+                    // This avoids relying on shader discard which has driver issues
+                    let bg = sprite_bg_color.unwrap_or((255, 255, 255));
+                    if (r, g, b) == bg {
+                        0 // bgColor pixel → transparent
                     } else {
                         255
                     }
@@ -3051,7 +3797,7 @@ impl WebGL2Renderer {
     /// Check if ink mode requires matte computation
     /// Matches Canvas2D's should_matte_sprite function
     fn should_matte_sprite(ink: i32) -> bool {
-        ink == 3 || (ink == 2 || ink == 36) || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
+        ink == 3 || ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7  || ink == 32
     }
 
     /// Get or create a texture for a bitmap member
@@ -3059,6 +3805,47 @@ impl WebGL2Renderer {
     /// The ink is included in the cache key because 32-bit bitmaps with ink 8 (Matte)
     /// need matte computation while other inks use the embedded alpha.
     ///
+    /// Capture the current 3D FBO pixels into w3d_frame_buffers for world.image access
+    fn capture_w3d_frame(&mut self, player: &mut DirPlayer, member_key: (i32, i32), width: u32, height: u32) {
+        use crate::player::bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette};
+
+        let gl = self.context.gl();
+        if let Some(fbo) = &self.scene3d.fbo {
+            gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, Some(fbo));
+            let mut pixels = vec![0u8; (width * height * 4) as usize];
+            let _ = gl.read_pixels_with_opt_u8_array(
+                0, 0, width as i32, height as i32,
+                WebGl2RenderingContext::RGBA,
+                WebGl2RenderingContext::UNSIGNED_BYTE,
+                Some(&mut pixels),
+            );
+            gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, None);
+
+            // Flip vertically (WebGL is bottom-to-top)
+            let row_size = (width * 4) as usize;
+            let mut flipped = vec![0u8; pixels.len()];
+            for y in 0..height as usize {
+                let src_row = (height as usize - 1 - y) * row_size;
+                let dst_row = y * row_size;
+                flipped[dst_row..dst_row + row_size].copy_from_slice(&pixels[src_row..src_row + row_size]);
+            }
+
+            let mut bitmap = Bitmap::new(
+                width as u16, height as u16, 32, 32, 8,
+                PaletteRef::BuiltIn(get_system_default_palette()),
+            );
+            bitmap.data = flipped;
+            bitmap.use_alpha = true;
+
+            if let Some(&existing_ref) = player.w3d_frame_buffers.get(&member_key) {
+                player.bitmap_manager.replace_bitmap(existing_ref, bitmap);
+            } else {
+                let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+                player.w3d_frame_buffers.insert(member_key, bitmap_ref);
+            }
+        }
+    }
+
     /// Colorize parameters are also included in the cache key because Director's colorize
     /// feature remaps palette indices to interpolate between fore and back colors.
     fn get_or_create_texture(
@@ -3075,12 +3862,14 @@ impl WebGL2Renderer {
         // EXCEPTION: For 32-bit bitmaps with use_alpha=true, we use the embedded alpha channel
         // instead of computing a matte (matching drawing.rs lines 1268-1269)
         if Self::should_matte_sprite(ink) {
-            let palettes = player.movie.cast_manager.palettes();
-            if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(image_ref) {
-                // Don't create matte for 32-bit bitmaps with embedded alpha
-                // Use original_bit_depth since bit_depth can change during execution
-                let use_embedded_alpha = bitmap.original_bit_depth == 32 && bitmap.use_alpha;
-                if bitmap.matte.is_none() && !use_embedded_alpha {
+            // Check if matte needs creating with immutable borrow first,
+            // to avoid bumping bitmap version unnecessarily (get_bitmap_mut increments version)
+            let needs_matte = player.bitmap_manager.get_bitmap(image_ref)
+                .map(|b| b.matte.is_none() && !(b.original_bit_depth == 32 && b.use_alpha))
+                .unwrap_or(false);
+            if needs_matte {
+                let palettes = player.movie.cast_manager.palettes();
+                if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(image_ref) {
                     bitmap.create_matte(&palettes);
                 }
             }
@@ -3088,7 +3877,12 @@ impl WebGL2Renderer {
 
         // Get bitmap data to check version
         let bitmap = player.bitmap_manager.get_bitmap(image_ref)?;
-        if bitmap.data.is_empty() {
+        // Skip rendering for empty bitmaps (data empty OR zero dimensions).
+        // Director's empty cast members (e.g. cc.jukebox.catalog.add.btn.dim
+        // — placeholder bitmaps with rect 0,0,0,0) are rendered as nothing in
+        // Shockwave; without the dimension guard dirplayer-rs's WebGL2 path
+        // would fall through and paint the sprite's rect as a solid white bar.
+        if bitmap.data.is_empty() || bitmap.width == 0 || bitmap.height == 0 {
             return None;
         }
 
@@ -3106,9 +3900,10 @@ impl WebGL2Renderer {
         // Note: Ink 33 uses shader color-key, not texture matte, so no bgColor in cache key
         // Note: Ink 41 for indexed bitmaps uses palette index 0, not bgColor
         let is_ink_with_bgcolor_matte =
-            ((ink == 7 || ink == 8 || ink == 37 || ink == 39 || ink == 40) && bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8)
+            ((ink == 7 || ink == 8 || ink == 36 || ink == 37 || ink == 39 || ink == 40) && bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8)
             || ((ink == 0 || ink == 8) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
-            || ((ink == 9 || ink == 41) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha);
+            || ((ink == 9 || ink == 41) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
+            || (ink == 36 && bitmap.original_bit_depth == 32 && bitmap.use_alpha);
         let cache_key_bg_color = if is_ink_with_bgcolor_matte {
             sprite_bg_color
         } else {
@@ -3135,7 +3930,27 @@ impl WebGL2Renderer {
         // Only log on the very first frame for any new texture
         let _is_first_creation = self.frame_count == 1 && !self.texture_cache.has(&cache_key);
 
-        let rgba_data = Self::bitmap_to_rgba(bitmap, &palettes, ink, colorize, sprite_bg_color);
+        // For ink 9 (Mask), find the mask bitmap: the next cast member (member+1)
+        let mask_bitmap_ref = if ink == 9 {
+            let mask_member_ref = CastMemberRef {
+                cast_lib: member_ref.cast_lib,
+                cast_member: member_ref.cast_member + 1,
+            };
+            player.movie.cast_manager.find_member_by_ref(&mask_member_ref)
+                .and_then(|m| {
+                    if let CastMemberType::Bitmap(bm) = &m.member_type {
+                        Some(bm.image_ref)
+                    } else {
+                        None
+                    }
+                })
+                .and_then(|img_ref| player.bitmap_manager.get_bitmap(img_ref))
+                .map(|b| b.clone())
+        } else {
+            None
+        };
+
+        let rgba_data = Self::bitmap_to_rgba(bitmap, &palettes, ink, colorize, sprite_bg_color, mask_bitmap_ref.as_ref());
 
         // Validate data size
         let expected_size = (width * height * 4) as usize;
@@ -3256,7 +4071,43 @@ impl WebGL2Renderer {
         word_wrap: bool,
         border: u16,
         box_drop_shadow: u16,
+        tab_stops: &[crate::player::cast_member::TabStop],
+        // Per-text-line line_spacing override from XMED par_run / par_info
+        // tables. Length equals (count of \r/\n in `text`) + 1 — i.e. one
+        // entry per text-line. Empty when the member has no per-paragraph
+        // spacing data; the renderer then falls back to the single
+        // `line_spacing` arg above.
+        per_line_spacings: &[u16],
     ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
+        // Whether to keep the bitmap at the authored height (no shrink-to-
+        // content, no fill-scaling). True when the sprite carries a skew or
+        // rotation; the texture must match the authored sprite_rect 1:1 so
+        // the parallelogram on stage shows text at the right proportions
+        // instead of stretching a tight texture into a tilted larger rect.
+        let keep_authored_height = cache_key.keep_authored_height;
+        // Stage auto-scale: when drawRect > movie.rect, caller-provided width/
+        // height are already scaled (via get_concrete_sprite_render_rect), but
+        // font_size and line spacing are not. Scale them here so the text
+        // rasterizes at the target resolution — crisp in the enlarged viewport
+        // rather than a stretched low-res bitmap. Uniform scale factor is used
+        // so text preserves its font's aspect ratio regardless of drawRect
+        // non-uniformity.
+        let (scale_x, scale_y) = crate::player::stage::stage_scale(player);
+        let scale = scale_x.min(scale_y);
+        let font_size = ((font_size as f64) * scale).round().max(1.0) as u16;
+        let line_spacing = ((line_spacing as f64) * scale).round() as u16;
+        let top_spacing = ((top_spacing as f64) * scale).round() as i16;
+        let bottom_spacing = ((bottom_spacing as f64) * scale).round() as i16;
+        let styled_spans_scaled: Option<Vec<StyledSpan>> = styled_spans.map(|spans| {
+            spans.iter().map(|s| {
+                let mut style = s.style.clone();
+                if let Some(sz) = style.font_size {
+                    style.font_size = Some(((sz as f64) * scale).round().max(1.0) as i32);
+                }
+                StyledSpan { text: s.text.clone(), style }
+            }).collect()
+        });
+        let styled_spans = styled_spans_scaled.as_ref();
         let styled_span_count = styled_spans.map_or(0, |s| s.len());
         // Use the text member's own font_size for PFR rasterization target.
         // Taking the max of styled span sizes causes pixel fonts to be rasterized
@@ -3409,32 +4260,107 @@ impl WebGL2Renderer {
         // Measure actual text height and shrink render_height if the measured
         // content is smaller. Never grow beyond the member's rect — the rect
         // defines the visual boundary and the background fill must not exceed it.
-        if word_wrap && render_width > 0 {
-            let (_, measured_h) = measure_text_wrapped(
-                text, &font, render_width, true,
-                line_spacing, top_spacing, bottom_spacing,
-            );
-            let measured_h = measured_h
+        // Only shrink when a real PFR bitmap font is loaded — for system fonts
+        // measure_text uses the system_font fallback (small char_height) which
+        // returns wrong measurements that would shrink the rect incorrectly.
+        let is_pfr_font_for_shrink = font.char_widths.is_some();
+        if is_pfr_font_for_shrink {
+            // When every per-line entry is non-zero (every paragraph has an
+            // explicit dword270), summing them gives the exact authored
+            // bitmap height — Junkbot's level-name column 15×21+16=331,
+            // matches Director. But when entries are 0 ("auto, derive from
+            // span size"), the sum is meaningless (Junkbot brick-info
+            // member 139: only line 22 = 6, others = 0 → sum = 6 would
+            // crop the bitmap to 6 px tall and clip the entire column).
+            // Fall back to measure_text in that case.
+            let per_line_all_nonzero = !per_line_spacings.is_empty()
+                && per_line_spacings.iter().all(|&s| s > 0);
+            let measured_h_raw = if per_line_all_nonzero {
+                per_line_spacings.iter().map(|&s| s as u32).sum::<u32>() as u16
+            } else if word_wrap && render_width > 0 {
+                measure_text_wrapped(
+                    text, &font, render_width, true,
+                    render_line_spacing, top_spacing, bottom_spacing, 0,
+                ).1
+            } else {
+                measure_text(
+                    text, &font, None, render_line_spacing, top_spacing, bottom_spacing,
+                ).1
+            };
+            let measured_h = measured_h_raw
                 + (2 * border) + (4 * box_drop_shadow);
-            if measured_h > 0 && measured_h < render_height {
-                render_height = measured_h;
-            }
-        } else if !word_wrap {
-            let (_, measured_h) = measure_text(
-                text, &font, None, line_spacing, top_spacing, bottom_spacing,
-            );
-            let measured_h = measured_h
-                + (2 * border) + (4 * box_drop_shadow);
-            if measured_h > 0 && measured_h < render_height {
-                render_height = measured_h;
+            if measured_h > 0 && measured_h < render_height && !keep_authored_height {
+                let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+                // Total visual line count including blanks (drives the
+                // extra-per-gap divisor when scaling fires).
+                let total_line_count = normalised.split('\n').count();
+                // Non-empty lines drive the gate: Lingo patterns like
+                // "\r\r\rLOADING\r\r\r" use empty RETURN padding to vertically
+                // centre a single content line. Without this filter that
+                // pattern reads as 7 "lines" and falsely qualifies for the
+                // fill scaling, which then spreads the lone "LOADING" word
+                // across the sprite_rect height with absurd gaps.
+                let non_empty_line_count = normalised
+                    .split('\n')
+                    .filter(|l| !l.trim().is_empty())
+                    .count();
+                // Only scale line spacing to fill the sprite_rect for tall
+                // multi-line lists (≥5 *non-empty* lines) whose styled spans
+                // were cleared (the `.text = ...` setter in text.rs clears
+                // them) AND whose sprite_rect is significantly taller than
+                // the measured text (≥1.25× — Junkbot's 16-line column is
+                // 1.31×). That combo narrows the fill-scaling to lists Lingo
+                // dynamically rebuilds for sibling-aligned column layout
+                // (Junkbot's level.num / level.name pair is the canonical
+                // case).
+                //
+                // Without these tighter gates, any 2-line text member
+                // without styled spans got its line spacing inflated to
+                // fill whatever extra room the score happened to allocate,
+                // which caused chat bubbles, captions, and other short
+                // multi-line members to render with absurdly wide gaps.
+                let oversized_ratio = render_height as u32 * 4 >= measured_h as u32 * 5;
+                let qualifies_fill = non_empty_line_count >= 5
+                    && total_line_count > 1
+                    && styled_spans.is_none()
+                    && oversized_ratio;
+                if qualifies_fill {
+                    let extra = render_height as u32 - measured_h as u32;
+                    let extra_per_gap = (extra / (total_line_count as u32 - 1)) as u16;
+                    render_line_spacing = render_line_spacing.saturating_add(extra_per_gap);
+                } else {
+                    // Doesn't qualify for fill-scaling: shrink bitmap to content
+                    // (preserve tight bounds for chat bubbles, button labels,
+                    // BossBot letters, etc.).
+                    render_height = measured_h;
+                }
             }
         }
 
-        // For bitmap font rendering (PFR or System font), keep rendering constrained to the sprite text box.
-        // Expanding to measured width breaks wrapping because max_width tracks render width.
-        // System font is a bitmap font that needs the same treatment as PFR fonts
-        if (is_pfr_font || font.font_name == "System") && styled_spans.is_none() {
-            render_line_spacing = 0;
+        // Safety net: if the requested per-line stride would push lines past
+        // the bitmap height, the line_spacing value is bogus (most often an
+        // XMED-parsed `fixed_line_space` that holds the field's box height
+        // rather than its real per-line height — CS InfoStandDescription's
+        // STXT reports height=55 for a 55-px-tall field, which would put
+        // line 2 of "Jukebox\rVintage jukebox" at y=55 and clip it). Fall
+        // back to the font's natural line height (pre-f641e03 behaviour),
+        // but only when actually unsafe — Junkbot's level.name (16 lines ×
+        // 21 px = 336 px in a 336-px rect) still honours its Lingo-set
+        // FixedLinespace because the math fits. Single-line text is
+        // guarded by line_count > 1.
+        if render_line_spacing > 0 {
+            let line_count = text
+                .replace("\r\n", "\n")
+                .replace('\r', "\n")
+                .split('\n')
+                .count()
+                .max(1) as u32;
+            let stride = render_line_spacing as u32
+                + top_spacing as u32
+                + bottom_spacing as u32;
+            if line_count > 1 && stride * line_count > render_height as u32 {
+                render_line_spacing = 0;
+            }
         }
 
         // Compute alignment offset for bitmap font rendering (native text handles alignment internally).
@@ -3447,8 +4373,10 @@ impl WebGL2Renderer {
             };
             let box_width = width as i32;
             let line_width = line_width as i32;
-            if matches!(alignment.to_lowercase().as_str(), "center" | "#center") {
-                bitmap_start_x = ((box_width - line_width) / 2).max(0);
+            match alignment.to_lowercase().as_str() {
+                "center" | "#center" => bitmap_start_x = ((box_width - line_width) / 2).max(0),
+                "right" | "#right" => bitmap_start_x = (box_width - line_width).max(0),
+                _ => {}
             }
         }
 
@@ -3499,9 +4427,10 @@ impl WebGL2Renderer {
         // falls back to System bitmap, we should still use Canvas2D native with "Arial".
         let is_system_font_requested = font_name == "System" || font_name.is_empty();
         let force_bitmap = glyph_pref == GlyphPreference::Bitmap || glyph_pref == GlyphPreference::Outline;
-        let force_native = glyph_pref == GlyphPreference::Native;
+        // Force native rendering when tab stops are present — bitmap path doesn't handle tabs
+        let force_native = glyph_pref == GlyphPreference::Native || !tab_stops.is_empty();
         let mut synthetic_spans: Option<Vec<StyledSpan>> = None;
-        let spans_for_native: Option<&Vec<StyledSpan>> = if force_bitmap {
+        let spans_for_native: Option<&Vec<StyledSpan>> = if force_bitmap && tab_stops.is_empty() {
             // Force bitmap rendering for everything
             None
         } else if (force_native || !is_pfr_font || use_native_for_pfr) && !is_system_font_requested {
@@ -3536,7 +4465,7 @@ impl WebGL2Renderer {
 
         // Set up copy parameters for text rendering
         // Use ink 36 (background transparent) so white pixels become transparent
-        let params = CopyPixelsParams {
+        let params = CopyPixelsParams { mask_offset: (0, 0),
             blend,
             ink: 36, // Background transparent - white background becomes transparent
             color: fg_color.clone(),
@@ -3547,6 +4476,9 @@ impl WebGL2Renderer {
             skew: 0.0,
             sprite: None,
             original_dst_rect: None,
+            bg_color_explicit: false,
+            fore_color_explicit: false,
+            ink9_mask_bitmap: None,
         };
 
         let pfr_multi_span_styled = is_pfr_font && styled_spans.map_or(false, |s| s.len() > 1);
@@ -3596,6 +4528,7 @@ impl WebGL2Renderer {
                 render_line_spacing,
                 top_spacing,
                 bottom_spacing,
+                tab_stops,
             ) {
                 web_sys::console::warn_1(
                     &format!("WebGL2 render_text_to_texture: Native text render error: {:?}", e).into()
@@ -3613,7 +4546,17 @@ impl WebGL2Renderer {
                 bitmap_font_copy_char, bitmap_font_copy_char_scaled, bitmap_font_copy_char_tight,
             };
 
-            let line_height = if font.font_size > 0 { font.font_size as i32 } else { font.char_height as i32 };
+            // Default line stride. The credits case (large empty-row gaps
+            // between sections) is now handled via XMED par_runs/par_infos
+            // → `per_line_spacings`, so this fallback only applies when no
+            // per-paragraph table is available — keep it as the requested
+            // point size (matches Director for FFF Reaction *, Verdana,
+            // 04b_08 * etc. on simple wrap-only members).
+            let line_height = if font.font_size > 0 {
+                font.font_size as i32
+            } else {
+                font.char_height as i32
+            };
             let max_width = width as i32;
             let mut y = top_spacing as i32;
 
@@ -3630,10 +4573,10 @@ impl WebGL2Renderer {
                         .chars()
                         .map(|c| font.get_char_advance(c as u8) as i32)
                         .sum();
-                let start_x = if matches!(alignment.to_lowercase().as_str(), "center" | "#center") {
-                    ((max_width - line_width) / 2).max(0)
-                } else {
-                    bitmap_start_x
+                let start_x = match alignment.to_lowercase().as_str() {
+                    "center" | "#center" => ((max_width - line_width) / 2).max(0),
+                    "right" | "#right" => (max_width - line_width).max(0),
+                    _ => bitmap_start_x,
                 };
 
                     let cell_has_ink = |code: u8| -> bool {
@@ -3954,11 +4897,24 @@ impl WebGL2Renderer {
                     runs: Vec<PfrLineRun>,
                     width: i32,
                     max_size: i32,
+                    /// Source text-line index (\r/\n separated). Used to
+                    /// look up per-line `line_spacing` from XMED par_runs.
+                    /// Wrap-induced visual lines share the previous text
+                    /// line's index (so the same line_spacing applies).
+                    text_line_idx: usize,
                 }
 
                 enum Piece {
                     Token(PfrToken),
-                    Newline,
+                    /// Newline carries the size_px of the span that
+                    /// contained the `\r/\n` character. Used to size empty
+                    /// lines (no tokens) so they don't fall to the default
+                    /// font height — Director sources stride from the
+                    /// style covering each line's offset, including
+                    /// blank-only lines (Junkbot brick-info member 138:
+                    /// lines 4-6 are empty but reported as fontSize=12,
+                    /// lines 9-11 empty reported as fontSize=6).
+                    Newline(i32),
                 }
 
                 let fallback_color = fg_color.clone();
@@ -3988,10 +4944,14 @@ impl WebGL2Renderer {
                 };
 
                 let token_width = |token_text: &str, style: &PfrRunStyle| -> i32 {
+                    // See blit logic below for the rationale on
+                    // `size_px / base_size` vs `size_px / native_char_height`.
+                    let scale_num = style.size_px.max(1);
+                    let scale_den = base_size.max(1);
                     token_text
                         .chars()
                         .map(|c| {
-                            ((font.get_char_advance(c as u8) as i32) * style.size_px / native_char_height)
+                            ((font.get_char_advance(c as u8) as i32) * scale_num / scale_den)
                                 .max(1)
                         })
                         .sum()
@@ -4017,7 +4977,7 @@ impl WebGL2Renderer {
                                     }));
                                     token_is_ws = None;
                                 }
-                                pieces.push(Piece::Newline);
+                                pieces.push(Piece::Newline(run_style.size_px));
                                 continue;
                             }
 
@@ -4045,14 +5005,27 @@ impl WebGL2Renderer {
 
                 let mut lines: Vec<PfrLine> = Vec::new();
                 let mut current_line = PfrLine::default();
+                let mut current_text_line_idx: usize = 0;
 
-                let mut push_line = |line: &mut PfrLine, lines_out: &mut Vec<PfrLine>| {
+                let push_line = |line: &mut PfrLine,
+                                 lines_out: &mut Vec<PfrLine>,
+                                 next_text_line_idx: usize| {
                     lines_out.push(std::mem::take(line));
+                    line.text_line_idx = next_text_line_idx;
                 };
 
                 for piece in pieces {
                     match piece {
-                        Piece::Newline => push_line(&mut current_line, &mut lines),
+                        Piece::Newline(size_px) => {
+                            // Apply the newline's span size to the line
+                            // being closed so empty lines (no tokens) carry
+                            // the right max_size for stride computation.
+                            if current_line.runs.is_empty() {
+                                current_line.max_size = current_line.max_size.max(size_px);
+                            }
+                            current_text_line_idx += 1;
+                            push_line(&mut current_line, &mut lines, current_text_line_idx);
+                        }
                         Piece::Token(token) => {
                             let width = token_width(&token.text, &token.style);
                             if word_wrap
@@ -4061,7 +5034,10 @@ impl WebGL2Renderer {
                                 && !current_line.runs.is_empty()
                                 && (current_line.width + width > max_width)
                             {
-                                push_line(&mut current_line, &mut lines);
+                                // Wrap-induced break: the next visual line
+                                // is still the same text-line, so don't
+                                // increment text_line_idx.
+                                push_line(&mut current_line, &mut lines, current_text_line_idx);
                             }
 
                             if token.is_whitespace && current_line.runs.is_empty() {
@@ -4118,45 +5094,72 @@ impl WebGL2Renderer {
                             rotation: params.rotation,
                             skew: params.skew,
                             sprite: None,
+                            mask_offset: (0, 0),
                             original_dst_rect: params.original_dst_rect.clone(),
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
                         };
 
-                        let char_h = run.style.size_px.max(1);
+                        // Scale glyphs by per-span size relative to the
+                        // member's base size, then map onto native cell
+                        // dimensions. When style.size_px == base_size (the
+                        // common default-size case), this yields a 1:1
+                        // render at native (matching the non-multi-span
+                        // bitmap path). The previous formula
+                        // `size_px / native_char_height` was off when
+                        // base_size != native_char_height (e.g. 04b_08 *:
+                        // base 12, native cell 14 — glyphs got blitted
+                        // at 12/14=86% size, making CS Junkbot WELCOME
+                        // text visibly thinner than READY TO PLAY which
+                        // used the non-multi-span path at 100%).
+                        let span_scale_num = run.style.size_px.max(1);
+                        let span_scale_den = base_size.max(1);
+                        let char_h = (native_char_height * span_scale_num / span_scale_den).max(1);
                         let char_w =
-                            ((font.char_width as i32) * char_h / native_char_height).max(1);
+                            ((font.char_width as i32) * span_scale_num / span_scale_den).max(1);
+                        // When the span uses the document's default size,
+                        // dispatch to the unscaled `bitmap_font_copy_char`
+                        // (the same call the non-multi-span path uses).
+                        // `bitmap_font_copy_char_scaled` adds sampling
+                        // overhead even for 1:1 dimensions and produced
+                        // visibly thinner glyphs on CS Junkbot credits
+                        // vs. WELCOME (which used the unscaled path).
+                        let span_is_default_size = span_scale_num == span_scale_den;
                         let underline_y = y + char_h - 1;
                         let run_start_x = x;
 
                         for ch in run.text.chars() {
-                            let advance =
-                                ((font.get_char_advance(ch as u8) as i32) * char_h / native_char_height)
-                                    .max(1);
+                            let advance = if span_is_default_size {
+                                font.get_char_advance(ch as u8) as i32
+                            } else {
+                                ((font.get_char_advance(ch as u8) as i32) * span_scale_num / span_scale_den)
+                                    .max(1)
+                            };
 
                             if ch == ' ' {
                                 x += advance;
                                 continue;
                             }
 
-                            bitmap_font_copy_char_scaled(
-                                &font,
-                                font_bitmap,
-                                ch as u8,
-                                &mut text_bitmap,
-                                x,
-                                y,
-                                char_w,
-                                char_h,
-                                &palettes,
-                                &run_params,
-                            );
-
-                            if run.style.bold {
+                            if span_is_default_size {
+                                bitmap_font_copy_char(
+                                    &font,
+                                    font_bitmap,
+                                    ch as u8,
+                                    &mut text_bitmap,
+                                    x,
+                                    y,
+                                    &palettes,
+                                    &run_params,
+                                );
+                            } else {
                                 bitmap_font_copy_char_scaled(
                                     &font,
                                     font_bitmap,
                                     ch as u8,
                                     &mut text_bitmap,
-                                    x + 1,
+                                    x,
                                     y,
                                     char_w,
                                     char_h,
@@ -4165,20 +5168,61 @@ impl WebGL2Renderer {
                                 );
                             }
 
+                            if run.style.bold {
+                                if span_is_default_size {
+                                    bitmap_font_copy_char(
+                                        &font,
+                                        font_bitmap,
+                                        ch as u8,
+                                        &mut text_bitmap,
+                                        x + 1,
+                                        y,
+                                        &palettes,
+                                        &run_params,
+                                    );
+                                } else {
+                                    bitmap_font_copy_char_scaled(
+                                        &font,
+                                        font_bitmap,
+                                        ch as u8,
+                                        &mut text_bitmap,
+                                        x + 1,
+                                        y,
+                                        char_w,
+                                        char_h,
+                                        &palettes,
+                                        &run_params,
+                                    );
+                                }
+                            }
+
                             if run.style.italic {
                                 let shear = (y / 4).max(0);
-                                bitmap_font_copy_char_scaled(
-                                    &font,
-                                    font_bitmap,
-                                    ch as u8,
-                                    &mut text_bitmap,
-                                    x + shear,
-                                    y,
-                                    char_w,
-                                    char_h,
-                                    &palettes,
-                                    &run_params,
-                                );
+                                if span_is_default_size {
+                                    bitmap_font_copy_char(
+                                        &font,
+                                        font_bitmap,
+                                        ch as u8,
+                                        &mut text_bitmap,
+                                        x + shear,
+                                        y,
+                                        &palettes,
+                                        &run_params,
+                                    );
+                                } else {
+                                    bitmap_font_copy_char_scaled(
+                                        &font,
+                                        font_bitmap,
+                                        ch as u8,
+                                        &mut text_bitmap,
+                                        x + shear,
+                                        y,
+                                        char_w,
+                                        char_h,
+                                        &palettes,
+                                        &run_params,
+                                    );
+                                }
                             }
 
                             x += advance;
@@ -4197,7 +5241,51 @@ impl WebGL2Renderer {
                         }
                     }
 
-                    let effective_lh = if render_line_spacing > 0 { render_line_spacing as i32 } else { line_height };
+                    // Per-line line_spacing override (XMED par_runs/par_infos).
+                    // Priority:
+                    //   1. Explicit `per_line_spacings` entry from par_info
+                    //      (Junkbot help member 124: 14 for size-12 titles,
+                    //      9 for size-6 body, 15/17/10 for gap pars).
+                    //   2. The line's dominant span size — when par_info
+                    //      `dword270` is 0 across the member (all
+                    //      "fixedLineSpace=0" in Director's chunk dump),
+                    //      Director uses each line's font_size as the
+                    //      stride. Junkbot brick-info member 138: 17×12 +
+                    //      21×6 = 330 = member.height exactly. Without
+                    //      this branch we'd fall to render_line_spacing
+                    //      (single member-level value) and ~7 lines worth
+                    //      of content overflow off the bottom.
+                    //   3. `render_line_spacing` (member.fixedLineSpace).
+                    //   4. `line_height` (font default).
+                    let per_line_spacing = per_line_spacings
+                        .get(line.text_line_idx)
+                        .copied()
+                        .filter(|&s| s > 0);
+                    // Per-line fallback when THIS line's par_info dword270
+                    // is 0. Priority:
+                    //   1. `render_line_spacing` (member-level fixedLineSpace).
+                    //      Junkbot hint_text member 174 has member.fixedLineSpace=17,
+                    //      par_info[0].line_spacing=0; Director strides every
+                    //      line at 17. Without this branch the body falls to
+                    //      max_size=12 and the laid-out content shrinks below
+                    //      Director's 6-row authored layout.
+                    //   2. `line.max_size` (line's dominant span size).
+                    //      Junkbot brick info members 138/139 have member-level
+                    //      fixedLineSpace=0 and per-line par_info=0; Director
+                    //      strides each line at its font_size (12 for titles,
+                    //      6 for body).
+                    //   3. `line_height` (font default).
+                    let effective_lh = per_line_spacing
+                        .map(|s| s as i32)
+                        .unwrap_or_else(|| {
+                            if render_line_spacing > 0 {
+                                render_line_spacing as i32
+                            } else if line.max_size > 0 {
+                                line.max_size
+                            } else {
+                                line_height
+                            }
+                        });
                     let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
                     if DEBUG_WEBGL2_TEXT {
                         debug!(
@@ -4214,11 +5302,18 @@ impl WebGL2Renderer {
             } else {
                 let raw_lines: Vec<&str> = text.split(|c| c == '\r' || c == '\n').collect();
                 let mut lines_to_draw: Vec<String> = Vec::new();
+                // Parallel array — for each entry in lines_to_draw, the index
+                // of the source raw text-line it came from. Used below to
+                // look up per-paragraph line stride from `per_line_spacings`
+                // (XMED par_runs/par_infos). Wrap-induced visual lines share
+                // the source line's index so they inherit the same stride.
+                let mut line_text_indices: Vec<usize> = Vec::new();
 
                 if word_wrap && max_width > 0 {
-                    for raw in raw_lines {
+                    for (raw_idx, raw) in raw_lines.iter().enumerate() {
                         if raw.is_empty() {
                             lines_to_draw.push(String::new());
+                            line_text_indices.push(raw_idx);
                             continue;
                         }
 
@@ -4239,16 +5334,21 @@ impl WebGL2Renderer {
                                 current = candidate;
                             } else {
                                 lines_to_draw.push(current);
+                                line_text_indices.push(raw_idx);
                                 current = word.to_string();
                             }
                         }
 
                         if !current.is_empty() {
                             lines_to_draw.push(current);
+                            line_text_indices.push(raw_idx);
                         }
                     }
                 } else {
-                    lines_to_draw = raw_lines.iter().map(|s| s.to_string()).collect();
+                    for (raw_idx, s) in raw_lines.iter().enumerate() {
+                        lines_to_draw.push(s.to_string());
+                        line_text_indices.push(raw_idx);
+                    }
                 }
 
                 if DEBUG_WEBGL2_TEXT {
@@ -4275,7 +5375,7 @@ impl WebGL2Renderer {
                     );
                 }
 
-                for line in lines_to_draw {
+                for (vis_idx, line) in lines_to_draw.iter().enumerate() {
                     if DEBUG_WEBGL2_TEXT {
                         let line_width: i32 = line.chars().map(|c| font.get_char_advance(c as u8) as i32).sum();
                         debug!(
@@ -4285,8 +5385,25 @@ impl WebGL2Renderer {
                             line.chars().take(60).collect::<String>()
                         );
                     }
-                    render_line(&line, y, &mut text_bitmap);
-                    let effective_lh = if render_line_spacing > 0 { render_line_spacing as i32 } else { line_height };
+                    render_line(line, y, &mut text_bitmap);
+                    // Per-line line_spacing override (XMED par_runs/par_infos).
+                    // Wrap-induced visual lines reuse the source text-line's
+                    // entry. Falls back to render_line_spacing/line_height
+                    // when no per-line table or when the entry is 0.
+                    let per_line_spacing = line_text_indices
+                        .get(vis_idx)
+                        .and_then(|src_idx| per_line_spacings.get(*src_idx))
+                        .copied()
+                        .filter(|&s| s > 0);
+                    let effective_lh = per_line_spacing
+                        .map(|s| s as i32)
+                        .unwrap_or_else(|| {
+                            if render_line_spacing > 0 {
+                                render_line_spacing as i32
+                            } else {
+                                line_height
+                            }
+                        });
                     let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
                     if DEBUG_WEBGL2_TEXT && is_pfr_font {
                         debug!(
@@ -4318,12 +5435,13 @@ impl WebGL2Renderer {
         // - Ink 36 (BgTransparent): composited with alpha blending
         // Filling background with bg_color at alpha=255 would make the entire
         // text area opaque, producing solid colored rectangles instead of text.
-        let is_transparency_ink = ink == 3 || ink == 7 || ink == 8 || ink == 9 || (ink == 2 || ink == 36);
-        // For non-transparency inks (e.g. ink 0 Copy), always fill the background
-        // with bgColor at alpha=255. This matches Director behavior where ink 0
-        // for field/text members renders as an opaque rectangle. Only transparency
-        // inks (36, 7, 8, 9) leave the background transparent.
-        let has_bg_fill = !is_transparency_ink;
+        let is_transparency_ink = ink == 3 || ink == 7 || ink == 8 || ink == 9 || ink == 36;
+        // When bgColor is default white, leave background transparent even for ink 0.
+        // This matches Director behavior where text/field members with default white
+        // bgColor appear transparent when composited over other content (e.g., 3D scenes).
+        // Only fill background when bgColor is explicitly non-white.
+        let bg_is_default_white = bg_rgb == (255, 255, 255);
+        let has_bg_fill = !is_transparency_ink && !bg_is_default_white;
 
         // After drawing text, handle background pixels.
         // The bitmap was pre-filled with alpha=0 (transparent).
@@ -4553,6 +5671,18 @@ impl WebGL2Renderer {
         self.projection_matrix = Self::create_ortho_matrix(width as f32, height as f32);
     }
 
+    /// Resize the canvas/viewport to `draw_w`x`draw_h` while keeping the sprite
+    /// coordinate space at `movie_w`x`movie_h` — sprites drawn at their native
+    /// movie coords fill the entire (larger or smaller) viewport, matching
+    /// Director's drawRect-scales-movie-to-stage behavior.
+    pub fn set_draw_rect_scaled(&mut self, draw_w: u32, draw_h: u32, movie_w: f32, movie_h: f32) {
+        self.size = (draw_w, draw_h);
+        self.canvas.set_width(draw_w);
+        self.canvas.set_height(draw_h);
+        self.context.gl().viewport(0, 0, draw_w as i32, draw_h as i32);
+        self.projection_matrix = Self::create_ortho_matrix(movie_w, movie_h);
+    }
+
     /// Get the canvas
     pub fn canvas(&self) -> &HtmlCanvasElement {
         &self.canvas
@@ -4572,6 +5702,16 @@ impl WebGL2Renderer {
 impl super::Renderer for WebGL2Renderer {
     fn draw_frame(&mut self, player: &mut DirPlayer) {
         WebGL2Renderer::draw_frame(self, player)
+    }
+
+    fn reset_for_new_movie(&mut self) {
+        // Drop all cached GPU textures and rendered-text bitmaps so sprites
+        // from a previous movie don't bleed into the next one. The Scene3D
+        // backing store also holds per-member GPU resources keyed by cast
+        // ref — clearing those forces rebuild on the next frame.
+        self.texture_cache.clear();
+        self.rendered_text_cache.clear();
+        self.last_palette_version = 0;
     }
 
     fn draw_preview_frame(&mut self, player: &mut DirPlayer) {

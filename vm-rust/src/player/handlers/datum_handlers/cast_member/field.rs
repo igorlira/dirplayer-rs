@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use itertools::Itertools;
 
 use crate::{
@@ -135,12 +136,12 @@ impl FieldMemberHandlers {
             }
             "line" => {
                 let lines = string_get_lines(&field.text);
-                let line_datums = lines.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect_vec();
+                let line_datums: VecDeque<_> = lines.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect();
                 Ok(Datum::List(DatumType::List, line_datums, false))
             }
             "word" => {
                 let words = string_get_words(&field.text);
-                let word_datums = words.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect_vec();
+                let word_datums: VecDeque<_> = words.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect();
                 Ok(Datum::List(DatumType::List, word_datums, false))
             }
             "pageHeight" => {
@@ -168,7 +169,7 @@ impl FieldMemberHandlers {
                     .ok_or_else(|| ScriptError::new("System font not available".to_string()))?;
 
                 let (_, measured_h) = if word_wrap && field_width > 0 {
-                    measure_text_wrapped(&text_clone, &font, field_width, true, fixed_line_space, top_spacing, 0)
+                    measure_text_wrapped(&text_clone, &font, field_width, true, fixed_line_space, top_spacing, 0, 0)
                 } else {
                     measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0)
                 };
@@ -236,12 +237,7 @@ impl FieldMemberHandlers {
                 };
 
                 match prop {
-                    "rect" => Ok(Datum::Rect([
-                        player.alloc_datum(Datum::Int(0)),
-                        player.alloc_datum(Datum::Int(0)),
-                        player.alloc_datum(Datum::Int(width as i32)),
-                        player.alloc_datum(Datum::Int(height as i32))
-                    ])),
+                    "rect" => Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0)),
                     "height" => Ok(Datum::Int(height as i32)),
                     "picture" => {
                         let mut bitmap = Bitmap::new(
@@ -283,7 +279,11 @@ impl FieldMemberHandlers {
                             rotation: 0.0,
                             skew: 0.0,
                             sprite: None,
+                            mask_offset: (0, 0),
                             original_dst_rect: None,
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
                         };
 
                         bitmap.draw_text(
@@ -298,13 +298,49 @@ impl FieldMemberHandlers {
                             top_spacing,
                         );
 
-                        let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+                        // Field `.image` returns a freshly rasterized snapshot
+                        // of the text. Each call rasterizes again, so the
+                        // bitmap isn't anchored — let the DatumRef refcount
+                        // free it when the script drops the value.
+                        let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
                         Ok(Datum::BitmapRef(bitmap_ref))
                     }
                     _ => unreachable!(),
                 }
             }
             "media" => Ok(Datum::Media(Media::Field(field.clone()))),
+            // Chunk count shortcuts — computed from text string.
+            "charCount" => {
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &field.text, StringChunkType::Char, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            "wordCount" => {
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &field.text, StringChunkType::Word, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            "paragraphCount" => {
+                // Director treats paragraphs as \r-delimited, same as lines.
+                let delimiter = player.movie.item_delimiter;
+                let count = StringChunkUtils::resolve_chunk_count(
+                    &field.text, StringChunkType::Line, delimiter,
+                )?;
+                Ok(Datum::Int(count as i32))
+            }
+            "tabCount" => Ok(Datum::Int(0)), // Fields don't have tab stops in our model
+            // Runtime selection state (stored, no editor integration yet)
+            "selStart" => Ok(Datum::Int(field.sel_start)),
+            "selEnd" => Ok(Datum::Int(field.sel_end)),
+            // Text rendering config
+            "kerning" => Ok(datum_bool(field.kerning)),
+            "kerningThreshold" => Ok(Datum::Int(field.kerning_threshold as i32)),
+            "useHypertextStyles" => Ok(datum_bool(field.use_hypertext_styles)),
+            "antiAliasType" => Ok(Datum::Symbol(field.anti_alias_type.clone())),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for field",
                 prop
@@ -328,13 +364,13 @@ impl FieldMemberHandlers {
             ),
             "rect" => borrow_member_mut(
                 member_ref,
-                |player| -> Result<(i32, i32, i32, i32), ScriptError> {
-                    let rect = value.to_rect()?;
+                |_player| -> Result<(i32, i32, i32, i32), ScriptError> {
+                    let (vals, _flags) = value.to_rect_inline()?;
 
-                    let x1 = player.get_datum(&rect[0]).int_value()?;
-                    let y1 = player.get_datum(&rect[1]).int_value()?;
-                    let x2 = player.get_datum(&rect[2]).int_value()?;
-                    let y2 = player.get_datum(&rect[3]).int_value()?;
+                    let x1 = vals[0] as i32;
+                    let y1 = vals[1] as i32;
+                    let x2 = vals[2] as i32;
+                    let y2 = vals[3] as i32;
 
                     Ok((x1, y1, x2, y2))
                 },
@@ -538,6 +574,54 @@ impl FieldMemberHandlers {
                         Media::Field(new_field) => field.clone_from(&new_field),
                         _ => return Err(ScriptError::new("Invalid media value for field".to_string())),
                     };
+                    Ok(())
+                },
+            ),
+            "selStart" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().sel_start = value?;
+                    Ok(())
+                },
+            ),
+            "selEnd" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().sel_end = value?;
+                    Ok(())
+                },
+            ),
+            "kerning" => borrow_member_mut(
+                member_ref,
+                |_player| value.bool_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().kerning = value?;
+                    Ok(())
+                },
+            ),
+            "kerningThreshold" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().kerning_threshold = value? as u16;
+                    Ok(())
+                },
+            ),
+            "useHypertextStyles" => borrow_member_mut(
+                member_ref,
+                |_player| value.bool_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().use_hypertext_styles = value?;
+                    Ok(())
+                },
+            ),
+            "antiAliasType" => borrow_member_mut(
+                member_ref,
+                |_player| value.string_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().anti_alias_type = value?;
                     Ok(())
                 },
             ),

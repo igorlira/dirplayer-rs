@@ -23,10 +23,18 @@ impl KeyboardManager {
         debug!("Key down: {} {} (mapped to: {:?})", key, code, code_mapped);
         let mapped_code = *code_mapped.unwrap_or(&code);
 
+        // Map JS key names to Director key values
+        let mapped_key = match key.as_str() {
+            "Enter" => "\r".to_string(),
+            "Tab" => "\t".to_string(),
+            "Backspace" => "\x08".to_string(),
+            _ => key,
+        };
+
         // Check if this code is already in the down_keys list
         if !self.down_keys.iter().any(|x| x.code == mapped_code) {
             self.down_keys.push(KeyboardKey {
-                key: key,
+                key: mapped_key,
                 code: mapped_code,
             });
         }

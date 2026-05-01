@@ -97,6 +97,8 @@ pub struct DrawTextParams<'a> {
     pub line_height: Option<u16>,
     pub line_spacing: u16,
     pub top_spacing: i16,
+    pub char_spacing: i16,
+    pub member_width: Option<i16>,
 }
 
 impl FontManager {
@@ -1125,9 +1127,21 @@ pub fn measure_text(
     let mut width = 0;
     let mut line_width = 0;
     // PFR bitmap fonts render at native char_height (no scaling).
-    // Use char_height - 1 to match Shockwave's line height for PFR fonts.
+    // Use char_height - 1 to match Shockwave's line height — but cap at
+    // `font_size × 1.5` to handle tiny pixel fonts (04b_08 *) whose atlas
+    // pads the cell to ~2× the nominal size. Without the cap, member 16's
+    // 19 lines of 04b_08 * render at char_height-1=25 px each (485 px
+    // total) instead of Director's ~20 px (375 px). Tight-cell PFR fonts
+    // (Verdana/Arial 12pt: char_height≈14, cell-1=13) keep the smaller
+    // value and don't regress.
     let effective_line_h = if font.char_widths.is_some() {
-        font.char_height.saturating_sub(1)
+        let cell_h = font.char_height.saturating_sub(1);
+        if font.font_size > 0 {
+            let cap = ((font.font_size as f32) * 1.5).round() as u16;
+            cell_h.min(cap)
+        } else {
+            cell_h
+        }
     } else if font.font_size > 0 {
         font.font_size
     } else {
@@ -1136,9 +1150,21 @@ pub fn measure_text(
     let line_height = line_height.unwrap_or(effective_line_h);
     // fixedLineSpace overrides line step between lines; topSpacing + bottomSpacing added on top.
     let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { line_height as i16 };
-    // First line uses the max of font height and line spacing so glyphs aren't clipped,
-    // but the field's STXT line height is also respected when it's larger than the font.
-    let first_line_h = (line_height as i16).max(effective_lh);
+    // First line height: when an explicit line_spacing (member's
+    // fixedLineSpace) is set, trust it verbatim — that's the authored
+    // per-line stride and Director uses it as the first-line extent too.
+    // Without the gate, `cell_h = char_height - 1` for PFR fonts gives
+    // exactly `fixed_line_space + 1` (e.g. 22 for fixed_line_space=21),
+    // which inflates `member.height` by N px on N-line lists. Junkbot's
+    // level-name member with fixed_line_space=21 reported height=22 for
+    // one rendered line when the authored 16-paragraph layout was 331.
+    // Fall back to `max(line_height, effective_lh)` for members without
+    // explicit line_spacing so glyphs still aren't clipped.
+    let first_line_h = if line_spacing > 0 {
+        effective_lh
+    } else {
+        (line_height as i16).max(effective_lh)
+    };
     let mut height = (top_spacing + first_line_h) as u16;
     let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;
     let mut index = 0;
@@ -1169,6 +1195,7 @@ pub fn measure_text(
 
 /// Measure text height with word wrapping support.
 /// Returns (max_line_width, total_height) considering word wrapping at max_width.
+/// `char_spacing` is added between every pair of characters (matches renderer's behavior).
 pub fn measure_text_wrapped(
     text: &str,
     font: &BitmapFont,
@@ -1177,9 +1204,18 @@ pub fn measure_text_wrapped(
     line_spacing: u16,
     top_spacing: i16,
     bottom_spacing: i16,
+    char_spacing: i32,
 ) -> (u16, u16) {
+    // See `measure_text` for the cap rationale — PFR pixel fonts pad
+    // the atlas cell to ~2× the nominal size, so we cap at `font_size × 1.5`.
     let effective_line_h = if font.char_widths.is_some() {
-        font.char_height.saturating_sub(1)
+        let cell_h = font.char_height.saturating_sub(1);
+        if font.font_size > 0 {
+            let cap = ((font.font_size as f32) * 1.5).round() as u16;
+            cell_h.min(cap)
+        } else {
+            cell_h
+        }
     } else if font.font_size > 0 {
         font.font_size
     } else {
@@ -1188,9 +1224,15 @@ pub fn measure_text_wrapped(
     let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { effective_line_h as i16 };
     let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;
 
+    // Per-character advance including char_spacing — matches the renderer at
+    // text.rs's flush_line loop which does `x += adv + char_spacing` for every char.
+    let char_adv = |c: char| -> i32 {
+        font.get_char_advance(c as u8) as i32 + char_spacing
+    };
+
     // Split into explicit lines first
     let raw_lines: Vec<&str> = text.split(|c: char| c == '\r' || c == '\n').collect();
-    let mut visual_lines: Vec<u16> = Vec::new(); // width of each visual line
+    let mut visual_lines: Vec<i32> = Vec::new(); // width of each visual line
 
     for raw in &raw_lines {
         if raw.is_empty() {
@@ -1198,18 +1240,17 @@ pub fn measure_text_wrapped(
             continue;
         }
         if word_wrap && max_width > 0 {
-            let mut current_width: u16 = 0;
+            let max_w = max_width as i32;
+            let mut current_width: i32 = 0;
             for word in raw.split_whitespace() {
-                let word_width: u16 = word.chars()
-                    .map(|c| font.get_char_advance(c as u8))
-                    .sum();
-                let space_width = font.get_char_advance(b' ');
+                let word_width: i32 = word.chars().map(char_adv).sum();
+                let space_width = char_adv(' ');
                 let candidate = if current_width == 0 {
                     word_width
                 } else {
                     current_width + space_width + word_width
                 };
-                if candidate <= max_width || current_width == 0 {
+                if candidate <= max_w || current_width == 0 {
                     current_width = candidate;
                 } else {
                     visual_lines.push(current_width);
@@ -1218,15 +1259,13 @@ pub fn measure_text_wrapped(
             }
             visual_lines.push(current_width);
         } else {
-            let line_width: u16 = raw.chars()
-                .map(|c| font.get_char_advance(c as u8))
-                .sum();
+            let line_width: i32 = raw.chars().map(char_adv).sum();
             visual_lines.push(line_width);
         }
     }
 
     let num_lines = visual_lines.len().max(1);
-    let max_width_found = visual_lines.iter().copied().max().unwrap_or(0);
+    let max_width_found = visual_lines.iter().copied().max().unwrap_or(0).max(0) as u16;
     let first_line_h = (effective_line_h as i16).max(effective_lh);
     let height = (top_spacing + first_line_h) as u16
         + (num_lines as u16 - 1) * line_step;
@@ -1235,28 +1274,37 @@ pub fn measure_text_wrapped(
 }
 
 pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize) -> (i16, i16) {
-    let mut x = 0;
+    let mut x: i16 = 0;
     let mut y = params.top_spacing;
-    let mut line_width = 0;
+    let mut line_width: i16 = 0;
     let mut line_index = 0;
+    let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
+    let line_step = params.line_height.unwrap_or(eff_lh) as i16
+        + params.line_spacing as i16
+        + 1;
+
+    let mut prev_was_cr = false;
     for c in text.chars() {
         if c == '\r' || c == '\n' {
             if line_index == char_index {
-                return (x, y);
+                return (line_width, y);
             }
-            if line_width > x {
-                x = line_width;
+            // Treat \r\n as a single line break
+            if c == '\n' && prev_was_cr {
+                prev_was_cr = false;
+                line_index += 1;
+                continue;
             }
+            prev_was_cr = c == '\r';
             line_width = 0;
-            let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
-            y += params.line_height.unwrap_or(eff_lh) as i16
-                + params.line_spacing as i16
-                + 1;
+            y += line_step;
         } else {
+            prev_was_cr = false;
+            let char_advance = params.font.get_char_advance(c as u8) as i16 + 1 + params.char_spacing;
             if line_index == char_index {
-                return (x, y);
+                return (line_width, y);
             }
-            line_width += params.font.get_char_advance(c as u8) as i16 + 1;
+            line_width += char_advance;
         }
         line_index += 1;
     }

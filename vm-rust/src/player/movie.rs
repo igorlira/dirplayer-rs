@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use chrono::Local;
 
@@ -7,7 +7,7 @@ use crate::{
         file::DirectorFile,
         lingo::datum::{datum_bool, Datum},
     },
-    utils::PATH_SEPARATOR, reserve_player_ref,
+    utils::PATH_SEPARATOR, reserve_player_ref, reserve_player_mut,
     player::ColorRef, player::ScriptInstanceRef, CastMemberRef,
 };
 
@@ -46,6 +46,7 @@ pub struct Movie {
     pub click_loc: (i32, i32),
     pub frame_script_instance: Option<ScriptInstanceRef>,
     pub frame_script_member: Option<CastMemberRef>,
+    pub sound_device: String,
 }
 
 impl Movie {
@@ -112,9 +113,9 @@ impl Movie {
                 Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
                 None => Ok(Datum::Int(0)),
             },
-            "exitLock" => Ok(datum_bool(self.exit_lock)),
-            "itemDelimiter" => Ok(Datum::String(self.item_delimiter.into())),
-            "runMode" => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
+            "exitlock" => Ok(datum_bool(self.exit_lock)),
+            "itemdelimiter" => Ok(Datum::String(self.item_delimiter.into())),
+            "runmode" => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
             "date" => {
                 // TODO localize formatting
                 let time = Local::now();
@@ -136,13 +137,13 @@ impl Movie {
             },
             "platform" => Ok(Datum::String("Windows,32".to_string())),
             "frame" => Ok(Datum::Int(self.current_frame as i32)),
-            "productVersion" => Ok(Datum::String("10.1".to_string())),
-            "stageRight" => Ok(Datum::Int(self.rect.right as i32)),
-            "stageLeft" => Ok(Datum::Int(self.rect.left as i32)),
-            "stageTop" => Ok(Datum::Int(self.rect.top as i32)),
-            "stageBottom" => Ok(Datum::Int(self.rect.bottom as i32)),
-            "movieName" => Ok(Datum::String(self.file_name.to_owned())),
-            "updateLock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
+            "productversion" => Ok(Datum::String("10.1".to_string())),
+            "stageright" => Ok(Datum::Int(self.rect.right as i32)),
+            "stageleft" => Ok(Datum::Int(self.rect.left as i32)),
+            "stagetop" => Ok(Datum::Int(self.rect.top as i32)),
+            "stagebottom" => Ok(Datum::Int(self.rect.bottom as i32)),
+            "moviename" => Ok(Datum::String(self.file_name.to_owned())),
+            "updatelock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
             "path" => Ok(Datum::String(self.base_path.to_owned())),
             "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
                 let script = if prop.eq_ignore_ascii_case("mouseDownScript") {
@@ -187,6 +188,55 @@ impl Movie {
             },
             "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
             "maxInteger" => Ok(Datum::Int(i32::MAX)),
+            "memorySize" => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
+            "active3dRenderer" => Ok(Datum::String("#openGL".to_string())),
+            "scriptExecutionStyle" => Ok(Datum::Int(9)),
+            "xtraList" => {
+                // Return a list of prop lists, each with #name and #fileName
+                use crate::player::xtra::manager::get_registered_xtra_names;
+                reserve_player_mut(|player| {
+                    let names = get_registered_xtra_names();
+                    let mut items = VecDeque::new();
+                    for name in names {
+                        let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
+                        let name_val = player.alloc_datum(Datum::String(name.to_string()));
+                        let file_key = player.alloc_datum(Datum::Symbol("fileName".to_string()));
+                        let file_val = player.alloc_datum(Datum::String(format!("{}.x32", name)));
+                        let entry = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
+                            (name_key, name_val), (file_key, file_val),
+                        ]), false));
+                        items.push_back(entry);
+                    }
+                    Ok(Datum::List(
+                        crate::director::lingo::datum::DatumType::List,
+                        items,
+                        false,
+                    ))
+                })
+            },
+            "soundDevice" => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
+            "soundDeviceList" => {
+                reserve_player_mut(|player| {
+                    let device = player.alloc_datum(Datum::String("WebAudio".to_string()));
+                    Ok(Datum::List(
+                        crate::director::lingo::datum::DatumType::List,
+                        VecDeque::from(vec![device]),
+                        false,
+                    ))
+                })
+            },
+            "desktopRectList" => {
+                reserve_player_mut(|player| {
+                    let w = player.movie.rect.right as i32;
+                    let h = player.movie.rect.bottom as i32;
+                    let rect = player.alloc_datum(Datum::Rect([0.0, 0.0, w as f64, h as f64], 0));
+                    Ok(Datum::List(
+                        crate::director::lingo::datum::DatumType::List,
+                        VecDeque::from(vec![rect]),
+                        false,
+                    ))
+                })
+            },
             "labelList" => {
                 let s = self
                     .score
@@ -197,6 +247,7 @@ impl Movie {
                     .join("\r");
                 Ok(Datum::String(s))
             },
+            "debugplaybackenabled" => Ok(Datum::Int(0)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
         })
     }
@@ -324,6 +375,16 @@ impl Movie {
             },
             "randomSeed" => {
                 self.random_seed = Some(value.int_value()?);
+                Ok(())
+            },
+            "soundDevice" => {
+                // Accept the sound device setting (DirectSound, MacroMix, QT3Mix, etc.)
+                // In WASM we use WebAudio, so this is stored but not acted upon
+                self.sound_device = value.string_value().unwrap_or_default();
+                Ok(())
+            },
+            "preferred3drenderer" | "milesfast" => {
+                // 3D renderer preference / sound settings — accept silently in WASM
                 Ok(())
             },
             _ => Err(ScriptError::new(format!("Cannot set movie prop {prop}")))

@@ -151,12 +151,17 @@ impl CastLib {
     }
 
     pub fn find_member_by_name(&self, name: &str) -> Option<&CastMember> {
+        // Director returns the lowest-numbered member when duplicates exist in the same cast.
+        // HashMap iteration order is non-deterministic, so we must track the best match.
+        let mut best: Option<&CastMember> = None;
         for member in self.members.values() {
             if member.name.eq_ignore_ascii_case(name) {
-                return Some(member);
+                if best.is_none() || member.number < best.unwrap().number {
+                    best = Some(member);
+                }
             }
         }
-        None
+        best
     }
 
     fn clear(&mut self) {
@@ -208,11 +213,28 @@ impl CastLib {
     pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
         match prop {
             "preloadMode" => Ok(Datum::Int(self.preload_mode as i32)),
-            "fileName" => Ok(Datum::String(self.file_name.clone())),
+            "fileName" => {
+                // Only return the fileName if the cast is actually loaded.
+                // External casts with preloadMode=0 ("When Needed") have file_name set
+                // in the movie structure but aren't loaded yet. Scripts like PreloadCast
+                // compare castLib.fileName to decide whether to download — returning the
+                // configured name for an unloaded cast would skip the download.
+                if self.is_external && self.state == CastLibState::None {
+                    Ok(Datum::String(String::new()))
+                } else {
+                    Ok(Datum::String(self.file_name.clone()))
+                }
+            }
             "number" => Ok(Datum::Int(self.number as i32)),
             "name" => Ok(Datum::String(self.name.clone())),
             "number of castMembers" | "number of members" => {
-                Ok(Datum::Int(self.members.len() as i32))
+                // Director semantics: the highest member slot number in use,
+                // not the population count. Casts routinely have gaps, and
+                // Lingo code like `repeat with i = 1 to the number of
+                // castMembers of castLib "X"` relies on this to reach every
+                // populated slot (including dynamically created members at
+                // high numbers) — otherwise cleanup loops silently skip them.
+                Ok(Datum::Int(self.max_member_id() as i32))
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castLib property {}",
@@ -288,6 +310,7 @@ impl CastLib {
             let player_mut = &mut PLAYER_OPT.as_mut().unwrap();
 
             player_mut.movie.cast_manager.clear_movie_script_cache();
+            player_mut.movie.cast_manager.invalidate_member_name_cache();
             player_mut.movie.cast_manager.load_fonts_into_manager(&mut player_mut.font_manager);
         };
     }

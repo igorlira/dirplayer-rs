@@ -6,7 +6,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   testDir: "./vm-rust/tests/browser",
-  timeout: 300_000,
+  timeout: 900_000,
   use: {
     headless: !!process.env.CI,
     baseURL: "http://127.0.0.1:9101",

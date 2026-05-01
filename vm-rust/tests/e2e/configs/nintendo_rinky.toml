@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_nintendo/rinky.dcr"
+
+[test]
+suite = "nintendo"

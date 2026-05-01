@@ -42,7 +42,42 @@ export function onClearTimeouts() {
     clearInterval(_timeoutHandles[name]);
   }
 }
+export function onClearAllTimeouts() {
+  for (const name of Object.keys(_timeoutHandles)) {
+    clearInterval(_timeoutHandles[name]);
+    delete _timeoutHandles[name];
+  }
+}
 
 export function onDatumSnapshot() {}
 export function onScriptInstanceSnapshot() {}
 export function onExternalEvent() {}
+
+// Lazy-load the Flash manager bundle the first time a Flash member
+// appears. If the bundle isn't present (e.g. ruffle/ missing) the
+// imports resolve to no-ops so tests without Flash still run.
+let _flashManager = null;
+let _flashManagerPromise = null;
+function flashManager() {
+  if (_flashManager) return Promise.resolve(_flashManager);
+  if (!_flashManagerPromise) {
+    _flashManagerPromise = import('./flashPlayerManager.bundle.js')
+      .then(mod => (_flashManager = mod))
+      .catch(err => {
+        console.warn('[flash] bundle not available:', err?.message || err);
+        return (_flashManager = { createFlashInstance: () => {}, destroyFlashInstance: () => {} });
+      });
+  }
+  return _flashManagerPromise;
+}
+export function onFlashMemberLoaded(castLib, castMember, swfData, width, height) {
+  const copy = new Uint8Array(swfData);
+  flashManager().then(m => {
+    m.createFlashInstance?.(castLib, castMember, copy, width, height)
+      ?.catch?.(e => console.error('createFlashInstance failed:', e));
+  });
+}
+export function onFlashMemberUnloaded(castLib, castMember) {
+  flashManager().then(m => m.destroyFlashInstance?.(castLib, castMember));
+}
+export function onStageSizeChanged() {}

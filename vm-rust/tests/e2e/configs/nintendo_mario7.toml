@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_nintendo/Mario-7.dcr"
+
+[test]
+suite = "nintendo"

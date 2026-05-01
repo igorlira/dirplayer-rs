@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_intel/3DText.dcr"
+
+[test]
+suite = "intel"

@@ -36,6 +36,7 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
     let (instance_ids, is_editable_field, sprite_id) = reserve_player_mut(|player| {
         if player.keyboard_focus_sprite != -1 {
             let sprite_id = player.keyboard_focus_sprite as i16;
+            player.sync_script_instance_list(sprite_id);
             let sprite = player.movie.score.get_sprite(sprite_id);
             if let Some(sprite) = sprite {
                 let instance_list = sprite.script_instance_list.clone();
@@ -95,6 +96,8 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
                                 let next_focus_sprite_id =
                                     get_next_focus_sprite_id(player, sprite_id);
                                 player.keyboard_focus_sprite = next_focus_sprite_id;
+                            } else if key == "Enter" {
+                                // Don't insert RETURN - let the keyDown handler deal with it
                             } else if key.len() == 1 {
                                 field_member.text.push_str(&key);
                             }

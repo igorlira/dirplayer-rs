@@ -1,9 +1,0 @@
-[movie]
-path = "dcr_woodpecker/habbo.dcr"
-
-[test]
-suite = "habbo_v7"
-
-[params]
-username = "${HABBO_V7_USERNAME:testuser}"
-password = "${HABBO_V7_PASSWORD:testpass}"

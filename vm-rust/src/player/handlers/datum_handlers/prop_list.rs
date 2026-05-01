@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use log::{warn, debug};
 
 use crate::PLAYER_OPT;
@@ -19,7 +21,7 @@ pub struct PropListUtils {}
 
 impl PropListUtils {
     fn find_index_to_add(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         item: (&DatumRef, &DatumRef),
         allocator: &DatumAllocator,
     ) -> Result<i32, ScriptError> {
@@ -41,13 +43,36 @@ impl PropListUtils {
     }
 
     fn get_key_index(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key: &Datum,
         allocator: &DatumAllocator,
     ) -> Result<i32, ScriptError> {
+        // For sorted prop lists with enough entries, use binary search
+        // (sorted lists are maintained by addProp/setaProp with find_index_to_add)
+        if prop_list.len() >= 8 {
+            // Try binary search: find insertion point, then check if the key matches
+            let mut low = 0i32;
+            let mut high = prop_list.len() as i32;
+            while low < high {
+                let mid = (low + high) / 2;
+                let mid_key = allocator.get_datum(&prop_list[mid as usize].0);
+                if datum_less_than(mid_key, key, allocator)? {
+                    low = mid + 1;
+                } else {
+                    high = mid;
+                }
+            }
+            // Binary search found insertion point `low`. Check if key at `low` matches.
+            if (low as usize) < prop_list.len() {
+                let found_key = allocator.get_datum(&prop_list[low as usize].0);
+                if Self::datum_equals_for_lookup(found_key, key, allocator)? {
+                    return Ok(low);
+                }
+            }
+            // Binary search may miss due to mixed key types — fall through to linear scan
+        }
         for (i, (k, _)) in prop_list.iter().enumerate() {
             let k_datum = allocator.get_datum(k);
-            // Lookup: exact match only
             if Self::datum_equals_for_lookup(k_datum, key, allocator)? {
                 return Ok(i as i32);
             }
@@ -78,7 +103,7 @@ impl PropListUtils {
 
     pub fn get_prop_or_built_in(
         player: &mut DirPlayer,
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key: &str,
     ) -> Result<DatumRef, ScriptError> {
         let key_index =
@@ -99,7 +124,7 @@ impl PropListUtils {
     }
 
     pub fn get_built_in_prop(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         prop: &str,
     ) -> Result<Datum, ScriptError> {
         match prop {
@@ -115,7 +140,7 @@ impl PropListUtils {
     }
 
     pub fn get_prop(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key_ref: &DatumRef,
         allocator: &DatumAllocator,
         is_required: bool,
@@ -171,13 +196,13 @@ impl PropListUtils {
         } else if is_sorted {
             prop_list.insert(index_to_add as usize, (key_ref.clone(), value_ref.clone()));
         } else {
-            prop_list.push((key_ref.clone(), value_ref.clone()));
+            prop_list.push_back((key_ref.clone(), value_ref.clone()));
         }
         Ok(())
     }
 
     pub fn get_at(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key_ref: &DatumRef,
         allocator: &DatumAllocator,
     ) -> Result<DatumRef, ScriptError> {
@@ -197,7 +222,7 @@ impl PropListUtils {
     }
 
     pub fn get_by_key(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key_ref: &DatumRef,
         allocator: &DatumAllocator,
     ) -> Result<DatumRef, ScriptError> {
@@ -206,7 +231,7 @@ impl PropListUtils {
     }
 
     pub fn get_by_concrete_key(
-        prop_list: &Vec<PropListPair>,
+        prop_list: &VecDeque<PropListPair>,
         key: &Datum,
         allocator: &DatumAllocator,
     ) -> Result<DatumRef, ScriptError> {
@@ -233,7 +258,7 @@ impl PropListUtils {
                 if index < prop_list.len() {
                     prop_list[index].1 = value_ref.clone();
                 } else if index <= prop_list.len() {
-                    prop_list.push((key_ref.clone(), value_ref.clone()));
+                    prop_list.push_back((key_ref.clone(), value_ref.clone()));
                 } else {
                     return Err(ScriptError::new(format!("Index out of range: {}", index)));
                 }
@@ -316,11 +341,14 @@ impl PropListDatumHandlers {
                                 )?;
                                 Ok(DatumRef::Void)
                             }
-                            Datum::Point(_) => {
+                            Datum::Point(..) => {
                                 // Point: index 1 = locH (x), index 2 = locV (y)
                                 if adjusted_index < 2 {
-                                    let point = player.get_datum_mut(&list_ref).to_point_mut()?;
-                                    let _ = std::mem::replace(&mut point[adjusted_index], value_ref.clone());
+                                    let new_val = player.get_datum(value_ref).clone();
+                                    let (component_val, is_float) = Datum::datum_to_inline_component(&new_val)?;
+                                    let (vals, flags) = player.get_datum_mut(&list_ref).to_point_inline_mut()?;
+                                    vals[adjusted_index] = component_val;
+                                    Datum::inline_set_float(flags, adjusted_index, is_float);
                                     Ok(DatumRef::Void)
                                 } else {
                                     Err(ScriptError::new(format!(
@@ -329,11 +357,14 @@ impl PropListDatumHandlers {
                                     )))
                                 }
                             }
-                            Datum::Rect(_) => {
+                            Datum::Rect(..) => {
                                 // Rect: index 1-4
                                 if adjusted_index < 4 {
-                                    let rect = player.get_datum_mut(&list_ref).to_rect_mut()?;
-                                    let _ = std::mem::replace(&mut rect[adjusted_index], value_ref.clone());
+                                    let new_val = player.get_datum(value_ref).clone();
+                                    let (component_val, is_float) = Datum::datum_to_inline_component(&new_val)?;
+                                    let (vals, flags) = player.get_datum_mut(&list_ref).to_rect_inline_mut()?;
+                                    vals[adjusted_index] = component_val;
+                                    Datum::inline_set_float(flags, adjusted_index, is_float);
                                     Ok(DatumRef::Void)
                                 } else {
                                     Err(ScriptError::new(format!(
@@ -371,9 +402,57 @@ impl PropListDatumHandlers {
             "getLast" => Self::get_last(datum, args),
             "count" => Self::count(datum, args),
             "getPropRef" => Self::get_prop_ref(datum, args),
-            _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for prop list datum"
-            ))),
+            "toString" => {
+                // Support toString() on PropLists that have a #toString property (e.g. Flash Date objects)
+                reserve_player_mut(|player| {
+                    let prop_list = player.get_datum(datum).to_map()?;
+                    for (key_ref, val_ref) in prop_list {
+                        let key = player.get_datum(&key_ref);
+                        if let Datum::Symbol(s) = key {
+                            if s == "toString" {
+                                return Ok(val_ref.clone());
+                            }
+                        }
+                    }
+                    // Fallback: return string representation
+                    let formatted = crate::player::datum_formatting::format_datum(datum, &player);
+                    Ok(player.alloc_datum(Datum::String(formatted)))
+                })
+            }
+            _ => {
+                // Flash object prop lists from callbacks: handle getter/setter methods
+                // by mapping to properties. e.g. getScreenName() -> #screenName,
+                // getTypeOf() -> #typeOf, setScreenName(v) -> #screenName = v
+                let name_lower = handler_name.to_lowercase();
+                if name_lower.starts_with("get") && handler_name.len() > 3 {
+                    let prop_name = &handler_name[3..];
+                    let prop_name_camel = {
+                        let mut chars = prop_name.chars();
+                        match chars.next() {
+                            Some(c) => format!("{}{}", c.to_lowercase(), chars.as_str()),
+                            None => String::new(),
+                        }
+                    };
+                    return reserve_player_mut(|player| {
+                        let prop_list = player.get_datum(datum).to_map()?.clone();
+                        for (key_ref, val_ref) in &prop_list {
+                            if let Datum::Symbol(s) = player.get_datum(key_ref) {
+                                if s == &prop_name_camel || s.eq_ignore_ascii_case(&prop_name_camel) {
+                                    return Ok(val_ref.clone());
+                                }
+                            }
+                        }
+                        Ok(player.alloc_datum(Datum::Void))
+                    });
+                }
+                if name_lower.starts_with("set") && handler_name.len() > 3 {
+                    // Silently ignore setters on prop lists
+                    return Ok(DatumRef::Void);
+                }
+                Err(ScriptError::new(format!(
+                    "No handler {handler_name} for prop list datum"
+                )))
+            }
         }
     }
 
@@ -413,14 +492,18 @@ impl PropListDatumHandlers {
                     ))
                 }
             };
-            let position = prop_list
+            // For prop lists, getOne returns the PROPERTY (key) for a given value.
+            let found_key = prop_list
                 .iter()
-                .position(|(_, v)| {
-                    datum_equals(player.get_datum(&v), find, &player.allocator).unwrap()
+                .find(|(_, v)| {
+                    datum_equals(player.get_datum(&v), find, &player.allocator).unwrap_or(false)
                 })
-                .map(|x| x as i32);
+                .map(|(k, _)| k.clone());
 
-            Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
+            match found_key {
+                Some(key_ref) => Ok(key_ref),
+                None => Ok(player.alloc_datum(Datum::Int(0))),
+            }
         })
     }
 
@@ -477,7 +560,7 @@ impl PropListDatumHandlers {
                     ))
                 }
             };
-            let last = prop_list.last().map(|(_, v)| v).unwrap();
+            let last = prop_list.back().map(|(_, v)| v).unwrap();
             Ok(last.clone())
         })
     }
@@ -617,7 +700,7 @@ impl PropListDatumHandlers {
                     (prop_name_ref.clone(), value_ref.clone()),
                 );
             } else {
-                prop_list.push((prop_name_ref.clone(), value_ref.clone()));
+                prop_list.push_back((prop_name_ref.clone(), value_ref.clone()));
             }
 
             Ok(DatumRef::Void)
@@ -759,7 +842,7 @@ impl PropListDatumHandlers {
     pub fn sort(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let sorted_prop_list = reserve_player_ref(|player| {
             let mut sorted_prop_list = player.get_datum(datum).to_map()?.clone();
-            sorted_prop_list.sort_by(|a, b| {
+            sorted_prop_list.make_contiguous().sort_by(|a, b| {
                 let (left_key_ref, _) = a;
                 let (right_key_ref, _) = b;
 
@@ -895,11 +978,11 @@ impl PropListDatumHandlers {
                             PropListUtils::get_by_key(&inner_pairs, index_ref, &player.allocator)?
                         }
                         // Point: index 1 = locH (x), index 2 = locV (y)
-                        Datum::Point(point_arr) => {
+                        Datum::Point(vals, flags) => {
                             let index = player.get_datum(index_ref).int_value()?;
                             let actual_index = if index >= 1 { (index - 1) as usize } else { 0 };
                             if actual_index < 2 {
-                                point_arr[actual_index].clone()
+                                player.alloc_datum(Datum::inline_component_to_datum(vals[actual_index], Datum::inline_is_float(*flags, actual_index)))
                             } else {
                                 return Err(ScriptError::new(format!(
                                     "Point index out of bounds: {}", index
@@ -907,11 +990,11 @@ impl PropListDatumHandlers {
                             }
                         }
                         // Rect: index 1-4
-                        Datum::Rect(rect_arr) => {
+                        Datum::Rect(vals, flags) => {
                             let index = player.get_datum(index_ref).int_value()?;
                             let actual_index = if index >= 1 { (index - 1) as usize } else { 0 };
                             if actual_index < 4 {
-                                rect_arr[actual_index].clone()
+                                player.alloc_datum(Datum::inline_component_to_datum(vals[actual_index], Datum::inline_is_float(*flags, actual_index)))
                             } else {
                                 return Err(ScriptError::new(format!(
                                     "Rect index out of bounds: {}", index

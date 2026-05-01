@@ -2,6 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use fxhash::FxHashMap;
 use itertools::Itertools;
+use log::warn;
 
 use crate::director::{
     chunks::{handler::HandlerDef, script::ScriptChunk},
@@ -28,12 +29,13 @@ use super::{
             date::DateDatumHandlers, math::MathDatumHandlers,
             vector::VectorDatumHandlers, xml::XmlDatumHandlers,
             float::FloatDatumHandlers,
+            cast_member::shockwave3d::Shockwave3dMemberHandlers,
         },
         types::TypeUtils,
     },
     reserve_player_mut, reserve_player_ref,
     scope::Scope,
-    score::{sprite_get_prop, sprite_set_prop_from_lingo},
+    score::{sprite_get_prop, sprite_set_prop},
     script_ref::ScriptInstanceRef,
     stage::{get_stage_prop, set_stage_prop},
     DatumRef, DirPlayer, ScriptError,
@@ -163,8 +165,8 @@ pub fn script_get_prop_opt(
         }
     }
 
-    // Fall back to built-in "class" property if not found in instance or ancestors
-    if prop_name == "class" {
+    // Fall back to built-in properties if not found in instance or ancestors
+    if prop_name == "class" || prop_name == "script" {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
     }
@@ -227,18 +229,58 @@ pub fn script_get_prop(
 ) -> Result<DatumRef, ScriptError> {
     if let Some(prop) = script_get_prop_opt(player, script_instance_ref, prop_name) {
         Ok(prop)
+    } else if prop_name.eq_ignore_ascii_case("count") {
+        // In Director, .count on a non-list object returns 1
+        Ok(player.alloc_datum(Datum::Int(1)))
+    } else if prop_name.eq_ignore_ascii_case("spriteNum") {
+        // spriteNum is a built-in property for behaviors — if not explicitly set,
+        // look up which sprite channel this instance belongs to.
+        // Resolve sprite ownership from the live/cached scriptInstanceList.
+        let stage_channel_snapshots: Vec<(i16, i32, Vec<ScriptInstanceRef>)> = player
+            .movie
+            .score
+            .channels
+            .iter()
+            .map(|channel| {
+                (
+                    channel.sprite.number as i16,
+                    channel.sprite.number as i32,
+                    channel.sprite.script_instance_list.clone(),
+                )
+            })
+            .collect();
+        for (sprite_id, channel_number, fallback) in stage_channel_snapshots {
+            let instance_ids = player.get_sprite_script_instance_ids(
+                sprite_id,
+                fallback.as_slice(),
+            );
+            if instance_ids.iter().any(|si| si.id() == script_instance_ref.id()) {
+                let datum_ref = player.alloc_datum(Datum::Int(channel_number));
+                return Ok(datum_ref);
+            }
+        }
+        // Also check the cache — behaviors may be in cache but not in script_instance_list Vec
+        Ok(player.alloc_datum(Datum::Int(0)))
     } else {
+        // Director silently returns VOID when reading a property that doesn't
+        // exist on an instance (or anywhere in its ancestor chain) — many
+        // Shockwave movies rely on this, e.g. `repeat with x in me.oItem.someList`
+        // where `someList` is only populated in some code paths. Raising a
+        // ScriptError here breaks those movies even though they ran fine in
+        // original Director. Log once per miss so real typos are still noticeable
+        // in the console.
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         let valid_props = script_instance.properties.keys().collect_vec();
-        Err(ScriptError::new(format!(
-            "Cannot get property {} found on script instance {}. Valid properties are: {}",
+        warn!(
+            "script_get_prop: undefined property '{}' on {} → returning VOID. Valid properties: {}",
             prop_name,
             format_concrete_datum(
                 &Datum::ScriptInstanceRef(script_instance_ref.clone()),
                 player
             ),
             valid_props.iter().join(", ")
-        )))
+        );
+        Ok(DatumRef::Void)
     }
 }
 
@@ -418,7 +460,7 @@ pub async fn player_set_obj_prop(
             script_set_prop(player, &script_instance_ref, &prop_name, value_ref, false)
         }),
         Datum::SpriteRef(sprite_id) => {
-            sprite_set_prop_from_lingo(sprite_id, prop_name, value_clone)
+            sprite_set_prop(sprite_id, prop_name, value_clone)
         }
         Datum::CastMember(member_ref) => {
             // TODO should we really pass a clone of the value here?
@@ -458,6 +500,9 @@ pub async fn player_set_obj_prop(
         Datum::PlayerRef => {
             reserve_player_mut(|player| player.set_player_prop(prop_name, value_ref))
         }
+        Datum::MouseRef => {
+            reserve_player_mut(|player| player.set_mouse_prop(prop_name, value_ref))
+        }
         Datum::MovieRef => reserve_player_mut(|player| {
             player.set_movie_prop(prop_name, player.get_datum(value_ref).clone())
         }),
@@ -479,6 +524,24 @@ pub async fn player_set_obj_prop(
         Datum::SoundChannel(_) => reserve_player_mut(|player| {
             SoundChannelDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
+        Datum::FlashObjectRef(_) => {
+            let value_datum = reserve_player_ref(|player| {
+                player.get_datum(value_ref).clone()
+            });
+            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::set_prop(obj_ref, &prop_name, &value_datum)
+        }
+        Datum::Shockwave3dObjectRef(_) => {
+            let value_datum = reserve_player_ref(|player| {
+                player.get_datum(value_ref).clone()
+            });
+            crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::set_prop(obj_ref, &prop_name, &value_datum)
+        }
+        Datum::Transform3d(_) => reserve_player_mut(|player| {
+            crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::set_prop(player, obj_ref, &prop_name, value_ref)
+        }),
+        Datum::HavokObjectRef(_) => {
+            crate::player::handlers::datum_handlers::havok_object::HavokObjectDatumHandlers::set_prop(obj_ref, &prop_name, value_ref.clone())
+        }
         Datum::Void | Datum::Null => {
             // In Director, setting a property on void/nothing is a no-op (silently ignored)
             // This commonly happens when scripts reference sprites/objects that have been erased
@@ -581,10 +644,115 @@ pub fn get_obj_prop(
         Datum::String(s) => {
             Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(&s, &prop_name)?))
         }
-        Datum::StringChunk(..) => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
-            &obj_clone.string_value()?,
-            &prop_name,
-        )?)),
+        Datum::StringChunk(ref source, ref chunk_expr, ref _str_val) => {
+            match prop_name {
+                "ref" => {
+                    // .ref returns the chunk reference itself (a StringChunk datum)
+                    Ok(obj_ref.clone())
+                }
+                "range" => {
+                    // .range returns point(startCharPos, endCharPos) — 1-based char positions in the source
+                    use crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils;
+                    use crate::director::lingo::datum::StringChunkType;
+
+                    let source_str = match source {
+                        crate::director::lingo::datum::StringChunkSource::Datum(d) => player.get_datum(d).string_value()?,
+                        crate::director::lingo::datum::StringChunkSource::Member(m) => {
+                            let member = player.movie.cast_manager.find_member_by_ref(m)
+                                .ok_or_else(|| ScriptError::new("Member not found for string chunk range".to_string()))?;
+                            if let Some(field) = member.member_type.as_field() {
+                                field.text.clone()
+                            } else if let Some(text) = member.member_type.as_text() {
+                                text.text.clone()
+                            } else {
+                                return Err(ScriptError::new("Member is not a text/field type".to_string()));
+                            }
+                        }
+                    };
+
+                    let chunk_list = StringChunkUtils::resolve_chunk_list(
+                        &source_str,
+                        chunk_expr.chunk_type.clone(),
+                        chunk_expr.item_delimiter,
+                    )?;
+
+                    let (start_idx, end_idx_exclusive) = StringChunkUtils::vm_range_to_host(
+                        (chunk_expr.start, chunk_expr.end),
+                        chunk_list.len(),
+                    );
+                    // vm_range_to_host returns exclusive end; convert to inclusive for the loop below
+                    let end_idx = if end_idx_exclusive > 0 { end_idx_exclusive - 1 } else { 0 };
+
+                    // Calculate character positions based on chunk type
+                    let (char_start, char_end) = match chunk_expr.chunk_type {
+                        StringChunkType::Char => {
+                            (start_idx as i32 + 1, end_idx_exclusive as i32)
+                        }
+                        _ => {
+                            // For line/word/item, find character positions by summing chunk lengths + delimiters
+                            let mut pos = 0usize;
+                            let mut result_start = 0usize;
+                            let delimiter_len = match chunk_expr.chunk_type {
+                                StringChunkType::Line => {
+                                    // Detect \r\n vs \r vs \n
+                                    if source_str.contains("\r\n") { 2 } else { 1 }
+                                }
+                                StringChunkType::Item => 1, // delimiter char
+                                StringChunkType::Word => 1, // whitespace
+                                _ => 1,
+                            };
+                            for (i, chunk) in chunk_list.iter().enumerate() {
+                                if i == start_idx {
+                                    result_start = pos;
+                                }
+                                pos += chunk.chars().count();
+                                if i == end_idx {
+                                    break;
+                                }
+                                if i + 1 < chunk_list.len() {
+                                    pos += delimiter_len;
+                                }
+                            }
+                            let result_end = pos;
+                            (result_start as i32 + 1, result_end as i32)
+                        }
+                    };
+
+                    Ok(player.alloc_datum(Datum::Point([char_start as f64, char_end as f64], 0)))
+                }
+                "charSpacing" => {
+                    // Read charSpacing from the source member's styled spans, walking the source chain
+                    if let Datum::StringChunk(ref source, _, _) = obj_clone {
+                        let mut current_source = source.clone();
+                        loop {
+                            match current_source {
+                                crate::director::lingo::datum::StringChunkSource::Member(ref member_ref) => {
+                                    if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                                        if let Some(text) = member.member_type.as_text() {
+                                            return Ok(player.alloc_datum(Datum::Int(text.char_spacing)));
+                                        }
+                                    }
+                                    break;
+                                }
+                                crate::director::lingo::datum::StringChunkSource::Datum(ref d) => {
+                                    let inner = player.get_datum(d).clone();
+                                    if let Datum::StringChunk(inner_source, _, _) = inner {
+                                        current_source = inner_source;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Int(0)))
+                }
+                _ => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
+                    &obj_clone.string_value()?,
+                    &prop_name,
+                )?)),
+            }
+        }
         Datum::TimeoutRef(_) | Datum::TimeoutInstance { .. } | Datum::TimeoutFactory
              => Ok(TimeoutDatumHandlers::get_prop(player, obj_ref, &prop_name)?),
         Datum::Symbol(_) => SymbolDatumHandlers::get_prop(player, obj_ref, &prop_name),
@@ -593,6 +761,7 @@ pub fn get_obj_prop(
         Datum::Float(_) => FloatDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::ColorRef(_) => ColorDatumHandlers::get_prop(player, obj_ref, &prop_name),
         Datum::PlayerRef => player.get_player_prop(prop_name),
+        Datum::MouseRef => player.get_mouse_prop(&prop_name),
         Datum::XmlRef(_) => XmlDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::DateRef(_) => DateDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::MathRef(_) => MathDatumHandlers::get_prop(player, obj_ref, prop_name),
@@ -603,6 +772,19 @@ pub fn get_obj_prop(
             player, obj_ref, &prop_name,
         )?)),
         Datum::MovieRef => player.get_movie_prop(prop_name),
+        Datum::FlashObjectRef(_) => {
+            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+        }
+        Datum::Shockwave3dObjectRef(_) => {
+            crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+        }
+        Datum::Transform3d(_) => {
+            let result = crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::get_prop(player, obj_ref, &prop_name)?;
+            Ok(player.alloc_datum(result))
+        }
+        Datum::HavokObjectRef(_) => {
+            crate::player::handlers::datum_handlers::havok_object::HavokObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+        }
         _ => {
             if prop_name == "ilk" {
                 let ilk = TypeUtils::get_datum_ilk(&obj_clone)?;

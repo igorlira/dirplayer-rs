@@ -921,7 +921,18 @@ impl SpriteBlendKeyframes {
             let mut sorted_frames: Vec<_> = dedup.into_iter().map(|(_, v)| v.clone()).collect();
             sorted_frames.sort_by_key(|(frame_num, _, _)| *frame_num);
 
-            // 3️⃣ Check if blend ACTUALLY animates in this interval
+            // 3️⃣ Only treat as a real tween if Director authored keyframes
+            // for this span. The FrameIntervalPrimary's trailing u32 list
+            // (`key_frames`) stores explicit keyframe frame indices — but
+            // Director appends a trailing `0` to every span as padding, so
+            // an "authored" tween needs at least one non-zero keyframe.
+            // Director's `tween_info.flags` baseline is identical across
+            // every span so it can't be used on its own as a gate.
+            if !interval.key_frames.iter().any(|&f| f != 0) {
+                continue;
+            }
+
+            // 4️⃣ Check if blend ACTUALLY animates in this interval
             if !has_real_animation::<Blend>(&sorted_frames) {
                 continue;
             }
@@ -1050,7 +1061,18 @@ impl SpriteRotationKeyframes {
             let mut sorted_frames: Vec<_> = dedup.into_iter().map(|(_, v)| v.clone()).collect();
             sorted_frames.sort_by_key(|(frame_num, _, _)| *frame_num);
 
-            // 3️⃣ Check if rotation ACTUALLY animates in this interval
+            // 3️⃣ Only treat as a real tween if Director authored keyframes
+            // for this span. The FrameIntervalPrimary's trailing u32 list
+            // (`key_frames`) stores explicit keyframe frame indices — but
+            // Director appends a trailing `0` to every span as padding, so
+            // an "authored" tween needs at least one non-zero keyframe.
+            // Director's `tween_info.flags` baseline is identical across
+            // every span so it can't be used on its own as a gate.
+            if !interval.key_frames.iter().any(|&f| f != 0) {
+                continue;
+            }
+
+            // 4️⃣ Check if rotation ACTUALLY animates in this interval
             if !has_real_animation::<Rotation>(&sorted_frames) {
                 continue;
             }
@@ -1187,7 +1209,18 @@ impl SpriteSkewKeyframes {
             let mut sorted_frames: Vec<_> = dedup.into_iter().map(|(_, v)| v.clone()).collect();
             sorted_frames.sort_by_key(|(frame_num, _, _)| *frame_num);
 
-            // 3️⃣ Check if skew ACTUALLY animates in this interval
+            // 3️⃣ Only treat as a real tween if Director authored keyframes
+            // for this span. The FrameIntervalPrimary's trailing u32 list
+            // (`key_frames`) stores explicit keyframe frame indices — but
+            // Director appends a trailing `0` to every span as padding, so
+            // an "authored" tween needs at least one non-zero keyframe.
+            // Director's `tween_info.flags` baseline is identical across
+            // every span so it can't be used on its own as a gate.
+            if !interval.key_frames.iter().any(|&f| f != 0) {
+                continue;
+            }
+
+            // 4️⃣ Check if skew ACTUALLY animates in this interval
             if !has_real_animation::<Skew>(&sorted_frames) {
                 continue;
             }
@@ -1320,12 +1353,20 @@ impl SpritePathKeyframes {
             let mut sorted_frames: Vec<_> = dedup.into_iter().map(|(_, v)| v.clone()).collect();
             sorted_frames.sort_by_key(|(frame_num, _, _)| *frame_num);
 
-            // 3️⃣ Check if position ACTUALLY animates in this interval
+            // 3️⃣ Only treat as a real path tween if the span has at least one
+            // non-zero authored keyframe index in its trailing u32 list.
+            // See size-tween gate for details on why the single `0` padding
+            // u32 doesn't count as an authored keyframe.
+            if !interval.key_frames.iter().any(|&f| f != 0) {
+                continue;
+            }
+
+            // 4️⃣ Check if position ACTUALLY animates in this interval
             if !has_real_animation::<Position>(&sorted_frames) {
                 continue;
             }
 
-            // 4️⃣ Collect effective keyframes for this interval
+            // 5️⃣ Collect effective keyframes for this interval
             let property_frames = collect_property_keyframes::<Position>(&sorted_frames);
             // TODO: research if this is correct when, yes change also
             // other tweening properties to 1-based Director frame
@@ -1461,12 +1502,20 @@ impl SpriteSizeKeyframes {
             let mut sorted_frames: Vec<_> = dedup.into_iter().map(|(_, v)| v.clone()).collect();
             sorted_frames.sort_by_key(|(frame_num, _, _)| *frame_num);
 
-            // 3️⃣ Check if size ACTUALLY animates in this interval
+            // 3️⃣ Only treat as a real tween if the span has at least one
+            // non-zero authored keyframe index in its trailing u32 list.
+            // Director appends a single `0` u32 as padding to every span
+            // regardless of whether a tween was authored.
+            if !interval.key_frames.iter().any(|&f| f != 0) {
+                continue;
+            }
+
+            // 4️⃣ Check if size ACTUALLY animates in this interval
             if !has_real_animation::<Size>(&sorted_frames) {
                 continue;
             }
 
-            // 4️⃣ Collect effective keyframes for this interval
+            // 5️⃣ Collect effective keyframes for this interval
             let property_frames = collect_property_keyframes::<Size>(&sorted_frames);
 
             for (frame, Size(width, height)) in property_frames {
@@ -1599,7 +1648,18 @@ impl SpriteForeColorKeyframes {
             let mut sorted_frames: Vec<_> = dedup.into_iter().map(|(_, v)| v.clone()).collect();
             sorted_frames.sort_by_key(|(frame_num, _, _)| *frame_num);
 
-            // 3️⃣ Check if fore color ACTUALLY animates in this interval
+            // 3️⃣ Only treat as a real tween if Director authored keyframes
+            // for this span. The FrameIntervalPrimary's trailing u32 list
+            // (`key_frames`) stores explicit keyframe frame indices — but
+            // Director appends a trailing `0` to every span as padding, so
+            // an "authored" tween needs at least one non-zero keyframe.
+            // Director's `tween_info.flags` baseline is identical across
+            // every span so it can't be used on its own as a gate.
+            if !interval.key_frames.iter().any(|&f| f != 0) {
+                continue;
+            }
+
+            // 4️⃣ Check if fore color ACTUALLY animates in this interval
             if !has_real_animation::<ForeColor>(&sorted_frames) {
                 continue;
             }
@@ -1723,7 +1783,18 @@ impl SpriteBackColorKeyframes {
             let mut sorted_frames: Vec<_> = dedup.into_iter().map(|(_, v)| v.clone()).collect();
             sorted_frames.sort_by_key(|(frame_num, _, _)| *frame_num);
 
-            // 3️⃣ Check if back color ACTUALLY animates in this interval
+            // 3️⃣ Only treat as a real tween if Director authored keyframes
+            // for this span. The FrameIntervalPrimary's trailing u32 list
+            // (`key_frames`) stores explicit keyframe frame indices — but
+            // Director appends a trailing `0` to every span as padding, so
+            // an "authored" tween needs at least one non-zero keyframe.
+            // Director's `tween_info.flags` baseline is identical across
+            // every span so it can't be used on its own as a gate.
+            if !interval.key_frames.iter().any(|&f| f != 0) {
+                continue;
+            }
+
+            // 4️⃣ Check if back color ACTUALLY animates in this interval
             if !has_real_animation::<BackColor>(&sorted_frames) {
                 continue;
             }
@@ -2105,6 +2176,7 @@ pub fn build_all_keyframes_cache(
         let channel_num = index_to_channel_number(primary.channel_index as u16);
         intervals_by_channel.entry(channel_num).or_insert_with(Vec::new).push(primary.clone());
     }
+
     
     // Build keyframes with proper flag checking
     let blend_cache = build_blend_keyframes_cache(frame_channel_data, &intervals_by_channel);

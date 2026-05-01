@@ -9,6 +9,7 @@ import { Provider as StoreProvider } from 'react-redux';
 export interface PolyfillConfig {
   wasmUrl: string;
   systemFontUrl: string;
+  requireClickToPlay?: boolean;
 }
 
 function compareSemver(a: string, b: string): number {
@@ -70,6 +71,7 @@ function renderPlayer(
             height={height}
             src={src}
             externalParams={externalParams}
+            requireClickToPlay={config.requireClickToPlay}
           />
         </VMProvider>
       </StoreProvider>

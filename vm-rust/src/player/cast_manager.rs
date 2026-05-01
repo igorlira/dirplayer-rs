@@ -5,7 +5,6 @@ use std::{
 };
 
 use fxhash::FxHashMap;
-use itertools::Itertools;
 use log::{debug, warn};
 use url::Url;
 
@@ -34,10 +33,15 @@ use super::{
 pub struct CastManager {
     pub casts: Vec<CastLib>,
     pub movie_script_cache: RefCell<Option<Vec<Rc<Script>>>>,
+    pub member_name_cache: RefCell<Option<FxHashMap<String, CastMemberRef>>>,
     pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
     /// Version counter incremented when palette cache is invalidated.
     /// Used by renderers to know when to clear texture caches.
     pub palette_version: RefCell<u32>,
+    /// Cast-member refs whose textures must be evicted from renderer caches
+    /// before the next frame. Populated when a member is erased or its slot
+    /// reassigned; drained by the renderer at frame start.
+    pub pending_texture_invalidations: RefCell<Vec<CastMemberRef>>,
 }
 
 const IS_WEB: bool = false;
@@ -53,8 +57,10 @@ impl CastManager {
         CastManager {
             casts: Vec::new(),
             movie_script_cache: RefCell::new(None),
+            member_name_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
+            pending_texture_invalidations: RefCell::new(Vec::new()),
         }
     }
 
@@ -73,10 +79,21 @@ impl CastManager {
         for index in 0..dir.cast_entries.len() {
             let cast_entry = &dir.cast_entries[index];
             let cast_def = dir.casts.iter().find(|cast| cast.id == cast_entry.id);
+            debug!(
+                "MCsL entry {}: name='{}' file_path='{}' id={} min={} max={} preload={} has_cast_def={}",
+                index, cast_entry.name, cast_entry.file_path, cast_entry.id,
+                cast_entry.min_member, cast_entry.max_member, cast_entry.preload_settings,
+                cast_def.is_some()
+            );
+
+            // A cast is external if it has a file_path in the MCsL entry,
+            // regardless of whether we found a CAS* chunk (which may come
+            // from a fallback lookup in the same .cct file).
+            let is_external = !cast_entry.file_path.is_empty();
 
             let mut cast = CastLib {
                 name: cast_entry.name.to_owned(),
-                file_name: if cast_def.is_some() {
+                file_name: if !is_external {
                     // Embedded casts: fileName should reference the parent movie (like real Shockwave player).
                     // This ensures Lingo scripts checking fileName.char[end-2..end] = "dcr" work correctly.
                     match &net_manager.base_path {
@@ -89,7 +106,7 @@ impl CastManager {
                         .map_or("".to_string(), |it| it.to_string())
                 },
                 number: (index + 1) as u32,
-                is_external: cast_def.is_none(),
+                is_external,
                 state: if cast_def.is_some() {
                     CastLibState::Loaded
                 } else {
@@ -110,6 +127,7 @@ impl CastManager {
             casts.push(cast);
         }
         self.casts = casts;
+        self.invalidate_member_name_cache();
         self.preload_casts(
             CastPreloadReason::MovieLoaded,
             net_manager,
@@ -205,30 +223,24 @@ impl CastManager {
         for cast in self.casts.iter_mut() {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
                 debug!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode);
-                // match cast.preload_mode {
-                //     0 => {
-                //         // Preload: When Needed
-                //     }
-                //     1 => {
-                //         // Preload: After frame one
-                //         if reason == CastPreloadReason::AfterFrameOne {
-                //             cast.preload(net_manager, bitmap_manager, dir_cache).await;
-                //         }
-                //     }
-                //     2 => {
-                //         // Preload: Before frame one
-                //         if reason == CastPreloadReason::MovieLoaded {
-                //             cast.preload(net_manager, bitmap_manager, dir_cache).await;
-                //         }
-                //     }
-                //     _ => {}
-                // }
-
-                // It seems like when the runMode is "Plugin" all casts getting directly download
-                // check with mobiles disco in shockwave player
-                cast.preload(net_manager, bitmap_manager, dir_cache).await;
+                match cast.preload_mode {
+                    0 | 1 => {
+                        // Preload: When Needed / After frame one
+                        // Load on both MovieLoaded and AfterFrameOne to ensure casts
+                        // are available even when scripts jump past frame 1 immediately
+                        cast.preload(net_manager, bitmap_manager, dir_cache).await;
+                    }
+                    2 => {
+                        // Preload: Before frame one
+                        if reason == CastPreloadReason::MovieLoaded {
+                            cast.preload(net_manager, bitmap_manager, dir_cache).await;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
+        self.invalidate_member_name_cache();
     }
 
     pub fn get_cast(&self, number: u32) -> Result<&CastLib, ScriptError> {
@@ -253,6 +265,10 @@ impl CastManager {
         }
     }
 
+    pub fn casts_len(&self) -> usize {
+        self.casts.len()
+    }
+
     pub fn get_cast_by_name(&self, name: &str) -> Option<&CastLib> {
         let target = name.to_lowercase();
         self.casts.iter().find(|c| c.name.to_lowercase() == target)
@@ -270,6 +286,24 @@ impl CastManager {
                         cast_member: member.number as i32,
                     });
                 }
+            }
+        }
+        None
+    }
+
+    /// Like `find_member_by_ref`, but when `cast_lib=0` (shorthand for
+    /// "any cast"), search from the highest cast lib downward so external
+    /// casts (loaded last) win over internal casts. Used by filmloop inner
+    /// sprite rendering, where the score stores `cast_lib=0` for members
+    /// that should resolve against the filmloop's source external cast
+    /// rather than shadowed duplicates in cast 1.
+    pub fn find_filmloop_inner_member(&self, member_ref: &CastMemberRef) -> Option<&CastMember> {
+        if member_ref.cast_lib > 0 {
+            return self.find_member_by_ref(member_ref);
+        }
+        for cast in self.casts.iter().rev() {
+            if let Some(member) = cast.find_member_by_number(member_ref.cast_member as u32) {
+                return Some(member);
             }
         }
         None
@@ -305,15 +339,37 @@ impl CastManager {
     }
 
     pub fn find_member_ref_by_name(&self, name: &str) -> Option<CastMemberRef> {
-        for cast in &self.casts {
-            if let Some(member) = cast.find_member_by_name(name) {
-                return Some(CastMemberRef {
-                    cast_lib: cast.number as i32,
-                    cast_member: member.number as i32,
-                });
+        if self.member_name_cache.borrow().is_none() {
+            let mut cache = FxHashMap::default();
+            for cast in &self.casts {
+                let mut best_matches: FxHashMap<String, CastMemberRef> = FxHashMap::default();
+                for member in cast.members.values() {
+                    let key = member.name.to_ascii_lowercase();
+                    let member_ref = CastMemberRef {
+                        cast_lib: cast.number as i32,
+                        cast_member: member.number as i32,
+                    };
+
+                    match best_matches.get(&key) {
+                        Some(existing) if existing.cast_member <= member_ref.cast_member => {}
+                        _ => {
+                            best_matches.insert(key, member_ref);
+                        }
+                    }
+                }
+
+                for (key, member_ref) in best_matches {
+                    cache.entry(key).or_insert(member_ref);
+                }
             }
+            self.member_name_cache.replace(Some(cache));
         }
-        None
+
+        let lookup_name = name.to_ascii_lowercase();
+        self.member_name_cache
+            .borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(&lookup_name).cloned())
     }
 
     pub fn find_member_ref_by_identifiers(
@@ -391,10 +447,26 @@ impl CastManager {
                 .find_member_ref_by_number(*num as u32)
                 .map(|member_ref| Ok(Some(member_ref))),
             (Datum::CastMember(member_ref), _) => Some(Ok(Some(member_ref.clone()))),
-            _ => Some(Err(ScriptError::new(format!(
-                "Member number or name type invalid: {}",
-                member_name_or_num.type_str()
-            )))),
+            // Some expressions (e.g. "the number of castMembers") may produce
+            // a list or other type. Try to coerce to int for member lookup.
+            _ => {
+                if let Ok(num) = member_name_or_num.int_value() {
+                    if let Some(cast_lib) = cast_lib {
+                        Some(Ok(Some(CastMemberRef {
+                            cast_lib: cast_lib.number as i32,
+                            cast_member: num as i32,
+                        })))
+                    } else {
+                        self.find_member_ref_by_number(num as u32)
+                            .map(|member_ref| Ok(Some(member_ref)))
+                    }
+                } else {
+                    Some(Err(ScriptError::new(format!(
+                        "Member number or name type invalid: {}",
+                        member_name_or_num.type_str()
+                    ))))
+                }
+            },
         };
 
         match member_ref {
@@ -431,6 +503,24 @@ impl CastManager {
             member_ref.cast_member as u32,
         );
         self.find_member_by_slot_number(slot_number)
+    }
+
+    pub fn find_member_by_ref_mut(&mut self, member_ref: &CastMemberRef) -> Option<&mut CastMember> {
+        if member_ref.cast_lib > 0 {
+            let cast = self.casts.get_mut(member_ref.cast_lib as usize - 1)?;
+            return cast.find_mut_member_by_number(member_ref.cast_member as u32);
+        }
+        let slot_number = CastMemberRefHandlers::get_cast_slot_number(
+            member_ref.cast_lib as u32,
+            member_ref.cast_member as u32,
+        );
+        let member_ref2 = CastMemberRefHandlers::member_ref_from_slot_number(slot_number);
+        if member_ref2.cast_lib > 0 {
+            let cast = self.casts.get_mut(member_ref2.cast_lib as usize - 1)?;
+            cast.find_mut_member_by_number(member_ref2.cast_member as u32)
+        } else {
+            None
+        }
     }
 
     pub fn find_member_by_slot_number(&self, slot_number: u32) -> Option<&CastMember> {
@@ -528,12 +618,35 @@ impl CastManager {
         }
         let cast = self.get_cast_mut(member_ref.cast_lib as u32);
         cast.remove_member(member_ref.cast_member as u32);
+        self.invalidate_member_name_cache();
+        self.queue_texture_invalidation(member_ref.clone());
         Ok(())
+    }
+
+    /// Queue a cast-member ref to have its cached textures evicted from
+    /// renderer caches before the next frame. Necessary whenever a member is
+    /// erased — without it, `first_free_member_id` can hand the same slot to a
+    /// new `new(#bitmap, castLib)` call and the renderer keeps serving the
+    /// previous member's texture (keyed by `(castLib, memberNumber)`).
+    pub fn queue_texture_invalidation(&self, member_ref: CastMemberRef) {
+        self.pending_texture_invalidations
+            .borrow_mut()
+            .push(member_ref);
+    }
+
+    /// Called by the renderer at frame start to collect and clear the list of
+    /// members whose cached textures need to be evicted this frame.
+    pub fn drain_texture_invalidations(&self) -> Vec<CastMemberRef> {
+        std::mem::take(&mut *self.pending_texture_invalidations.borrow_mut())
     }
 
     pub fn clear_movie_script_cache(&mut self) {
         let mut cache = self.movie_script_cache.borrow_mut();
         *cache = None;
+    }
+
+    pub fn invalidate_member_name_cache(&self) {
+        self.member_name_cache.replace(None);
     }
 
     pub fn get_movie_scripts(&self) -> Ref<Option<Vec<Rc<Script>>>> {
@@ -542,6 +655,8 @@ impl CastManager {
             for cast in &self.casts {
                 for script_rc in cast.scripts.values() {
                     if let ScriptType::Movie = script_rc.script_type {
+                        let handler_names: Vec<String> = script_rc.handlers.iter()
+                            .map(|(name, _)| name.to_string()).collect();
                         result.push(script_rc.clone());
                     }
                 }

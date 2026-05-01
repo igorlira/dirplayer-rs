@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_dirplayer_test_movies/D8_5_00001_shapes_1.dcr"
+
+[test]
+suite = "dirplayer_test_movies"

@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_nintendo/game_donkeykonk.dcr"
+
+[test]
+suite = "nintendo"

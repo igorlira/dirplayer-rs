@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use log::error;
 use pest::{
     iterators::{Pair, Pairs},
@@ -127,10 +128,10 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             eval_lingo_pair_static(inner)
         },
         Rule::multi_list => {
-            let mut result_vec = vec![];
+            let mut result_vec = VecDeque::new();
             for inner_pair in pair.into_inner() {
                 let result = eval_lingo_pair_static(inner_pair)?;
-                result_vec.push(result);
+                result_vec.push_back(result);
             }
             reserve_player_mut(|player| {
                 Ok(player.alloc_datum(Datum::List(DatumType::List, result_vec, false)))
@@ -148,7 +149,7 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             eval_lingo_pair_static(inner)
         },
         Rule::multi_prop_list => {
-            let mut result_vec = vec![];
+            let mut result_vec = VecDeque::new();
             for inner_pair in pair.into_inner() {
                 let mut pair_inner = inner_pair.into_inner();
                 let key = eval_lingo_pair_static(pair_inner.next()
@@ -156,12 +157,12 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 let value = eval_lingo_pair_static(pair_inner.next()
                     .ok_or_else(|| ScriptError::new("Expected prop list value".to_string()))?)?;
 
-                result_vec.push((key, value));
+                result_vec.push_back((key, value));
             }
             reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(result_vec, false))))
         }
         Rule::empty_prop_list => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(vec![], false))))
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false))))
         }
         Rule::number_int => reserve_player_mut(|player| {
             let val = pair.as_str().parse::<i32>()
@@ -175,18 +176,17 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         }),
         Rule::rect => {
             let mut inner = pair.into_inner();
+            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect x".to_string()))?)?;
+            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect y".to_string()))?)?;
+            let w_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect w".to_string()))?)?;
+            let h_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect h".to_string()))?)?;
             reserve_player_mut(|player| {
-                let x = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected rect x".to_string()))?)?;
-                let y = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected rect y".to_string()))?)?;
-                let w = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected rect width".to_string()))?)?;
-                let h = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected rect height".to_string()))?)?;
-                
-                let x_ref = player.alloc_datum(if x.fract() == 0.0 { Datum::Int(x as i32) } else { Datum::Float(x) });
-                let y_ref = player.alloc_datum(if y.fract() == 0.0 { Datum::Int(y as i32) } else { Datum::Float(y) });
-                let w_ref = player.alloc_datum(if w.fract() == 0.0 { Datum::Int(w as i32) } else { Datum::Float(w) });
-                let h_ref = player.alloc_datum(if h.fract() == 0.0 { Datum::Int(h as i32) } else { Datum::Float(h) });
-                
-                Ok(player.alloc_datum(Datum::Rect([x_ref, y_ref, w_ref, h_ref])))
+                let x_datum = player.get_datum(&x_ref);
+                let y_datum = player.get_datum(&y_ref);
+                let w_datum = player.get_datum(&w_ref);
+                let h_datum = player.get_datum(&h_ref);
+                let rect = Datum::build_rect(x_datum, y_datum, w_datum, h_datum)?;
+                Ok(player.alloc_datum(rect))
             })
         }
         Rule::rgb_num_color => {
@@ -242,18 +242,17 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         }),
         Rule::point => {
             let mut inner = pair.into_inner();
+            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point x".to_string()))?)?;
+            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point y".to_string()))?)?;
             reserve_player_mut(|player| {
-                let x = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected point x".to_string()))?)?;
-                let y = parse_number_value(inner.next().ok_or_else(|| ScriptError::new("Expected point y".to_string()))?)?;
-                
-                let x_ref = player.alloc_datum(if x.fract() == 0.0 { Datum::Int(x as i32) } else { Datum::Float(x) });
-                let y_ref = player.alloc_datum(if y.fract() == 0.0 { Datum::Int(y as i32) } else { Datum::Float(y) });
-                
-                Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                let x_datum = player.get_datum(&x_ref);
+                let y_datum = player.get_datum(&y_ref);
+                let point = Datum::build_point(x_datum, y_datum)?;
+                Ok(player.alloc_datum(point))
             })
         }
         Rule::empty_list => reserve_player_mut(|player| {
-            Ok(player.alloc_datum(Datum::List(DatumType::List, vec![], false)))
+            Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false)))
         }),
         Rule::the_prop => {
             // For multi-word properties like "the long time", we need to get the full text
@@ -305,11 +304,16 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                         // If cast_lib was specified, create a ref with the specified values
                         // Otherwise return invalid ref
                         if let Some(cast_datum) = cast_lib_datum {
-                            let cast_lib_num = match cast_datum {
-                                Datum::Int(num) => num,
-                                Datum::CastLib(num) => num as i32,
+                            let cast_lib_num = match &cast_datum {
+                                Datum::Int(num) => *num,
+                                Datum::CastLib(num) => *num as i32,
+                                Datum::String(name) => {
+                                    player.movie.cast_manager.get_cast_by_name(name)
+                                        .map(|c| c.number as i32)
+                                        .unwrap_or(0)
+                                }
                                 _ => return Err(ScriptError::new(format!(
-                                    "Expected int or castLib, got {:?}",
+                                    "Expected int, string, or castLib, got {:?}",
                                     cast_datum.type_enum()
                                 ))),
                             };
@@ -373,6 +377,45 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 Ok(player.alloc_datum(Datum::String(pair.as_str().to_owned())))
             })
         }
+        Rule::handler_call => {
+            // Support common constructors in static context (e.g. vector(0, 0, -1))
+            let mut inner = pair.into_inner();
+            let handler_name = inner.next()
+                .ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?
+                .as_str().to_lowercase();
+            let mut arg_refs = vec![];
+            if let Some(args_container) = inner.next() {
+                for arg_pair in args_container.into_inner() {
+                    // Each arg_pair contains an expr; recursively evaluate
+                    let mut arg_inner = arg_pair.into_inner();
+                    if let Some(expr_pair) = arg_inner.next() {
+                        arg_refs.push(eval_lingo_pair_static(expr_pair)?);
+                    }
+                }
+            }
+            match handler_name.as_str() {
+                "vector" => {
+                    reserve_player_mut(|player| {
+                        let x = if arg_refs.len() > 0 { player.get_datum(&arg_refs[0]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let y = if arg_refs.len() > 1 { player.get_datum(&arg_refs[1]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let z = if arg_refs.len() > 2 { player.get_datum(&arg_refs[2]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        Ok(player.alloc_datum(Datum::Vector([x, y, z])))
+                    })
+                }
+                "rect" => {
+                    reserve_player_mut(|player| {
+                        let l = if arg_refs.len() > 0 { player.get_datum(&arg_refs[0]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let t = if arg_refs.len() > 1 { player.get_datum(&arg_refs[1]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let r = if arg_refs.len() > 2 { player.get_datum(&arg_refs[2]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        let b = if arg_refs.len() > 3 { player.get_datum(&arg_refs[3]).to_float().unwrap_or(0.0) } else { 0.0 };
+                        Ok(player.alloc_datum(Datum::Rect([l, t, r, b], 0)))
+                    })
+                }
+                _ => Err(ScriptError::new(format!(
+                    "Unsupported handler '{}' in static expression", handler_name
+                ))),
+            }
+        }
         _ => Err(ScriptError::new(format!(
             "Invalid static Lingo expression {:?}",
             inner_rule
@@ -406,54 +449,62 @@ fn get_eval_top_level_prop(
 
     // Resolve against the current scope (locals, args, receiver properties)
     // This is needed both during breakpoint evaluation and during `do` command execution
-    if player.scope_count > 0 {
-        let scope_idx = if player.current_breakpoint.is_some() {
-            player.eval_scope_index.unwrap_or(player.scope_count - 1) as usize
+    if player.scope_count > 0 && (player.scope_count as usize) <= player.scopes.len() {
+        let raw = if player.current_breakpoint.is_some() {
+            player.eval_scope_index.unwrap_or(player.scope_count - 1)
         } else {
-            (player.scope_count - 1) as usize
+            player.scope_count - 1
         };
-        let scope = &player.scopes[scope_idx];
+        // Defensive: if scope_count was corrupted (e.g. an underflowed u32
+        // from a stale post-reset pop), fall through to the globals branch
+        // instead of panicking on an out-of-range scope index.
+        let scope_idx = raw as usize;
+        if scope_idx >= player.scopes.len() {
+            // Fall through to globals.
+        } else {
+            let scope = &player.scopes[scope_idx];
 
-        // Check locals by reverse-looking up the name_id from the name table
-        {
-            let script_ref_for_locals = scope.script_ref.clone();
-            if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref_for_locals) {
-                if let Some(lctx) = get_lctx_for_script(player, &script_rc) {
-                    if let Some(name_id) = lctx.names.iter().position(|n| n.eq_ignore_ascii_case(prop_name)) {
-                        if let Some(local_ref) = player.scopes[scope_idx].locals.get(&(name_id as u16)) {
-                            return Ok(local_ref.clone());
+            // Check locals by reverse-looking up the name_id from the name table
+            {
+                let script_ref_for_locals = scope.script_ref.clone();
+                if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref_for_locals) {
+                    if let Some(lctx) = get_lctx_for_script(player, &script_rc) {
+                        if let Some(name_id) = lctx.names.iter().position(|n| n.eq_ignore_ascii_case(prop_name)) {
+                            if let Some(local_ref) = player.scopes[scope_idx].locals.get(&(name_id as u16)) {
+                                return Ok(local_ref.clone());
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Check "me" (the receiver)
-        if prop_name == "me" {
-            if let Some(receiver) = scope.receiver.clone() {
-                return Ok(player.alloc_datum(Datum::ScriptInstanceRef(receiver)));
+            // Check "me" (the receiver)
+            if prop_name == "me" {
+                if let Some(receiver) = scope.receiver.clone() {
+                    return Ok(player.alloc_datum(Datum::ScriptInstanceRef(receiver)));
+                }
             }
-        }
 
-        // Resolve handler name from the scope's handler_name_id
-        let script_ref = scope.script_ref.clone();
-        let handler_name_id = scope.handler_name_id;
-        if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref) {
-            let script = script_rc.clone();
-            // Find the handler whose name_id matches this scope's handler_name_id
-            let handler_name = script.handlers.iter()
-                .find(|(_, h)| h.name_id == handler_name_id)
-                .map(|(name, _)| name.as_str().to_owned());
-            if let Some(handler_name) = handler_name {
-                if let Some(handler_def) = script.get_own_handler(&handler_name) {
-                    let handler_def = handler_def.clone();
-                    // Check handler arguments by name
-                    if let Some(lctx) = get_lctx_for_script(player, &script) {
-                        for (i, &name_id) in handler_def.argument_name_ids.iter().enumerate() {
-                            if let Some(name) = lctx.names.get(name_id as usize) {
-                                if name.eq_ignore_ascii_case(prop_name) {
-                                    if let Some(arg_ref) = player.scopes[scope_idx].args.get(i) {
-                                        return Ok(arg_ref.clone());
+            // Resolve handler name from the scope's handler_name_id
+            let script_ref = scope.script_ref.clone();
+            let handler_name_id = scope.handler_name_id;
+            if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref) {
+                let script = script_rc.clone();
+                // Find the handler whose name_id matches this scope's handler_name_id
+                let handler_name = script.handlers.iter()
+                    .find(|(_, h)| h.name_id == handler_name_id)
+                    .map(|(name, _)| name.as_str().to_owned());
+                if let Some(handler_name) = handler_name {
+                    if let Some(handler_def) = script.get_own_handler(&handler_name) {
+                        let handler_def = handler_def.clone();
+                        // Check handler arguments by name
+                        if let Some(lctx) = get_lctx_for_script(player, &script) {
+                            for (i, &name_id) in handler_def.argument_name_ids.iter().enumerate() {
+                                if let Some(name) = lctx.names.get(name_id as usize) {
+                                    if name.eq_ignore_ascii_case(prop_name) {
+                                        if let Some(arg_ref) = player.scopes[scope_idx].args.get(i) {
+                                            return Ok(arg_ref.clone());
+                                        }
                                     }
                                 }
                             }
@@ -461,14 +512,14 @@ fn get_eval_top_level_prop(
                     }
                 }
             }
-        }
 
-        // Check properties on the receiver (me) object
-        let receiver = player.scopes[scope_idx].receiver.clone();
-        if let Some(receiver_ref) = receiver {
-            let prop_name_str = prop_name.to_string();
-            if let Some(result) = script_get_prop_opt(player, &receiver_ref, &prop_name_str) {
-                return Ok(result);
+            // Check properties on the receiver (me) object
+            let receiver = player.scopes[scope_idx].receiver.clone();
+            if let Some(receiver_ref) = receiver {
+                let prop_name_str = prop_name.to_string();
+                if let Some(result) = script_get_prop_opt(player, &receiver_ref, &prop_name_str) {
+                    return Ok(result);
+                }
             }
         }
     }
@@ -594,6 +645,19 @@ fn parse_lingo_expr_runtime(
                     }
                     LingoExpr::HandlerCall(name, args) => {
                         Ok(LingoExpr::ObjHandlerCall(Box::new(obj_ref), name, args))
+                    }
+                    LingoExpr::MemberRef(member_expr, _cast_lib) => {
+                        // pMapCastLib.member[expr] → ObjHandlerCall(obj, "getPropRef", [#member, expr])
+                        // Unwrap single-element ListLiteral (from [expr] syntax)
+                        let index_expr = match *member_expr {
+                            LingoExpr::ListLiteral(mut items) if items.len() == 1 => items.remove(0),
+                            other => other,
+                        };
+                        Ok(LingoExpr::ObjHandlerCall(
+                            Box::new(obj_ref),
+                            "getPropRef".to_string(),
+                            vec![LingoExpr::SymbolLiteral("member".to_string()), index_expr],
+                        ))
                     }
                     _ => Err(ScriptError::new(format!(
                         "Invalid object prop operator rhs {:?}",
@@ -726,11 +790,14 @@ pub fn parse_lingo_rule_runtime(
         }
         Rule::rgb_num_color => {
             let mut inner = pair.into_inner();
-            Ok(LingoExpr::ColorLiteral(ColorRef::Rgb(
-                inner.next().unwrap().as_str().parse::<u8>().unwrap(),
-                inner.next().unwrap().as_str().parse::<u8>().unwrap(),
-                inner.next().unwrap().as_str().parse::<u8>().unwrap(),
-            )))
+            let r_str = inner.next().unwrap().as_str().trim();
+            let g_str = inner.next().unwrap().as_str().trim();
+            let b_str = inner.next().unwrap().as_str().trim();
+            // Parse as i32 first to handle negative values and values > 255, then clamp to u8
+            let r = r_str.parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+            let g = g_str.parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+            let b = b_str.parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+            Ok(LingoExpr::ColorLiteral(ColorRef::Rgb(r, g, b)))
         }
         Rule::rgb_str_color => {
             let mut inner = pair.into_inner();
@@ -1254,10 +1321,10 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(s.to_string()))))
         }
         LingoExpr::ListLiteral(items) => {
-            let mut datum_items = vec![];
+            let mut datum_items = VecDeque::new();
             for item in items {
                 let datum = Box::pin(eval_lingo_expr_ast_runtime(item)).await?;
-                datum_items.push(datum);
+                datum_items.push_back(datum);
             }
             reserve_player_mut(|player| {
                 Ok(player.alloc_datum(Datum::List(DatumType::List, datum_items, false)))
@@ -1274,11 +1341,11 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Float(*f))))
         }
         LingoExpr::PropListLiteral(pairs) => {
-            let mut datum_pairs = vec![];
+            let mut datum_pairs = VecDeque::new();
             for (key_expr, value_expr) in pairs {
                 let key_datum = Box::pin(eval_lingo_expr_ast_runtime(key_expr)).await?;
                 let value_datum = Box::pin(eval_lingo_expr_ast_runtime(value_expr)).await?;
-                datum_pairs.push((key_datum, value_datum));
+                datum_pairs.push_back((key_datum, value_datum));
             }
             reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(datum_pairs, false))))
         }
@@ -1344,25 +1411,41 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                         PropListUtils::get_at(pairs, &index_ref, &player.allocator)
                     }
                     // Point indexed by number: 1=x, 2=y
-                    Datum::Point(point_arr) => {
+                    Datum::Point(vals, flags) => {
                         let index_num = index_datum.int_value()?;
                         if index_num < 1 || index_num > 2 {
                             Err(ScriptError::new(format!(
                                 "Point index {} out of bounds (must be 1 or 2)", index_num
                             )))
                         } else {
-                            Ok(point_arr[(index_num - 1) as usize].clone())
+                            let i = (index_num - 1) as usize;
+                            let component = Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i));
+                            Ok(player.alloc_datum(component))
                         }
                     }
                     // Rect indexed by number: 1-4
-                    Datum::Rect(rect_arr) => {
+                    Datum::Rect(vals, flags) => {
                         let index_num = index_datum.int_value()?;
                         if index_num < 1 || index_num > 4 {
                             Err(ScriptError::new(format!(
                                 "Rect index {} out of bounds (must be 1-4)", index_num
                             )))
                         } else {
-                            Ok(rect_arr[(index_num - 1) as usize].clone())
+                            let i = (index_num - 1) as usize;
+                            let component = Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i));
+                            Ok(player.alloc_datum(component))
+                        }
+                    }
+                    // String indexed by number: return nth character
+                    Datum::String(s) => {
+                        let index_num = index_datum.int_value()?;
+                        if index_num < 1 || index_num as usize > s.chars().count() {
+                            Ok(player.alloc_datum(Datum::String(String::new())))
+                        } else {
+                            let ch = s.chars().nth((index_num - 1) as usize)
+                                .map(|c| c.to_string())
+                                .unwrap_or_default();
+                            Ok(player.alloc_datum(Datum::String(ch)))
                         }
                     }
                     _ => Err(ScriptError::new(format!(
@@ -1397,16 +1480,21 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 return Err(ScriptError::new("RectLiteral must have 1 tuple of 4 elements".to_string()));
             }
             let (x_expr, y_expr, w_expr, h_expr) = &values[0];
-            
+
             // Evaluate each component expression
-            let x_datum = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
-            let y_datum = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
-            let w_datum = Box::pin(eval_lingo_expr_ast_runtime(w_expr)).await?;
-            let h_datum = Box::pin(eval_lingo_expr_ast_runtime(h_expr)).await?;
-            
-            // Create the Rect datum with DatumRef components
+            let x_ref = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
+            let y_ref = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
+            let w_ref = Box::pin(eval_lingo_expr_ast_runtime(w_expr)).await?;
+            let h_ref = Box::pin(eval_lingo_expr_ast_runtime(h_expr)).await?;
+
+            // Create the Rect datum with inline components
             reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Rect([x_datum, y_datum, w_datum, h_datum])))
+                let x_d = player.get_datum(&x_ref);
+                let y_d = player.get_datum(&y_ref);
+                let w_d = player.get_datum(&w_ref);
+                let h_d = player.get_datum(&h_ref);
+                let rect = Datum::build_rect(x_d, y_d, w_d, h_d)?;
+                Ok(player.alloc_datum(rect))
             })
         }
         LingoExpr::PointLiteral(values) => {
@@ -1414,14 +1502,17 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 return Err(ScriptError::new("PointLiteral must have 1 tuple of 2 elements".to_string()));
             }
             let (x_expr, y_expr) = &values[0];
-            
+
             // Evaluate each component expression
-            let x_datum = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
-            let y_datum = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
-            
-            // Create the Point datum with DatumRef components
+            let x_ref = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
+            let y_ref = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
+
+            // Create the Point datum with inline components
             reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::Point([x_datum, y_datum])))
+                let x_d = player.get_datum(&x_ref);
+                let y_d = player.get_datum(&y_ref);
+                let point = Datum::build_point(x_d, y_d)?;
+                Ok(player.alloc_datum(point))
             })
         }
         LingoExpr::MemberRef(member_expr, cast_lib_expr) => {
@@ -1455,11 +1546,16 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                         // If cast_lib was specified, create a ref with member 0
                         // Otherwise return invalid ref
                         if let Some(cast_datum) = cast_lib_datum {
-                            let cast_lib_num = match cast_datum {
-                                Datum::Int(num) => num,
-                                Datum::CastLib(num) => num as i32,
+                            let cast_lib_num = match &cast_datum {
+                                Datum::Int(num) => *num,
+                                Datum::CastLib(num) => *num as i32,
+                                Datum::String(name) => {
+                                    player.movie.cast_manager.get_cast_by_name(name)
+                                        .map(|c| c.number as i32)
+                                        .unwrap_or(0)
+                                }
                                 _ => return Err(ScriptError::new(format!(
-                                    "Expected int or castLib, got {:?}",
+                                    "Expected int, string, or castLib, got {:?}",
                                     cast_datum.type_enum()
                                 ))),
                             };
@@ -1543,7 +1639,7 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                                 PropListUtils::set_at(player, &list_ref, &index_ref, &right_datum, &formatted_key)?;
                                 Ok(right_datum)
                             }
-                            Datum::Point(_) => {
+                            Datum::Point(..) => {
                                 let index_num = index_datum.int_value()?;
                                 let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
                                 if adjusted >= 2 {
@@ -1551,11 +1647,14 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                                         "Point index {} out of bounds", index_num
                                     )));
                                 }
-                                let point = player.get_datum_mut(&list_ref).to_point_mut()?;
-                                point[adjusted] = right_datum.clone();
+                                let right_val = player.get_datum(&right_datum);
+                                let (val, is_float) = Datum::datum_to_inline_component(right_val)?;
+                                let (point_vals, point_flags) = player.get_datum_mut(&list_ref).to_point_inline_mut()?;
+                                point_vals[adjusted] = val;
+                                Datum::inline_set_float(point_flags, adjusted, is_float);
                                 Ok(right_datum)
                             }
-                            Datum::Rect(_) => {
+                            Datum::Rect(..) => {
                                 let index_num = index_datum.int_value()?;
                                 let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
                                 if adjusted >= 4 {
@@ -1563,8 +1662,11 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                                         "Rect index {} out of bounds", index_num
                                     )));
                                 }
-                                let rect = player.get_datum_mut(&list_ref).to_rect_mut()?;
-                                rect[adjusted] = right_datum.clone();
+                                let right_val = player.get_datum(&right_datum);
+                                let (val, is_float) = Datum::datum_to_inline_component(right_val)?;
+                                let (rect_vals, rect_flags) = player.get_datum_mut(&list_ref).to_rect_inline_mut()?;
+                                rect_vals[adjusted] = val;
+                                Datum::inline_set_float(rect_flags, adjusted, is_float);
                                 Ok(right_datum)
                             }
                             _ => Err(ScriptError::new(format!(

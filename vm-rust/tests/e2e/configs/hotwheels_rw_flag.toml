@@ -2,4 +2,4 @@
 path = "dcr_hotwheels/rw_flag.dcr"
 
 [test]
-suite = "hotwheels_rw_flag"
+suite = "hotwheels"

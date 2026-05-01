@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_nintendo/RakeEm.dcr"
+
+[test]
+suite = "nintendo"

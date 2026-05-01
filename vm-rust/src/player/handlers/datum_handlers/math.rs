@@ -50,6 +50,11 @@ impl MathDatumHandlers {
                 "asin" => arg_values.get(0).copied().unwrap_or(0.0).asin(),
                 "acos" => arg_values.get(0).copied().unwrap_or(0.0).acos(),
                 "atan" => arg_values.get(0).copied().unwrap_or(0.0).atan(),
+                "atan2" => {
+                    let y = arg_values.get(0).copied().unwrap_or(0.0);
+                    let x = arg_values.get(1).copied().unwrap_or(0.0);
+                    y.atan2(x)
+                }
 
                 // Power/log
                 "sqrt" => arg_values.get(0).copied().unwrap_or(0.0).sqrt(),

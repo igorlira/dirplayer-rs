@@ -1,3 +1,7 @@
+use std::collections::VecDeque;
+
+use log::debug;
+
 use crate::player::datum_formatting::format_concrete_datum;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
@@ -15,7 +19,7 @@ pub struct ListDatumUtils {}
 
 impl ListDatumUtils {
     fn find_index_to_add(
-        list_vec: &Vec<DatumRef>,
+        list_vec: &VecDeque<DatumRef>,
         item: &DatumRef,
         allocator: &DatumAllocator,
     ) -> Result<i32, ScriptError> {
@@ -37,7 +41,7 @@ impl ListDatumUtils {
     }
 
     pub fn get_prop(
-        list_vec: &Vec<DatumRef>,
+        list_vec: &VecDeque<DatumRef>,
         prop_name: &str,
         _datums: &DatumAllocator,
     ) -> Result<Datum, ScriptError> {
@@ -82,8 +86,8 @@ impl ListDatumHandlers {
 
             if position < 0 || position >= list_vec.len() as i32 {
                 return Err(ScriptError::new(format!(
-                    "Index out of bounds: {} (list length: {})",
-                    position,
+                    "List index {} out of bounds (list has {} items)",
+                    position + 1,
                     list_vec.len()
                 )));
             }
@@ -106,10 +110,12 @@ impl ListDatumHandlers {
                 let padding_size = index - list_vec.len() as i32;
                 for _ in 0..padding_size {
                     // TODO: should this be filled with zeroes instead?
-                    list_vec.push(DatumRef::Void);
+                    list_vec.push_back(DatumRef::Void);
                 }
-                list_vec.push(item_ref.clone());
+                list_vec.push_back(item_ref.clone());
             }
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -129,15 +135,29 @@ impl ListDatumHandlers {
             "duplicate" => Self::duplicate(datum, args),
             "addAt" => Self::add_at(datum, args),
             "getLast" => Self::get_last(datum, args),
-            "append" => Self::append(datum, args),
+            "append" | "push" => Self::append(datum, args),
             "deleteOne" => Self::delete_one(datum, args),
             "deleteAt" => Self::delete_at(datum, args),
             "deleteAll" => Self::delete_all(datum, args),
             "findPos" => Self::find_pos(datum, args),
+            "getPos" => Self::get_one(datum, args),
             "findPosNear" => Self::find_pos_near(datum, args),
-            "getPos" => Self::find_pos(datum, args),
+            //"getPos" => Self::find_pos(datum, args), TODO: Check which getPos is correct
             "join" => Self::join(datum, args),
-            "getPropRef" => Self::get_prop_ref(datum, args),
+            "getPropRef" | "getProp" => Self::get_prop_ref(datum, args),
+            "toString" => {
+                Ok(reserve_player_mut(|player| {
+                    let s = crate::player::datum_formatting::format_datum(datum, player);
+                    player.alloc_datum(Datum::String(s))
+                }))
+            },
+            "getTypeOf" => {
+                // Flash objects have getTypeOf() for error checking.
+                // A list is never an error type, so return empty string.
+                Ok(reserve_player_mut(|player| {
+                    player.alloc_datum(Datum::String("".to_string()))
+                }))
+            },
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for list datum"
             ))),
@@ -171,9 +191,10 @@ impl ListDatumHandlers {
             }
 
             let result = items[actual_index].clone();
-            // If there are more keys, recursively resolve
-            if args.len() > 2 {
-                TypeUtils::get_sub_prop(&result, &args[2], player)
+            // If there are more keys AND the first arg was an int (nested indexing like list[a][b]),
+            // recursively resolve. Don't sub-index when args[0] was a symbol (#prop, index) pattern.
+            if args.len() >= 2 && player.get_datum(&args[0]).is_int() {
+                TypeUtils::get_sub_prop(&result, &args[1], player)
             } else {
                 Ok(result)
             }
@@ -192,7 +213,7 @@ impl ListDatumHandlers {
     fn get_last(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let list_vec = player.get_datum(datum).to_list()?;
-            let last = list_vec.last().map(|x| x.clone()).unwrap_or(DatumRef::Void);
+            let last = list_vec.back().map(|x| x.clone()).unwrap_or(DatumRef::Void);
             Ok(last)
         })
     }
@@ -249,7 +270,67 @@ impl ListDatumHandlers {
             if datum_value.is_void() {
                 return Ok(DatumRef::Void);
             }
-            
+            if args.is_empty() {
+                // add() with no args — used by meshDeform.mesh[m].textureLayer.add()
+                // Find the meshDeform context for this list to create proper meshDeformTexLayer refs
+                let tex_layer_context: Option<(i32, i32, String, usize)> = {
+                    let mut found = None;
+                    for cast in &player.movie.cast_manager.casts {
+                        for (member_num, member) in &cast.members {
+                            if let Some(w3d) = member.member_type.as_shockwave3d() {
+                                for (model_name, md) in &w3d.runtime_state.mesh_deform {
+                                    for (mesh_idx, mesh) in md.meshes.iter().enumerate() {
+                                        if let Some(ref list_ref) = mesh.texture_layer_datum_ref {
+                                            if *list_ref == *datum {
+                                                found = Some((cast.number as i32, *member_num as i32, model_name.clone(), mesh_idx));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if found.is_some() { break; }
+                    }
+                    found
+                };
+
+                // Debug: log context search result
+                debug!(
+                    "[W3D-ADD] add() no-args on list datum_id={} context={:?}",
+                    datum.unwrap(), tex_layer_context
+                );
+
+                if let Some((cast_lib, cast_member, model_name, mesh_idx)) = tex_layer_context {
+                    // Get current layer count to determine the new layer index
+                    let new_layer_idx = {
+                        let d = player.get_datum(datum);
+                        if let Datum::List(_, items, _) = d { items.len() } else { 0 }
+                    };
+                    // Create a meshDeformTexLayer ref so set_prop dispatches correctly
+                    use crate::director::lingo::datum::Shockwave3dObjectRef;
+                    let tex_layer_ref = player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                        cast_lib,
+                        cast_member,
+                        object_type: "meshDeformTexLayer".to_string(),
+                        name: format!("{}:{}:{}", model_name, mesh_idx, new_layer_idx),
+                    }));
+                    let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
+                    list_vec.push_back(tex_layer_ref);
+                } else {
+                    // Fallback: generic PropList (non-textureLayer list)
+                    let key = player.alloc_datum(Datum::Symbol("textureCoordinateList".to_string()));
+                    let val = player.alloc_datum(Datum::List(
+                        crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
+                    ));
+                    let prop_list = player.alloc_datum(Datum::PropList(VecDeque::from(vec![(key, val)]), false));
+                    let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
+                    list_vec.push_back(prop_list);
+                }
+                player.note_actor_list_mutation(datum);
+                player.note_script_instance_list_mutation(datum);
+                return Ok(DatumRef::Void);
+            }
+
             let item = &args[0];
             let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
             let index_to_add = if is_sorted {
@@ -262,8 +343,10 @@ impl ListDatumHandlers {
             if is_sorted {
                 list_vec.insert(index_to_add as usize, item.clone());
             } else {
-                list_vec.push(item.clone());
+                list_vec.push_back(item.clone());
             }
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -294,7 +377,15 @@ impl ListDatumHandlers {
         reserve_player_mut(|player| {
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             if let Some(index) = index {
-                list_vec.remove(index);
+                if index == 0 {
+                    list_vec.pop_front();
+                } else if index == list_vec.len() - 1 {
+                    list_vec.pop_back();
+                } else {
+                    list_vec.remove(index);
+                }
+                player.note_actor_list_mutation(datum);
+                player.note_script_instance_list_mutation(datum);
             }
             Ok(player.alloc_datum(datum_bool(index.is_some())))
         })
@@ -306,7 +397,17 @@ impl ListDatumHandlers {
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             if position <= list_vec.len() as i32 {
                 let index = (position - 1) as usize;
-                list_vec.remove(index);
+                // Use pop_front/pop_back for endpoints — O(1) on VecDeque
+                // vs O(n) for remove() which shifts elements.
+                if index == 0 {
+                    list_vec.pop_front();
+                } else if index == list_vec.len() - 1 {
+                    list_vec.pop_back();
+                } else {
+                    list_vec.remove(index);
+                }
+                player.note_actor_list_mutation(datum);
+                player.note_script_instance_list_mutation(datum);
                 Ok(DatumRef::Void)
             } else {
                 Err(ScriptError::new("Index out of bounds".to_string()))
@@ -318,6 +419,8 @@ impl ListDatumHandlers {
         reserve_player_mut(|player| {
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.clear();
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -341,6 +444,8 @@ impl ListDatumHandlers {
 
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.insert(position as usize, item_ref.clone());
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -354,7 +459,9 @@ impl ListDatumHandlers {
             
             let item = &args[0];
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-            list_vec.push(item.clone());
+            list_vec.push_back(item.clone());
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
         })
     }
@@ -363,7 +470,7 @@ impl ListDatumHandlers {
         let sorted_list = reserve_player_ref(|player| {
             let list_vec = player.get_datum(datum).to_list()?;
             let mut sorted_list = list_vec.clone();
-            sorted_list.sort_by(|a, b| {
+            sorted_list.make_contiguous().sort_by(|a, b| {
                 let left = player.get_datum(a);
                 let right = player.get_datum(b);
 
@@ -384,6 +491,8 @@ impl ListDatumHandlers {
             list_vec.clear();
             list_vec.extend(sorted_list);
             *is_sorted = true;
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
 
             Ok(DatumRef::Void)
         })

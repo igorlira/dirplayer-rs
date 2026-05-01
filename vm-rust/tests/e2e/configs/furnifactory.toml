@@ -1,5 +1,0 @@
-[movie]
-path = "dcr_ff/FurniFactory.dcr"
-
-[test]
-suite = "furnifactory"

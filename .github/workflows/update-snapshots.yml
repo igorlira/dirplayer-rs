@@ -32,6 +32,8 @@ env:
   TEST_ASSETS_URL: ${{ secrets.TEST_ASSETS_URL }}
   HABBO_V7_USERNAME: ${{ secrets.HABBO_V7_USERNAME }}
   HABBO_V7_PASSWORD: ${{ secrets.HABBO_V7_PASSWORD }}
+  HABBO_V7_INFO_HOST: ${{ secrets.HABBO_V7_INFO_HOST }}
+  HABBO_V7_INFO_PORT: ${{ secrets.HABBO_V7_INFO_PORT }}
 
 jobs:
   update:
@@ -82,7 +84,11 @@ jobs:
       - name: Install Playwright browsers
         if: inputs.suite != 'native'
         run: npx playwright install --with-deps chromium
-
+      
+      - name: Build and copy Ruffle
+        working-directory: ./vm-rust
+        run: npm run build-ruffle && npm run copy-ruffle
+      
       - name: Download test assets
         run: |
           if [ -z "$TEST_ASSETS_URL" ]; then

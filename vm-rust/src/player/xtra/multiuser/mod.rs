@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use async_std::{channel::Sender, task::spawn_local};
 use fxhash::FxHashMap;
 use wasm_bindgen::{closure::Closure, JsCast};
@@ -142,6 +143,34 @@ impl MultiuserXtraManager {
                 let ws_url = format!("{}://{}:{}", ws_scheme, host, port);
                 multiuser_log!("Multiuser: Connecting to WebSocket URL: {} (user={}, movie={})", ws_url, username, movie_id);
 
+                // Check if the page provides a socket proxy mapping via JS
+                let ws_url = {
+                    let default_url = format!("ws://{}:{}", host, port);
+                    let window = web_sys::window().unwrap();
+                    if let Ok(resolver) = js_sys::Reflect::get(&window, &"dirplayerResolveSocketUrl".into()) {
+                        if let Some(func) = resolver.dyn_ref::<js_sys::Function>() {
+                            if let Ok(result) = func.call2(&wasm_bindgen::JsValue::NULL, &host.as_str().into(), &wasm_bindgen::JsValue::from_f64(port as f64)) {
+                                if let Some(url) = result.as_string() {
+                                    if !url.is_empty() {
+                                        url
+                                    } else {
+                                        default_url
+                                    }
+                                } else {
+                                    default_url
+                                }
+                            } else {
+                                default_url
+                            }
+                        } else {
+                            default_url
+                        }
+                    } else {
+                        default_url
+                    }
+                };
+                multiuser_log!("Multiuser: Connecting to WebSocket URL: {} (original={}:{}, user={}, movie={})", ws_url, host, port, username, movie_id);
+
                 let socket = match WebSocket::new(&ws_url) {
                     Ok(s) => s,
                     Err(e) => {
@@ -285,7 +314,7 @@ impl MultiuserXtraManager {
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 if let Some(message) = instance.next_message() {
                     reserve_player_mut(|player| {
-                        let recipient_refs = message
+                        let recipient_refs: VecDeque<DatumRef> = message
                             .recipients
                             .iter()
                             .map(|recipient| player.alloc_datum(Datum::String(recipient.clone())))
@@ -311,14 +340,14 @@ impl MultiuserXtraManager {
                             player.alloc_datum(Datum::String("timeStamp".to_string()));
 
                         Ok(player.alloc_datum(Datum::PropList(
-                            vec![
+                            VecDeque::from(vec![
                                 (error_code_key, error_code),
                                 (recipients_key, recipients),
                                 (sender_id_key, sender_id),
                                 (subject_key, subject),
                                 (content_key, content),
                                 (time_stamp_key, time_stamp),
-                            ],
+                            ]),
                             false,
                         )))
                     })
@@ -344,7 +373,61 @@ impl MultiuserXtraManager {
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::String("".to_string())))
                 })
-            },
+            }
+            "getnumberwaitingnetmessages" => {
+                let multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
+                let instance = multiusr_manager.instances.get(&instance_id).unwrap();
+                let count = instance.message_queue.len() as i32;
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::Int(count)))
+                })
+            }
+            "checknetmessages" => {
+                // Process pending messages — in our implementation messages are already
+                // dispatched via callbacks, so this is effectively a no-op
+                Ok(DatumRef::Void)
+            }
+            "breakconnection" => {
+                // Close the WebSocket connection
+                let multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
+                if let Some(instance) = multiusr_manager.instances.get_mut(&instance_id) {
+                    // Drop the sender to close the send loop; the WebSocket
+                    // close is handled by the browser when the socket is dropped
+                    instance.socket_tx = None;
+                }
+                Ok(DatumRef::Void)
+            }
+            "getneterrorstring" => {
+                // Return a human-readable error string for an error code
+                let error_code = reserve_player_ref(|player| {
+                    player.get_datum(args.get(0).unwrap()).int_value()
+                })?;
+                let error_string = match error_code {
+                    0 => "No error",
+                    -1 => "Connection failed",
+                    -2 => "Connection refused",
+                    -3 => "Connection timed out",
+                    -4 => "Invalid message",
+                    -5 => "Not connected",
+                    _ => "Unknown error",
+                };
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::String(error_string.to_string())))
+                })
+            }
+            "getpeerconnectionlist" => {
+                // Return an empty list — we don't track peer connections in the client
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false)))
+                })
+            }
+            "waitfornetconnection" => {
+                // Server-side: start listening for incoming connections
+                // In a browser WASM context, we can't act as a server — return error code
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::Int(-1)))
+                })
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {} found for Multiuser xtra instance #{}",
                 handler_name, instance_id
