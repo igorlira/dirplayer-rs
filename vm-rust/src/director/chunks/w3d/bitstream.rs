@@ -403,7 +403,7 @@ impl IFXBitStreamCompressed {
             u_value |= self.data_local_next << (32 - self.data_bit_offset);
         }
 
-        u_value += u_value; // left shift by 1
+        u_value <<= 1; // left shift by 1
         u_value = (SWAP8[((u_value >> 12) & 0xf) as usize])
             | ((SWAP8[((u_value >> 8) & 0xf) as usize]) << 4)
             | ((SWAP8[((u_value >> 4) & 0xf) as usize]) << 8)
