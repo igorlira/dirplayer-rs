@@ -8,8 +8,8 @@ use crate::{
 use std::sync::Arc;
 use wasm_bindgen::JsCast;
 use web_sys::{
-    AudioBuffer, AudioBufferSourceNode, AudioContext, Blob, GainNode, HtmlAudioElement,
-    OfflineAudioContext, StereoPannerNode, Url,
+    AudioBuffer, AudioBufferSourceNode, AudioContext, AudioScheduledSourceNode, Blob, GainNode,
+    HtmlAudioElement, OfflineAudioContext, StereoPannerNode, Url,
 };
 
 use crate::player::cast_member::CastMemberType;
@@ -1520,7 +1520,8 @@ impl SoundChannel {
 
         // Disconnect and stop any existing nodes
         if let Some(source) = channel.source_node.take() {
-            let _ = source.stop();
+            let scheduled: &AudioScheduledSourceNode = source.as_ref();
+            let _ = scheduled.stop();
             let _ = source.disconnect();
         }
 
@@ -2617,7 +2618,8 @@ impl SoundChannel {
         self.is_fading = false;
 
         if let Some(ref source) = self.source_node {
-            let _ = source.stop_with_when(0.0);
+            let scheduled: &AudioScheduledSourceNode = source.as_ref();
+            let _ = scheduled.stop_with_when(0.0);
             let _ = source.disconnect();
             debug!("🛑 Stopped previous sound");
         }
@@ -3146,9 +3148,11 @@ impl SoundChannel {
         let mut blob_parts = js_sys::Array::new();
         blob_parts.push(&uint8_array);
 
+        let blob_opts = web_sys::BlobPropertyBag::new();
+        blob_opts.set_type("audio/mpeg");
         let blob = Blob::new_with_u8_array_sequence_and_options(
             &blob_parts,
-            web_sys::BlobPropertyBag::new().type_("audio/mpeg"),
+            &blob_opts,
         )?;
 
         debug!("✅ Blob created: {} bytes", blob.size());
@@ -3238,7 +3242,8 @@ impl SoundChannel {
 
         // Step 3: Stop any existing playback
         if let Some(ref source) = self.source_node {
-            let _ = source.stop_with_when(0.0);
+            let scheduled: &AudioScheduledSourceNode = source.as_ref();
+            let _ = scheduled.stop_with_when(0.0);
             let _ = source.disconnect();
         }
         self.source_node = None;
@@ -3687,7 +3692,8 @@ impl SoundChannel {
         
         if let Some(source) = self.source_node.take() {
             debug!("🛑 Stopping channel {}", self.channel_num);
-            let _ = source.stop_with_when(0.0);
+            let scheduled: &AudioScheduledSourceNode = source.as_ref();
+            let _ = scheduled.stop_with_when(0.0);
             let _ = source.disconnect();
         }
         if let Some(gain) = self.gain_node.take() {
@@ -3911,7 +3917,8 @@ impl SoundChannel {
         }
 
         if let Some(ref source) = self.source_node {
-            let _ = source.stop_with_when(0.0);
+            let scheduled: &AudioScheduledSourceNode = source.as_ref();
+            let _ = scheduled.stop_with_when(0.0);
         }
         self.source_node = None;
 
@@ -4016,7 +4023,8 @@ impl SoundChannel {
 
     pub fn stop_sound(&mut self) {
         if let Some(ref source) = self.source_node {
-            let _ = source.stop_with_when(0.0);
+            let scheduled: &AudioScheduledSourceNode = source.as_ref();
+            let _ = scheduled.stop_with_when(0.0);
             let _ = source.disconnect();
             debug!("🛑 Stopped previous sound");
         } else {
@@ -4030,7 +4038,8 @@ impl SoundChannel {
     pub fn pause_sound(&mut self) {
         if let Some(ref source) = self.source_node {
             debug!("⏸️ Pausing current sound...");
-            let _ = source.stop_with_when(0.0);
+            let scheduled: &AudioScheduledSourceNode = source.as_ref();
+            let _ = scheduled.stop_with_when(0.0);
             self.source_node = None;
         } else {
             debug!("ℹ️ No active sound source to pause");

@@ -98,11 +98,11 @@ pub async fn fetch_net_task(
     let request = match task.method {
         HttpMethod::Get => web_sys::Request::new_with_str(&url_string.as_str()).unwrap(),
         HttpMethod::Post => {
-            let mut opts = web_sys::RequestInit::new();
-            opts.method("POST");
+            let opts = web_sys::RequestInit::new();
+            opts.set_method("POST");
 
             if let Some(post_data) = &task.post_data {
-                opts.body(Some(&JsValue::from_str(post_data)));
+                opts.set_body(&JsValue::from_str(post_data));
             }
 
             // Set Content-Type to form-urlencoded so servers populate
