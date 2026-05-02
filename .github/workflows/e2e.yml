@@ -5,10 +5,17 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  pull_request_target:
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
         description: 'Branch, tag, or commit SHA to test'
+        required: false
+        type: string
+        default: ''
+      pr_number:
+        description: 'PR number to test (for fork PRs — posts statuses on the PR head SHA)'
         required: false
         type: string
         default: ''
@@ -17,6 +24,11 @@ on:
         required: false
         type: boolean
         default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,12 +46,55 @@ jobs:
   native:
     name: Native tests
     runs-on: ubuntu-latest
+    # Skip pull_request runs from forks (they have no secrets and would fail);
+    # those go through pull_request_target instead.
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)
+    # pull_request_target from a fork pauses on this environment until a
+    environment: ${{ github.event_name == 'pull_request_target' && 'fork-pr-tests' || '' }}
     steps:
+      - name: Resolve PR head
+        id: resolve_pr
+        if: inputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: parseInt(process.env.PR_NUMBER, 10),
+            });
+            core.setOutput('sha', pr.data.head.sha);
+            core.setOutput('ref', `refs/pull/${pr.data.number}/head`);
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          # For pull_request_target, github.ref points at the BASE branch — we
+          # need to explicitly check out the PR's merge ref to test the PR code.
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || steps.resolve_pr.outputs.ref || inputs.ref || github.ref }}
           submodules: true
           fetch-depth: 0
+
+      - name: Post pending status
+        if: inputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_SHA: ${{ steps.resolve_pr.outputs.sha }}
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: process.env.PR_SHA,
+              state: 'pending',
+              context: 'E2E / native',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
 
       - name: Rebase on main
         if: inputs.rebase_on_main
@@ -94,12 +149,33 @@ jobs:
           retention-days: 7
 
       - name: Post snapshot test report on PR
-        if: always() && github.event_name == 'pull_request'
+        if: always() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target' || inputs.pr_number != '')
         uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
         with:
           script: |
             const script = require('./scripts/post-snapshot-comment.cjs');
-            await script({ github, context, label: 'native', artifactName: 'native-test-results' });
+            const prNumber = process.env.PR_NUMBER ? parseInt(process.env.PR_NUMBER, 10) : context.issue.number;
+            await script({ github, context, label: 'native', artifactName: 'native-test-results', prNumber });
+
+      - name: Post final status
+        if: always() && inputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_SHA: ${{ steps.resolve_pr.outputs.sha }}
+          OUTCOME: ${{ steps.native_tests.outcome }}
+        with:
+          script: |
+            const state = process.env.OUTCOME === 'success' ? 'success' : 'failure';
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: process.env.PR_SHA,
+              state,
+              context: 'E2E / native',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
 
       - name: Fail if native tests failed
         if: steps.native_tests.outcome == 'failure'
@@ -108,12 +184,50 @@ jobs:
   browser:
     name: Browser tests
     runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)
+    environment: ${{ github.event_name == 'pull_request_target' && 'fork-pr-tests' || '' }}
     steps:
+      - name: Resolve PR head
+        id: resolve_pr
+        if: inputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: parseInt(process.env.PR_NUMBER, 10),
+            });
+            core.setOutput('sha', pr.data.head.sha);
+            core.setOutput('ref', `refs/pull/${pr.data.number}/head`);
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || steps.resolve_pr.outputs.ref || inputs.ref || github.ref }}
           submodules: true
           fetch-depth: 0
+
+      - name: Post pending status
+        if: inputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_SHA: ${{ steps.resolve_pr.outputs.sha }}
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: process.env.PR_SHA,
+              state: 'pending',
+              context: 'E2E / browser',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
 
       - name: Rebase on main
         if: inputs.rebase_on_main
@@ -192,12 +306,33 @@ jobs:
           retention-days: 7
 
       - name: Post snapshot test report on PR
-        if: always() && github.event_name == 'pull_request'
+        if: always() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target' || inputs.pr_number != '')
         uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
         with:
           script: |
             const script = require('./scripts/post-snapshot-comment.cjs');
-            await script({ github, context, label: 'browser', artifactName: 'browser-test-results' });
+            const prNumber = process.env.PR_NUMBER ? parseInt(process.env.PR_NUMBER, 10) : context.issue.number;
+            await script({ github, context, label: 'browser', artifactName: 'browser-test-results', prNumber });
+
+      - name: Post final status
+        if: always() && inputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_SHA: ${{ steps.resolve_pr.outputs.sha }}
+          OUTCOME: ${{ steps.browser_tests.outcome }}
+        with:
+          script: |
+            const state = process.env.OUTCOME === 'success' ? 'success' : 'failure';
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: process.env.PR_SHA,
+              state,
+              context: 'E2E / browser',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
 
       - name: Fail if browser tests failed
         if: steps.browser_tests.outcome == 'failure'
