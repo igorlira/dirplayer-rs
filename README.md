@@ -122,7 +122,7 @@ https://discord.gg/8yKDk9nJH2
 This project would have not been possible without the extensive work of the Shockwave reverse engineering community.
 
 A lot of code has been reproduced from the following projects:
-
+ 
 https://github.com/Earthquake-Project/Format-Documentation/
 
 https://github.com/Brian151/OpenShockwave/
