@@ -145,7 +145,7 @@ impl MultiuserXtraManager {
 
                 // Check if the page provides a socket proxy mapping via JS
                 let ws_url = {
-                    let default_url = format!("ws://{}:{}", host, port);
+                    let default_url = format!("{}://{}:{}", ws_scheme, host, port);
                     let window = web_sys::window().unwrap();
                     if let Ok(resolver) = js_sys::Reflect::get(&window, &"dirplayerResolveSocketUrl".into()) {
                         if let Some(func) = resolver.dyn_ref::<js_sys::Function>() {
