@@ -462,11 +462,18 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onKeyDown={e => {
+        // When the hidden input is focused (editable field tapped), let its
+        // own handlers + onInput drive key dispatch. Otherwise we'd double-fire
+        // every key — both here on bubble and from the input's handler.
+        if (document.activeElement === hiddenInputRef.current) return;
         e.preventDefault();
         if (e.repeat) return; // Skip browser key repeats; Lingo handles held keys via keyPressed()
         key_down(e.key, e.keyCode);
       }}
-      onKeyUp={e => key_up(e.key, e.keyCode)}
+      onKeyUp={e => {
+        if (document.activeElement === hiddenInputRef.current) return;
+        key_up(e.key, e.keyCode);
+      }}
     >
       <div
         className={styles.stageWrapper}
