@@ -1,10 +1,95 @@
 .container {
+  position: relative;
   width: 100%;
   height: 100%;
+  overflow: hidden;
+  touch-action: none;
+  outline: none;
+}
+
+.stageWrapper {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.overlay {
+  position: absolute;
+  top: 8px;
+  right: 8px;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.overlay > * {
+  pointer-events: auto;
+}
+
+.panToggle {
+  width: 36px;
+  height: 36px;
+  display: flex;
   align-items: center;
-  touch-action: manipulation;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+  opacity: 0.65;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.panToggle:hover,
+.panToggle:focus-visible {
+  opacity: 1;
+  outline: none;
+}
+
+.panToggleActive {
+  composes: panToggle;
+  background: rgba(74, 158, 255, 0.65);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 0.95);
+  opacity: 1;
+}
+
+.minimap {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 4px;
+  opacity: 0.65;
+  transition: opacity 0.15s;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.minimap:hover,
+.minimap:active {
+  opacity: 1;
+}
+
+.minimapInner {
+  position: relative;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.minimapViewport {
+  position: absolute;
+  border: 1.5px solid rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+  box-sizing: border-box;
 }
 
 .controlBar {
