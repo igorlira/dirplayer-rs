@@ -1238,8 +1238,8 @@ fn write_chunk_source(player: &mut DirPlayer, source_expr: &LingoExpr, new_strin
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         use crate::player::cast_member::CastMemberType;
                         match &mut member.member_type {
-                            CastMemberType::Field(field) => { field.text = new_string; },
-                            CastMemberType::Text(text) => { text.text = new_string; },
+                            CastMemberType::Field(field) => { field.set_text_preserving_caret(new_string); },
+                            CastMemberType::Text(text) => { text.set_text_preserving_caret(new_string); },
                             _ => { log::warn!("put into chunk: source is not a field/text member"); }
                         }
                     }

@@ -480,7 +480,8 @@ pub fn player_get_sprite_at(x: f64, y: f64) -> i32 {
     })
 }
 
-/// Check if a sprite is an editable field member (for mobile keyboard focus)
+/// Check if a sprite is an editable Field or Text member (for mobile keyboard
+/// focus and to gate caret/selection events from JS).
 #[wasm_bindgen]
 pub fn is_sprite_editable_field(sprite_id: i32) -> bool {
     reserve_player_ref(|player| {
@@ -490,9 +491,262 @@ pub fn is_sprite_editable_field(sprite_id: i32) -> bool {
             .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
         member.map_or(false, |m| match &m.member_type {
             CastMemberType::Field(f) => f.editable,
+            CastMemberType::Text(t) => t.info.as_ref().map_or(false, |i| i.editable),
             _ => false,
         })
     })
+}
+
+/// Place the caret in an editable Field/Text at the given canvas coordinates.
+/// `extend` mirrors a shift-click: extends from the existing anchor instead
+/// of collapsing the selection.
+#[wasm_bindgen]
+pub fn field_set_caret_at(sprite_id: i32, canvas_x: f64, canvas_y: f64, extend: bool) {
+    let mode = if extend {
+        crate::player::keyboard_events::CaretAtMode::ExtendToAnchor
+    } else {
+        crate::player::keyboard_events::CaretAtMode::SetAndAnchor
+    };
+    let (mx, my) = reserve_player_ref(|player| {
+        crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y)
+    });
+    crate::player::keyboard_events::set_caret_at_screen(
+        sprite_id as i16, mx as i32, my as i32, mode,
+    );
+}
+
+/// Continuation of a click-drag in an editable Field/Text — extends sel_end
+/// to the position under the current pointer, sel_anchor unchanged.
+#[wasm_bindgen]
+pub fn field_drag_extend_to(sprite_id: i32, canvas_x: f64, canvas_y: f64) {
+    let (mx, my) = reserve_player_ref(|player| {
+        crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y)
+    });
+    crate::player::keyboard_events::set_caret_at_screen(
+        sprite_id as i16, mx as i32, my as i32,
+        crate::player::keyboard_events::CaretAtMode::DragExtend,
+    );
+}
+
+/// Double-click word selection at the given canvas coordinates.
+#[wasm_bindgen]
+pub fn field_select_word_at(sprite_id: i32, canvas_x: f64, canvas_y: f64) {
+    let (mx, my) = reserve_player_ref(|player| {
+        crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y)
+    });
+    crate::player::keyboard_events::set_caret_at_screen(
+        sprite_id as i16, mx as i32, my as i32,
+        crate::player::keyboard_events::CaretAtMode::SelectWord,
+    );
+}
+
+/// Triple-click line selection at the given canvas coordinates.
+#[wasm_bindgen]
+pub fn field_select_line_at(sprite_id: i32, canvas_x: f64, canvas_y: f64) {
+    let (mx, my) = reserve_player_ref(|player| {
+        crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y)
+    });
+    crate::player::keyboard_events::set_caret_at_screen(
+        sprite_id as i16, mx as i32, my as i32,
+        crate::player::keyboard_events::CaretAtMode::SelectLine,
+    );
+}
+
+/// Whether a Field/Text sprite currently holds keyboard focus. Used by
+/// frontend clipboard listeners to decide whether to intercept copy/paste.
+#[wasm_bindgen]
+pub fn is_field_focused() -> bool {
+    reserve_player_ref(|player| {
+        if player.keyboard_focus_sprite < 0 { return false; }
+        let sprite_id = player.keyboard_focus_sprite as i16;
+        let sprite = player.movie.score.get_sprite(sprite_id);
+        let member = sprite
+            .and_then(|s| s.member.as_ref())
+            .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
+        member.map_or(false, |m| matches!(&m.member_type,
+            CastMemberType::Field(f) if f.editable
+        ) || matches!(&m.member_type,
+            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable)
+        ))
+    })
+}
+
+/// Selected text from the focused editable Field/Text. Empty string if no
+/// focus, no selection, or non-editable. Synchronous so it can be called
+/// from a copy/cut event handler.
+#[wasm_bindgen]
+pub fn get_focused_field_selected_text() -> String {
+    reserve_player_ref(|player| {
+        if player.keyboard_focus_sprite < 0 { return String::new(); }
+        let sprite_id = player.keyboard_focus_sprite as i16;
+        let sprite = player.movie.score.get_sprite(sprite_id);
+        let member = sprite
+            .and_then(|s| s.member.as_ref())
+            .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
+        let Some(member) = member else { return String::new() };
+        let (text, lo, hi) = match &member.member_type {
+            CastMemberType::Field(f) if f.editable => {
+                (&f.text, f.sel_start, f.sel_end)
+            }
+            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => {
+                (&t.text, t.sel_start, t.sel_end)
+            }
+            _ => return String::new(),
+        };
+        let len = text.len() as i32;
+        let lo = lo.clamp(0, len).min(hi.clamp(0, len));
+        let hi = lo.max(hi.clamp(0, len));
+        text[lo as usize..hi as usize].to_string()
+    })
+}
+
+/// Delete the current selection in the focused editable member. Used by cut.
+#[wasm_bindgen]
+pub fn delete_focused_field_selection() {
+    reserve_player_mut(|player| {
+        if player.keyboard_focus_sprite < 0 { return; }
+        let sprite_id = player.keyboard_focus_sprite as i16;
+        let sprite = player.movie.score.get_sprite(sprite_id);
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
+        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+            return;
+        };
+        let (text, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
+            CastMemberType::Field(f) if f.editable => (
+                &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
+            ),
+            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
+                &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
+            ),
+            _ => return,
+        };
+        crate::player::keyboard_events::apply_text_insertion(text, sel_start, sel_end, sel_anchor, "");
+        let s = *sel_start;
+        let e = *sel_end;
+        player.text_selection_start = s.max(0) as u16;
+        player.text_selection_end = e.max(0) as u16;
+    });
+}
+
+/// Update the VM-side mirror of the OS clipboard so Lingo `the clipBoard`
+/// reads back what was last copied via the JS gesture event. The OS clipboard
+/// itself remains the source of truth; this is purely so scripts can observe
+/// what the user just copied/cut.
+#[wasm_bindgen]
+pub fn set_clipboard_mirror(text: String) {
+    reserve_player_mut(|player| {
+        player.clipboard_mirror = text;
+    });
+}
+
+/// IME composition started — record the byte offset where the provisional
+/// composition will begin (= current caret position, with any selection
+/// already replaced). No-op if no editable member has focus.
+#[wasm_bindgen]
+pub fn ime_composition_start() {
+    reserve_player_mut(|player| {
+        if player.keyboard_focus_sprite < 0 { return; }
+        let sprite_id = player.keyboard_focus_sprite as i16;
+        let sprite = player.movie.score.get_sprite(sprite_id);
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
+        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+            return;
+        };
+        let (text, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
+            CastMemberType::Field(f) if f.editable => (
+                &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
+            ),
+            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
+                &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
+            ),
+            _ => return,
+        };
+        // Collapse any existing selection so the composition replaces it cleanly.
+        if *sel_start != *sel_end {
+            crate::player::keyboard_events::apply_text_insertion(text, sel_start, sel_end, sel_anchor, "");
+        }
+        let pos = (*sel_start).max(0);
+        player.ime_composition = Some((pos, pos));
+        player.text_selection_start = pos.max(0) as u16;
+        player.text_selection_end = pos.max(0) as u16;
+    });
+}
+
+/// IME composition update — replace the current provisional run with `text`.
+/// Caret advances to the end of the new provisional text. No-op if no
+/// composition is active.
+#[wasm_bindgen]
+pub fn ime_composition_update(text: String) {
+    reserve_player_mut(|player| {
+        let Some((start, end)) = player.ime_composition else { return };
+        if player.keyboard_focus_sprite < 0 { return; }
+        let sprite_id = player.keyboard_focus_sprite as i16;
+        let sprite = player.movie.score.get_sprite(sprite_id);
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
+        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+            return;
+        };
+        let (text_buf, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
+            CastMemberType::Field(f) if f.editable => (
+                &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
+            ),
+            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
+                &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
+            ),
+            _ => return,
+        };
+        let len = text_buf.len() as i32;
+        let lo = start.clamp(0, len) as usize;
+        let hi = end.clamp(0, len) as usize;
+        let hi = hi.max(lo);
+        text_buf.replace_range(lo..hi, &text);
+        let new_end = lo as i32 + text.len() as i32;
+        *sel_start = new_end;
+        *sel_end = new_end;
+        *sel_anchor = new_end;
+        player.ime_composition = Some((start, new_end));
+        player.text_selection_start = new_end.max(0) as u16;
+        player.text_selection_end = new_end.max(0) as u16;
+    });
+}
+
+/// IME composition committed — `text` is the final string. Same replacement
+/// as update, then clears composition state. No-op if no composition is active.
+#[wasm_bindgen]
+pub fn ime_composition_end(text: String) {
+    ime_composition_update(text);
+    reserve_player_mut(|player| {
+        player.ime_composition = None;
+    });
+}
+
+/// Insert text at the focused editable member's caret/selection. Used by
+/// paste and IME commit.
+#[wasm_bindgen]
+pub fn paste_text_into_focused_field(text: String) {
+    reserve_player_mut(|player| {
+        if player.keyboard_focus_sprite < 0 { return; }
+        let sprite_id = player.keyboard_focus_sprite as i16;
+        let sprite = player.movie.score.get_sprite(sprite_id);
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
+        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+            return;
+        };
+        let (target, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
+            CastMemberType::Field(f) if f.editable => (
+                &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
+            ),
+            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
+                &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
+            ),
+            _ => return,
+        };
+        crate::player::keyboard_events::apply_text_insertion(target, sel_start, sel_end, sel_anchor, &text);
+        let s = *sel_start;
+        let e = *sel_end;
+        player.text_selection_start = s.max(0) as u16;
+        player.text_selection_end = e.max(0) as u16;
+    });
 }
 
 // Inspector commands bypass the command queue to allow inspecting state

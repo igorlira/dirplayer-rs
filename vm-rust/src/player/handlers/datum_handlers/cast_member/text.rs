@@ -130,7 +130,7 @@ impl TextMemberHandlers {
                 // Need mutable access - drop immutable borrows first
                 let cast_member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref).unwrap();
                 let text_member = cast_member.member_type.as_text_mut().unwrap();
-                text_member.text = new_text.trim_end_matches('\0').to_string();
+                text_member.set_text_preserving_caret(new_text.trim_end_matches('\0').to_string());
                 Ok(DatumRef::Void)
             }
             // `put X into member("name")` lowers to `setContents` (and the
@@ -1675,9 +1675,15 @@ impl TextMemberHandlers {
                 )?;
                 Ok(Datum::Int(count as i32))
             }
-            // Runtime selection state (stored properties; no editor integration yet)
+            // Runtime selection state
             "selstart" => Ok(Datum::Int(text_data.sel_start)),
             "selend" => Ok(Datum::Int(text_data.sel_end)),
+            "selectedtext" => {
+                let len = text_data.text.len() as i32;
+                let lo = text_data.sel_start.min(text_data.sel_end).clamp(0, len);
+                let hi = text_data.sel_start.max(text_data.sel_end).clamp(0, len);
+                Ok(Datum::String(text_data.text[lo as usize..hi as usize].to_string()))
+            }
             // Previously-unstaged stored properties
             "bottomspacing" => Ok(Datum::Int(text_data.bottom_spacing as i32)),
             "charspacing" => Ok(Datum::Int(text_data.char_spacing)),
@@ -1732,8 +1738,8 @@ impl TextMemberHandlers {
                     );
 
 
-                    // Update the plain text
-                    text_member.text = new_text.clone();
+                    // Update the plain text + caret state in one go.
+                    text_member.set_text_preserving_caret(new_text.clone());
 
                     // Clear html_styled_spans on .text assignment. Inheriting the
                     // first existing span's style carried colour/bold from prior
@@ -1910,7 +1916,7 @@ impl TextMemberHandlers {
                     text_member.html_source = html_string.clone();
 
                     // Extract plain text from all spans
-                    text_member.text = spans.iter().map(|s| s.text.clone()).collect();
+                    text_member.set_text_preserving_caret(spans.iter().map(|s| s.text.clone()).collect());
 
                     // Ensure the HTML-derived text ends with a paragraph
                     // terminator. Director appends a trailing `\r` to
@@ -2566,6 +2572,23 @@ impl TextMemberHandlers {
                 |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_text_mut().unwrap().sel_end = value?;
+                    Ok(())
+                },
+            ),
+            "selectedtext" => borrow_member_mut(
+                member_ref,
+                |_player| value.string_value(),
+                |cast_member, value| {
+                    let s = value?;
+                    let text = cast_member.member_type.as_text_mut().unwrap();
+                    let len = text.text.len() as i32;
+                    let lo = text.sel_start.min(text.sel_end).clamp(0, len);
+                    let hi = text.sel_start.max(text.sel_end).clamp(0, len);
+                    text.text.replace_range(lo as usize..hi as usize, &s);
+                    let new_caret = lo + s.len() as i32;
+                    text.sel_start = new_caret;
+                    text.sel_end = new_caret;
+                    text.sel_anchor = new_caret;
                     Ok(())
                 },
             ),

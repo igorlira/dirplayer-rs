@@ -72,9 +72,12 @@ pub struct FieldMember {
     pub hilite: bool,
     pub fore_color: Option<ColorRef>,  // From STXT formatting run color (>> 8)
     pub back_color: Option<ColorRef>,  // From FieldInfo bg RGB (& 0xff)
-    // Runtime selection state (no editor integration yet — just stored so scripts can read/write)
+    // Runtime selection state. Convention: sel_start <= sel_end. Equal values mean caret;
+    // otherwise it's a selection range. sel_anchor remembers the drag/shift origin so
+    // shift+arrow and drag-to-select extend in the right direction.
     pub sel_start: i32,
     pub sel_end: i32,
+    pub sel_anchor: i32,
     // Text rendering config
     pub kerning: bool,
     pub kerning_threshold: u16,
@@ -157,9 +160,11 @@ pub struct TextMember {
     /// Embedded 3D world for Director's "3D Text" feature (text extrusion).
     /// Lazily initialized when 3D methods (.model(), .camera(), etc.) are called.
     pub w3d: Option<Box<Shockwave3dMember>>,
-    // Runtime selection state (stored, no editor integration yet)
+    // Runtime selection state. Convention: sel_start <= sel_end. Equal = caret;
+    // otherwise selection range. sel_anchor is the drag/shift origin.
     pub sel_start: i32,
     pub sel_end: i32,
+    pub sel_anchor: i32,
     /// Anti-alias method: "AutoAlias", "GrayScaleAllAlias", "SubpixelAllAlias",
     /// "GrayscaleLargerThanAlias", or "NoneAlias".
     pub anti_alias_type: String,
@@ -222,11 +227,31 @@ impl FieldMember {
             back_color: None,
             sel_start: 0,
             sel_end: 0,
+            sel_anchor: 0,
             kerning: false,
             kerning_threshold: 14,
             use_hypertext_styles: false,
             anti_alias_type: "AutoAlias".to_string(),
         }
+    }
+
+    /// Replace `text` and adjust the live caret/selection to a sensible
+    /// position. When the caret was at the end of the old text, follow it
+    /// to the end of the new text (handles password masks, chat-bot echoes,
+    /// autocomplete, "put X into field" — all the cases where a script
+    /// rewrites the text in lockstep with the user typing). Otherwise the
+    /// caret stays at its byte offset, clamped to the new length, so a
+    /// mid-edit refresh doesn't yank the caret to a surprising spot.
+    /// Use this anywhere code mutates `field.text` outside the editor itself.
+    pub fn set_text_preserving_caret(&mut self, new_text: String) {
+        let old_len = self.text.len() as i32;
+        let was_at_end = self.sel_start == self.sel_end && self.sel_end >= old_len;
+        self.text = new_text;
+        let new_len = self.text.len() as i32;
+        let caret = if was_at_end { new_len } else { self.sel_end.clamp(0, new_len) };
+        self.sel_start = caret;
+        self.sel_end = caret;
+        self.sel_anchor = caret;
     }
 
     pub fn from_field_info(field_info: &FieldInfo) -> FieldMember {
@@ -272,6 +297,7 @@ impl FieldMember {
             back_color,
             sel_start: 0,
             sel_end: 0,
+            sel_anchor: 0,
             kerning: false,
             kerning_threshold: 14,
             use_hypertext_styles: false,
@@ -281,6 +307,18 @@ impl FieldMember {
 }
 
 impl TextMember {
+    /// Replace `text` and adjust caret/selection. See FieldMember docs.
+    pub fn set_text_preserving_caret(&mut self, new_text: String) {
+        let old_len = self.text.len() as i32;
+        let was_at_end = self.sel_start == self.sel_end && self.sel_end >= old_len;
+        self.text = new_text;
+        let new_len = self.text.len() as i32;
+        let caret = if was_at_end { new_len } else { self.sel_end.clamp(0, new_len) };
+        self.sel_start = caret;
+        self.sel_end = caret;
+        self.sel_anchor = caret;
+    }
+
     pub fn new() -> TextMember {
         TextMember {
             text: "".to_string(),
@@ -307,6 +345,7 @@ impl TextMember {
             w3d: None,
             sel_start: 0,
             sel_end: 0,
+            sel_anchor: 0,
             anti_alias_type: "AutoAlias".to_string(),
         }
     }
@@ -3359,6 +3398,7 @@ impl CastMember {
             w3d: None,
             sel_start: 0,
             sel_end: 0,
+            sel_anchor: 0,
             anti_alias_type: "AutoAlias".to_string(),
         };
 

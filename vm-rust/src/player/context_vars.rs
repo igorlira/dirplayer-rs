@@ -243,45 +243,54 @@ pub fn player_set_context_var(
             {
                 match &mut member.member_type {
                     CastMemberType::Field(field) => {
-                        match put_type {
-                            PutType::Into => field.text = new_value,
+                        let combined = match put_type {
+                            PutType::Into => new_value,
                             PutType::Before => {
                                 let mut combined = new_value;
                                 combined.push_str(&field.text);
-                                field.text = combined;
+                                combined
                             }
                             PutType::After => {
-                                field.text.push_str(&new_value);
+                                let mut combined = field.text.clone();
+                                combined.push_str(&new_value);
+                                combined
                             }
-                        }
+                        };
+                        field.set_text_preserving_caret(combined);
                         Ok(())
                     }
                     CastMemberType::Text(text) => {
-                        match put_type {
-                            PutType::Into => text.text = new_value,
+                        let combined = match put_type {
+                            PutType::Into => new_value,
                             PutType::Before => {
                                 let mut combined = new_value;
                                 combined.push_str(&text.text);
-                                text.text = combined;
+                                combined
                             }
                             PutType::After => {
-                                text.text.push_str(&new_value);
+                                let mut combined = text.text.clone();
+                                combined.push_str(&new_value);
+                                combined
                             }
-                        }
+                        };
+                        text.set_text_preserving_caret(combined);
                         Ok(())
                     }
                     CastMemberType::Button(button) => {
-                        match put_type {
-                            PutType::Into => button.field.text = new_value,
+                        let combined = match put_type {
+                            PutType::Into => new_value,
                             PutType::Before => {
                                 let mut combined = new_value;
                                 combined.push_str(&button.field.text);
-                                button.field.text = combined;
+                                combined
                             }
                             PutType::After => {
-                                button.field.text.push_str(&new_value);
+                                let mut combined = button.field.text.clone();
+                                combined.push_str(&new_value);
+                                combined
                             }
-                        }
+                        };
+                        button.field.set_text_preserving_caret(combined);
                         Ok(())
                     }
                     other => {

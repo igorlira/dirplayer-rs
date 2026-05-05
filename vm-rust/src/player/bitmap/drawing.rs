@@ -299,6 +299,16 @@ fn blend_pixel(
     }
 }
 
+/// One visual line produced by `wrap_lines_with_spans`. `start..end` is the byte
+/// range in the original text that this line covers (exclusive of the trailing
+/// space that caused a soft wrap, and exclusive of any \r/\n terminator).
+#[derive(Clone, Debug)]
+pub struct LineSpan {
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+}
+
 impl Bitmap {
     pub fn get_pixel_color_with_alpha(
         &self,
@@ -3040,48 +3050,201 @@ impl Bitmap {
 
     /// Break text into lines that fit within max_width, wrapping at word boundaries.
     pub fn wrap_text_lines(text: &str, font: &BitmapFont, max_width: i32) -> Vec<String> {
-        let mut lines: Vec<String> = Vec::new();
+        Self::wrap_lines_with_spans(text, font, max_width)
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
+    }
 
-        for paragraph in text.split(|c| c == '\r' || c == '\n') {
-            if max_width <= 0 {
-                lines.push(paragraph.to_string());
-                continue;
+    /// Break text into lines that fit within max_width, returning each line's byte
+    /// range in the original text along with its visible content. Used by caret
+    /// math so positions agree byte-for-byte with what's rendered.
+    pub fn wrap_lines_with_spans(text: &str, font: &BitmapFont, max_width: i32) -> Vec<LineSpan> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        let mut lines: Vec<LineSpan> = Vec::new();
+
+        let mut i = 0usize;
+        loop {
+            let para_start = i;
+            let mut para_end = para_start;
+            while para_end < len && bytes[para_end] != b'\r' && bytes[para_end] != b'\n' {
+                para_end += 1;
             }
 
-            let words: Vec<&str> = paragraph.split(' ').collect();
-            let mut current_line = String::new();
-            let mut current_width: i32 = 0;
-            let space_width = font.get_char_advance(b' ') as i32;
+            if max_width <= 0 || para_start == para_end {
+                lines.push(LineSpan {
+                    start: para_start,
+                    end: para_end,
+                    text: text[para_start..para_end].to_string(),
+                });
+            } else {
+                let mut line_start = para_start;
+                let mut line_w: i32 = 0;
+                let mut last_space: Option<usize> = None;
 
-            for (i, word) in words.iter().enumerate() {
-                let word_width: i32 = word.chars()
-                    .map(|ch| font.get_char_advance(ch as u8) as i32)
-                    .sum();
+                let mut p = para_start;
+                while p < para_end {
+                    let ch = bytes[p];
+                    let cw = font.get_char_advance(ch) as i32;
 
-                let needed = if current_line.is_empty() {
-                    word_width
-                } else {
-                    space_width + word_width
-                };
-
-                if !current_line.is_empty() && current_width + needed > max_width {
-                    // Wrap: push current line and start new one
-                    lines.push(current_line);
-                    current_line = word.to_string();
-                    current_width = word_width;
-                } else {
-                    if !current_line.is_empty() {
-                        current_line.push(' ');
-                        current_width += space_width;
+                    if ch == b' ' {
+                        last_space = Some(p);
                     }
-                    current_line.push_str(word);
-                    current_width += word_width;
+
+                    if line_w + cw > max_width && p > line_start {
+                        if let Some(sp) = last_space.filter(|&sp| sp > line_start) {
+                            lines.push(LineSpan {
+                                start: line_start,
+                                end: sp,
+                                text: text[line_start..sp].to_string(),
+                            });
+                            line_start = sp + 1;
+                            last_space = None;
+                            line_w = text[line_start..p]
+                                .bytes()
+                                .map(|b| font.get_char_advance(b) as i32)
+                                .sum();
+                        } else {
+                            // Single word longer than line — hard break at p.
+                            lines.push(LineSpan {
+                                start: line_start,
+                                end: p,
+                                text: text[line_start..p].to_string(),
+                            });
+                            line_start = p;
+                            last_space = None;
+                            line_w = 0;
+                        }
+                    }
+
+                    line_w += cw;
+                    p += 1;
                 }
+
+                lines.push(LineSpan {
+                    start: line_start,
+                    end: para_end,
+                    text: text[line_start..para_end].to_string(),
+                });
             }
-            lines.push(current_line);
+
+            if para_end >= len {
+                break;
+            }
+            // Each \r and each \n is its own line terminator. Director text
+            // is overwhelmingly single-\r, but legacy "a\r\nb" content from
+            // imported sources renders as three lines (a, empty, b) and the
+            // bitmap-font path counts paragraphs the same way, so caret math
+            // must too.
+            i = para_end + 1;
         }
 
+        if lines.is_empty() {
+            lines.push(LineSpan { start: 0, end: 0, text: String::new() });
+        }
         lines
+    }
+
+    /// Map a caret byte index to a (dx, dy) offset relative to the text's top-left
+    /// origin (loc_h, loc_v + top_spacing). Caller adds those.
+    pub fn caret_index_to_xy(
+        text: &str,
+        font: &BitmapFont,
+        max_width: i32,
+        alignment: &str,
+        line_spacing: u16,
+        idx: i32,
+    ) -> (i32, i32) {
+        let lines = Self::wrap_lines_with_spans(text, font, max_width);
+        let line_height = font.char_height as i32 + line_spacing as i32;
+        let idx = (idx.max(0) as usize).min(text.len());
+
+        let mut line_idx = lines.len() - 1;
+        for (i, l) in lines.iter().enumerate() {
+            if idx >= l.start && idx <= l.end {
+                line_idx = i;
+                break;
+            }
+        }
+        // At a soft-wrap boundary the same byte index may sit at the end of one
+        // visual line and the start of the next (caused by a wrap on a long word).
+        // Prefer the start of the following line so the caret appears where the
+        // next inserted char will land.
+        if line_idx + 1 < lines.len() {
+            let cur = &lines[line_idx];
+            let nxt = &lines[line_idx + 1];
+            if idx == cur.end && nxt.start == idx {
+                line_idx += 1;
+            }
+        }
+
+        let line = &lines[line_idx];
+        let col = idx.saturating_sub(line.start);
+        let line_w: i32 = line.text.bytes().map(|b| font.get_char_advance(b) as i32).sum();
+        let x_offset = if max_width > 0 {
+            let key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
+            match key.as_str() {
+                "center" => ((max_width - line_w) / 2).max(0),
+                "right" => (max_width - line_w).max(0),
+                _ => 0,
+            }
+        } else {
+            0
+        };
+
+        let mut x = x_offset;
+        for b in line.text.bytes().take(col) {
+            x += font.get_char_advance(b) as i32;
+        }
+        (x, (line_idx as i32) * line_height)
+    }
+
+    /// Inverse of caret_index_to_xy. Coordinates are relative to (loc_h, loc_v + top_spacing).
+    pub fn xy_to_caret_index(
+        text: &str,
+        font: &BitmapFont,
+        max_width: i32,
+        alignment: &str,
+        line_spacing: u16,
+        x: i32,
+        y: i32,
+    ) -> i32 {
+        let lines = Self::wrap_lines_with_spans(text, font, max_width);
+        let line_height = (font.char_height as i32 + line_spacing as i32).max(1);
+
+        let line_idx = if y < 0 {
+            0
+        } else {
+            ((y / line_height) as usize).min(lines.len() - 1)
+        };
+
+        let line = &lines[line_idx];
+        let line_w: i32 = line.text.bytes().map(|b| font.get_char_advance(b) as i32).sum();
+        let x_offset = if max_width > 0 {
+            let key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
+            match key.as_str() {
+                "center" => ((max_width - line_w) / 2).max(0),
+                "right" => (max_width - line_w).max(0),
+                _ => 0,
+            }
+        } else {
+            0
+        };
+
+        if x < x_offset {
+            return line.start as i32;
+        }
+
+        let mut cx = x_offset;
+        for (i, b) in line.text.bytes().enumerate() {
+            let cw = font.get_char_advance(b) as i32;
+            if x < cx + cw / 2 {
+                return (line.start + i) as i32;
+            }
+            cx += cw;
+        }
+        line.end as i32
     }
 
     pub fn trim_whitespace(&mut self, palettes: &PaletteMap) {

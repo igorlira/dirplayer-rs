@@ -198,6 +198,13 @@ pub struct RenderedTextCacheKey {
     pub bg_color: ColorRef,
     /// Whether the field has keyboard focus (affects cursor rendering)
     pub has_focus: bool,
+    /// Caret/selection state. Hashed into the cache key so the texture
+    /// invalidates as the user moves the caret or extends the selection.
+    /// `caret_blink_on` toggles every 500ms while focused — at most two
+    /// cached entries per field rotate.
+    pub sel_start: i32,
+    pub sel_end: i32,
+    pub caret_blink_on: bool,
     /// Texture width (needed because sprite rect can change independently of text)
     pub width: u32,
     /// Texture height
@@ -242,6 +249,9 @@ impl RenderedTextCacheKey {
             fg_color,
             bg_color,
             false,
+            0,
+            0,
+            false,
             width,
             height,
             "left",
@@ -263,6 +273,9 @@ impl RenderedTextCacheKey {
         fg_color: ColorRef,
         bg_color: ColorRef,
         has_focus: bool,
+        sel_start: i32,
+        sel_end: i32,
+        caret_blink_on: bool,
         width: u32,
         height: u32,
         alignment: &str,
@@ -282,6 +295,9 @@ impl RenderedTextCacheKey {
             fg_color,
             bg_color,
             has_focus,
+            sel_start,
+            sel_end,
+            caret_blink_on,
             width,
             height,
             alignment,
@@ -304,6 +320,9 @@ impl RenderedTextCacheKey {
         fg_color: ColorRef,
         bg_color: ColorRef,
         has_focus: bool,
+        sel_start: i32,
+        sel_end: i32,
+        caret_blink_on: bool,
         width: u32,
         height: u32,
         alignment: &str,
@@ -363,6 +382,9 @@ impl RenderedTextCacheKey {
             fg_color,
             bg_color,
             has_focus,
+            sel_start,
+            sel_end,
+            caret_blink_on,
             width,
             height,
             // Caller flips this after construction when the sprite has a
