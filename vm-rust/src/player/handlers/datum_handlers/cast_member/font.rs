@@ -315,6 +315,15 @@ impl HtmlParser {
     }
 }
 
+/// Caret + selection state to draw on top of native-rendered text. Byte
+/// offsets index into the concatenation of all `spans[*].text`.
+#[derive(Clone, Debug)]
+pub struct NativeCaretOverlay {
+    pub sel_start: i32,
+    pub sel_end: i32,
+    pub caret_blink_on: bool,
+}
+
 pub struct FontMemberHandlers {}
 
 impl FontMemberHandlers {
@@ -581,6 +590,37 @@ impl FontMemberHandlers {
         par_infos: &[crate::director::chunks::xmedia_styled_text::ParInfo],
         par_runs: &[crate::director::chunks::xmedia_styled_text::ParRun],
     ) -> Result<(), ScriptError> {
+        Self::render_native_text_to_bitmap_with_caret(
+            bitmap, spans, start_x, start_y, render_width, render_height,
+            alignment, max_width, word_wrap, sprite_color, fixed_line_space,
+            top_spacing, bottom_spacing, tab_stops, par_infos, par_runs, None,
+        )
+    }
+
+    /// Same as `render_native_text_to_bitmap` but optionally draws a caret +
+    /// selection highlight on top of the rendered text. Positions are computed
+    /// from Canvas2D `measureText` (the same metrics used for layout) so the
+    /// caret/selection align with what the user sees, regardless of which
+    /// system font Canvas2D ends up choosing.
+    pub fn render_native_text_to_bitmap_with_caret(
+        bitmap: &mut Bitmap,
+        spans: &[StyledSpan],
+        start_x: i32,
+        start_y: i32,
+        render_width: i32,
+        render_height: i32,
+        alignment: TextAlignment,
+        max_width: i32,
+        word_wrap: bool,
+        sprite_color: Option<&ColorRef>,
+        fixed_line_space: u16,
+        top_spacing: i16,
+        bottom_spacing: i16,
+        tab_stops: &[crate::player::cast_member::TabStop],
+        par_infos: &[crate::director::chunks::xmedia_styled_text::ParInfo],
+        par_runs: &[crate::director::chunks::xmedia_styled_text::ParRun],
+        caret_overlay: Option<NativeCaretOverlay>,
+    ) -> Result<(), ScriptError> {
         // Create temporary canvas for text rendering (size of text area only)
         let document = web_sys::window()
             .ok_or_else(|| ScriptError::new("No window".to_string()))?
@@ -634,6 +674,10 @@ impl FontMemberHandlers {
             width: f64,
             style: NativeSegmentStyle,
             is_tab: bool, // Tab marker - width is placeholder, resolved during rendering
+            // Byte offset of this segment's first char in the concatenation of
+            // all spans[*].text. Used by the optional caret/selection overlay
+            // to map byte offsets back to pixel positions.
+            start_byte: usize,
         }
 
         #[derive(Default)]
@@ -711,6 +755,11 @@ impl FontMemberHandlers {
             lines_out.push(std::mem::take(line));
         };
 
+        // Cumulative byte offset across all spans — feeds segment.start_byte
+        // so the optional caret/selection overlay can map byte offsets back
+        // to pixel positions.
+        let mut cur_byte_offset: usize = 0;
+
         for span in spans {
             if span.text.is_empty() {
                 continue;
@@ -719,12 +768,14 @@ impl FontMemberHandlers {
 
             let mut token = String::new();
             let mut token_is_ws: Option<bool> = None;
+            let mut token_start_byte: usize = cur_byte_offset;
 
             let mut flush_token = |token_text: &mut String,
                                    is_ws: Option<bool>,
                                    line: &mut NativeLine,
                                    lines_out: &mut Vec<NativeLine>,
-                                   style: &NativeSegmentStyle| {
+                                   style: &NativeSegmentStyle,
+                                   start_byte: usize| {
                 if token_text.is_empty() {
                     return;
                 }
@@ -756,6 +807,7 @@ impl FontMemberHandlers {
                         width: token_width,
                         style: style.clone(),
                         is_tab: false,
+                        start_byte,
                     });
                 }
 
@@ -764,6 +816,7 @@ impl FontMemberHandlers {
 
             let mut prev_was_cr = false;
             for ch in span.text.chars() {
+                let ch_byte_len = ch.len_utf8();
                 // Director (Mac origin) uses \r for line breaks.
                 // Handle \r, \n, and \r\n without double-breaking.
                 if ch == '\n' && prev_was_cr {
@@ -773,6 +826,8 @@ impl FontMemberHandlers {
                     prev_was_cr = false;
                     cumulative_pos += 1;
                     current_line.start_text_pos = cumulative_pos;
+                    cur_byte_offset += ch_byte_len;
+                    token_start_byte = cur_byte_offset;
                     continue;
                 }
                 prev_was_cr = ch == '\r';
@@ -783,11 +838,14 @@ impl FontMemberHandlers {
                         &mut current_line,
                         &mut lines,
                         &seg_style,
+                        token_start_byte,
                     );
                     token_is_ws = None;
                     push_line(&mut current_line, &mut lines);
                     cumulative_pos += 1;
                     current_line.start_text_pos = cumulative_pos;
+                    cur_byte_offset += ch_byte_len;
+                    token_start_byte = cur_byte_offset;
                     continue;
                 }
                 if ch == '\t' {
@@ -797,6 +855,7 @@ impl FontMemberHandlers {
                         &mut current_line,
                         &mut lines,
                         &seg_style,
+                        token_start_byte,
                     );
                     token_is_ws = None;
                     // Count how many tabs we've seen so far on this line
@@ -807,6 +866,7 @@ impl FontMemberHandlers {
                         width: 0.0,
                         style: seg_style.clone(),
                         is_tab: true,
+                        start_byte: cur_byte_offset,
                     });
                     // Update line.width to the tab stop position so subsequent
                     // flush_token calls don't cause false word-wrap overflow
@@ -817,6 +877,8 @@ impl FontMemberHandlers {
                         }
                     }
                     cumulative_pos += 1;
+                    cur_byte_offset += ch_byte_len;
+                    token_start_byte = cur_byte_offset;
                     continue;
                 }
 
@@ -828,11 +890,14 @@ impl FontMemberHandlers {
                         &mut current_line,
                         &mut lines,
                         &seg_style,
+                        token_start_byte,
                     );
+                    token_start_byte = cur_byte_offset;
                 }
                 token_is_ws = Some(is_ws);
                 token.push(ch);
                 cumulative_pos += 1;
+                cur_byte_offset += ch_byte_len;
             }
 
             flush_token(
@@ -841,7 +906,9 @@ impl FontMemberHandlers {
                 &mut current_line,
                 &mut lines,
                 &seg_style,
+                token_start_byte,
             );
+            token_start_byte = cur_byte_offset;
         }
 
         if !current_line.segments.is_empty() || lines.is_empty() {
@@ -867,6 +934,11 @@ impl FontMemberHandlers {
             }
             active
         };
+
+        // Per-line top-y / line-height in 1x logical canvas pixels (same units
+        // as the rendering loop's `y`). Captured during render so the optional
+        // caret/selection overlay can place rects in the same positions later.
+        let mut line_positions: Vec<(f64, f64)> = Vec::new();
 
         let mut y = top_spacing.max(0) as f64;
         let mut prev_par_idx: Option<u16> = None;
@@ -1015,6 +1087,7 @@ impl FontMemberHandlers {
             } else {
                 line_font_px
             };
+            line_positions.push((y, effective_line_height));
             y += effective_line_height + bottom_spacing as f64 + top_spacing as f64;
             prev_par_idx = this_par_idx;
         }
@@ -1107,6 +1180,95 @@ impl FontMemberHandlers {
                     bitmap.data[dest_idx + 2] = fg_b;
                     // Coverage maps to alpha: text body=255, anti-aliased edges=partial
                     bitmap.data[dest_idx + 3] = coverage.min(255);
+                }
+            }
+        }
+
+        // Optional caret + selection overlay. Drawn with Canvas2D-measured
+        // positions so the caret aligns with what was actually rendered,
+        // including for center/right alignment where the bitmap font's
+        // advances would disagree with the browser font's measureText.
+        if let Some(overlay) = caret_overlay {
+            let palette_map = PaletteMap::new();
+            let sel_lo = overlay.sel_start.min(overlay.sel_end).max(0) as usize;
+            let sel_hi = overlay.sel_start.max(overlay.sel_end).max(0) as usize;
+            let has_selection = sel_hi > sel_lo;
+            let selection_color: (u8, u8, u8) = (164, 205, 255);
+
+            for (line_idx, line) in lines.iter().enumerate() {
+                let (line_top_y, line_h) = match line_positions.get(line_idx) {
+                    Some(&p) => p,
+                    None => continue,
+                };
+                let x_start = match alignment {
+                    TextAlignment::Left => 0.0,
+                    TextAlignment::Center => {
+                        if max_width > 0 { ((max_width as f64) - line.width) / 2.0 } else { 0.0 }
+                    }
+                    TextAlignment::Right => {
+                        if max_width > 0 { (max_width as f64) - line.width } else { 0.0 }
+                    }
+                    TextAlignment::Justify => 0.0,
+                }.max(0.0);
+                let line_byte_start = line.segments.first().map(|s| s.start_byte).unwrap_or(0);
+                let line_byte_end = line.segments.last()
+                    .map(|s| s.start_byte + s.text.len())
+                    .unwrap_or(line_byte_start);
+
+                // Resolve a byte offset within this line to a pixel x by walking
+                // segments and using Canvas2D measureText for the prefix inside
+                // the segment that contains the offset.
+                let pixel_x_for_byte = |byte: usize, ctx: &web_sys::CanvasRenderingContext2d| -> f64 {
+                    let mut x = x_start;
+                    for segment in &line.segments {
+                        if segment.is_tab { continue; }
+                        let seg_end = segment.start_byte + segment.text.len();
+                        if byte <= segment.start_byte {
+                            return x;
+                        }
+                        if byte >= seg_end {
+                            x += segment.width;
+                            continue;
+                        }
+                        let inner = byte - segment.start_byte;
+                        let prefix = &segment.text[..inner.min(segment.text.len())];
+                        ctx.set_font(&segment.style.font);
+                        let prefix_w = ctx.measure_text(prefix)
+                            .map(|m| m.width())
+                            .unwrap_or(0.0);
+                        return x + prefix_w;
+                    }
+                    x
+                };
+
+                if has_selection {
+                    if sel_hi <= line_byte_start || sel_lo > line_byte_end {
+                        continue;
+                    }
+                    let from = sel_lo.max(line_byte_start);
+                    let to = sel_hi.min(line_byte_end);
+                    let x0 = pixel_x_for_byte(from, &ctx);
+                    let mut x1 = pixel_x_for_byte(to, &ctx);
+                    if x1 <= x0 && sel_hi > line_byte_end {
+                        // Selection wraps to next line — show the trailing space.
+                        x1 = x0 + line.max_font_px.max(8.0) * 0.4;
+                    }
+                    if x1 <= x0 { continue; }
+                    let left = start_x + (x0).round() as i32;
+                    let right = start_x + (x1).round() as i32;
+                    let top = start_y + line_top_y.round() as i32;
+                    let bottom = top + line_h.round() as i32;
+                    bitmap.fill_rect(left, top, right, bottom, selection_color, &palette_map, 0.5);
+                } else if overlay.caret_blink_on {
+                    let target = overlay.sel_end as usize;
+                    if target < line_byte_start || target > line_byte_end {
+                        continue;
+                    }
+                    let cx = pixel_x_for_byte(target, &ctx);
+                    let left = start_x + cx.round() as i32;
+                    let top = start_y + line_top_y.round() as i32;
+                    let bottom = top + line_h.round() as i32;
+                    bitmap.fill_rect(left, top, left + 1, bottom, (0, 0, 0), &palette_map, 1.0);
                 }
             }
         }

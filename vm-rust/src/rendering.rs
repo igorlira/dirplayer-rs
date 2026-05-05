@@ -43,6 +43,69 @@ use crate::director::lingo::datum::Datum;
 use crate::player::score_keyframes::SpritePathKeyframes;
 use crate::rendering_gpu::{DynamicRenderer, Renderer};
 
+/// 500ms-on, 500ms-off caret blink phase derived from wall time. The renderer
+/// runs every frame so this query is cheap and needs no separate timer.
+fn caret_blink_visible() -> bool {
+    let t = crate::player::testing_shared::now_ms();
+    (t.rem_euclid(1000.0)) < 500.0
+}
+
+/// Standard text-selection background color (matches macOS-ish blue). Drawn
+/// before glyphs so the text reads on top.
+const SELECTION_COLOR: (u8, u8, u8) = (164, 205, 255);
+
+/// Fill selection-highlight rectangles for the byte range [sel_lo..sel_hi)
+/// within a wrapped Field/Text. Math reuses `caret_index_to_xy` so the rects
+/// agree with the rendered glyphs byte-for-byte.
+fn draw_text_selection_rects(
+    bitmap: &mut Bitmap,
+    text: &str,
+    font: &BitmapFont,
+    loc_h: i32,
+    loc_v: i32,
+    max_width: i32,
+    alignment: &str,
+    line_spacing: u16,
+    top_spacing: i16,
+    sel_lo: i32,
+    sel_hi: i32,
+    palettes: &PaletteMap,
+) {
+    if sel_lo >= sel_hi {
+        return;
+    }
+    let lines = Bitmap::wrap_lines_with_spans(text, font, max_width);
+    let line_h = font.char_height as i32 + line_spacing as i32;
+    let lo = sel_lo as usize;
+    let hi = sel_hi as usize;
+    let base_y = loc_v + top_spacing as i32;
+    for (i, line) in lines.iter().enumerate() {
+        if hi <= line.start || lo >= line.end && line.start != line.end {
+            continue;
+        }
+        let from = lo.max(line.start);
+        let to = hi.min(line.end);
+        if from > to {
+            continue;
+        }
+        let (x0, _) = Bitmap::caret_index_to_xy(text, font, max_width, alignment, line_spacing, from as i32);
+        let (x1, _) = Bitmap::caret_index_to_xy(text, font, max_width, alignment, line_spacing, to as i32);
+        // If the selection wraps a full line and `to == line.end`, also extend a
+        // small space-wide hint so the user sees the line is selected through.
+        let y = base_y + (i as i32) * line_h;
+        let mut left = loc_h + x0;
+        let mut right = loc_h + x1;
+        if right == left && hi > line.end {
+            // Selection continues to next line — show a trailing space's worth.
+            right += font.get_char_advance(b' ') as i32;
+        }
+        if right < left {
+            std::mem::swap(&mut left, &mut right);
+        }
+        bitmap.fill_rect(left, y, right, y + font.char_height as i32, SELECTION_COLOR, palettes, 1.0);
+    }
+}
+
 /// Interpolate path position between keyframes for filmloop animation.
 /// Returns interpolated (x, y) position for the given frame, or None if no interpolation is needed.
 fn interpolate_path_position(path_keyframes: &SpritePathKeyframes, frame: u32) -> Option<(i32, i32)> {
@@ -94,7 +157,7 @@ pub struct PlayerCanvasRenderer {
     pub bitmap: Bitmap,
 }
 
-fn get_or_load_font(
+pub(crate) fn get_or_load_font(
     font_manager: &mut FontManager,
     cast_manager: &CastManager,
     font_name: &str,
@@ -104,7 +167,7 @@ fn get_or_load_font(
     return get_or_load_font_with_id(font_manager, cast_manager, font_name, font_size, font_style, None);
 }
 
-fn get_or_load_font_with_id(
+pub(crate) fn get_or_load_font_with_id(
     font_manager: &mut FontManager,
     cast_manager: &CastManager,
     font_name: &str,
@@ -1989,6 +2052,28 @@ pub fn render_score_to_bitmap_with_offset(
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
+                    let is_focused = player.keyboard_focus_sprite == sprite.number as i16;
+                    let sel_lo = field_member.sel_start.min(field_member.sel_end).max(0);
+                    let sel_hi = field_member.sel_start.max(field_member.sel_end).max(0);
+                    let has_selection = is_focused && sel_lo != sel_hi;
+
+                    if has_selection {
+                        draw_text_selection_rects(
+                            bitmap,
+                            &field_member.text,
+                            &font,
+                            sprite.loc_h,
+                            sprite.loc_v,
+                            sprite.width,
+                            &field_member.alignment,
+                            field_member.fixed_line_space,
+                            field_member.top_spacing,
+                            sel_lo,
+                            sel_hi,
+                            &palettes,
+                        );
+                    }
+
                     bitmap.draw_text_wrapped(
                         &field_member.text,
                         &font,
@@ -2003,17 +2088,22 @@ pub fn render_score_to_bitmap_with_offset(
                         field_member.top_spacing,
                     );
 
-                    if player.keyboard_focus_sprite == sprite.number as i16 {
-                        let cursor_x = sprite.loc_h + (sprite.width / 2);
-                        let cursor_y = sprite.loc_v;
-                        let cursor_width = 1;
-                        let cursor_height = font.char_height as i32;
-
+                    if is_focused && !has_selection && caret_blink_visible() {
+                        let (dx, dy) = Bitmap::caret_index_to_xy(
+                            &field_member.text,
+                            &font,
+                            sprite.width,
+                            &field_member.alignment,
+                            field_member.fixed_line_space,
+                            field_member.sel_end,
+                        );
+                        let caret_x = sprite.loc_h + dx;
+                        let caret_y = sprite.loc_v + field_member.top_spacing as i32 + dy;
                         bitmap.fill_rect(
-                            cursor_x,
-                            cursor_y,
-                            cursor_x + cursor_width,
-                            cursor_y + cursor_height,
+                            caret_x,
+                            caret_y,
+                            caret_x + 1,
+                            caret_y + font.char_height as i32,
                             (0, 0, 0),
                             &palettes,
                             1.0,
@@ -2560,6 +2650,28 @@ pub fn render_score_to_bitmap_with_offset(
                             console_warn!("Native text render error for Text member: {:?}", e);
                         }
                     } else {
+                        let is_focused = player.keyboard_focus_sprite == sprite.number as i16;
+                        let sel_lo = text_member.sel_start.min(text_member.sel_end).max(0);
+                        let sel_hi = text_member.sel_start.max(text_member.sel_end).max(0);
+                        let has_selection = is_focused && sel_lo != sel_hi;
+
+                        if has_selection {
+                            draw_text_selection_rects(
+                                bitmap,
+                                &text_member.text,
+                                &font,
+                                draw_x,
+                                draw_y,
+                                0, // draw_text doesn't wrap; treat as unbounded
+                                "left",
+                                text_member.fixed_line_space,
+                                text_member.top_spacing,
+                                sel_lo,
+                                sel_hi,
+                                &palettes,
+                            );
+                        }
+
                         bitmap.draw_text(
                             &text_member.text,
                             &font,
@@ -2571,6 +2683,28 @@ pub fn render_score_to_bitmap_with_offset(
                             text_member.fixed_line_space,
                             text_member.top_spacing,
                         );
+
+                        if is_focused && !has_selection && caret_blink_visible() {
+                            let (dx, dy) = Bitmap::caret_index_to_xy(
+                                &text_member.text,
+                                &font,
+                                0,
+                                "left",
+                                text_member.fixed_line_space,
+                                text_member.sel_end,
+                            );
+                            let caret_x = draw_x + dx;
+                            let caret_y = draw_y + text_member.top_spacing as i32 + dy;
+                            bitmap.fill_rect(
+                                caret_x,
+                                caret_y,
+                                caret_x + 1,
+                                caret_y + font.char_height as i32,
+                                (0, 0, 0),
+                                &palettes,
+                                1.0,
+                            );
+                        }
                     }
                 }
             }

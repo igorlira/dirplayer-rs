@@ -229,6 +229,17 @@ pub struct DirPlayer {
     pub keyboard_focus_sprite: i16,
     pub text_selection_start: u16,
     pub text_selection_end: u16,
+    /// Mirror of the OS clipboard's last-known plain text. Populated by the
+    /// frontend's copy/cut listeners and by `the clipBoard = ...` assignment;
+    /// read by `the clipBoard`. Not the source of truth — `paste` reads
+    /// directly from the OS via the JS gesture event.
+    pub clipboard_mirror: String,
+    /// IME composition state. When `Some(start)`, an in-progress composition
+    /// is active in the focused editable member: `start` is the byte offset
+    /// where the provisional composition begins. `end` is the current end of
+    /// the provisional run (start + composition_text.len()). When None,
+    /// no composition is in flight.
+    pub ime_composition: Option<(i32, i32)>,
     pub mouse_loc: (i32, i32),
     pub wants_pointer_lock: bool,
     pub cursor_is_hidden: bool,
@@ -441,6 +452,8 @@ impl DirPlayer {
             keyboard_manager: KeyboardManager::new(),
             text_selection_start: 0,
             text_selection_end: 0,
+            clipboard_mirror: String::new(),
+            ime_composition: None,
             float_precision: 4,
             last_handler_result: DatumRef::Void,
             hovered_sprite: None,
@@ -1719,6 +1732,40 @@ impl DirPlayer {
             "keyboardFocusSprite" => {
                 Ok(self.alloc_datum(Datum::Int(self.keyboard_focus_sprite as i32)))
             },
+            "selection" => {
+                // Returns the currently selected text in the focused editable
+                // Field/Text member, or "" if none.
+                let s = if self.keyboard_focus_sprite >= 0 {
+                    let sprite_id = self.keyboard_focus_sprite as i16;
+                    let sprite = self.movie.score.get_sprite(sprite_id);
+                    let member = sprite
+                        .and_then(|s| s.member.as_ref())
+                        .and_then(|m| self.movie.cast_manager.find_member_by_ref(m));
+                    match member.map(|m| &m.member_type) {
+                        Some(crate::player::cast_member::CastMemberType::Field(f)) if f.editable => {
+                            let len = f.text.len() as i32;
+                            let lo = f.sel_start.min(f.sel_end).clamp(0, len);
+                            let hi = f.sel_start.max(f.sel_end).clamp(0, len);
+                            f.text[lo as usize..hi as usize].to_string()
+                        }
+                        Some(crate::player::cast_member::CastMemberType::Text(t))
+                            if t.info.as_ref().map_or(false, |i| i.editable) =>
+                        {
+                            let len = t.text.len() as i32;
+                            let lo = t.sel_start.min(t.sel_end).clamp(0, len);
+                            let hi = t.sel_start.max(t.sel_end).clamp(0, len);
+                            t.text[lo as usize..hi as usize].to_string()
+                        }
+                        _ => String::new(),
+                    }
+                } else {
+                    String::new()
+                };
+                Ok(self.alloc_datum(Datum::String(s)))
+            },
+            "clipBoard" => {
+                Ok(self.alloc_datum(Datum::String(self.clipboard_mirror.clone())))
+            },
             "frameTempo" => {
                 // Get tempo from current frame in score, or use default frame_rate
                 let frame_tempo = self.movie.score.get_frame_tempo(self.movie.current_frame)
@@ -2126,6 +2173,10 @@ impl DirPlayer {
             },
             "selEnd" => {
                 self.text_selection_end = value.int_value()? as u16;
+                Ok(())
+            },
+            "clipBoard" => {
+                self.clipboard_mirror = value.string_value()?;
                 Ok(())
             },
             "floatPrecision" => {

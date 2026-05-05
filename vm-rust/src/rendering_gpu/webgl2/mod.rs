@@ -43,6 +43,16 @@ pub use texture_cache::{TextureCache, TextureCacheKey, RenderedTextCache, Render
 const DEBUG_WEBGL2_TEXT: bool = false;
 static SPRITE_DEBUG_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Caret blink phase (500ms on / 500ms off). Mirrors the CPU path's
+/// `caret_blink_visible()` in `rendering.rs` so both renderers blink in sync.
+fn caret_blink_visible_now() -> bool {
+    let t = crate::player::testing_shared::now_ms();
+    (t.rem_euclid(1000.0)) < 500.0
+}
+
+/// Selection-highlight color, matched to the CPU path's `SELECTION_COLOR`.
+const SELECTION_HIGHLIGHT: (u8, u8, u8) = (164, 205, 255);
+
 /// WebGL2 hardware-accelerated renderer
 ///
 /// This renderer uses WebGL2 to offload compositing to the GPU,
@@ -1454,6 +1464,9 @@ impl WebGL2Renderer {
                         fg_color.clone(),
                         bg_color.clone(),
                         false,
+                        0,
+                        0,
+                        false,
                         width,
                         height,
                         "left",  // Font members default to left alignment
@@ -1897,6 +1910,8 @@ impl WebGL2Renderer {
 
                     // Build cache key from the final styled spans that will actually be rendered.
                     let styled_spans_ref = styled_spans_with_defaults.as_ref().map(|s| s.as_slice());
+                    let text_has_focus = player.keyboard_focus_sprite == channel_num;
+                    let text_caret_blink = caret_blink_visible_now();
                     let mut cache_key = RenderedTextCacheKey::new_with_styled_spans(
                         member_ref.clone(),
                         text,
@@ -1905,7 +1920,10 @@ impl WebGL2Renderer {
                         blend,
                         text_fg_color.clone(),
                         text_bg_color.clone(),
-                        false,
+                        text_has_focus,
+                        text_member.sel_start,
+                        text_member.sel_end,
+                        text_caret_blink,
                         width,
                         height,
                         &text_member.alignment,
@@ -2158,6 +2176,7 @@ impl WebGL2Renderer {
                     );
 
                     // Include focus state in cache key so cursor state changes invalidate cache
+                    let field_caret_blink = caret_blink_visible_now();
                     let mut cache_key = RenderedTextCacheKey::new_with_focus(
                         member_ref.clone(),
                         text,
@@ -2166,6 +2185,9 @@ impl WebGL2Renderer {
                         effective_fg.clone(),
                         effective_bg.clone(),
                         has_focus,
+                        field_member.sel_start,
+                        field_member.sel_end,
+                        field_caret_blink,
                         width,
                         height,
                         &field_member.alignment,
@@ -4800,9 +4822,24 @@ impl WebGL2Renderer {
                 _ => TextAlignment::Left,
             };
 
+            // For focused editable members, hand the caret/selection state to
+            // the Canvas2D renderer so it draws them with measureText positions
+            // (the bitmap font's advances would disagree with the browser font
+            // and the caret would visibly drift, especially under center/right
+            // alignment).
+            let overlay = if cache_key.has_focus {
+                Some(crate::player::handlers::datum_handlers::cast_member::font::NativeCaretOverlay {
+                    sel_start: cache_key.sel_start,
+                    sel_end: cache_key.sel_end,
+                    caret_blink_on: cache_key.caret_blink_on,
+                })
+            } else {
+                None
+            };
+
             // Use native browser text rendering for smooth, anti-aliased text
             // Don't pass fg_color since colors are now in the styled spans
-            if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
+            if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap_with_caret(
                 &mut text_bitmap,
                 spans,
                 0,  // loc_h - render at origin
@@ -4819,6 +4856,7 @@ impl WebGL2Renderer {
                 tab_stops,
                 par_infos_for_native,
                 par_runs_for_native,
+                overlay,
             ) {
                 web_sys::console::warn_1(
                     &format!("WebGL2 render_text_to_texture: Native text render error: {:?}", e).into()
@@ -5606,54 +5644,28 @@ impl WebGL2Renderer {
                     y += line_step;
                 }
             } else {
-                let raw_lines: Vec<&str> = text.split(|c| c == '\r' || c == '\n').collect();
-                let mut lines_to_draw: Vec<String> = Vec::new();
-                // Parallel array — for each entry in lines_to_draw, the index
-                // of the source raw text-line it came from. Used below to
-                // look up per-paragraph line stride from `per_line_spacings`
-                // (XMED par_runs/par_infos). Wrap-induced visual lines share
-                // the source line's index so they inherit the same stride.
-                let mut line_text_indices: Vec<usize> = Vec::new();
-
-                if word_wrap && wrap_max_width > 0 {
-                    for (raw_idx, raw) in raw_lines.iter().enumerate() {
-                        if raw.is_empty() {
-                            lines_to_draw.push(String::new());
-                            line_text_indices.push(raw_idx);
-                            continue;
-                        }
-
-                        let mut current = String::new();
-                        for word in raw.split_whitespace() {
-                            let candidate = if current.is_empty() {
-                                word.to_string()
-                            } else {
-                                format!("{} {}", current, word)
-                            };
-
-                            let candidate_width: i32 = candidate
-                                .chars()
-                                .map(|c| font.get_char_advance(c as u8) as i32)
-                                .sum();
-
-                            if candidate_width <= wrap_max_width || current.is_empty() {
-                                current = candidate;
-                            } else {
-                                lines_to_draw.push(current);
-                                line_text_indices.push(raw_idx);
-                                current = word.to_string();
-                            }
-                        }
-
-                        if !current.is_empty() {
-                            lines_to_draw.push(current);
-                            line_text_indices.push(raw_idx);
-                        }
-                    }
-                } else {
-                    for (raw_idx, s) in raw_lines.iter().enumerate() {
-                        lines_to_draw.push(s.to_string());
-                        line_text_indices.push(raw_idx);
+                // Use the same wrap algorithm the caret/selection math uses
+                // (Bitmap::wrap_lines_with_spans). Otherwise per-line widths
+                // diverge by a few pixels — most visible under center/right
+                // alignment, where the per-line offset is (width - line_w)/2
+                // and any line_w mismatch shifts the rendered text relative
+                // to the caret.
+                let wrap_w = if word_wrap && max_width > 0 { max_width } else { 0 };
+                let spans = Bitmap::wrap_lines_with_spans(text, &font, wrap_w);
+                // Map each visual line back to its source paragraph index for
+                // per_line_spacings lookup.
+                let lines_to_draw: Vec<String> = spans.iter().map(|s| s.text.clone()).collect();
+                let mut line_text_indices: Vec<usize> = Vec::with_capacity(spans.len());
+                {
+                    // Source paragraph index = number of \r or \n characters
+                    // strictly before the line's start byte offset.
+                    let bytes = text.as_bytes();
+                    for s in &spans {
+                        let para_idx = bytes[..s.start.min(bytes.len())]
+                            .iter()
+                            .filter(|b| **b == b'\r' || **b == b'\n')
+                            .count();
+                        line_text_indices.push(para_idx);
                     }
                 }
 
@@ -5823,26 +5835,66 @@ impl WebGL2Renderer {
             }
         }
 
-        // Render cursor/caret if the field has focus
-        if cache_key.has_focus {
-            let text_width: i32 = text.chars()
-                .map(|c| font.get_char_advance(c as u8) as i32)
-                .sum();
-            let cursor_x = bitmap_start_x + text_width;
-            let cursor_y = 0;
-            let cursor_width = 1;
-            let cursor_height = font.char_height as i32;
+        // Render selection highlight + caret when the field has focus.
+        // The cache key already includes sel_start/sel_end and the blink phase,
+        // so this draws into a fresh texture entry whenever any of those move.
+        // Skip when the Canvas2D path already drew them (it has access to the
+        // browser's measureText, which we can't replicate from BitmapFont
+        // metrics here).
+        let caret_drawn_by_native = spans_for_native.is_some();
+        if cache_key.has_focus && !caret_drawn_by_native {
+            let sel_lo = cache_key.sel_start.min(cache_key.sel_end).max(0);
+            let sel_hi = cache_key.sel_start.max(cache_key.sel_end).max(0);
+            let has_selection = sel_lo != sel_hi;
+            // The render_line closure inside this function computes per-line
+            // alignment using the box width (`max_width`) for both wrap and
+            // non-wrap paths when alignment is center/right (`bitmap_start_x`
+            // is only used as the fallback for left alignment). To agree
+            // pixel-for-pixel, our caret math must do the same: pass the box
+            // width in unconditionally so caret_index_to_xy produces the
+            // per-line alignment offset itself, and we don't add
+            // `bitmap_start_x` on top — that would double-count alignment.
+            let caret_max_width = width as i32;
 
-            // Draw black cursor line
-            text_bitmap.fill_rect(
-                cursor_x,
-                cursor_y,
-                cursor_x + cursor_width,
-                cursor_y + cursor_height,
-                (0, 0, 0),
-                &palettes,
-                1.0,
-            );
+            if has_selection {
+                let lines = Bitmap::wrap_lines_with_spans(text, &font, caret_max_width);
+                let line_h = font.char_height as i32 + render_line_spacing as i32;
+                let lo = sel_lo as usize;
+                let hi = sel_hi as usize;
+                for (i, line) in lines.iter().enumerate() {
+                    if hi <= line.start || (lo >= line.end && line.start != line.end) {
+                        continue;
+                    }
+                    let from = lo.max(line.start);
+                    let to = hi.min(line.end);
+                    if from > to { continue; }
+                    let (x0, _) = Bitmap::caret_index_to_xy(text, &font, caret_max_width, alignment, render_line_spacing, from as i32);
+                    let (x1, _) = Bitmap::caret_index_to_xy(text, &font, caret_max_width, alignment, render_line_spacing, to as i32);
+                    let mut left = x0;
+                    let mut right = x1;
+                    if right == left && hi > line.end {
+                        right += font.get_char_advance(b' ') as i32;
+                    }
+                    if right < left { std::mem::swap(&mut left, &mut right); }
+                    let y = top_spacing as i32 + (i as i32) * line_h;
+                    // Drawn on top of text via translucent alpha so glyphs read through.
+                    // The CPU path renders the highlight beneath the text; this overlay
+                    // approach is a webgl2-specific concession because text is already
+                    // composited into text_bitmap by this point.
+                    text_bitmap.fill_rect(left, y, right, y + font.char_height as i32, SELECTION_HIGHLIGHT, &palettes, 0.5);
+                }
+            } else if cache_key.caret_blink_on {
+                let (dx, dy) = Bitmap::caret_index_to_xy(
+                    text,
+                    &font,
+                    caret_max_width,
+                    alignment,
+                    render_line_spacing,
+                    cache_key.sel_end,
+                );
+                let cy = top_spacing as i32 + dy;
+                text_bitmap.fill_rect(dx, cy, dx + 1, cy + font.char_height as i32, (0, 0, 0), &palettes, 1.0);
+            }
         }
 
         // Draw border and drop shadow for fields

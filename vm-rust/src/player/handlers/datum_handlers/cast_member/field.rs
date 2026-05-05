@@ -86,7 +86,7 @@ impl FieldMemberHandlers {
                     .member_type
                     .as_field_mut()
                     .unwrap();
-                member.text = new_contents.trim_end_matches('\0').to_string();
+                member.set_text_preserving_caret(new_contents.trim_end_matches('\0').to_string());
                 Ok(DatumRef::Void)
             }
             _ => Err(ScriptError::new(format!(
@@ -352,9 +352,15 @@ impl FieldMemberHandlers {
                 Ok(Datum::Int(count as i32))
             }
             "tabCount" => Ok(Datum::Int(0)), // Fields don't have tab stops in our model
-            // Runtime selection state (stored, no editor integration yet)
+            // Runtime selection state
             "selStart" => Ok(Datum::Int(field.sel_start)),
             "selEnd" => Ok(Datum::Int(field.sel_end)),
+            "selectedText" => {
+                let len = field.text.len() as i32;
+                let lo = field.sel_start.min(field.sel_end).clamp(0, len);
+                let hi = field.sel_start.max(field.sel_end).clamp(0, len);
+                Ok(Datum::String(field.text[lo as usize..hi as usize].to_string()))
+            }
             // Text rendering config
             "kerning" => Ok(datum_bool(field.kerning)),
             "kerningThreshold" => Ok(Datum::Int(field.kerning_threshold as i32)),
@@ -377,7 +383,8 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().text = value?.trim_end_matches('\0').to_string();
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    field.set_text_preserving_caret(value?.trim_end_matches('\0').to_string());
                     Ok(())
                 },
             ),
@@ -638,6 +645,23 @@ impl FieldMemberHandlers {
                 |_player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().sel_end = value?;
+                    Ok(())
+                },
+            ),
+            "selectedText" => borrow_member_mut(
+                member_ref,
+                |_player| value.string_value(),
+                |cast_member, value| {
+                    let s = value?;
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    let len = field.text.len() as i32;
+                    let lo = field.sel_start.min(field.sel_end).clamp(0, len);
+                    let hi = field.sel_start.max(field.sel_end).clamp(0, len);
+                    field.text.replace_range(lo as usize..hi as usize, &s);
+                    let new_caret = lo + s.len() as i32;
+                    field.sel_start = new_caret;
+                    field.sel_end = new_caret;
+                    field.sel_anchor = new_caret;
                     Ok(())
                 },
             ),

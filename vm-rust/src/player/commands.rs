@@ -377,13 +377,13 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                         .and_then(|x| x.member.as_ref())
                         .and_then(|x| player.movie.cast_manager.find_member_by_ref(&x));
                     if let Some(sprite_member) = sprite_member {
-                        match &sprite_member.member_type {
-                            CastMemberType::Field(field_member) => {
-                                if field_member.editable {
-                                    player.keyboard_focus_sprite = sprite_number as i16;
-                                }
-                            }
-                            _ => {}
+                        let editable = match &sprite_member.member_type {
+                            CastMemberType::Field(f) => f.editable,
+                            CastMemberType::Text(t) => t.info.as_ref().map_or(false, |i| i.editable),
+                            _ => false,
+                        };
+                        if editable {
+                            player.keyboard_focus_sprite = sprite_number as i16;
                         }
                     }
 

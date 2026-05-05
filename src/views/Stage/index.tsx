@@ -14,6 +14,18 @@ import {
   player_get_sprite_at,
   player_set_debug_selected_channel,
   is_sprite_editable_field,
+  field_set_caret_at,
+  field_drag_extend_to,
+  field_select_word_at,
+  field_select_line_at,
+  is_field_focused,
+  get_focused_field_selected_text,
+  delete_focused_field_selection,
+  paste_text_into_focused_field,
+  set_clipboard_mirror,
+  ime_composition_start,
+  ime_composition_update,
+  ime_composition_end,
 } from "vm-rust";
 import { useAppDispatch } from "../../store/hooks";
 import { channelSelected } from "../../store/uiSlice";
@@ -160,6 +172,16 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   // tracks the in-progress single-finger interaction so we can deliver mouse_up
   // even if the finger lifts outside the canvas rect
   const singleTouchActiveRef = useRef(false);
+  // text-edit drag state: which sprite the press started on, so subsequent
+  // pointermoves extend the selection inside that field.
+  const textDragRef = useRef<{ spriteId: number } | null>(null);
+  // tracks recent clicks on the same editable sprite to detect double / triple
+  // clicks for word/line selection.
+  const lastClickRef = useRef<{ spriteId: number; t: number; x: number; y: number; count: number } | null>(null);
+  // True while an IME composition is in flight on the hidden input. Used to
+  // suppress the regular onInput char-by-char dispatch path so we don't double
+  // up insertion (compositionend already commits the final string).
+  const isComposingRef = useRef(false);
   // single-finger pan (when panMode is on)
   const singlePanRef = useRef<{ startPointer: Pt; startPan: Pt } | null>(null);
   const gestureRef = useRef<{
@@ -252,6 +274,44 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     player_set_picking_mode(pickingMode);
   }, [pickingMode]);
 
+  // OS-clipboard bridge for editable Field/Text members. Listeners only act
+  // when an editable member holds focus so they don't steal copy/paste from
+  // unrelated host inputs (settings panels, etc.).
+  useEffect(() => {
+    const onCopy = (e: ClipboardEvent) => {
+      if (!is_field_focused()) return;
+      const text = get_focused_field_selected_text();
+      if (!text) return;
+      e.preventDefault();
+      e.clipboardData?.setData("text/plain", text);
+      set_clipboard_mirror(text);
+    };
+    const onCut = (e: ClipboardEvent) => {
+      if (!is_field_focused()) return;
+      const text = get_focused_field_selected_text();
+      if (!text) return;
+      e.preventDefault();
+      e.clipboardData?.setData("text/plain", text);
+      set_clipboard_mirror(text);
+      delete_focused_field_selection();
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      if (!is_field_focused()) return;
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      if (!text) return;
+      e.preventDefault();
+      paste_text_into_focused_field(text);
+    };
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("cut", onCut);
+    document.addEventListener("paste", onPaste);
+    return () => {
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("cut", onCut);
+      document.removeEventListener("paste", onPaste);
+    };
+  }, []);
+
   function pointerOuterPos(e: React.PointerEvent): Pt {
     const rect = outerRef.current?.getBoundingClientRect();
     return rect
@@ -305,6 +365,9 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         if (!document.pointerLockElement) {
           mouse_move(canvasX, canvasY);
         }
+        if (textDragRef.current) {
+          field_drag_extend_to(textDragRef.current.spriteId, canvasX, canvasY);
+        }
         break;
       case "down": {
         const spriteId = player_get_sprite_at(canvasX, canvasY);
@@ -313,9 +376,32 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         if (isEditable) {
           e.preventDefault();
           hiddenInputRef.current?.focus();
-        } else if (document.activeElement === hiddenInputRef.current) {
-          hiddenInputRef.current?.blur();
-          outerRef.current?.focus();
+          // Detect rapid repeat clicks on the same sprite for word/line select.
+          const now = performance.now();
+          const prev = lastClickRef.current;
+          const sameSpot = !!prev
+            && prev.spriteId === spriteId
+            && (now - prev.t) < 500
+            && Math.hypot(prev.x - canvasX, prev.y - canvasY) < 4;
+          const count = sameSpot ? prev.count + 1 : 1;
+          lastClickRef.current = { spriteId, t: now, x: canvasX, y: canvasY, count };
+          if (count >= 3) {
+            field_select_line_at(spriteId, canvasX, canvasY);
+            textDragRef.current = null; // don't drag-extend after triple click
+          } else if (count === 2) {
+            field_select_word_at(spriteId, canvasX, canvasY);
+            textDragRef.current = null;
+          } else {
+            field_set_caret_at(spriteId, canvasX, canvasY, e.shiftKey);
+            textDragRef.current = { spriteId };
+          }
+        } else {
+          textDragRef.current = null;
+          lastClickRef.current = null;
+          if (document.activeElement === hiddenInputRef.current) {
+            hiddenInputRef.current?.blur();
+            outerRef.current?.focus();
+          }
         }
         if (wants_pointer_lock() && !document.pointerLockElement) {
           const canvas = stageEl.current?.querySelector("canvas");
@@ -327,6 +413,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
       }
       case "up":
         mouse_up(canvasX, canvasY);
+        textDragRef.current = null;
         break;
     }
   }
@@ -566,7 +653,24 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         onKeyUp={e => {
           key_up(e.key, e.keyCode);
         }}
+        onCompositionStart={() => {
+          isComposingRef.current = true;
+          ime_composition_start();
+        }}
+        onCompositionUpdate={e => {
+          ime_composition_update(e.data ?? "");
+        }}
+        onCompositionEnd={e => {
+          ime_composition_end(e.data ?? "");
+          isComposingRef.current = false;
+          // Clear so the trailing onInput (which fires with the committed text)
+          // doesn't re-dispatch as plain key_downs.
+          (e.currentTarget as HTMLInputElement).value = '';
+        }}
         onInput={e => {
+          // Skip while IME composition owns the input — compositionend commits
+          // the final string via ime_composition_end above.
+          if (isComposingRef.current) return;
           // Catch characters from virtual keyboards (and desktop as fallback).
           // Virtual keyboards may not fire individual keyDown events for characters.
           const input = e.currentTarget;

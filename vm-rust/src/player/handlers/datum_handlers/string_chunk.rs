@@ -105,8 +105,8 @@ impl StringChunkUtils {
                     .unwrap()
                     .member_type;
                 match member {
-                    CastMemberType::Field(field) => field.text = new_string,
-                    CastMemberType::Text(member) => member.text = new_string,
+                    CastMemberType::Field(field) => field.set_text_preserving_caret(new_string),
+                    CastMemberType::Text(member) => member.set_text_preserving_caret(new_string),
                     _ => {
                         return Err(ScriptError::new(
                             "Cannot set contents for non-text member".to_string(),

@@ -92,7 +92,7 @@ impl ButtonMemberHandlers {
                 member_ref,
                 |_player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_button_mut().unwrap().field.text = value?.trim_end_matches('\0').to_string();
+                    cast_member.member_type.as_button_mut().unwrap().field.set_text_preserving_caret(value?.trim_end_matches('\0').to_string());
                     Ok(())
                 },
             ),
