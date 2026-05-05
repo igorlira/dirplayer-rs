@@ -1,15 +1,13 @@
 use std::collections::HashMap;
 
 use crate::{
-    director::lingo::datum::{datum_bool, Datum},
+    director::lingo::datum::{Datum, datum_bool},
     player::{
-        bitmap::{
-            bitmap::{resolve_color_ref, BuiltInPalette, PaletteRef},
+        ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{
+            bitmap::{BuiltInPalette, PaletteRef, resolve_color_ref},
             manager::BitmapRef,
             mask::BitmapMask,
-        },
-        geometry::IntRect,
-        player_duplicate_datum, reserve_player_mut, ColorRef, DatumRef, DirPlayer, ScriptError,
+        }, geometry::IntRect, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut
     },
 };
 
@@ -92,6 +90,7 @@ impl BitmapDatumHandlers {
 
                 Ok(player.alloc_datum(Datum::Void))
             }),
+            "getProp" => Self::get_prop_handler(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for bitmap datum"
             ))),
@@ -781,6 +780,26 @@ impl BitmapDatumHandlers {
                 Some(&player.movie.score),
             );
             Ok(datum.clone())
+        })
+    }
+
+    pub fn get_prop_handler(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.len() == 0 {
+            return Err(ScriptError::new("getProp requires at least 1 argument".to_string()));
+        }
+        reserve_player_mut(|player| {
+            let prop = player.get_datum(&args[0]).string_value()?;
+            let prop_value = Self::get_prop(player, datum, &prop)?;
+            if args.len() == 1 {
+                Ok(prop_value)
+            } else if args.len() == 2 {
+                let prop_key_ref = args[1].clone();
+                TypeUtils::get_sub_prop(&prop_value, &prop_key_ref, player)
+            } else {
+                Err(ScriptError::new(
+                    "getProp with sub-property requires 2 arguments".to_string(),
+                ))
+            }
         })
     }
 
