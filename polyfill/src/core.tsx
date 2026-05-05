@@ -46,6 +46,21 @@ function checkDirEmbed(element: HTMLEmbedElement): boolean {
   return element.src.endsWith('.dcr');
 }
 
+const DATA_PARAM_PREFIX = 'data-sw-';
+
+function parseDataExternalParams(element: HTMLElement): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const attr of Array.from(element.attributes)) {
+    if (attr.name.startsWith(DATA_PARAM_PREFIX)) {
+      const name = attr.name.slice(DATA_PARAM_PREFIX.length);
+      if (name) {
+        params[name] = attr.value;
+      }
+    }
+  }
+  return params;
+}
+
 function checkDirObject(object: HTMLObjectElement): { isDirObject: boolean; params: Record<string, string | null> } {
   const paramTags = object.getElementsByTagName('param');
   const params: Record<string, string | null> = Array.from(paramTags).reduce((acc, param) => {
@@ -101,6 +116,7 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
     }
     externalParams[`sw${i}`] = swValue;
   }
+  Object.assign(externalParams, parseDataExternalParams(element));
 
   const newElement = document.createElement('div');
   if (element.parentElement && element.parentElement.tagName === 'OBJECT') {
@@ -134,6 +150,7 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
     }
     externalParams[`sw${i}`] = swValue;
   }
+  Object.assign(externalParams, parseDataExternalParams(element));
 
   const newElement = document.createElement('div');
   element.replaceWith(newElement);
