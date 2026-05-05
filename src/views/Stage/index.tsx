@@ -452,6 +452,16 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     pan.y + stageHeight * scale <= outerHeight;
   const showMinimap = !stageFitsInViewport && !!stageWidth && !!stageHeight && !!outerWidth && !!outerHeight;
 
+  // Snap the rendered translate to integer device pixels. ResizeObserver gives
+  // fractional CSS dimensions on high-DPI displays, so the centered pan ends
+  // up sub-pixel — the compositor then bilinear-filters the canvas during
+  // the DPR scale-up, defeating image-rendering:pixelated and blurring pixel
+  // art. The interaction math keeps using the unsnapped pan so gestures stay
+  // continuous; only the visual transform is snapped.
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  const tx = Math.round(pan.x * dpr) / dpr;
+  const ty = Math.round(pan.y * dpr) / dpr;
+
   return (
     <div
       className={styles.container}
@@ -478,7 +488,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
       <div
         className={styles.stageWrapper}
         style={{
-          transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+          transform: `translate(${tx}px, ${ty}px) scale(${scale})`,
           cursor: pickingMode ? "crosshair" : panMode ? "grab" : undefined,
         }}
       >
