@@ -4,6 +4,25 @@ use super::{
     player_is_playing, reserve_player_mut, DatumRef, DirPlayer, ScriptError,
 };
 
+/// Per-line stride to use for caret math, matching the renderer's safety
+/// guard: prefer `fixed_line_space` when it looks sane, otherwise fall back
+/// to the font's natural line height. Values much larger than that come
+/// from XMED-misparsed STXT runs that store the field's box height instead
+/// of its real per-line height — honoring them sends the caret to the
+/// wrong line on click and breaks selection past the first line.
+pub(crate) fn effective_line_height(font: &crate::player::font::BitmapFont, fixed_line_space: u16) -> i32 {
+    let natural_lh = if font.font_size > 0 {
+        font.font_size as i32
+    } else {
+        font.char_height as i32
+    };
+    if fixed_line_space > 0 && (fixed_line_space as i32) <= natural_lh * 5 / 2 {
+        fixed_line_space as i32
+    } else {
+        natural_lh
+    }
+}
+
 fn get_next_focus_sprite_id(player: &DirPlayer, after: i16) -> i16 {
     for sprite_id in after + 1..=player.movie.score.get_channel_count() as i16 {
         let sprite = player.movie.score.get_sprite(sprite_id);
@@ -205,9 +224,16 @@ pub(crate) fn apply_text_edit(
             *sel_end = len;
             *sel_anchor = 0;
         }
-        // Tab and Enter are intentionally not handled here — focus advance and
-        // newline behavior live in the caller.
-        "Tab" | "Enter" => {}
+        // Tab is handled by the caller (advances focus across editable
+        // members). Enter inserts a Director-style \r line terminator;
+        // scripts that want Enter to mean "submit" trap keyDown and
+        // suppress default insertion.
+        "Tab" => {}
+        "Enter" => {
+            text.replace_range(lo as usize..hi as usize, "\r");
+            let new_caret = lo + 1;
+            collapse(sel_start, sel_end, sel_anchor, new_caret, text.len() as i32);
+        }
         _ => {
             // Single ASCII char insertion. Any modifier other than Shift
             // suppresses insertion (Cmd+S, Ctrl+B, etc.).
@@ -319,13 +345,14 @@ pub(crate) fn set_caret_at_screen(
                 let Some(f) = font_opt else { return false };
                 let local_x = movie_x - sprite_loc_h;
                 let local_y = movie_y - sprite_loc_v - *top_spacing as i32;
+                let line_h = effective_line_height(&f, *fixed_line_space);
                 // Always pass sprite_width so xy_to_caret_index can compute the
                 // per-line alignment offset for centered/right text. Setting
                 // max_width to 0 when word_wrap is off makes the helper assume
                 // left alignment, which sends every click to the left edge of
                 // the sprite even when the visible glyphs are centered.
                 crate::player::bitmap::bitmap::Bitmap::xy_to_caret_index(
-                    text, &f, sprite_width, alignment, *fixed_line_space, local_x, local_y,
+                    text, &f, sprite_width, alignment, line_h, local_x, local_y,
                 )
             }
             MemberSnapshot::Text { text, font, font_size, fixed_line_space, top_spacing } => {
@@ -341,8 +368,9 @@ pub(crate) fn set_caret_at_screen(
                 // the renderer (see rendering.rs draw_text-with-caret block).
                 let local_x = movie_x - sprite_loc_h;
                 let local_y = movie_y - sprite_loc_v - *top_spacing as i32;
+                let line_h = effective_line_height(&f, *fixed_line_space);
                 crate::player::bitmap::bitmap::Bitmap::xy_to_caret_index(
-                    text, &f, 0, "left", *fixed_line_space, local_x, local_y,
+                    text, &f, 0, "left", line_h, local_x, local_y,
                 )
             }
         };

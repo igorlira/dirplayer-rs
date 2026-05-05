@@ -538,11 +538,15 @@ impl WebGL2Renderer {
             .and_then(|id| player.movie.cast_manager.find_member_by_slot_number(id as u32))
             .and_then(|m| m.member_type.as_bitmap().cloned());
 
+        // No custom cursor → clear the canvas's `cursor` property so the
+        // stageWrapper's CSS cursor (set by JS in onPointerMove) governs.
+        // Without this, draw_cursor sets the canvas cursor every frame and
+        // overrides any parent style — losing the I-beam during a text
+        // drag, etc.
         let cursor_bitmap_member = match cursor_bitmap_member {
             Some(m) => m,
             None => {
-                // No custom cursor - restore native cursor
-                let _ = self.canvas.style().set_property("cursor", "default");
+                let _ = self.canvas.style().remove_property("cursor");
                 return;
             }
         };
@@ -550,7 +554,7 @@ impl WebGL2Renderer {
         let cursor_bitmap = match player.bitmap_manager.get_bitmap(cursor_bitmap_member.image_ref) {
             Some(b) => b,
             None => {
-                let _ = self.canvas.style().set_property("cursor", "default");
+                let _ = self.canvas.style().remove_property("cursor");
                 return;
             }
         };
@@ -4653,6 +4657,17 @@ impl WebGL2Renderer {
                 // is no longer needed.
                 render_height = measured_h;
             }
+            let natural_lh = if font.font_size > 0 {
+                font.font_size as u32
+            } else {
+                font.char_height as u32
+            };
+            // 2.5× covers legitimate "double-spaced" or wide-leading lines
+            // (CSS line-height 2 ≈ 2× font-size) but rejects anything that
+            // looks like a field-height-misparsed value.
+            if natural_lh > 0 && (render_line_spacing as u32) > natural_lh * 5 / 2 {
+                render_line_spacing = 0;
+            }
         }
         // Safety net previously reset render_line_spacing to 0 when the
         // requested stride × line_count exceeded render_height, on the
@@ -5749,7 +5764,13 @@ impl WebGL2Renderer {
                     // 'g' descender extended to ~31 but trim was at 25).
                     let glyph_bottom = y + leading_top + font.char_height as i32;
                     last_glyph_bottom = last_glyph_bottom.max(glyph_bottom);
-                    let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
+                    // Per-line stride is the font height + bottom_spacing.
+                    // top_spacing is the initial padding before the first
+                    // line — it's already baked into the starting `y`, so
+                    // adding it to the per-line step would stack extra
+                    // space between every line (visible as "Enter creates
+                    // a new line way below the previous one").
+                    let line_step = effective_lh + bottom_spacing as i32;
                     if DEBUG_WEBGL2_TEXT && is_pfr_font {
                         debug!(
                             "[webgl2.text.pfr.simple] step={} next_y={} h={}",
@@ -5855,10 +5876,20 @@ impl WebGL2Renderer {
             // per-line alignment offset itself, and we don't add
             // `bitmap_start_x` on top — that would double-count alignment.
             let caret_max_width = width as i32;
+            // Match the per-line stride render_line uses below: effective_lh
+            // (= render_line_spacing if > 0 else line_height) + bottom_spacing.
+            // Without this the caret y drifts away from the rendered glyphs as
+            // soon as render_line_spacing is non-zero or the font defines a
+            // distinct font_size vs. char_height.
+            let renderer_line_h: i32 = {
+                let lh = if font.font_size > 0 { font.font_size as i32 } else { font.char_height as i32 };
+                let effective_lh = if render_line_spacing > 0 { render_line_spacing as i32 } else { lh };
+                effective_lh + bottom_spacing as i32
+            };
 
             if has_selection {
                 let lines = Bitmap::wrap_lines_with_spans(text, &font, caret_max_width);
-                let line_h = font.char_height as i32 + render_line_spacing as i32;
+                let line_h = renderer_line_h;
                 let lo = sel_lo as usize;
                 let hi = sel_hi as usize;
                 for (i, line) in lines.iter().enumerate() {
@@ -5868,8 +5899,8 @@ impl WebGL2Renderer {
                     let from = lo.max(line.start);
                     let to = hi.min(line.end);
                     if from > to { continue; }
-                    let (x0, _) = Bitmap::caret_index_to_xy(text, &font, caret_max_width, alignment, render_line_spacing, from as i32);
-                    let (x1, _) = Bitmap::caret_index_to_xy(text, &font, caret_max_width, alignment, render_line_spacing, to as i32);
+                    let (x0, _) = Bitmap::caret_index_to_xy(text, &font, caret_max_width, alignment, renderer_line_h, from as i32);
+                    let (x1, _) = Bitmap::caret_index_to_xy(text, &font, caret_max_width, alignment, renderer_line_h, to as i32);
                     let mut left = x0;
                     let mut right = x1;
                     if right == left && hi > line.end {
@@ -5877,11 +5908,37 @@ impl WebGL2Renderer {
                     }
                     if right < left { std::mem::swap(&mut left, &mut right); }
                     let y = top_spacing as i32 + (i as i32) * line_h;
-                    // Drawn on top of text via translucent alpha so glyphs read through.
-                    // The CPU path renders the highlight beneath the text; this overlay
-                    // approach is a webgl2-specific concession because text is already
-                    // composited into text_bitmap by this point.
-                    text_bitmap.fill_rect(left, y, right, y + font.char_height as i32, SELECTION_HIGHLIGHT, &palettes, 0.5);
+                    // Composite the selection BEHIND the already-rasterized
+                    // text glyphs (same approach as the Canvas2D path) so the
+                    // text reads on top of the highlight instead of being
+                    // tinted by a translucent overlay.
+                    let bottom = y + font.char_height as i32;
+                    let bw = text_bitmap.width as i32;
+                    let bh = text_bitmap.height as i32;
+                    let l = left.max(0);
+                    let r = right.min(bw);
+                    let t = y.max(0);
+                    let b = bottom.min(bh);
+                    for py in t..b {
+                        for px in l..r {
+                            let idx = ((py as usize) * bw as usize + px as usize) * 4;
+                            if idx + 3 >= text_bitmap.data.len() { continue; }
+                            let a = text_bitmap.data[idx + 3] as u32;
+                            if a == 0 {
+                                text_bitmap.data[idx]     = SELECTION_HIGHLIGHT.0;
+                                text_bitmap.data[idx + 1] = SELECTION_HIGHLIGHT.1;
+                                text_bitmap.data[idx + 2] = SELECTION_HIGHLIGHT.2;
+                                text_bitmap.data[idx + 3] = 255;
+                            } else if a < 255 {
+                                let inv = 255 - a;
+                                text_bitmap.data[idx]     = ((text_bitmap.data[idx]     as u32 * a + SELECTION_HIGHLIGHT.0 as u32 * inv) / 255) as u8;
+                                text_bitmap.data[idx + 1] = ((text_bitmap.data[idx + 1] as u32 * a + SELECTION_HIGHLIGHT.1 as u32 * inv) / 255) as u8;
+                                text_bitmap.data[idx + 2] = ((text_bitmap.data[idx + 2] as u32 * a + SELECTION_HIGHLIGHT.2 as u32 * inv) / 255) as u8;
+                                text_bitmap.data[idx + 3] = 255;
+                            }
+                        }
+                    }
+                    let _ = palettes;
                 }
             } else if cache_key.caret_blink_on {
                 let (dx, dy) = Bitmap::caret_index_to_xy(
@@ -5889,7 +5946,7 @@ impl WebGL2Renderer {
                     &font,
                     caret_max_width,
                     alignment,
-                    render_line_spacing,
+                    renderer_line_h,
                     cache_key.sel_end,
                 );
                 let cy = top_spacing as i32 + dy;
