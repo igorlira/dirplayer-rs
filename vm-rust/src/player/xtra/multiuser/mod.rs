@@ -168,20 +168,32 @@ impl MultiuserXtraManager {
                     }
                 })?;
 
-                let ws_scheme = if web_sys::window()
+                let window_secure = web_sys::window()
                     .and_then(|w| w.location().protocol().ok())
-                    .map_or(false, |p| p == "https:")
-                {
+                    .map_or(false, |p| p == "https:");
+                let (ws_path, ws_secure) = reserve_player_ref(|player| {
+                    (
+                        player.external_params.get("multiuser_websocket_path").cloned(),
+                        player.external_params.get("multiuser_websocket_secure").map(|v| {
+                            // parse bool
+                            v == "true" || v == "1"
+                        }),
+                    )
+                });
+
+                // If ws_secure param is set, it overrides the page protocol check for ws_scheme
+                let ws_secure = ws_secure.unwrap_or(window_secure);
+                let ws_scheme = if ws_secure {
                     "wss"
                 } else {
                     "ws"
                 };
-                let ws_url = format!("{}://{}:{}", ws_scheme, host, port);
+                let ws_url = format!("{}://{}:{}{}", ws_scheme, host, port, ws_path.unwrap_or_default());
                 multiuser_log!("Multiuser: Connecting to WebSocket URL: {} (user={}, movie={})", ws_url, username, movie_id);
 
                 // Check if the page provides a socket proxy mapping via JS
                 let ws_url = {
-                    let default_url = format!("{}://{}:{}", ws_scheme, host, port);
+                    let default_url = ws_url.clone();
                     let window = web_sys::window().unwrap();
                     if let Ok(resolver) = js_sys::Reflect::get(&window, &"dirplayerResolveSocketUrl".into()) {
                         if let Some(func) = resolver.dyn_ref::<js_sys::Function>() {
