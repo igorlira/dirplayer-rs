@@ -18,6 +18,13 @@ type RecentMovie = {
 
 const RECENT_MOVIES_KEY = 'recentMovies';
 const MAX_RECENT_MOVIES = 50;
+const ENV_PARAM_PREFIX = 'REACT_APP_MOVIE_PARAM_';
+
+function getEnvExternalParams(): ExternalParam[] {
+  return Object.entries(process.env)
+    .filter(([k, v]) => k.startsWith(ENV_PARAM_PREFIX) && v !== undefined)
+    .map(([k, v]) => ({ key: k.slice(ENV_PARAM_PREFIX.length), value: v as string }));
+}
 
 function paramsArrayToRecord(params: ExternalParam[]): Record<string, string> {
   const record: Record<string, string> = {};
@@ -62,10 +69,10 @@ export default function LoadMovie() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [hasError, setHasError] = useState(false);
   const [autoPlay, setAutoPlay] = useState<boolean>(process.env.REACT_APP_MOVIE_AUTO_PLAY === 'true');
-  const [externalParams, setExternalParams] = useState<ExternalParam[]>([]);
+  const [externalParams, setExternalParams] = useState<ExternalParam[]>(() => getEnvExternalParams());
   const [fakeMoviePath, setFakeMoviePath] = useState<string>('');
   const [recentMovies, setRecentMovies] = useState<RecentMovie[]>(() => loadRecentMovies());
-  const [paramsExpanded, setParamsExpanded] = useState(false);
+  const [paramsExpanded, setParamsExpanded] = useState(() => getEnvExternalParams().length > 0);
   const isInElectron = isElectron();
 
   const addParam = useCallback(() => {
