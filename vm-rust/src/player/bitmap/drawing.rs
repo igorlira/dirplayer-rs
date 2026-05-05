@@ -1530,14 +1530,22 @@ impl Bitmap {
         let bg_color_explicit = param_list.get("bgColor").is_some();
         let bg_color = param_list.get("bgColor");
         let bg_color = if let Some(bg_color) = bg_color {
-            bg_color.to_color_ref().unwrap().to_owned()
+            match bg_color {
+                Datum::ColorRef(c) => c.to_owned(),
+                Datum::Int(i) => ColorRef::PaletteIndex(*i as u8),
+                _ => ColorRef::PaletteIndex(0),
+            }
         } else {
             ColorRef::PaletteIndex(0)
         };
         let fore_color_explicit = param_list.get("color").is_some();
         let color = param_list.get("color");
         let color = if let Some(color) = color {
-            color.to_color_ref().unwrap().to_owned()
+            match color {
+                Datum::ColorRef(c) => c.to_owned(),
+                Datum::Int(i) => ColorRef::PaletteIndex(*i as u8),
+                _ => ColorRef::PaletteIndex(255),
+            }
         } else {
             ColorRef::PaletteIndex(255)
         };
