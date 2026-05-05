@@ -727,7 +727,11 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         }}
       />
       {showControls && (
-        <div className={styles.controlBar}>
+        <div 
+          className={styles.controlBar} 
+          onPointerDown={e => e.stopPropagation()}
+          onPointerMove={e => e.stopPropagation()}
+          onPointerUp={e => e.stopPropagation()}>
           <button
             className={pickingMode ? styles.pickButtonActive : styles.pickButton}
             onClick={() => setPickingMode(!pickingMode)}
