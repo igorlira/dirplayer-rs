@@ -3148,16 +3148,19 @@ impl Bitmap {
 
     /// Map a caret byte index to a (dx, dy) offset relative to the text's top-left
     /// origin (loc_h, loc_v + top_spacing). Caller adds those.
+    ///
+    /// `line_height` is the actual per-line stride the renderer uses (the y
+    /// distance between line N's top and line N+1's top). Keep this in sync
+    /// with the renderer or the caret will drift vertically across lines.
     pub fn caret_index_to_xy(
         text: &str,
         font: &BitmapFont,
         max_width: i32,
         alignment: &str,
-        line_spacing: u16,
+        line_height: i32,
         idx: i32,
     ) -> (i32, i32) {
         let lines = Self::wrap_lines_with_spans(text, font, max_width);
-        let line_height = font.char_height as i32 + line_spacing as i32;
         let idx = (idx.max(0) as usize).min(text.len());
 
         let mut line_idx = lines.len() - 1;
@@ -3206,12 +3209,12 @@ impl Bitmap {
         font: &BitmapFont,
         max_width: i32,
         alignment: &str,
-        line_spacing: u16,
+        line_height: i32,
         x: i32,
         y: i32,
     ) -> i32 {
         let lines = Self::wrap_lines_with_spans(text, font, max_width);
-        let line_height = (font.char_height as i32 + line_spacing as i32).max(1);
+        let line_height = line_height.max(1);
 
         let line_idx = if y < 0 {
             0

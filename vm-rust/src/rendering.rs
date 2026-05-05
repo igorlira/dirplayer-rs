@@ -56,7 +56,8 @@ const SELECTION_COLOR: (u8, u8, u8) = (164, 205, 255);
 
 /// Fill selection-highlight rectangles for the byte range [sel_lo..sel_hi)
 /// within a wrapped Field/Text. Math reuses `caret_index_to_xy` so the rects
-/// agree with the rendered glyphs byte-for-byte.
+/// agree with the rendered glyphs byte-for-byte. `line_h` is the per-line
+/// stride the renderer used (so caret y matches glyph y).
 fn draw_text_selection_rects(
     bitmap: &mut Bitmap,
     text: &str,
@@ -65,7 +66,7 @@ fn draw_text_selection_rects(
     loc_v: i32,
     max_width: i32,
     alignment: &str,
-    line_spacing: u16,
+    line_h: i32,
     top_spacing: i16,
     sel_lo: i32,
     sel_hi: i32,
@@ -75,7 +76,6 @@ fn draw_text_selection_rects(
         return;
     }
     let lines = Bitmap::wrap_lines_with_spans(text, font, max_width);
-    let line_h = font.char_height as i32 + line_spacing as i32;
     let lo = sel_lo as usize;
     let hi = sel_hi as usize;
     let base_y = loc_v + top_spacing as i32;
@@ -88,8 +88,8 @@ fn draw_text_selection_rects(
         if from > to {
             continue;
         }
-        let (x0, _) = Bitmap::caret_index_to_xy(text, font, max_width, alignment, line_spacing, from as i32);
-        let (x1, _) = Bitmap::caret_index_to_xy(text, font, max_width, alignment, line_spacing, to as i32);
+        let (x0, _) = Bitmap::caret_index_to_xy(text, font, max_width, alignment, line_h, from as i32);
+        let (x1, _) = Bitmap::caret_index_to_xy(text, font, max_width, alignment, line_h, to as i32);
         // If the selection wraps a full line and `to == line.end`, also extend a
         // small space-wide hint so the user sees the line is selected through.
         let y = base_y + (i as i32) * line_h;
@@ -2056,6 +2056,8 @@ pub fn render_score_to_bitmap_with_offset(
                     let sel_lo = field_member.sel_start.min(field_member.sel_end).max(0);
                     let sel_hi = field_member.sel_start.max(field_member.sel_end).max(0);
                     let has_selection = is_focused && sel_lo != sel_hi;
+                    // Same line stride bitmap.draw_text_wrapped uses internally.
+                    let line_h = font.char_height as i32 + field_member.fixed_line_space as i32;
 
                     if has_selection {
                         draw_text_selection_rects(
@@ -2066,7 +2068,7 @@ pub fn render_score_to_bitmap_with_offset(
                             sprite.loc_v,
                             sprite.width,
                             &field_member.alignment,
-                            field_member.fixed_line_space,
+                            line_h,
                             field_member.top_spacing,
                             sel_lo,
                             sel_hi,
@@ -2094,7 +2096,7 @@ pub fn render_score_to_bitmap_with_offset(
                             &font,
                             sprite.width,
                             &field_member.alignment,
-                            field_member.fixed_line_space,
+                            line_h,
                             field_member.sel_end,
                         );
                         let caret_x = sprite.loc_h + dx;
@@ -2654,6 +2656,8 @@ pub fn render_score_to_bitmap_with_offset(
                         let sel_lo = text_member.sel_start.min(text_member.sel_end).max(0);
                         let sel_hi = text_member.sel_start.max(text_member.sel_end).max(0);
                         let has_selection = is_focused && sel_lo != sel_hi;
+                        // bitmap.draw_text uses font.char_height + line_spacing as the per-line stride.
+                        let line_h = font.char_height as i32 + text_member.fixed_line_space as i32;
 
                         if has_selection {
                             draw_text_selection_rects(
@@ -2664,7 +2668,7 @@ pub fn render_score_to_bitmap_with_offset(
                                 draw_y,
                                 0, // draw_text doesn't wrap; treat as unbounded
                                 "left",
-                                text_member.fixed_line_space,
+                                line_h,
                                 text_member.top_spacing,
                                 sel_lo,
                                 sel_hi,
@@ -2690,7 +2694,7 @@ pub fn render_score_to_bitmap_with_offset(
                                 &font,
                                 0,
                                 "left",
-                                text_member.fixed_line_space,
+                                line_h,
                                 text_member.sel_end,
                             );
                             let caret_x = draw_x + dx;

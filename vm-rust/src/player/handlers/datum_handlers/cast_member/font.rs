@@ -1088,7 +1088,14 @@ impl FontMemberHandlers {
                 line_font_px
             };
             line_positions.push((y, effective_line_height));
-            y += effective_line_height + bottom_spacing as f64 + top_spacing as f64;
+            // Per-line stride is line height + bottom_spacing only.
+            // top_spacing is the initial offset before the first line (added
+            // once when y was initialized) — adding it again per line stacks
+            // extra space between every visual line, which is most visible
+            // when a user presses Enter in an editable field and the new
+            // line appears way below the previous one instead of one line
+            // height down.
+            y += effective_line_height + bottom_spacing as f64;
             prev_par_idx = this_par_idx;
         }
 
@@ -1254,11 +1261,42 @@ impl FontMemberHandlers {
                         x1 = x0 + line.max_font_px.max(8.0) * 0.4;
                     }
                     if x1 <= x0 { continue; }
-                    let left = start_x + (x0).round() as i32;
-                    let right = start_x + (x1).round() as i32;
-                    let top = start_y + line_top_y.round() as i32;
-                    let bottom = top + line_h.round() as i32;
-                    bitmap.fill_rect(left, top, right, bottom, selection_color, &palette_map, 0.5);
+                    let left = (start_x + (x0).round() as i32).max(0);
+                    let right = (start_x + (x1).round() as i32).max(0);
+                    let top = (start_y + line_top_y.round() as i32).max(0);
+                    let bottom = (top + line_h.round() as i32)
+                        .min(bitmap.height as i32);
+                    let right = right.min(bitmap.width as i32);
+                    let left = left.min(right);
+                    // Composite the selection BEHIND the already-rasterized
+                    // text. The bitmap currently has text glyphs with alpha
+                    // 0..=255 (255 = solid glyph body, 0 = transparent
+                    // background). For each pixel in the selection rect:
+                    //   alpha == 0  → fill with selection color (was empty)
+                    //   alpha < 255 → blend selection under the partial glyph
+                    //   alpha == 255 → leave the glyph alone
+                    // This gives the standard "highlight rect with text on
+                    // top" look instead of a translucent overlay tinting the
+                    // glyphs.
+                    for py in top..bottom {
+                        for px in left..right {
+                            let idx = ((py as usize) * bitmap.width as usize + px as usize) * 4;
+                            if idx + 3 >= bitmap.data.len() { continue; }
+                            let a = bitmap.data[idx + 3] as u32;
+                            if a == 0 {
+                                bitmap.data[idx]     = selection_color.0;
+                                bitmap.data[idx + 1] = selection_color.1;
+                                bitmap.data[idx + 2] = selection_color.2;
+                                bitmap.data[idx + 3] = 255;
+                            } else if a < 255 {
+                                let inv = 255 - a;
+                                bitmap.data[idx]     = ((bitmap.data[idx]     as u32 * a + selection_color.0 as u32 * inv) / 255) as u8;
+                                bitmap.data[idx + 1] = ((bitmap.data[idx + 1] as u32 * a + selection_color.1 as u32 * inv) / 255) as u8;
+                                bitmap.data[idx + 2] = ((bitmap.data[idx + 2] as u32 * a + selection_color.2 as u32 * inv) / 255) as u8;
+                                bitmap.data[idx + 3] = 255;
+                            }
+                        }
+                    }
                 } else if overlay.caret_blink_on {
                     let target = overlay.sel_end as usize;
                     if target < line_byte_start || target > line_byte_end {

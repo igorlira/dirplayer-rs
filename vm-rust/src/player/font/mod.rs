@@ -1327,12 +1327,14 @@ pub fn measure_text(
     let mut height = (top_spacing + first_line_h) as u16;
     let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;
     let mut index = 0;
+    let mut last_was_newline = false;
     for c in text.chars() {
         if c == '\r' || c == '\n' {
             if line_width > width {
                 width = line_width;
             }
             line_width = 0;
+            last_was_newline = true;
         } else {
             if line_width == 0 && index > 0 {
                 height += line_step;
@@ -1343,11 +1345,20 @@ pub fn measure_text(
             } else {
                 line_width += adv + 1;
             }
+            last_was_newline = false;
         }
         index += 1;
     }
     if line_width > width {
         width = line_width;
+    }
+    // Account for a trailing empty line. Without this, text like "abc\r"
+    // measures the same as "abc", so an editable field that just received
+    // an Enter keystroke doesn't grow vertically — the renderer happily
+    // draws the new (empty) line at y = line_step but the sprite_rect
+    // stays one-line tall, pushing the caret outside the visible field box.
+    if last_was_newline {
+        height += line_step;
     }
     return (width, height);
 }

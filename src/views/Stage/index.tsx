@@ -155,6 +155,12 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   const [transformInitialized, setTransformInitialized] = useState(false);
   const [pickingMode, setPickingMode] = useState(false);
   const [panMode, setPanMode] = useState(false);
+  // Frontend-driven cursor override. JS keeps authority over the I-beam
+  // because the WASM-side draw_cursor runs once per frame and the hover/drag
+  // state isn't visible to it; relying on the VM kept losing the I-beam mid-
+  // drag whenever the pointer skirted a sprite edge or a frame fired between
+  // pointermoves.
+  const [textCursor, setTextCursor] = useState(false);
   const hiddenInputRef = useRef<HTMLInputElement | null>(null);
   const dispatch = useAppDispatch();
 
@@ -498,6 +504,22 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     // not in the tracked map) and active drags (pointer down, in the map).
     const c = outerToCanvas(p);
     dispatchVMMouse("move", c.x, c.y, e);
+
+    // Frontend-driven I-beam: stays "text" while a text drag is in flight,
+    // OR the pointer is hovering an editable Field/Text sprite. Doing this
+    // in JS instead of relying on the WASM draw_cursor avoids the case where
+    // a per-frame draw_cursor sees a non-editable sprite under the pointer
+    // (or no sprite at all when the drag wanders past the field edge) and
+    // flips the cursor back to an arrow mid-selection.
+    if (textDragRef.current) {
+      if (!textCursor) setTextCursor(true);
+    } else if (isInsideCanvas(c)) {
+      const spriteId = player_get_sprite_at(c.x, c.y);
+      const editable = spriteId > 0 && is_sprite_editable_field(spriteId);
+      if (editable !== textCursor) setTextCursor(editable);
+    } else if (textCursor) {
+      setTextCursor(false);
+    }
   }
 
   function onPointerUp(e: React.PointerEvent) {
@@ -524,6 +546,16 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
       const c = outerToCanvas(lastP);
       dispatchVMMouse("up", c.x, c.y, e);
       singleTouchActiveRef.current = false;
+      // Re-evaluate the cursor at the release position now that the drag is
+      // over — without this the I-beam stays on after the user releases
+      // outside an editable sprite.
+      if (isInsideCanvas(c)) {
+        const spriteId = player_get_sprite_at(c.x, c.y);
+        const editable = spriteId > 0 && is_sprite_editable_field(spriteId);
+        if (editable !== textCursor) setTextCursor(editable);
+      } else if (textCursor) {
+        setTextCursor(false);
+      }
     }
     if (activePointersRef.current.size === 0) {
       suppressCanvasUntilReleaseRef.current = false;
@@ -576,7 +608,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         className={styles.stageWrapper}
         style={{
           transform: `translate(${tx}px, ${ty}px) scale(${scale})`,
-          cursor: pickingMode ? "crosshair" : panMode ? "grab" : undefined,
+          cursor: pickingMode ? "crosshair" : panMode ? "grab" : textCursor ? "text" : undefined,
         }}
       >
         <div
