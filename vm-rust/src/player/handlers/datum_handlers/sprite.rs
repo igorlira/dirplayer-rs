@@ -15,29 +15,33 @@ use crate::player::{
 
 use super::script_instance::ScriptInstanceUtils;
 
+// JS bridge names use the `dirplayer_` prefix so this fork's globals don't
+// collide with stock Ruffle if both are loaded on the same page (e.g. via a
+// browser extension). Matching JS-side definitions live in
+// src/services/flashPlayerManager.ts::initFlashBridge.
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_name = "ruffleGoToFrame")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrame")]
     fn ruffle_goto_frame(cast_lib: i32, cast_member: i32, frame: i32);
-    #[wasm_bindgen(js_name = "ruffleStop")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleStop")]
     fn ruffle_stop(cast_lib: i32, cast_member: i32);
-    #[wasm_bindgen(js_name = "rufflePlay")]
+    #[wasm_bindgen(js_name = "dirplayer_rufflePlay")]
     fn ruffle_play(cast_lib: i32, cast_member: i32);
-    #[wasm_bindgen(js_name = "ruffleRewind")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleRewind")]
     fn ruffle_rewind(cast_lib: i32, cast_member: i32);
-    #[wasm_bindgen(js_name = "ruffleCallFrame")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleCallFrame")]
     fn ruffle_call_frame(cast_lib: i32, cast_member: i32, frame: i32);
-    #[wasm_bindgen(js_name = "ruffleGetVariable", catch)]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetVariable", catch)]
     fn ruffle_get_variable(cast_lib: i32, cast_member: i32, path: &str) -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(js_name = "ruffleSetVariable", catch)]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleSetVariable", catch)]
     fn ruffle_set_variable(cast_lib: i32, cast_member: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(js_name = "ruffleCallFunction", catch)]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleCallFunction", catch)]
     fn ruffle_call_function(cast_lib: i32, cast_member: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(js_name = "ruffleHitTest")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
     fn ruffle_hit_test(cast_lib: i32, cast_member: i32, x: f64, y: f64) -> bool;
-    #[wasm_bindgen(js_name = "ruffleGetFlashProperty", catch)]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetFlashProperty", catch)]
     fn ruffle_get_flash_property(cast_lib: i32, cast_member: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(js_name = "ruffleSetFlashProperty")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleSetFlashProperty")]
     fn ruffle_set_flash_property(cast_lib: i32, cast_member: i32, target: &str, prop_num: i32, value: &str);
 }
 
@@ -786,9 +790,12 @@ impl SpriteDatumHandlers {
                             }
                         };
 
-                        // Call the JS bridge to register the callback in Ruffle
+                        // Call the JS bridge to register the callback in Ruffle.
+                        // The export is exposed under the dirplayer_ prefix
+                        // (see ruffle/web/src/lib.rs and the matching JS in
+                        // src/services/flashPlayerManager.ts).
                         if let Some(window) = web_sys::window() {
-                            if let Ok(func) = js_sys::Reflect::get(&window, &"ruffleRegisterLingoCallback".into()) {
+                            if let Ok(func) = js_sys::Reflect::get(&window, &"dirplayer_ruffleRegisterLingoCallback".into()) {
                                 if func.is_function() {
                                     let func = js_sys::Function::from(func);
                                     let js_args = js_sys::Array::new();
