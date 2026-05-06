@@ -44,13 +44,17 @@ use super::{
     DirPlayer, ScriptError, PLAYER_OPT,
 };
 
+// JS bridge names use the `dirplayer_` prefix so this fork's globals don't
+// collide with stock Ruffle if both are loaded on the same page (e.g. via a
+// browser extension). Matching JS-side definitions live in
+// src/services/flashPlayerManager.ts::initFlashBridge.
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_name = "ruffleIsPlaying")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleIsPlaying")]
     fn ruffle_is_playing(cast_lib: i32, cast_member: i32) -> bool;
-    #[wasm_bindgen(js_name = "ruffleGetFrameCount")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetFrameCount")]
     fn ruffle_get_frame_count(cast_lib: i32, cast_member: i32) -> i32;
-    #[wasm_bindgen(js_name = "ruffleGetCurrentFrame")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetCurrentFrame")]
     fn ruffle_get_current_frame(cast_lib: i32, cast_member: i32) -> i32;
 }
 
@@ -3269,7 +3273,21 @@ pub fn sprite_get_prop(
                 })
             });
             match datum_ref {
-                Some(ref_) => Ok(player.get_datum(&ref_).clone()),
+                // Some(ref_) => Ok(player.get_datum(&ref_).clone()),
+
+                Some(ref_) => {
+                    // Return a clone of the Datum AND cache the underlying DatumRef
+                    // in last_sprite_prop_ref so the bytecode handler uses the real
+                    // ref instead of allocating a fresh slot. Without this, mutating
+                    // a behavior-stored list/proplist via sprite(N).propName would
+                    // mutate a *clone*, severing the link to the script instance's
+                    // storage (e.g. setaProp(sprite(N).pCustomData, key, val) would
+                    // not propagate back to the behavior's pCustomData).
+                    let datum_clone = player.get_datum(&ref_).clone();
+                    player.last_sprite_prop_ref = Some(ref_);
+                    Ok(datum_clone)
+                }
+
                 None => {
                     // Unknown sprite props may be custom behavior properties — return VOID
                     warn!(
@@ -3338,10 +3356,10 @@ fn resolve_sprite_member_assignment(
                 CastMemberType::VectorShape(vs) => {
                     Some((vs.width().ceil() as i32, vs.height().ceil() as i32))
                 }
-                CastMemberType::Flash(flash) => flash.flash_info.as_ref().map(|fi| {
-                    let (l, t, r, b) = fi.flash_rect;
-                    ((r - l) as i32, (b - t) as i32)
-                }),
+                CastMemberType::Flash(flash) => {
+                    let (l, t, r, b) = flash.effective_rect();
+                    Some(((r - l) as i32, (b - t) as i32))
+                }
                 _ => None,
             };
             let is_film_loop = matches!(&m.member_type, CastMemberType::FilmLoop(_));
@@ -4211,12 +4229,13 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 sprite.trails = value.to_bool()?;
                 Ok(())
             },
-        ),
+        ),       
         prop_name => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
-                sprite
+                // First pass: try to set on a behavior that already declares/has the property
+                let first_pass = sprite
                     .script_instance_list
                     .iter()
                     .find_map(|behavior| {
@@ -4233,14 +4252,34 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                                 Err(_) => None,
                             }
                         })
-                    })
-                    .unwrap_or_else(|| {
-                        eprintln!(
-                            "Warning: Cannot set prop {} of sprite, ignoring",
-                            prop_name
-                        );
-                        Ok(())
-                    })
+                    });
+                match first_pass {
+                    Some(r) => r,
+                    None => {
+                        // No behavior declares this property. Director allows dynamic
+                        // creation of behavior properties via assignment, so create it
+                        // on the first behavior (e.g. cs `sprite(N).pCustomData = ...`
+                        // on a sprite whose only behavior doesn't declare pCustomData).
+                        if let Some(first_behavior) = sprite.script_instance_list.first().cloned() {
+                            reserve_player_mut(|player| {
+                                let value_ref = player.alloc_datum(value.clone());
+                                script_set_prop(
+                                    player,
+                                    &first_behavior,
+                                    &prop_name.to_string(),
+                                    &value_ref,
+                                    false,
+                                )
+                            })
+                        } else {
+                            eprintln!(
+                                "Warning: Cannot set prop {} of sprite (no behaviors)",
+                                prop_name
+                            );
+                            Ok(())
+                        }
+                    }
+                }
             },
         ),
     };
@@ -4742,7 +4781,25 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             )
         }
         CastMemberType::Field(field_member) => {
-            let field_width = sprite.width;
+            // Director's `the rect of sprite` for fields uses the member's
+            // authored width on `#adjust` boxType. Other box types
+            // (`#scroll`, `#fixed`, `#limit`) honor sprite.width because
+            // the sprite is a user-resizable box independent of the member.
+            // We read `field_member.width` (not `rect_right - rect_left`)
+            // because CS-style runtime authoring creates members via Lingo
+            // `new(#field)` then sets `the width of member` from a .window
+            // XML — which only updates `field.width`, not the parse-time
+            // `rect_*` (they stay at FieldMember::new() defaults of 100).
+            // For .dir-loaded fields like figure8 timerbox, `field.width`
+            // was set from FieldInfo's rect at parse, so this still
+            // matches.
+            let is_adjust_for_width = field_member.box_type == "adjust";
+            let member_authored_w = field_member.width as i32;
+            let field_width = if is_adjust_for_width && member_authored_w > 0 {
+                member_authored_w
+            } else {
+                sprite.width
+            };
             let rect_height = (field_member.rect_bottom - field_member.rect_top).max(0) as i32;
             let extras = (2 * field_member.border as i32)
                 + (2 * field_member.margin as i32)
@@ -5128,10 +5185,35 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.loc_v - reg_y + use_height,
             )
         }
-        CastMemberType::VectorShape(_vs) => {
-            // VectorShapes with centerRegPoint use center registration
-            let reg_x = sprite.width / 2;
-            let reg_y = sprite.height / 2;
+        CastMemberType::VectorShape(vs) => {
+            // Director positions a vector shape on stage so that the
+            // member's `regPoint` (in member-pixel coords) aligns with
+            // the sprite's `loc`. Because vector shapes scale to sprite
+            // dimensions (default scaleMode = #autoSize), the regPoint
+            // offset is scaled by sprite.width/member.width before being
+            // subtracted from loc:
+            //
+            //   sprite_left = loc_h - regPoint.x * (sprite.width  / member.width)
+            //   sprite_top  = loc_v - regPoint.y * (sprite.height / member.height)
+            //
+            // Verified against figure8 Slider Groove:
+            //   regPoint=(1,2), member.width=113, sprite.width=200,
+            //   loc=(91,378)  →  91 - 1*(200/113) ≈ 89  (matches Director).
+            //
+            // Falls back to centering when regPoint or member dims are
+            // missing (e.g. Lingo `new(#vectorShape)` synthesized members).
+            let mw = vs.member_width as i32;
+            let mh = vs.member_height as i32;
+            let (reg_x, reg_y) = if mw > 0 && mh > 0 {
+                let sx = sprite.width as f32 / mw as f32;
+                let sy = sprite.height as f32 / mh as f32;
+                (
+                    (vs.reg_point.0 as f32 * sx).round() as i32,
+                    (vs.reg_point.1 as f32 * sy).round() as i32,
+                )
+            } else {
+                (sprite.width / 2, sprite.height / 2)
+            };
             IntRect::from(
                 sprite.loc_h - reg_x,
                 sprite.loc_v - reg_y,
@@ -5140,12 +5222,10 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             )
         }
         CastMemberType::Flash(flash_member) => {
-            let flash_width = flash_member.flash_info.as_ref()
-                .map(|i| (i.flash_rect.2 - i.flash_rect.0) as i32)
-                .unwrap_or(sprite.width);
-            let flash_height = flash_member.flash_info.as_ref()
-                .map(|i| (i.flash_rect.3 - i.flash_rect.1) as i32)
-                .unwrap_or(sprite.height);
+            let (l, t, r, b) = flash_member.effective_rect();
+            let flash_width = if r != l { (r - l) as i32 } else { sprite.width };
+            let flash_height = if b != t { (b - t) as i32 } else { sprite.height };
+            let _ = (l, t);
 
             let mut reg_x = flash_member.reg_point.0 as i32;
             let mut reg_y = flash_member.reg_point.1 as i32;
