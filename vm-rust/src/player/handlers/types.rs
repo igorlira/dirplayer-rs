@@ -557,6 +557,26 @@ impl TypeHandlers {
                         return Ok(DatumRef::Void);
                     }
                 }
+                Datum::DateRef(date_id) => {
+                    // Director's `integer(the systemDate)` returns the date
+                    // packed as YYYYMMDD (e.g. 20240328 for 28 Mar 2024).
+                    // Used by Director scripts as a numeric handshake/seed
+                    // — e.g. ClubMarian's login flow does
+                    // `key3 = bitXor(integer(the systemDate), key1)`.
+                    let date_obj = player
+                        .date_objects
+                        .get(date_id)
+                        .ok_or_else(|| ScriptError::new(format!(
+                            "Date object {} not found", date_id
+                        )))?;
+                    let js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
+                        date_obj.timestamp_ms as f64,
+                    ));
+                    let yyyymmdd = js_date.get_full_year() as i32 * 10000
+                        + (js_date.get_month() as i32 + 1) * 100  // js months are 0-based
+                        + js_date.get_date() as i32;
+                    Datum::Int(yyyymmdd)
+                }
                 Datum::Void => Datum::Void,
                 _ => {
                     return Err(ScriptError::new(format!(

@@ -8,6 +8,29 @@ use crate::{
 
 use super::{sprite::ColorRef, DirPlayer, ScriptError};
 
+/// Allocate a new `DateObject` whose timestamp is `days_delta` days from
+/// the source date's timestamp. Used by `add_datums` / `subtract_datums`
+/// to implement Director's `date + N` and `date - N` arithmetic, which
+/// return a brand new date value rather than mutating the source.
+fn shift_date_by_days(
+    src_date_id: u32,
+    days_delta: i64,
+    player: &mut DirPlayer,
+) -> Result<u32, ScriptError> {
+    let src_ms = player
+        .date_objects
+        .get(&src_date_id)
+        .ok_or_else(|| ScriptError::new(format!("Date object {} not found", src_date_id)))?
+        .timestamp_ms;
+    let new_ms = src_ms + days_delta * 24 * 60 * 60 * 1000;
+    let new_id = player.allocator.get_free_script_instance_id();
+    let new_obj = crate::player::handlers::datum_handlers::date::DateObject::from_timestamp(
+        new_id, new_ms,
+    );
+    player.date_objects.insert(new_id, new_obj);
+    Ok(new_id)
+}
+
 /// Perform a binary op on two inline components, preserving int/float semantics.
 /// If either operand is float, result is float.
 fn inline_binop_2(
@@ -219,6 +242,15 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
                 a, b
             ))),
         },
+        // Director date arithmetic: `date + N` returns a new date N days
+        // later (and `N + date` is symmetric). Used by ClubMarian's daily
+        // login window check (`if NetDate = ParamDate or NetDate = ParamDate + 1`).
+        (Datum::DateRef(date_id), Datum::Int(days)) => {
+            Ok(Datum::DateRef(shift_date_by_days(*date_id, *days as i64, player)?))
+        }
+        (Datum::Int(days), Datum::DateRef(date_id)) => {
+            Ok(Datum::DateRef(shift_date_by_days(*date_id, *days as i64, player)?))
+        }
         (Datum::String(left), Datum::Int(right)) => {
             let left_float = left.parse::<f64>().unwrap_or(0.0);
             Ok(Datum::Float(left_float + (*right as f64)))
@@ -390,6 +422,11 @@ pub fn subtract_datums(
                 .ok_or_else(|| ScriptError::new(format!("Date object {} not found", b_id)))?.timestamp_ms;
             let diff_days = (a_ms - b_ms) / (1000 * 60 * 60 * 24);
             Ok(Datum::Int(diff_days as i32))
+        }
+        // Director date arithmetic: `date - N` returns a new date N days
+        // earlier. Mirrors `date + N` in `add_datums`.
+        (Datum::DateRef(date_id), Datum::Int(days)) => {
+            Ok(Datum::DateRef(shift_date_by_days(*date_id, -(*days as i64), player)?))
         }
         (Datum::Void, Datum::Int(r)) => Ok(Datum::Float(0.0 - (*r as f64))),
         (Datum::Void, Datum::Float(r)) => Ok(Datum::Float(0.0 - r)),
