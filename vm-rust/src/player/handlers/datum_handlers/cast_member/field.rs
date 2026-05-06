@@ -283,7 +283,7 @@ impl FieldMemberHandlers {
                             original_dst_rect: None,
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None,
+                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         };
 
                         bitmap.draw_text(
@@ -385,6 +385,14 @@ impl FieldMemberHandlers {
                     if h > 0 {
                         field_data.fixed_line_space = h;
                     }
+                    // Keep rect_* in sync so callers like
+                    // get_concrete_sprite_rect (which uses these for
+                    // bounding-box arithmetic) see the script-authored
+                    // rect, not the FieldMember::new() defaults.
+                    field_data.rect_left = x1 as i16;
+                    field_data.rect_top = y1 as i16;
+                    field_data.rect_right = x2 as i16;
+                    field_data.rect_bottom = y2 as i16;
 
                     Ok(())
                 }
@@ -409,7 +417,12 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().width = value? as u16;
+                    let w = value? as u16;
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    field.width = w;
+                    // Mirror into rect_* (right = left + w) so consumers
+                    // that read rect_right/rect_left stay consistent.
+                    field.rect_right = field.rect_left.saturating_add(w as i16);
                     Ok(())
                 },
             ),
@@ -417,7 +430,11 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().fixed_line_space = value? as u16;
+                    let h = value? as u16;
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    field.fixed_line_space = h;
+                    field.height = h;
+                    field.rect_bottom = field.rect_top.saturating_add(h as i16);
                     Ok(())
                 },
             ),
