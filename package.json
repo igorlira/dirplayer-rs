@@ -104,6 +104,7 @@
     "@types/pngjs": "^6.0.5",
     "@vitejs/plugin-react": "^2.1.0",
     "concurrently": "^9.2.1",
+    "dotenv": "^17.4.2",
     "electron": "^38.3.0",
     "electron-builder": "^26.0.12",
     "pngjs": "^7.0.0",

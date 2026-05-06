@@ -49,6 +49,7 @@ rand = { version = "0.9", features = ["small_rng"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 base64 = "0.22"
 toml = "0.8"
+dotenvy = "0.15"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

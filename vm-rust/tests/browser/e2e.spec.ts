@@ -137,12 +137,44 @@ test("browser e2e tests", async ({ page }) => {
 
   await page.goto("/index.html");
 
-  // Wait for all wasm tests to complete
+  // Stop waiting as soon as the harness finishes, a panic hook reports a
+  // Rust panic, or the page accumulates script errors.
   const handle = await page.waitForFunction(
-    () => (window as any).__testResults as TestResults | null,
+    () => {
+      const win = window as any;
+      return (
+        win.__testResults?.done === true ||
+        typeof win.__testPanic === "string" ||
+        (Array.isArray(win.__scriptErrors) && win.__scriptErrors.length > 0)
+      );
+    },
     { timeout: 900_000 }
   );
-  const testResults = (await handle.jsonValue()) as TestResults;
+  await handle.dispose();
+
+  const [testResults, panicMessage, scriptErrors] = await Promise.all([
+    page.evaluate(() => ((window as any).__testResults ?? null) as TestResults | null),
+    page.evaluate(() => ((window as any).__testPanic ?? null) as string | null),
+    page.evaluate(() => ((window as any).__scriptErrors ?? []) as string[]),
+  ]);
+
+  if (panicMessage) {
+    throw new Error(`Rust panic during browser test:\n${panicMessage}`);
+  }
+
+  if (scriptErrors.length > 0) {
+    console.log(`\n${scriptErrors.length} script error(s):`);
+    for (const err of scriptErrors) {
+      console.log(`  ✗ ${err}`);
+    }
+    throw new Error(
+      `${scriptErrors.length} script error(s) during test:\n${scriptErrors.join("\n")}`
+    );
+  }
+
+  if (!testResults) {
+    throw new Error("Browser test harness exited without publishing test results.");
+  }
 
   // Log results
   for (const t of testResults.tests) {
@@ -155,20 +187,6 @@ test("browser e2e tests", async ({ page }) => {
   console.log(
     `${testResults.passed} passed, ${testResults.failed} failed`
   );
-
-  // Check for VM script errors
-  const scriptErrors = await page.evaluate(
-    () => (window as any).__scriptErrors as string[]
-  );
-  if (scriptErrors.length > 0) {
-    console.log(`\n${scriptErrors.length} script error(s):`);
-    for (const err of scriptErrors) {
-      console.log(`  ✗ ${err}`);
-    }
-    throw new Error(
-      `${scriptErrors.length} script error(s) during test:\n${scriptErrors.join("\n")}`
-    );
-  }
 
   // Assert all tests passed
   expect(testResults.failed).toBe(0);
