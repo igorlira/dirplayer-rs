@@ -331,7 +331,19 @@ pub struct DirPlayer {
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
     /// Optional fake movie path override. When set, `the moviePath` and `the movieName`
     /// return values derived from this path, while actual file fetching uses the real URL.
+    /// URLs the script builds from `the moviePath` (e.g. `postNetText(the moviePath & "x.aspx")`)
+    /// are rewritten back to the real base in net handlers.
     pub movie_path_override: Option<String>,
+    /// Like `movie_path_override` but **purely informational** — sets
+    /// `the moviePath` / `the movieName` for the script to read, and
+    /// nothing more. Net handlers do NOT rewrite URLs constructed from
+    /// it; the script-emitted URL is fetched as-is. Use this when the
+    /// JS-side fetch interceptor already handles host routing (e.g.
+    /// `flashPlayerManager.ts` rewriting `maidmarian.com` to a local
+    /// CORS proxy) and you want the URL the script builds to land at
+    /// the proxy unchanged. Mutually exclusive with the rewrite path —
+    /// when both are set, this label wins for `the moviePath`.
+    pub movie_path_label: Option<String>,
     pub console: console::ConsoleBuffer,
 }
 
@@ -378,6 +390,7 @@ impl DirPlayer {
                 allow_custom_caching: false,
                 trace_script: false,
                 trace_log_file: String::new(),
+                debug_playback_enabled: false,
                 mouse_down: false,
                 click_loc: (0,0),
                 frame_script_instance: None,
@@ -489,6 +502,7 @@ impl DirPlayer {
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
+            movie_path_label: None,
             console: console::ConsoleBuffer::new(),
             rng: rand::rngs::SmallRng::seed_from_u64(0),
         };
@@ -567,25 +581,59 @@ impl DirPlayer {
             )
             .await;
 
-        // Apply fake movie path override if set (moviePath/movieName use this,
-        // but net_manager.base_path stays real for actual file fetching)
-        if let Some(ref override_path) = self.movie_path_override {
-            if !override_path.is_empty() {
-                if let Ok(url) = Url::parse(override_path) {
-                    self.movie.base_path = get_base_url(&url).to_string();
-                    if let Some(name) = url.path_segments().and_then(|s| s.last()) {
-                        self.movie.file_name = name.to_string();
-                    }
-                } else {
-                    // Treat as a plain path
-                    if let Some(pos) = override_path.rfind('/') {
-                        self.movie.base_path = override_path[..pos].to_string();
-                        self.movie.file_name = override_path[pos + 1..].to_string();
-                    } else {
-                        self.movie.file_name = override_path.clone();
-                    }
+        // Apply fake movie path override if set (moviePath/movieName use
+        // this, but net_manager.base_path stays real for actual file
+        // fetching).
+        //
+        // Three sources, listed by precedence:
+        //   1. `movie_path_label` (set_movie_path_label JS API) —
+        //      label-only, no URL rewrite.
+        //   2. external_params["_moviePath"] — same semantics as #1; just
+        //      a more declarative way to set it (drop a key in the
+        //      externalParams the host passes to dirplayer).
+        //   3. `movie_path_override` (set_movie_path_override JS API) —
+        //      rewrite-mode: registers `net_manager.override_base_path`
+        //      so URLs the script builds get translated back to the real
+        //      base before they're fetched.
+        //
+        // The first two are "label-only"; the third is the legacy
+        // rewrite path. Only the rewrite path registers an
+        // override_base_path with the net manager.
+        let label_value: Option<String> = self
+            .movie_path_label
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .or_else(|| {
+                self.external_params
+                    .get("_moviePath")
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+            });
+        let path_to_apply: Option<(String, bool /* is_label */)> = label_value
+            .map(|s| (s, true))
+            .or_else(|| {
+                self.movie_path_override
+                    .as_ref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (s.clone(), false))
+            });
+        if let Some((path, is_label)) = path_to_apply {
+            if let Ok(url) = Url::parse(&path) {
+                self.movie.base_path = get_base_url(&url).to_string();
+                if let Some(name) = url.path_segments().and_then(|s| s.last()) {
+                    self.movie.file_name = name.to_string();
                 }
-                // Store the fake base path on net_manager so it can resolve override paths
+            } else {
+                // Treat as a plain path
+                if let Some(pos) = path.rfind('/') {
+                    self.movie.base_path = path[..pos].to_string();
+                    self.movie.file_name = path[pos + 1..].to_string();
+                } else {
+                    self.movie.file_name = path.clone();
+                }
+            }
+            if !is_label {
                 self.net_manager.override_base_path = Some(self.movie.base_path.clone());
             }
         }
@@ -1849,6 +1897,88 @@ impl DirPlayer {
                     .unwrap_or_else(|| "Plugin".to_string());
                 Ok(self.alloc_datum(Datum::String(mode)))
             },
+            // `the moviePath` precedence (read at every Lingo access so
+            // it stays correct even if external_params change post-load):
+            //   1. external_params["_moviePath"]  — declarative label
+            //   2. movie_path_label               — JS API label
+            //   3. self.movie.base_path           — actual loaded path
+            //      (handled by Movie::get_prop in the fallthrough below)
+            // Director's `the moviePath` is the directory part of the
+            // movie's location — NOT the full file URL. So if the label
+            // looks like a full URL (`http://host/dir/movie.dcr`), strip
+            // the filename and return `http://host/dir/`. This matches
+            // the load-time logic in `load_movie_from_dir`. Label sources
+            // do NOT trigger URL rewriting in net handlers — that's
+            // reserved for `movie_path_override`. See `set_movie_path_label`.
+            "moviePath" => {
+                let label = self.external_params
+                    .get("_moviePath")
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .or_else(|| {
+                        self.movie_path_label
+                            .as_ref()
+                            .filter(|s| !s.is_empty())
+                            .cloned()
+                    });
+                if let Some(path) = label {
+                    let base_path = if let Ok(url) = Url::parse(&path) {
+                        get_base_url(&url).to_string()
+                    } else if let Some(pos) = path.rfind('/') {
+                        path[..=pos].to_string()
+                    } else if let Some(pos) = path.rfind('\\') {
+                        path[..=pos].to_string()
+                    } else {
+                        // Single-segment path: nothing to strip — append
+                        // a separator so concatenation with movieName
+                        // produces a well-formed path.
+                        let mut s = path.clone();
+                        if !s.ends_with('/') && !s.ends_with('\\') {
+                            s.push('/');
+                        }
+                        s
+                    };
+                    Ok(self.alloc_datum(Datum::String(base_path)))
+                } else {
+                    let datum = self.movie.get_prop(prop)?;
+                    Ok(self.alloc_datum(datum))
+                }
+            },
+            // `the movieName` mirrors `the moviePath` — when a label is
+            // active, return the FILENAME portion (last path segment).
+            // Scripts use `the moviePath & the movieName` to reconstruct
+            // the full URL for security/whitelist checks. Without this
+            // companion intercept, `movieName` would still come from the
+            // actually-loaded file, breaking the concatenation.
+            "movieName" => {
+                let label = self.external_params
+                    .get("_moviePath")
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .or_else(|| {
+                        self.movie_path_label
+                            .as_ref()
+                            .filter(|s| !s.is_empty())
+                            .cloned()
+                    });
+                if let Some(path) = label {
+                    let file_name = if let Ok(url) = Url::parse(&path) {
+                        url.path_segments()
+                            .and_then(|s| s.last())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default()
+                    } else if let Some(pos) = path.rfind(|c| c == '/' || c == '\\') {
+                        path[pos + 1..].to_string()
+                    } else {
+                        path.clone()
+                    };
+                    Ok(self.alloc_datum(Datum::String(file_name)))
+                } else {
+                    let datum = self.movie.get_prop(prop)?;
+                    Ok(self.alloc_datum(datum))
+                }
+            },
             _ => {
                 let datum = self.movie.get_prop(prop)?;
                 Ok(self.alloc_datum(datum))
@@ -1918,8 +2048,13 @@ impl DirPlayer {
                 self.movie.item_delimiter = (value.string_value()?).chars().next().unwrap();
                 Ok(())
             }
-            "traceScript" | "debugPlaybackEnabled" => {
+            "traceScript" => {
                 // Accepted, no-op
+                Ok(())
+            }
+            "debugPlaybackEnabled" => {
+                let v = self.get_datum(value).int_value()? != 0;
+                self.movie.debug_playback_enabled = v;
                 Ok(())
             }
             _ => Err(ScriptError::new(format!("Cannot set player prop {}", prop))),
@@ -3214,9 +3349,11 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     });
 }
 
+// JS bridge name uses the `dirplayer_` prefix so this fork's globals don't
+// collide with stock Ruffle / other libraries on the same page.
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_name = "isFlashLoading", catch)]
+    #[wasm_bindgen(js_name = "dirplayer_isFlashLoading", catch)]
     fn is_flash_loading() -> Result<bool, wasm_bindgen::JsValue>;
 }
 /// Execute one complete frame cycle: run frame scripts, then advance to the next frame.
