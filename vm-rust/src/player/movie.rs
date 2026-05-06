@@ -42,6 +42,7 @@ pub struct Movie {
     pub allow_custom_caching: bool,
     pub trace_script: bool,
     pub trace_log_file: String,
+    pub debug_playback_enabled: bool,
     pub mouse_down: bool,
     pub click_loc: (i32, i32),
     pub frame_script_instance: Option<ScriptInstanceRef>,
@@ -247,7 +248,7 @@ impl Movie {
                     .join("\r");
                 Ok(Datum::String(s))
             },
-            "debugplaybackenabled" => Ok(Datum::Int(0)),
+            "debugplaybackenabled" => Ok(datum_bool(self.debug_playback_enabled)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
         })
     }
@@ -268,7 +269,7 @@ impl Movie {
                 Ok(())
             },
             "debugPlaybackEnabled" => {
-                // TODO
+                self.debug_playback_enabled = value.int_value()? != 0;
                 Ok(())
             },
             "alertHook" => {

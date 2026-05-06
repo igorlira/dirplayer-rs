@@ -39,6 +39,7 @@ pub enum PlayerVMCommand {
     SetExternalParams(HashMap<String, String>),
     SetBasePath(String),
     SetMoviePathOverride(String),
+    SetMoviePathLabel(String),
     SetSystemFontPath(String),
     SetStageSize(u32, u32),
     TimeoutTriggered(TimeoutRef),
@@ -77,6 +78,7 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         }
         PlayerVMCommand::SetBasePath(path) => format!("SetBasePath({})", path),
         PlayerVMCommand::SetMoviePathOverride(path) => format!("SetMoviePathOverride({})", path),
+        PlayerVMCommand::SetMoviePathLabel(path) => format!("SetMoviePathLabel({})", path),
         PlayerVMCommand::SetSystemFontPath(path) => format!("SetSystemFontPath({})", path),
         PlayerVMCommand::SetStageSize(width, height) => {
             format!("SetStageSize({}, {})", width, height)
@@ -221,6 +223,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         PlayerVMCommand::SetMoviePathOverride(path) => {
             reserve_player_mut(|player| {
                 player.movie_path_override = if path.is_empty() { None } else { Some(path) };
+            });
+        }
+        PlayerVMCommand::SetMoviePathLabel(path) => {
+            reserve_player_mut(|player| {
+                player.movie_path_label = if path.is_empty() { None } else { Some(path) };
             });
         }
         PlayerVMCommand::SetSystemFontPath(path) => {
