@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import dotenv from "dotenv";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +15,14 @@ const FLASH_MANAGER_SRC = path.join(REPO_ROOT, "src", "services", "flashPlayerMa
 const RUNNER_DIR = path.join(VM_RUST_DIR, "target", "browser_runner");
 const TEMPLATE_DIR = path.join(VM_RUST_DIR, "tests", "browser_templates");
 const CONFIG_DIR = path.join(VM_RUST_DIR, "tests", "e2e", "configs");
+const DOTENV_PATH = path.join(REPO_ROOT, ".env");
 const IS_WIN = process.platform === "win32";
+
+const dotenvResult = dotenv.config({ path: DOTENV_PATH, quiet: true });
+const loadedEnv = {
+  ...(dotenvResult.parsed ?? {}),
+  ...process.env,
+};
 
 function run(cmd, args, opts = {}) {
   const res = spawnSync(cmd, args, {
@@ -31,7 +39,7 @@ function run(cmd, args, opts = {}) {
 // Separate our own flags from args forwarded to playwright.
 const cliArgs = process.argv.slice(2);
 const forwardArgs = [];
-let updateSnapshots = process.env.SNAPSHOT_UPDATE === "1";
+let updateSnapshots = loadedEnv.SNAPSHOT_UPDATE === "1";
 for (const arg of cliArgs) {
   if (arg === "--update" || arg === "-u") {
     updateSnapshots = true;
@@ -103,7 +111,7 @@ if (fs.existsSync(CONFIG_DIR)) {
 }
 const testEnv = {};
 for (const name of envVars) {
-  const value = process.env[name];
+  const value = loadedEnv[name];
   if (value !== undefined && value !== "") testEnv[name] = value;
 }
 const testEnvJson = JSON.stringify(testEnv);

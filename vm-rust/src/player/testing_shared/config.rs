@@ -1,8 +1,26 @@
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::OnceLock;
 use serde::Deserialize;
 use crate::player::reserve_player_mut;
 
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
+
+#[cfg(not(target_arch = "wasm32"))]
+static DOTENV_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dotenv_vars() -> &'static HashMap<String, String> {
+    DOTENV_VARS.get_or_init(|| {
+        let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".env");
+        let Ok(iter) = dotenvy::from_path_iter(&env_path) else {
+            return HashMap::new();
+        };
+        iter.filter_map(Result::ok).collect()
+    })
+}
 
 /// Test configuration loaded from a TOML file.
 ///
@@ -66,7 +84,7 @@ impl TestConfig {
     /// Parse a TOML string into a TestConfig, resolving `${VAR:default}`
     /// placeholders in all string values from environment variables.
     ///
-    /// - `${VAR}` — replaced by the env var `VAR`; panics if unset.
+    /// - `${VAR}` — replaced by the env var `VAR`; or an empty string if unset.
     /// - `${VAR:fallback}` — replaced by `VAR` if set, otherwise `fallback`.
     pub fn from_toml(toml_str: &str) -> Self {
         let mut cfg: TestConfig = toml::from_str(toml_str).expect("Failed to parse test config TOML");
@@ -121,7 +139,10 @@ impl TestConfig {
                 Self::get_env(var).unwrap_or_else(|| default.to_string())
             } else {
                 Self::get_env(token)
-                    .unwrap_or_else(|| panic!("Env var '{}' not set and no default provided", token))
+                    .unwrap_or_else(|| {
+                        log::warn!("Env var '{}' not set and no default provided; using empty string", token);
+                        String::new()
+                    })
             };
             result.push_str(&resolved);
             rest = &after[end + 1..];
@@ -133,7 +154,11 @@ impl TestConfig {
     /// Platform-appropriate env var lookup.
     fn get_env(name: &str) -> Option<String> {
         #[cfg(not(target_arch = "wasm32"))]
-        { std::env::var(name).ok() }
+        {
+            std::env::var(name)
+                .ok()
+                .or_else(|| dotenv_vars().get(name).cloned())
+        }
 
         #[cfg(target_arch = "wasm32")]
         {
