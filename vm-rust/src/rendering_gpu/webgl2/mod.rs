@@ -723,7 +723,7 @@ impl WebGL2Renderer {
             original_dst_rect: None,
             bg_color_explicit: false,
             fore_color_explicit: false,
-            ink9_mask_bitmap: None,
+            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
         };
 
         // Render text to the bitmap
@@ -1918,8 +1918,14 @@ impl WebGL2Renderer {
                     let width = sprite_rect.width().max(1) as u32;
                     let height = sprite_rect.height().max(1) as u32;
 
-                    // Check if this field has keyboard focus (for cursor rendering)
-                    let has_focus = player.keyboard_focus_sprite == channel_num;
+                    // Check if this field has keyboard focus AND is editable.
+                    // Non-editable fields ignore focus state for the cursor-render
+                    // path: Director doesn't draw a caret on read-only fields even
+                    // if they happen to be the focus owner (e.g. Coke Studios'
+                    // `nav_v-ego_search_motto` is a non-editable text panel that
+                    // would otherwise show a caret at the end of the motto text).
+                    let has_focus = field_member.editable
+                        && player.keyboard_focus_sprite == channel_num;
 
                     let mut style = 0u8;
                     let style_lc = field_member.font_style.to_lowercase();
@@ -1954,17 +1960,29 @@ impl WebGL2Renderer {
                         field_member.fore_color.clone()
                             .unwrap_or_else(|| fg_color.clone())
                     };
+                    // Field bg priority:
+                    //   1. sprite.backColor IF it was explicitly set (Lingo
+                    //      `the backColor of sprite N` or score-frame-data
+                    //      tween) — Director honors those overrides for
+                    //      field sprites too.
+                    //   2. `member.bg_color`, which is initialized in
+                    //      cast_member.rs from FieldInfo and tracked by the
+                    //      `the bgColor of member` Lingo setter.
+                    // The previous fallback used `field_member.back_color`,
+                    // which is a parse-time snapshot and does NOT track
+                    // member-level Lingo writes — so a script that did
+                    // `set the bgColor of member "x" to red` would still
+                    // render with the original FieldInfo bg.
                     let effective_bg = if has_back_color {
                         bg_color.clone()
                     } else {
-                        field_member.back_color.clone()
-                            .unwrap_or_else(|| bg_color.clone())
+                        member.bg_color.clone()
                     };
 
                     debug!(
-                        "[FIELD] sprite#{} text='{}' ink={} font='{}' fontSize={} fg={:?} bg={:?} member.fg={:?} member.bg={:?} has_fore={} has_back={} -> eff_fg={:?} eff_bg={:?} box_type='{}' editable={} border={} size={}x{}",
+                        "[FIELD] sprite#{} text='{}' ink={} font='{}' fontSize={} fg={:?} sprite.bg={:?} member.fg={:?} member.bg={:?} has_fore={} has_back={} -> eff_fg={:?} eff_bg={:?} box_type='{}' editable={} border={} size={}x{}",
                         channel_num, &text[..text.len().min(30)], ink, field_member.font, field_member.font_size,
-                        fg_color, bg_color, field_member.fore_color, field_member.back_color,
+                        fg_color, bg_color, field_member.fore_color, member.bg_color,
                         has_fore_color, has_back_color, effective_fg, effective_bg,
                         field_member.box_type, field_member.editable, field_member.border, width, height,
                     );
@@ -2646,7 +2664,7 @@ impl WebGL2Renderer {
                             original_dst_rect: None,
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None,
+                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         };
                         btn_bitmap.draw_text_wrapped(
                             &text, font, font_bmp,
@@ -3519,16 +3537,24 @@ impl WebGL2Renderer {
                     match bitmap.original_bit_depth {
                         // ---------- 32-BIT ----------
                         32 => {
-                            // Treat source as grayscale intensity
+                            // Treat source as grayscale intensity. When only
+                            // one of fg/bg is set, default the other to
+                            // black/white so anti-aliased edges still tint
+                            // proportionally — matching drawing.rs:2483-2492.
+                            // CS DiscoLight uses ink=0 + bgColor=random with no
+                            // foreColor; without this branch every random
+                            // bgColor falls through and the rays render as
+                            // raw white, so all four sprites look identical.
                             let gray = ((r as u16 + g as u16 + b as u16) / 3) as u8;
 
-                            if has_fore && has_back && use_back_color {
-                                // Interpolate between fg and bg based on gray
+                            if (has_fore || has_back) && use_back_color {
+                                let eff_fg = if has_fore { fg_rgb } else { (0u8, 0u8, 0u8) };
+                                let eff_bg = if has_back { bg_rgb } else { (255u8, 255u8, 255u8) };
                                 let t = gray as f32 / 255.0;
                                 (
-                                    ((1.0 - t) * fg_rgb.0 as f32 + t * bg_rgb.0 as f32) as u8,
-                                    ((1.0 - t) * fg_rgb.1 as f32 + t * bg_rgb.1 as f32) as u8,
-                                    ((1.0 - t) * fg_rgb.2 as f32 + t * bg_rgb.2 as f32) as u8,
+                                    ((1.0 - t) * eff_fg.0 as f32 + t * eff_bg.0 as f32) as u8,
+                                    ((1.0 - t) * eff_fg.1 as f32 + t * eff_bg.1 as f32) as u8,
+                                    ((1.0 - t) * eff_fg.2 as f32 + t * eff_bg.2 as f32) as u8,
                                 )
                             } else if has_fore && gray <= 1 {
                                 // Replace near-black with fg color
@@ -3921,7 +3947,7 @@ impl WebGL2Renderer {
             if cached.version == bitmap_version {
                 return Some((cached.texture.clone(), cached.width, cached.height));
             }
-            // Version changed - texture needs to be re-uploaded (don't log to avoid spam)
+            // Version changed - texture needs to be re-uploaded
         }
 
         // Convert bitmap to RGBA format with ink for matte computation
@@ -4478,7 +4504,7 @@ impl WebGL2Renderer {
             original_dst_rect: None,
             bg_color_explicit: false,
             fore_color_explicit: false,
-            ink9_mask_bitmap: None,
+            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
         };
 
         let pfr_multi_span_styled = is_pfr_font && styled_spans.map_or(false, |s| s.len() > 1);
@@ -4543,7 +4569,8 @@ impl WebGL2Renderer {
             }
 
             use crate::player::font::{
-                bitmap_font_copy_char, bitmap_font_copy_char_scaled, bitmap_font_copy_char_tight,
+                bitmap_font_copy_char, bitmap_font_copy_char_italic, bitmap_font_copy_char_scaled,
+                bitmap_font_copy_char_tight, bitmap_font_copy_char_tight_italic,
             };
 
             // Default line stride. The credits case (large empty-row gaps
@@ -4768,79 +4795,29 @@ impl WebGL2Renderer {
                                 );
                             }
                         }
-                        if use_tight_pfr {
-                            bitmap_font_copy_char_tight(
-                                &font,
-                                font_bitmap,
-                                glyph_code,
-                                bitmap,
-                                x,
-                                y_pos,
-                                &palettes,
-                                &params,
-                            );
-                        } else {
-                            bitmap_font_copy_char(
-                                &font,
-                                font_bitmap,
-                                glyph_code,
-                                bitmap,
-                                x,
-                                y_pos,
-                                &palettes,
-                                &params,
-                            );
-                        }
+                        // Each glyph is drawn exactly once, with italic and tight
+                        // variants chosen up-front. Bold uses fake double-strike
+                        // (x and x+1) since bitmap fonts don't have a separate
+                        // bold weight; italic uses per-row shear via the _italic
+                        // helpers (drawing a second sheared copy on top of the
+                        // upright one produced the doubled-glyph artifact).
+                        let draw_glyph = |dest: &mut Bitmap, dx: i32| match (italic, use_tight_pfr) {
+                            (true, true) => bitmap_font_copy_char_tight_italic(
+                                &font, font_bitmap, glyph_code, dest, dx, y_pos, &palettes, &params,
+                            ),
+                            (true, false) => bitmap_font_copy_char_italic(
+                                &font, font_bitmap, glyph_code, dest, dx, y_pos, &palettes, &params,
+                            ),
+                            (false, true) => bitmap_font_copy_char_tight(
+                                &font, font_bitmap, glyph_code, dest, dx, y_pos, &palettes, &params,
+                            ),
+                            (false, false) => bitmap_font_copy_char(
+                                &font, font_bitmap, glyph_code, dest, dx, y_pos, &palettes, &params,
+                            ),
+                        };
+                        draw_glyph(bitmap, x);
                         if bold {
-                            if use_tight_pfr {
-                                bitmap_font_copy_char_tight(
-                                    &font,
-                                    font_bitmap,
-                                    glyph_code,
-                                    bitmap,
-                                    x + 1,
-                                    y_pos,
-                                    &palettes,
-                                    &params,
-                                );
-                            } else {
-                                bitmap_font_copy_char(
-                                    &font,
-                                    font_bitmap,
-                                    glyph_code,
-                                    bitmap,
-                                    x + 1,
-                                    y_pos,
-                                    &palettes,
-                                    &params,
-                                );
-                            }
-                        }
-                        if italic {
-                            let shear = (y_pos / 4) as i32;
-                            if use_tight_pfr {
-                                bitmap_font_copy_char_tight(
-                                    &font,
-                                    font_bitmap,
-                                    glyph_code,
-                                    bitmap,
-                                    x + shear,
-                                    y_pos,
-                                    &palettes,
-                                    &params,
-                                );
-                            } else {
-                                bitmap_font_copy_char(
-                                    &font,
-                                    font_bitmap,
-                                    glyph_code,
-                                    bitmap,
-                                    x + shear,
-                                    y_pos,
-                                    &palettes,
-                                    &params,
-                                );
-                            }
+                            draw_glyph(bitmap, x + 1);
                         }
                         x += adv;
                         char_i += 1;
@@ -5098,7 +5075,7 @@ impl WebGL2Renderer {
                             original_dst_rect: params.original_dst_rect.clone(),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None,
+                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         };
 
                         // Scale glyphs by per-span size relative to the
@@ -5142,87 +5119,32 @@ impl WebGL2Renderer {
                                 continue;
                             }
 
-                            if span_is_default_size {
-                                bitmap_font_copy_char(
-                                    &font,
-                                    font_bitmap,
-                                    ch as u8,
-                                    &mut text_bitmap,
-                                    x,
-                                    y,
-                                    &palettes,
-                                    &run_params,
-                                );
-                            } else {
-                                bitmap_font_copy_char_scaled(
-                                    &font,
-                                    font_bitmap,
-                                    ch as u8,
-                                    &mut text_bitmap,
-                                    x,
-                                    y,
-                                    char_w,
-                                    char_h,
-                                    &palettes,
-                                    &run_params,
-                                );
-                            }
-
+                            // Each glyph is drawn exactly once. Bold uses fake
+                            // double-strike (x and x+1); italic uses per-row
+                            // shear via the _italic helpers. Italic is only
+                            // available at default size — _scaled doesn't have
+                            // an italic variant yet, so scaled italic falls
+                            // through to the non-italic scaled copy.
+                            let italic_default_size = run.style.italic && span_is_default_size;
+                            let draw_glyph = |dest: &mut Bitmap, dx: i32| {
+                                if italic_default_size {
+                                    bitmap_font_copy_char_italic(
+                                        &font, font_bitmap, ch as u8, dest, dx, y, &palettes, &run_params,
+                                    );
+                                } else if span_is_default_size {
+                                    bitmap_font_copy_char(
+                                        &font, font_bitmap, ch as u8, dest, dx, y, &palettes, &run_params,
+                                    );
+                                } else {
+                                    bitmap_font_copy_char_scaled(
+                                        &font, font_bitmap, ch as u8, dest, dx, y,
+                                        char_w, char_h, &palettes, &run_params,
+                                    );
+                                }
+                            };
+                            draw_glyph(&mut text_bitmap, x);
                             if run.style.bold {
-                                if span_is_default_size {
-                                    bitmap_font_copy_char(
-                                        &font,
-                                        font_bitmap,
-                                        ch as u8,
-                                        &mut text_bitmap,
-                                        x + 1,
-                                        y,
-                                        &palettes,
-                                        &run_params,
-                                    );
-                                } else {
-                                    bitmap_font_copy_char_scaled(
-                                        &font,
-                                        font_bitmap,
-                                        ch as u8,
-                                        &mut text_bitmap,
-                                        x + 1,
-                                        y,
-                                        char_w,
-                                        char_h,
-                                        &palettes,
-                                        &run_params,
-                                    );
-                                }
-                            }
-
-                            if run.style.italic {
-                                let shear = (y / 4).max(0);
-                                if span_is_default_size {
-                                    bitmap_font_copy_char(
-                                        &font,
-                                        font_bitmap,
-                                        ch as u8,
-                                        &mut text_bitmap,
-                                        x + shear,
-                                        y,
-                                        &palettes,
-                                        &run_params,
-                                    );
-                                } else {
-                                    bitmap_font_copy_char_scaled(
-                                        &font,
-                                        font_bitmap,
-                                        ch as u8,
-                                        &mut text_bitmap,
-                                        x + shear,
-                                        y,
-                                        char_w,
-                                        char_h,
-                                        &palettes,
-                                        &run_params,
-                                    );
-                                }
+                                draw_glyph(&mut text_bitmap, x + 1);
                             }
 
                             x += advance;
@@ -5436,12 +5358,13 @@ impl WebGL2Renderer {
         // Filling background with bg_color at alpha=255 would make the entire
         // text area opaque, producing solid colored rectangles instead of text.
         let is_transparency_ink = ink == 3 || ink == 7 || ink == 8 || ink == 9 || ink == 36;
-        // When bgColor is default white, leave background transparent even for ink 0.
-        // This matches Director behavior where text/field members with default white
-        // bgColor appear transparent when composited over other content (e.g., 3D scenes).
-        // Only fill background when bgColor is explicitly non-white.
-        let bg_is_default_white = bg_rgb == (255, 255, 255);
-        let has_bg_fill = !is_transparency_ink && !bg_is_default_white;
+        // White bg fields use ink 36 (BgTransparent) when the author wants the
+        // bg to fall through (e.g. text/field members composited over a 3D
+        // scene). Under any non-transparent ink (e.g. ink 0 Copy on Coke
+        // Studios' `nav_vego_search_field` v-ego search box) the white bg has
+        // to be drawn — otherwise the field appears as transparent text on
+        // whatever's behind it. Don't second-guess the ink here.
+        let has_bg_fill = !is_transparency_ink;
 
         // After drawing text, handle background pixels.
         // The bitmap was pre-filled with alpha=0 (transparent).
