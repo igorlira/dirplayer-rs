@@ -121,15 +121,51 @@ impl MultiuserXtraManager {
                     let _handler_symbol = handler_symbol.clone();
                     let _handler_obj_ref = handler_obj_ref.clone();
                 }
-                // userNameString, passwordString, serverIDString, portNumber, movieIDString {, mode, encryptionKey
+                // Director's connectToNetServer has two overloads:
+                //   (A) (userName, password, serverID, port, movieID, [mode, encKey])
+                //   (B) (serverID, port, propList[#userID, #password, #movieid],
+                //        modeSymbol, [encKey])
+                // Form B is what ClubMarian / MaidMarian's Connection
+                // Script uses. Detect it by sniffing args[2]: a PropList
+                // means form B; otherwise assume form A.
                 let (username, password, host, port, movie_id) = reserve_player_ref(|player| {
-                    let username = player.get_datum(args.get(0).unwrap()).string_value().unwrap_or_default();
-                    let password = player.get_datum(args.get(1).unwrap()).string_value().unwrap_or_default();
-                    let host = player.get_datum(args.get(2).unwrap()).string_value()?;
-                    let port = player.get_datum(args.get(3).unwrap()).int_value()?;
-                    let movie_id = player.get_datum(args.get(4).unwrap()).string_value().unwrap_or_default();
-
-                    Ok((username, password, host, port, movie_id))
+                    let arg2 = args.get(2).map(|d| player.get_datum(d));
+                    let is_form_b = matches!(arg2, Some(Datum::PropList(..)));
+                    if is_form_b {
+                        // Form B: (host, port, plist, mode, [encKey])
+                        let host = player.get_datum(args.get(0).unwrap()).string_value()?;
+                        let port = player.get_datum(args.get(1).unwrap()).int_value()?;
+                        let plist = player.get_datum(args.get(2).unwrap());
+                        let lookup_str = |key: &str| -> String {
+                            if let Datum::PropList(pairs, _) = plist {
+                                for (k, v) in pairs.iter() {
+                                    let kd = player.get_datum(k);
+                                    let key_matches = match kd {
+                                        Datum::Symbol(s) | Datum::String(s) => {
+                                            s.eq_ignore_ascii_case(key)
+                                        }
+                                        _ => false,
+                                    };
+                                    if key_matches {
+                                        return player.get_datum(v).string_value().unwrap_or_default();
+                                    }
+                                }
+                            }
+                            String::default()
+                        };
+                        let username = lookup_str("userID");
+                        let password = lookup_str("password");
+                        let movie_id = lookup_str("movieid");
+                        Ok((username, password, host, port, movie_id))
+                    } else {
+                        // Form A: (userName, password, serverID, port, movieID, ...)
+                        let username = player.get_datum(args.get(0).unwrap()).string_value().unwrap_or_default();
+                        let password = player.get_datum(args.get(1).unwrap()).string_value().unwrap_or_default();
+                        let host = player.get_datum(args.get(2).unwrap()).string_value()?;
+                        let port = player.get_datum(args.get(3).unwrap()).int_value()?;
+                        let movie_id = player.get_datum(args.get(4).unwrap()).string_value().unwrap_or_default();
+                        Ok((username, password, host, port, movie_id))
+                    }
                 })?;
 
                 let ws_scheme = if web_sys::window()
