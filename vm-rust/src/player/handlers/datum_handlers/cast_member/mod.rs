@@ -10,3 +10,4 @@ pub mod palette;
 pub mod havok;
 pub mod havok_physics;
 pub mod hke_parser;
+pub mod vector_shape;
