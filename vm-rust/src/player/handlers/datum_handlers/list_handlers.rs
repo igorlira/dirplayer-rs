@@ -158,10 +158,48 @@ impl ListDatumHandlers {
                     player.alloc_datum(Datum::String("".to_string()))
                 }))
             },
+            "max" => Self::max(datum, args),
+            "min" => Self::min(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for list datum"
             ))),
         }
+    }
+
+    pub fn max(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let list_vec = player.get_datum(datum).to_list()?;
+            if list_vec.is_empty() {
+                return Ok(DatumRef::Void);
+            }
+            let mut max_item = list_vec[0].clone();
+            for item_ref in list_vec.iter().skip(1) {
+                let item = player.get_datum(item_ref);
+                let current_max = player.get_datum(&max_item);
+                if datum_less_than(current_max, item, &player.allocator)? {
+                    max_item = item_ref.clone();
+                }
+            }
+            Ok(max_item)
+        })
+    }
+
+    pub fn min(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let list_vec = player.get_datum(datum).to_list()?;
+            if list_vec.is_empty() {
+                return Ok(DatumRef::Void);
+            }
+            let mut min_item = list_vec[0].clone();
+            for item_ref in list_vec.iter().skip(1) {
+                let item = player.get_datum(item_ref);
+                let current_min = player.get_datum(&min_item);
+                if datum_less_than(item, current_min, &player.allocator)? {
+                    min_item = item_ref.clone();
+                }
+            }
+            Ok(min_item)
+        })
     }
 
     pub fn get_prop_ref(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
