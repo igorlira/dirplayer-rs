@@ -1,0 +1,4 @@
+export HABBO_V7_USERNAME="crimetime"
+export HABBO_V7_PASSWORD="test123"
+export HABBO_V7_INFO_HOST="54.190.238.172"
+export HABBO_V7_INFO_PORT="3089"

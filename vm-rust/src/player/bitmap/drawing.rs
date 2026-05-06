@@ -3101,6 +3101,15 @@ impl Bitmap {
                             });
                             line_start = sp + 1;
                             last_space = None;
+                            // If the space we just wrapped at is the current
+                            // character (it was the overflowing one), the
+                            // space itself is consumed by the wrap — skip
+                            // past it without double-counting its width.
+                            if line_start > p {
+                                line_w = 0;
+                                p = line_start;
+                                continue;
+                            }
                             line_w = text[line_start..p]
                                 .bytes()
                                 .map(|b| font.get_char_advance(b) as i32)
