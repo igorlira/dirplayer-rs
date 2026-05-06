@@ -31,11 +31,16 @@ impl TimeoutManager {
         // side so the underlying setInterval stops. Previously only the
         // is_scheduled flag was flipped, leaking the JS interval. Each
         // re-add without an explicit forget()/clear stacked another active
-        // setInterval for the same name; CS's CD-request window hits this
-        // because Lingo's `timeout("CDplayer").forget()` (capital CD) doesn't
-        // match the parser-stored `"cdplayer"` (lowercase) and the close
-        // doesn't clean up — every reopen accumulates another parallel
-        // interval, making the countdown appear N× faster after N opens.
+        // setInterval for the same name.
+        //
+        // Names are inserted *as-is* (case preserved). We deliberately do
+        // not canonicalize to lowercase here — Habbo creates many timeouts
+        // whose uniqueness depends on case-preserving keys (e.g. "Delay" &&
+        // me.getID() && the milliSeconds, where the embedded ID may be a
+        // mixed-case symbol). Lowercasing would alias unrelated entries and
+        // each new add would cancel an unrelated live timer, which during
+        // teardown cascades into the Object Manager / Window Manager
+        // recursion and blows the scope stack.
         if let Some(old) = self.timeouts.get_mut(&timeout.name) {
             old.cancel();
         }
@@ -44,19 +49,58 @@ impl TimeoutManager {
 
     #[allow(dead_code)]
     pub fn forget_timeout(&mut self, timeout_name: &TimeoutRef) {
-        let timeout = &mut self.timeouts.remove(timeout_name);
-        if let Some(timeout) = timeout {
+        // Exact match wins. This is the common case and matches Habbo's
+        // expectation that case-distinct keys stay distinct.
+        if let Some(mut timeout) = self.timeouts.remove(timeout_name) {
             timeout.cancel();
+            return;
+        }
+        // Fallback: case-insensitive scan. CS's cdtimer creates
+        // `timeout("cdplayer").new(...)` and cancels with
+        // `timeout("CDplayer").forget()` (typo); without this the cancel
+        // would miss, the 1-second tick keeps firing, and once
+        // `pSeconds <= 0` it spams `oStudio.sendCdStop()` every second
+        // through the song. Only used when no exact match exists, so it
+        // doesn't accidentally cancel a same-named-different-case entry
+        // that Habbo legitimately keeps live.
+        let key_to_remove = self
+            .timeouts
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case(timeout_name))
+            .cloned();
+        if let Some(key) = key_to_remove {
+            if let Some(mut timeout) = self.timeouts.remove(&key) {
+                timeout.cancel();
+            }
         }
     }
 
     #[allow(dead_code)]
     pub fn get_timeout(&self, timeout_name: &TimeoutRef) -> Option<&Timeout> {
-        self.timeouts.get(timeout_name)
+        if let Some(t) = self.timeouts.get(timeout_name) {
+            return Some(t);
+        }
+        // Same fallback as forget_timeout: only used when no exact match
+        // exists.
+        self.timeouts
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(timeout_name))
+            .map(|(_, v)| v)
     }
 
     pub fn get_timeout_mut(&mut self, timeout_name: &TimeoutRef) -> Option<&mut Timeout> {
-        self.timeouts.get_mut(timeout_name)
+        // Resolve the actual key first (exact, then case-insensitive
+        // fallback), then re-borrow mutably. Avoids the borrow-checker
+        // issue with returning a &mut while also holding the iterator.
+        let key = if self.timeouts.contains_key(timeout_name) {
+            Some(timeout_name.clone())
+        } else {
+            self.timeouts
+                .keys()
+                .find(|k| k.eq_ignore_ascii_case(timeout_name))
+                .cloned()
+        };
+        key.and_then(move |k| self.timeouts.get_mut(&k))
     }
 
     pub fn clear(&mut self) {
