@@ -11,3 +11,5 @@ password = "${HABBO_V7_PASSWORD:testpass1}"
 [external_params]
 sw1 = "connection.info.host=${HABBO_V7_INFO_HOST:127.0.0.1}"
 sw2 = "connection.info.port=${HABBO_V7_INFO_PORT:3091}"
+multiuser_websocket_ssl = "${HABBO_V7_WS_SSL}"
+multiuser_websocket_path = "${HABBO_V7_WS_PATH}"
