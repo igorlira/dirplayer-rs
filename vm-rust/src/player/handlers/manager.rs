@@ -537,6 +537,9 @@ impl BuiltInHandlerManager {
                     let mut instance_ids = vec![];
                     let count = prop_list.len();
                     for (_, value_ref) in prop_list {
+                        if player.get_datum(&value_ref).is_void() {
+                            continue;
+                        }
                         instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
                     }
                     (Ok(Some(instance_ids)), count)
@@ -545,6 +548,9 @@ impl BuiltInHandlerManager {
                     let mut instance_ids = vec![];
                     let count = list.len();
                     for value_ref in list {
+                        if player.get_datum(&value_ref).is_void() {
+                            continue;
+                        }
                         instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
                     }
                     (Ok(Some(instance_ids)), count)
