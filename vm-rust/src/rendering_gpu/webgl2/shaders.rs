@@ -309,9 +309,15 @@ void main() {
     // Also discard fully transparent pixels (from embedded alpha)
     if (src.a < 0.01) discard;
 
-    // Director Add Pin: ONLY uses blend %, ignores bitmap alpha
-    // final = dst + src.rgb * blend (with GL_ONE, GL_ONE blend func)
-    fragColor = vec4(src.rgb * u_blend, 1.0);
+    // Add Pin: src.rgb * blend additively contributes, modulated by the
+    // bitmap's per-pixel alpha. Output `src.a` (not 1.0) so the
+    // glBlendFunc(SRC_ALPHA, ONE) blend func correctly weighs each pixel
+    // by its authored opacity — bright bulb pixels (alpha=255) contribute
+    // fully, gradient edges (alpha=3..128) contribute proportionally,
+    // alpha=0 leftover RGB doesn't contribute at all (the lighthouse buoy
+    // halo bug). For sprites with alpha=255 everywhere this degenerates
+    // to straight additive, preserving the moodlight halo behaviour.
+    fragColor = vec4(src.rgb * u_blend, src.a);
 }
 "#;
 

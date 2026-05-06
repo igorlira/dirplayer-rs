@@ -185,18 +185,27 @@ impl WebGL2Context {
         Ok(())
     }
 
-    /// Set blend mode for additive blending (ink 33)
+    /// Set blend mode for additive blending (ink 33 — Add Pin)
     pub fn set_blend_additive(&self) {
         // Ensure blend equation is FUNC_ADD (additive needs: dst + src)
         self.gl.blend_equation(WebGl2RenderingContext::FUNC_ADD);
         // Use separate blend for RGB and Alpha:
-        // - RGB: ONE, ONE (additive: result = src + dst)
-        // - Alpha: ZERO, ONE (preserve destination alpha)
-        // This prevents AddPin from modifying the alpha channel,
-        // which can cause issues when AddPin is drawn on top of
-        // semi-transparent sprites (like blend < 100).
+        // - RGB: SRC_ALPHA, ONE (alpha-modulated additive:
+        //        result = src*src.alpha + dst). The alpha factor is
+        //        essential for sprites whose "transparent" pixels are
+        //        encoded as alpha=0 + non-zero RGB (common quirk of
+        //        32-bit RGBA bitmaps). Straight ONE,ONE additive would
+        //        light those leftover RGB values onto the dst across
+        //        the bitmap's whole rectangle (the lighthouse buoy halo
+        //        bug). For sprites with alpha=255 everywhere
+        //        (use_alpha=false bitmaps), src.alpha=1 so this
+        //        degenerates to straight additive — moodlight halo
+        //        behaviour is preserved.
+        // - Alpha: ZERO, ONE (preserve destination alpha) — prevents
+        //        AddPin from modifying the alpha channel when drawn on
+        //        top of semi-transparent sprites (blend < 100).
         self.gl.blend_func_separate(
-            WebGl2RenderingContext::ONE,           // srcRGB
+            WebGl2RenderingContext::SRC_ALPHA,     // srcRGB
             WebGl2RenderingContext::ONE,           // dstRGB
             WebGl2RenderingContext::ZERO,          // srcAlpha
             WebGl2RenderingContext::ONE,           // dstAlpha

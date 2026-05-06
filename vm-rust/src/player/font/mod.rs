@@ -1116,6 +1116,165 @@ pub fn bitmap_font_copy_char_tight(
     )
 }
 
+/// Italic shear factor: each row is shifted right by
+/// `(glyph_height - 1 - row) / ITALIC_SHEAR_DIVISOR`. Smaller divisor → steeper
+/// slant. 4 matches Director's emulated italic on bitmap fonts at typical UI
+/// sizes (12–16px), giving 3–4px of total shear from baseline to ascender.
+const ITALIC_SHEAR_DIVISOR: i32 = 4;
+
+/// Return the horizontal italic shear (in pixels) needed to add to the right
+/// edge of a glyph cell so the slanted top doesn't visually collide with the
+/// next character. Callers that build per-glyph cursor advance use this to
+/// reserve room for the slant.
+pub fn italic_shear_for_height(char_height: i32) -> i32 {
+    (char_height.max(1) - 1) / ITALIC_SHEAR_DIVISOR
+}
+
+/// Like `bitmap_font_copy_char` but applies a per-row horizontal shear to fake
+/// italic on a non-italic bitmap font. Source rows are copied 1px-tall at a
+/// time so each scanline can land at its own dest_x. PFR atlases are pre-
+/// rasterized — we cannot get a real italic face from the bitmap, but per-row
+/// shear gives the slanted look that Director produces when fontStyle includes
+/// `#italic` and no italic face is available.
+pub fn bitmap_font_copy_char_italic(
+    font: &BitmapFont,
+    font_bitmap: &Bitmap,
+    char_num: u8,
+    dest: &mut Bitmap,
+    dest_x: i32,
+    dest_y: i32,
+    palettes: &PaletteMap,
+    draw_params: &CopyPixelsParams,
+) {
+    if char_num < font.first_char_num {
+        return;
+    }
+    let char_index = (char_num - font.first_char_num) as usize;
+    let char_x = (char_index % font.grid_columns as usize) as u16;
+    let char_y = (char_index / font.grid_columns as usize) as u16;
+    let src_x = (char_x * font.grid_cell_width + font.char_offset_x) as i32;
+    let src_y = (char_y * font.grid_cell_height + font.char_offset_y) as i32;
+    let w = font.char_width as i32;
+    let h = font.char_height as i32;
+
+    for row in 0..h {
+        let shift = (h - 1 - row) / ITALIC_SHEAR_DIVISOR;
+        dest.copy_pixels_with_params(
+            palettes,
+            font_bitmap,
+            IntRect::from(
+                dest_x + shift,
+                dest_y + row,
+                dest_x + shift + w,
+                dest_y + row + 1,
+            ),
+            IntRect::from(
+                src_x,
+                src_y + row,
+                src_x + w,
+                src_y + row + 1,
+            ),
+            draw_params,
+        );
+    }
+}
+
+/// Tight + italic: combines `bitmap_font_copy_char_tight`'s ink-bounds trim
+/// with per-row shear. For each row of the trimmed bbox, copy 1px tall at the
+/// sheared dest_x. Fall back to non-tight italic when the cell has no ink.
+pub fn bitmap_font_copy_char_tight_italic(
+    font: &BitmapFont,
+    font_bitmap: &Bitmap,
+    char_num: u8,
+    dest: &mut Bitmap,
+    dest_x: i32,
+    dest_y: i32,
+    palettes: &PaletteMap,
+    draw_params: &CopyPixelsParams,
+) {
+    if char_num < font.first_char_num {
+        return;
+    }
+    let char_index = (char_num - font.first_char_num) as usize;
+    let char_x = (char_index % font.grid_columns as usize) as u16;
+    let char_y = (char_index / font.grid_columns as usize) as u16;
+    let src_x_base = (char_x * font.grid_cell_width + font.char_offset_x) as i32;
+    let src_y_base = (char_y * font.grid_cell_height + font.char_offset_y) as i32;
+    let full_w = font.char_width as i32;
+    let full_h = font.char_height as i32;
+
+    let bmp_w = font_bitmap.width as i32;
+    let bmp_h = font_bitmap.height as i32;
+
+    let mut min_x = full_w;
+    let mut max_x = -1;
+    let mut min_y = full_h;
+    let mut max_y = -1;
+
+    for y in 0..full_h {
+        let sy = src_y_base + y;
+        if sy < 0 || sy >= bmp_h {
+            continue;
+        }
+        for x in 0..full_w {
+            let sx = src_x_base + x;
+            if sx < 0 || sx >= bmp_w {
+                continue;
+            }
+            let idx = ((sy * bmp_w + sx) * 4) as usize;
+            if idx + 3 >= font_bitmap.data.len() {
+                continue;
+            }
+            let r = font_bitmap.data[idx];
+            let g = font_bitmap.data[idx + 1];
+            let b = font_bitmap.data[idx + 2];
+            if !(r >= 250 && g >= 250 && b >= 250) {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+
+    if max_x < min_x || max_y < min_y {
+        bitmap_font_copy_char_italic(
+            font, font_bitmap, char_num, dest, dest_x, dest_y, palettes, draw_params,
+        );
+        return;
+    }
+
+    let src_x = src_x_base + min_x;
+    let src_y_top = src_y_base + min_y;
+    let w = (max_x - min_x + 1).max(1);
+    let h = (max_y - min_y + 1).max(1);
+
+    for row in 0..h {
+        // Shear is computed against full glyph height so the slant is consistent
+        // across glyphs — using only the trimmed `h` would give wider chars more
+        // slant than narrow ones at the same point size.
+        let global_row = min_y + row;
+        let shift = (full_h - 1 - global_row) / ITALIC_SHEAR_DIVISOR;
+        dest.copy_pixels_with_params(
+            palettes,
+            font_bitmap,
+            IntRect::from(
+                dest_x + min_x + shift,
+                dest_y + min_y + row,
+                dest_x + min_x + shift + w,
+                dest_y + min_y + row + 1,
+            ),
+            IntRect::from(
+                src_x,
+                src_y_top + row,
+                src_x + w,
+                src_y_top + row + 1,
+            ),
+            draw_params,
+        );
+    }
+}
+
 pub fn measure_text(
     text: &str,
     font: &BitmapFont,
