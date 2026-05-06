@@ -561,7 +561,18 @@ impl ScriptInstanceDatumHandlers {
             "keyDown" | "keyUp" | "beginSprite" | "endSprite" | "prepareMovie" |
             "startMovie" | "stopMovie" | "activate" | "deactivate" |
             // forget is called on wrapper objects that may not have it - silently ignore
-            "forget" => {
+            "forget" |
+            // CS IsoAvatar.updateStatus invokes standOn on whatever action class
+            // the under-foot furni has. getStandOnAtSquare returns any furni
+            // whose type is "Stand_On" or "mirror", which matches some items
+            // (e.g. Randomatic Number Podium, prodId 158) whose action class is
+            // ACTION_ANIMATED_DICE — no standOn handler. The #standOnCheck
+            // attribute on these items is a server-side concept, not a
+            // client-side gate, so the client unconditionally calls standOn
+            // and Director silently no-ops when the handler isn't there. Match
+            // that here. has_async_handler still walks the ancestor chain
+            // first, so call_async runs the real handler when one exists.
+            "standOn" => {
                 Ok(DatumRef::Void)
             }
             _ => {
