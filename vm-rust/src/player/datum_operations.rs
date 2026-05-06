@@ -568,8 +568,15 @@ pub fn multiply_datums(
             Datum::List(DatumType::List, ref_list, false)
         }
         (Datum::String(left), Datum::Int(right)) => {
-            let left_float = left.parse::<f64>().unwrap_or(0.0);
-            Datum::Float(left_float * (*right as f64))
+            if *right == 0 {
+                Datum::Int(0)
+            } else if let Ok(left_float) = left.parse::<f64>() {
+                Datum::Float(left_float * (*right as f64))
+            } else {
+                // Director returns random, arbitrarily large int for string * int if string isn't a number
+                // Some movies rely on this behavior, so we replicate it here.
+                Datum::Int(123456789)
+            }
         }
         (Datum::String(left), Datum::Float(right)) => {
             let left_float = left.parse::<f64>().unwrap_or(0.0);

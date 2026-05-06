@@ -3356,19 +3356,26 @@ impl WebGL2Renderer {
                 // For 32-bit bitmaps without use_alpha:
                 // - Ink 8: use sprite's bgColor for matte (matches Canvas2D behavior)
                 // - Ink 9: use sprite's bgColor for matte
-                // - Ink 41: use sprite's bgColor for matte
+                // - Ink 41 (Darken): use bitmap's structural bg (white). Canvas2D's
+                //   create_matte uses get_bg_color_ref() = Rgb(255,255,255) for non-palette
+                //   bitmaps; the sprite's bgColor only tints the multiplication in the shader.
+                //   Using sprite_bg_color here would re-flood the matte every time bgColor
+                //   changes, causing real bg pixels to render as colored blobs.
                 // - Other inks: use edge color
-                let bg_color_for_matte = if ink == 8 || ink == 9 || ink == 41 {
+                let bg_color_for_matte = if ink == 8 || ink == 9 {
                     sprite_bg_color.unwrap_or_else(|| bitmap.get_pixel_color(palettes, 0, 0))
+                } else if ink == 41 {
+                    (255u8, 255u8, 255u8)
                 } else {
                     bitmap.get_pixel_color(palettes, 0, 0)
                 };
                 Some(Self::compute_edge_matte_mask_rgb(bitmap, palettes, bg_color_for_matte, width, height))
             } else if is_16bit {
                 // For 16-bit bitmaps:
-                // - Ink 7, 8, 41: use sprite's bgColor for matte (matches Canvas2D behavior)
+                // - Ink 7, 8: use sprite's bgColor for matte (matches Canvas2D behavior)
+                // - Ink 41 (Darken): use bitmap's structural bg (white) — see 32-bit branch above
                 // - Ink 0: use white as background (default for trim_white_space)
-                let bg_color_for_matte = if ink == 7 || ink == 8 || ink == 41 {
+                let bg_color_for_matte = if ink == 7 || ink == 8 {
                     sprite_bg_color.unwrap_or((255u8, 255u8, 255u8))
                 } else {
                     (255u8, 255u8, 255u8)
@@ -3922,13 +3929,14 @@ impl WebGL2Renderer {
         // - Ink 8: indexed bitmaps and 32-bit bitmaps without use_alpha (flood-fill matte)
         // - Ink 9: 32-bit bitmaps without use_alpha (mask with bgColor-based matte)
         // - Ink 40: indexed bitmaps (lighten - skips bgColor pixels via RGB comparison)
-        // - Ink 41: 32-bit bitmaps without use_alpha (darken with bgColor-based matte)
         // Note: Ink 33 uses shader color-key, not texture matte, so no bgColor in cache key
-        // Note: Ink 41 for indexed bitmaps uses palette index 0, not bgColor
+        // Note: Ink 41 (Darken) uses bitmap's structural bg (palette idx 0 / white), not the
+        //       sprite's bgColor — the bgColor only tints in the shader uniform — so the texture
+        //       does not depend on sprite_bg_color and must not be in the cache key.
         let is_ink_with_bgcolor_matte =
             ((ink == 7 || ink == 8 || ink == 36 || ink == 37 || ink == 39 || ink == 40) && bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8)
             || ((ink == 0 || ink == 8) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
-            || ((ink == 9 || ink == 41) && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
+            || (ink == 9 && bitmap.original_bit_depth == 32 && !bitmap.use_alpha)
             || (ink == 36 && bitmap.original_bit_depth == 32 && bitmap.use_alpha);
         let cache_key_bg_color = if is_ink_with_bgcolor_matte {
             sprite_bg_color
