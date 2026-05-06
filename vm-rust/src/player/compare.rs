@@ -283,6 +283,19 @@ pub fn datum_equals(
             _ => false
         }),
 
+        (FlashObjectRef(a), o) | (o, FlashObjectRef(a)) => Ok(match o {
+            // Two AS object refs are equal iff they point to the same path.
+            // Without this case, the catch-all at the bottom returns false even
+            // for identical refs, which makes any prop list containing AS object
+            // values (e.g. Coke Studios' friend list with #lastAccess Date refs)
+            // fail deep equality against its own .duplicate() — causing every
+            // friendslist exitFrame to redraw the whole list during scrolling.
+            FlashObjectRef(b) => a.path == b.path
+                && a.cast_lib == b.cast_lib
+                && a.cast_member == b.cast_member,
+            _ => false
+        }),
+
         (MathRef(a), o) | (o, MathRef(a)) => Ok(match o {
             MathRef(b) => a == b,
             _ => false
