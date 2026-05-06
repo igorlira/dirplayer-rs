@@ -615,9 +615,8 @@ impl BitmapDatumHandlers {
                 };
                 
                 if shape != "rect" {
-                    return Err(ScriptError::new(
-                        format!("Invalid shapeType {} for fill", shape)
-                    ));
+                    log::warn!("Unsupported shapeType '{}' for bitmap fill handler, skipping", shape);
+                    return Ok(datum.clone()); // Silently ignore unsupported shape types for now
                 }
 
                 let x1 = rect_vals[0] as i32;
