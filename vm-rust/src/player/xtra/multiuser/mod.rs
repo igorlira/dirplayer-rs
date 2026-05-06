@@ -174,10 +174,18 @@ impl MultiuserXtraManager {
                 let (ws_path, ws_secure) = reserve_player_ref(|player| {
                     (
                         player.external_params.get("multiuser_websocket_path").cloned(),
-                        player.external_params.get("multiuser_websocket_secure").map(|v| {
-                            // parse bool
-                            v == "true" || v == "1"
-                        }),
+                        player.external_params.get("multiuser_websocket_ssl")
+                            .and_then(|v|{
+                                if v.is_empty() { 
+                                    return None;
+                                } else {
+                                    Some(v)
+                                }
+                            })
+                            .map(|v| {
+                                // parse bool
+                                v == "true" || v == "1"
+                            }),
                     )
                 });
 
