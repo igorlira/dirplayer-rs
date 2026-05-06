@@ -2152,7 +2152,25 @@ impl Bitmap {
                         }
                     }
 
-                    self.set_pixel_fast(dst_x, dst_y, (sr, sg, sb), &dst_palette_cache);
+                    // Apply #blend (alpha) when < 100. The CS catalog's
+                    // WFpreview script overlays the gray studiofloor pattern
+                    // on top of the colored floor gradient using
+                    // `[#blend: FloorTextureblend, #maskImage: floormatte]`
+                    // — no ink, so the default ink:0 path runs, and without
+                    // alpha-blending here the gray pattern fully overwrote
+                    // the colored gradient. Other indexed inks (2/36) already
+                    // do this; ink:0 was a gap.
+                    let final_color = if alpha >= 0.999 {
+                        (sr, sg, sb)
+                    } else {
+                        let dst_color = if !dst_palette_cache.is_empty() {
+                            self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16)
+                        } else {
+                            self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                        };
+                        blend_color_alpha(dst_color, (sr, sg, sb), alpha)
+                    };
+                    self.set_pixel_fast(dst_x, dst_y, final_color, &dst_palette_cache);
                     continue;
                 }
 
