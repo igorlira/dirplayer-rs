@@ -29,11 +29,15 @@
     window.__testEnv = $TEST_ENV_JSON;
 
     // Ruffle + DirPlayer Flash bridge — mirrors public/index.html setup.
-    window.RufflePlayer = window.RufflePlayer || {};
-    window.RufflePlayer.config = { allowNetworking: "all" };
+    // dirplayer-rs ships a fork of Ruffle namespaced under
+    // window.dirplayer_RufflePlayer (and the loader is renamed to
+    // dirplayer_ruffle.js) so the fork's globals don't collide with stock
+    // Ruffle if both are loaded on the same page.
+    window.dirplayer_RufflePlayer = window.dirplayer_RufflePlayer || {};
+    window.dirplayer_RufflePlayer.config = { allowNetworking: "all" };
     window.__dirplayerFlashConfig = { renderer: "canvas", logLevel: "warn" };
   </script>
-  <script src="./ruffle/ruffle.js"></script>
+  <script src="./ruffle/dirplayer_ruffle.js"></script>
   <script type="importmap">
   {
     "imports": {

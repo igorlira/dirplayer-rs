@@ -11,6 +11,8 @@ interface FlashConfig {
   fetchRewriteRules?: Array<{pathPrefix: string, targetHost: string, targetPort: string, targetProtocol: string}>;
   renderer?: string;
   logLevel?: string;
+  /** When true, skip Ruffle entirely. Lingo Flash calls become no-ops. */
+  disableFlash?: boolean;
 }
 
 function configureFlash(partial: FlashConfig): void {
@@ -54,23 +56,30 @@ function getPolyfillBaseUrl(): string {
 }
 
 /**
- * Load Ruffle by injecting a <script> tag for ruffle/ruffle.js
- * relative to the polyfill script's location.
- * Skips if RufflePlayer is already available on window.
+ * Load Ruffle by injecting a <script> tag for ruffle/dirplayer_ruffle.js
+ * relative to the polyfill script's location. The loader file is renamed
+ * (from upstream's `ruffle.js`) so the fork doesn't collide with stock
+ * Ruffle if both bundles are on the same page (e.g. via a browser
+ * extension that ships its own ruffle.js).
+ *
+ * Skips if dirplayer's Ruffle fork is already on window. The fork
+ * namespaces its global as `dirplayer_RufflePlayer` so it doesn't collide
+ * with stock Ruffle.
  */
 function loadRuffle(): Promise<void> {
-  if (window.RufflePlayer?.newest) {
+  const win = window as any;
+  if (win.dirplayer_RufflePlayer?.newest) {
     return Promise.resolve();
   }
 
   // Check for a custom ruffle URL on the script tag: data-ruffle-url="..."
   const customUrl = polyfillScript?.getAttribute('data-ruffle-url');
-  const ruffleUrl = customUrl || (getPolyfillBaseUrl() + 'ruffle/ruffle.js');
+  const ruffleUrl = customUrl || (getPolyfillBaseUrl() + 'ruffle/dirplayer_ruffle.js');
 
-  // Set up RufflePlayer config before the script loads
-  window.RufflePlayer = window.RufflePlayer || {};
-  window.RufflePlayer.config = {
-    ...(window.RufflePlayer.config || {}),
+  // Set up dirplayer_RufflePlayer config before the script loads
+  win.dirplayer_RufflePlayer = win.dirplayer_RufflePlayer || {};
+  win.dirplayer_RufflePlayer.config = {
+    ...(win.dirplayer_RufflePlayer.config || {}),
     allowNetworking: 'all',
   };
 
@@ -99,7 +108,23 @@ function initCore() {
 }
 
 function init() {
-  // Always ensure Ruffle is loaded before initializing
+  // `data-disable-flash` on the polyfill <script> tag completely skips
+  // Ruffle. The flag is also written to __dirplayerFlashConfig so
+  // flashPlayerManager.createFlashInstance() short-circuits cleanly
+  // instead of throwing "Ruffle not found" for every Flash member.
+  const disableFlash = polyfillScript?.hasAttribute('data-disable-flash') ?? false;
+  if (disableFlash) {
+    const win = window as any;
+    win.__dirplayerFlashConfig = {
+      ...(win.__dirplayerFlashConfig || {}),
+      disableFlash: true,
+    };
+    console.log('[DirPlayer] data-disable-flash set — skipping Ruffle. Lingo Flash calls will no-op.');
+    initCore();
+    return;
+  }
+
+  // Default: ensure Ruffle is loaded before initializing
   loadRuffle().then(initCore);
 }
 
