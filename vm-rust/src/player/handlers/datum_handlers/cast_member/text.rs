@@ -113,6 +113,35 @@ impl TextMemberHandlers {
                 text_member.text = new_text.trim_end_matches('\0').to_string();
                 Ok(DatumRef::Void)
             }
+            // `put X into member("name")` lowers to `setContents` (and the
+            // `into`/`after`/`before` variants) — see decompiler/handler.rs.
+            // Field members already implement these (cast_member/field.rs);
+            // text members need the same support so D6+ Text-formatted
+            // members (e.g. ClubMarian's LoginName) accept the same syntax
+            // without throwing "No handler setContents for text member type".
+            "setContents" | "setContentsAfter" | "setContentsBefore" => {
+                if args.len() != 1 {
+                    return Err(ScriptError::new(format!(
+                        "{handler_name} requires 1 argument"
+                    )));
+                }
+                let new_str = player.get_datum(&args[0]).string_value()?
+                    .trim_end_matches('\0')
+                    .to_string();
+                let cast_member = player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(&member_ref)
+                    .unwrap();
+                let text_member = cast_member.member_type.as_text_mut().unwrap();
+                text_member.text = match handler_name {
+                    "setContents" => new_str,
+                    "setContentsAfter" => format!("{}{}", text_member.text, new_str),
+                    "setContentsBefore" => format!("{}{}", new_str, text_member.text),
+                    _ => unreachable!(),
+                };
+                Ok(DatumRef::Void)
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for text member type"
             ))),
@@ -1177,7 +1206,7 @@ impl TextMemberHandlers {
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None,
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
                     use crate::player::bitmap::bitmap::resolve_color_ref;
@@ -1387,7 +1416,7 @@ impl TextMemberHandlers {
                                 original_dst_rect: params.original_dst_rect.clone(),
                                 bg_color_explicit: false,
                                 fore_color_explicit: false,
-                                ink9_mask_bitmap: None,
+                                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             };
                             if use_tight {
                                 bitmap_font_copy_char_tight(
