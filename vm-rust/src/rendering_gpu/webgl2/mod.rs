@@ -2275,9 +2275,24 @@ impl WebGL2Renderer {
                 bg_color_rgb.2,
             ))
         } else if (has_fore_color || has_back_color) && (
-            // 32-bit colorize (ink 0, 8, 9)
-            (bitmap_bit_depth == 32 && (ink == 0 || ink == 8 || ink == 9)) ||
-            (bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && (ink == 0))
+            // 32-bit colorize (ink 0, 8, 9, 36)
+            //   ink:36 needs has_fore_color so vector-shape sprites that
+            //   carry a sprite.color tint (e.g. CS private-studio
+            //   `floor_shape_a` with sprite.color = aColorData.texturecolor)
+            //   get the multiplicative tint applied — without it, the
+            //   shape renders its raw pink gradient and blends pink over
+            //   the destination instead of producing the wood-tinted
+            //   color the texturecolor multiply was meant to give.
+            (bitmap_bit_depth == 32 && (ink == 0 || ink == 8 || ink == 9 || ink == 36)) ||
+            // Indexed (2-8 bit) colorize: ink 0 (Copy palette interpolation),
+            // ink 8 (Matte) and ink 9 (Mask) — all three apply the
+            // foreColor→bgColor lerp on near-grayscale pixels in
+            // `bitmap_to_rgba`. Mirrors `drawing.rs::allow_colorize` which
+            // already lists `(d, 8) | (d, 9) if d <= 8 => true` — without
+            // ink 8 here, CS private-studio wall color sprites (`_b_`
+            // members) couldn't tint via sprite.color/sprite.bgColor and
+            // walls rendered untinted gray instead of brick red.
+            (bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && (ink == 0 || ink == 8 || ink == 9))
         ) {
             // Bitmap colorization defaults: foreColor defaults to black (0,0,0),
             // bgColor defaults to white (255,255,255). Only apply substitution when
@@ -2824,6 +2839,31 @@ impl WebGL2Renderer {
                 let dst_rect = IntRect::from(0, 0, w, h);
                 shape_bitmap.draw_vector_shape(&vector_member, dst_rect, &palettes, 1.0);
 
+                // Ink:36 + has_fore_color: multiply each visible pixel's
+                // RGB by sprite.color / 255. CS private-studio
+                // `floor_shape_a` uses ink:36 with sprite.color set to
+                // `aColorData.texturecolor` (e.g. yellow rgb(255, 255, 0))
+                // — Director ties the floor's wood/brown look to this
+                // multiplicative tint of the pink gradient. The vector
+                // shape bypasses bitmap_to_rgba, so we apply the tint
+                // here before upload. Skip alpha=0 pixels so the matte
+                // (transparent black backdrop) stays transparent.
+                if ink == 36 && has_fore_color {
+                    let fr = fg_color_rgb.0;
+                    let fg2 = fg_color_rgb.1;
+                    let fb = fg_color_rgb.2;
+                    let pixels = shape_bitmap.data.len() / 4;
+                    for i in 0..pixels {
+                        let idx = i * 4;
+                        if shape_bitmap.data[idx + 3] == 0 {
+                            continue;
+                        }
+                        shape_bitmap.data[idx]     = ((shape_bitmap.data[idx]     as u16 * fr as u16) / 255) as u8;
+                        shape_bitmap.data[idx + 1] = ((shape_bitmap.data[idx + 1] as u16 * fg2 as u16) / 255) as u8;
+                        shape_bitmap.data[idx + 2] = ((shape_bitmap.data[idx + 2] as u16 * fb as u16) / 255) as u8;
+                    }
+                }
+
                 let texture = match self.context.create_texture() {
                     Ok(t) => t,
                     Err(_) => return,
@@ -3175,6 +3215,7 @@ impl WebGL2Renderer {
         let allow_colorize = match (bitmap.original_bit_depth, ink as u32) {
             (32, 0) => true,                    // 32-bit ink 0: grayscale remap
             (32, 8) | (32, 9) => true,          // 32-bit ink 8/9: foreColor only
+            (32, 36) => true,                   // 32-bit ink 36: foreColor MULTIPLICATIVE tint
             (d, 0) if d <= 8 => true,           // indexed ink 0: palette index interpolation
             (d, 8) | (d, 9) if d <= 8 => true,  // indexed ink 8/9: foreColor only
             (d, 36) if d <= 8 => true,          // indexed ink 36: foreColor tinting for index 255/black (ALWAYS)
@@ -3185,10 +3226,19 @@ impl WebGL2Renderer {
         // Only tint when foreColor was explicitly set (has_fore from colorize params)
         let ink36_indexed_tint = bitmap.original_bit_depth <= 8 && ink == 36 && has_fore;
 
-        // Check if backColor should be used (for interpolation)
+        // Check if backColor should be used (for fg→bg interpolation
+        // through the bitmap's near-grayscale palette). Director's
+        // private-studio walls use ink:8 (Matte) with `sprite.color`
+        // (red) + `sprite.bgColor` (darker red) on indexed pattern
+        // bitmaps; the expected behavior is the same fg→bg lerp ink:0
+        // does. Without ink:8/9 listed here, the lerp branch was gated
+        // off and only palette-index-0 pixels got tinted with foreColor —
+        // which left the bulk of the wall pattern rendering as its
+        // native gray indices.
         let use_back_color = match (bitmap.original_bit_depth, ink as u32) {
             (32, 0) => true,
             (d, 0) if d <= 8 => true,
+            (d, 8) | (d, 9) if d <= 8 => true,
             _ => false,
         };
 
@@ -3553,8 +3603,40 @@ impl WebGL2Renderer {
                             // bgColor falls through and the rays render as
                             // raw white, so all four sprites look identical.
                             let gray = ((r as u16 + g as u16 + b as u16) / 3) as u8;
+                            // Only apply the fg→bg lerp to NEAR-grayscale
+                            // pixels. Colored pixels (where R/G/B span > 16)
+                            // keep their authored RGB. Mirrors the same
+                            // guard in `drawing.rs` indexed ink:0 colorize.
+                            // Without this, a 32-bit RGBA bitmap that
+                            // contains real colored content (e.g. Habbo
+                            // Purse numeric display) gets every pixel
+                            // remapped through the fg→bg ramp on the gray
+                            // intensity — collapsing into a single tone
+                            // of brown so the on-stage render looks much
+                            // darker than the source bitmap.
+                            let max_c = r.max(g).max(b);
+                            let min_c = r.min(g).min(b);
+                            let near_grayscale = max_c.saturating_sub(min_c) <= 16;
 
-                            if (has_fore || has_back) && use_back_color {
+                            if ink == 36 && has_fore {
+                                // Ink 36 (BgTransparent) on a 32-bit bitmap
+                                // with explicit foreColor: multiplicative
+                                // tint. Director's CS private-studio
+                                // floor uses `sprite.color = texturecolor`
+                                // on `floor_shape_a` (a vector shape with
+                                // a pink gradient) plus ink:36 — each
+                                // visible pixel gets `src.rgb *
+                                // sprite.color / 255`, so a yellow
+                                // texturecolor (255, 255, 0) drops the
+                                // pink shape's blue channel to zero and
+                                // produces the orange/brown that then
+                                // alpha-blends onto the floor at blend %.
+                                (
+                                    ((r as u16 * fg_rgb.0 as u16) / 255) as u8,
+                                    ((g as u16 * fg_rgb.1 as u16) / 255) as u8,
+                                    ((b as u16 * fg_rgb.2 as u16) / 255) as u8,
+                                )
+                            } else if near_grayscale && (has_fore || has_back) && use_back_color {
                                 let eff_fg = if has_fore { fg_rgb } else { (0u8, 0u8, 0u8) };
                                 let eff_bg = if has_back { bg_rgb } else { (255u8, 255u8, 255u8) };
                                 let t = gray as f32 / 255.0;
@@ -3563,7 +3645,7 @@ impl WebGL2Renderer {
                                     ((1.0 - t) * eff_fg.1 as f32 + t * eff_bg.1 as f32) as u8,
                                     ((1.0 - t) * eff_fg.2 as f32 + t * eff_bg.2 as f32) as u8,
                                 )
-                            } else if has_fore && gray <= 1 {
+                            } else if near_grayscale && has_fore && gray <= 1 {
                                 // Replace near-black with fg color
                                 fg_rgb
                             } else {
