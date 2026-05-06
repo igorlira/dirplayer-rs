@@ -5892,6 +5892,7 @@ impl WebGL2Renderer {
                 let line_h = renderer_line_h;
                 let lo = sel_lo as usize;
                 let hi = sel_hi as usize;
+                let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
                 for (i, line) in lines.iter().enumerate() {
                     if hi <= line.start || (lo >= line.end && line.start != line.end) {
                         continue;
@@ -5899,10 +5900,34 @@ impl WebGL2Renderer {
                     let from = lo.max(line.start);
                     let to = hi.min(line.end);
                     if from > to { continue; }
-                    let (x0, _) = Bitmap::caret_index_to_xy(text, &font, caret_max_width, alignment, renderer_line_h, from as i32);
-                    let (x1, _) = Bitmap::caret_index_to_xy(text, &font, caret_max_width, alignment, renderer_line_h, to as i32);
-                    let mut left = x0;
-                    let mut right = x1;
+                    // Compute x positions inline for THIS line, instead of
+                    // delegating to caret_index_to_xy. The helper preferentially
+                    // returns the start of the next line for byte indices that
+                    // sit at a soft-wrap boundary, which makes a multi-line
+                    // selection's right edge on line N collapse onto line N+1.
+                    let line_w: i32 = line.text.bytes().map(|b| font.get_char_advance(b) as i32).sum();
+                    let x_offset: i32 = if caret_max_width > 0 {
+                        match alignment_key.as_str() {
+                            "center" => ((caret_max_width - line_w) / 2).max(0),
+                            "right" => (caret_max_width - line_w).max(0),
+                            _ => 0,
+                        }
+                    } else {
+                        0
+                    };
+                    let advance_for = |start: usize, end: usize| -> i32 {
+                        let s = start.saturating_sub(line.start).min(line.text.len());
+                        let e = end.saturating_sub(line.start).min(line.text.len());
+                        line.text.as_bytes()[s..e]
+                            .iter()
+                            .map(|&b| font.get_char_advance(b) as i32)
+                            .sum()
+                    };
+                    let mut left = x_offset + advance_for(line.start, from);
+                    let mut right = x_offset + advance_for(line.start, to);
+                    // Selection that continues into the next visual line — show a
+                    // trailing space's worth so the highlight visibly bridges
+                    // wrapped lines instead of stopping mid-air.
                     if right == left && hi > line.end {
                         right += font.get_char_advance(b' ') as i32;
                     }

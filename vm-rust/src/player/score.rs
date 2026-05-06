@@ -4887,17 +4887,24 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
 
             let measured_plus_extras = measured_height.map(|h| h + extras);
 
+            // Box type comes from STxT (lowercase, no `#`) or from Lingo
+            // (`member.boxType = #fixed` may serialize with the `#` prefix
+            // and arbitrary case). Normalize before comparing.
+            let box_type_norm = field_member
+                .box_type
+                .trim()
+                .trim_start_matches('#')
+                .to_ascii_lowercase();
+            let _ = box_type_norm; // (used only for legacy debug logs; safe to drop later)
             let (field_height, height_arm) = if is_adjust && measured_plus_extras.is_some() {
-                // #adjust: grow to fit the actual measured text. Floor at sprite.height
-                // so the field never shrinks below the authored box.
+                // #adjust is the ONLY box type that auto-grows. #fixed clips
+                // overflow, #scroll adds a scrollbar (also clips visually),
+                // #limit rejects text that doesn't fit. All three keep the
+                // authored sprite_rect height regardless of how tall the
+                // measured text is — typing past the bottom is supposed to
+                // disappear or be refused, not stretch the field.
                 let m = measured_plus_extras.unwrap();
                 (m.max(sprite.height.max(1)), "adjust+measured")
-            } else if field_member.word_wrap
-                && measured_plus_extras.map_or(false, |m| m > sprite.height.max(0))
-            {
-                // Word-wrapped fixed/scroll: authored height is too small to hold
-                // the wrapped text. Expand so nothing clips.
-                (measured_plus_extras.unwrap(), "wrap+measured>sprite")
             } else if field_member.word_wrap && is_adjust && field_member.text_height > 0 {
                 ((field_member.text_height as i32 + extras).max(sprite.height), "wrap+adjust+text_height")
             } else if sprite.height > 0 {

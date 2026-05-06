@@ -1307,6 +1307,24 @@ pub fn measure_text(
         font.char_height
     };
     let line_height = line_height.unwrap_or(effective_line_h);
+    // Same safety guard the renderer applies (see webgl2/mod.rs): treat
+    // fixed_line_space values much larger than the natural line height as
+    // XMED-misparsed field heights and fall back. Without this, the field's
+    // auto-grown sprite_rect inflates to many times its rendered height,
+    // which expands the I-beam hit-test area into empty space below the
+    // actual text.
+    let natural_lh_for_guard = if font.font_size > 0 {
+        font.font_size
+    } else {
+        font.char_height
+    };
+    let line_spacing = if line_spacing > 0
+        && (line_spacing as u32) > (natural_lh_for_guard as u32 * 5 / 2)
+    {
+        0
+    } else {
+        line_spacing
+    };
     // fixedLineSpace overrides line step between lines; topSpacing + bottomSpacing added on top.
     let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { line_height as i16 };
     // First line height: when an explicit line_spacing (member's
@@ -1390,6 +1408,22 @@ pub fn measure_text_wrapped(
         font.font_size
     } else {
         font.char_height
+    };
+    // Same safety guard as the renderer / measure_text — drop misset
+    // fixed_line_space values that look like field heights so the auto-
+    // grown sprite_rect doesn't inflate the hit-test area past the
+    // visible text.
+    let natural_lh_for_guard = if font.font_size > 0 {
+        font.font_size
+    } else {
+        font.char_height
+    };
+    let line_spacing = if line_spacing > 0
+        && (line_spacing as u32) > (natural_lh_for_guard as u32 * 5 / 2)
+    {
+        0
+    } else {
+        line_spacing
     };
     let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { effective_line_h as i16 };
     let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;

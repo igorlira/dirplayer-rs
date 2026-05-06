@@ -79,6 +79,7 @@ fn draw_text_selection_rects(
     let lo = sel_lo as usize;
     let hi = sel_hi as usize;
     let base_y = loc_v + top_spacing as i32;
+    let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
     for (i, line) in lines.iter().enumerate() {
         if hi <= line.start || lo >= line.end && line.start != line.end {
             continue;
@@ -88,13 +89,32 @@ fn draw_text_selection_rects(
         if from > to {
             continue;
         }
-        let (x0, _) = Bitmap::caret_index_to_xy(text, font, max_width, alignment, line_h, from as i32);
-        let (x1, _) = Bitmap::caret_index_to_xy(text, font, max_width, alignment, line_h, to as i32);
-        // If the selection wraps a full line and `to == line.end`, also extend a
-        // small space-wide hint so the user sees the line is selected through.
+        // Compute x positions inline for THIS line — caret_index_to_xy snaps
+        // soft-wrap-boundary indices to the FOLLOWING visual line, which
+        // would collapse a multi-line selection's right edge onto the wrong
+        // row. Walking the line's own bytes keeps every rect bound to its
+        // own visual line.
+        let line_w: i32 = line.text.bytes().map(|b| font.get_char_advance(b) as i32).sum();
+        let x_offset: i32 = if max_width > 0 {
+            match alignment_key.as_str() {
+                "center" => ((max_width - line_w) / 2).max(0),
+                "right" => (max_width - line_w).max(0),
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        let advance_for = |start: usize, end: usize| -> i32 {
+            let s = start.saturating_sub(line.start).min(line.text.len());
+            let e = end.saturating_sub(line.start).min(line.text.len());
+            line.text.as_bytes()[s..e]
+                .iter()
+                .map(|&b| font.get_char_advance(b) as i32)
+                .sum()
+        };
         let y = base_y + (i as i32) * line_h;
-        let mut left = loc_h + x0;
-        let mut right = loc_h + x1;
+        let mut left = loc_h + x_offset + advance_for(line.start, from);
+        let mut right = loc_h + x_offset + advance_for(line.start, to);
         if right == left && hi > line.end {
             // Selection continues to next line — show a trailing space's worth.
             right += font.get_char_advance(b' ') as i32;
