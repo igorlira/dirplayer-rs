@@ -97,7 +97,16 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
                                     get_next_focus_sprite_id(player, sprite_id);
                                 player.keyboard_focus_sprite = next_focus_sprite_id;
                             } else if key == "Enter" {
-                                // Don't insert RETURN - let the keyDown handler deal with it
+                                // Match Director's default behavior: append `\r` to the
+                                // editable field's text. Behaviors that want to *prevent*
+                                // this (e.g. chatinput) install a keyDown handler that
+                                // calls stopEvent() — that flips `handled` to true and
+                                // we don't reach this branch. Behaviors that don't have
+                                // a keyDown handler (e.g. searchuser/searchroom field)
+                                // detect Enter via the exitFrame trick
+                                // `if member.text.lines.count > 1`, which only works if
+                                // dirplayer actually inserts the carriage return here.
+                                field_member.text.push('\r');
                             } else if key.len() == 1 {
                                 field_member.text.push_str(&key);
                             }

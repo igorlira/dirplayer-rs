@@ -200,8 +200,22 @@ impl Sprite {
         self.flip_h = false;
         self.flip_v = false;
         self.rotation = 0.0;
-        self.bg_color = ColorRef::PaletteIndex(0);
-        self.color = ColorRef::PaletteIndex(255);
+        // Only reset fore/bg color when they weren't explicitly set by Lingo.
+        // Coke Studios' backpack does
+        //   sprite.bgColor = myColor
+        //   sprite.ink = 41
+        //   sprite.member = member(...)
+        // — the member assignment triggered an unconditional reset that wiped
+        // the just-authored bgColor, so ink-41 (Darken) had nothing to multiply
+        // against and every separator icon rendered un-tinted. Director keeps
+        // explicit colour properties across member swaps; only score-default
+        // colours should fall back to the placeholder values here.
+        if !self.has_back_color {
+            self.bg_color = ColorRef::PaletteIndex(0);
+        }
+        if !self.has_fore_color {
+            self.color = ColorRef::PaletteIndex(255);
+        }
     }
 
     pub fn reset(&mut self) {
