@@ -119,17 +119,35 @@ async function loadRuffle(): Promise<any> {
   if (rufflePromise) return rufflePromise;
 
   rufflePromise = (async () => {
-    // Try to get Ruffle from window (if loaded via script tag)
+    // Try to get our forked Ruffle from window (loaded via script tag).
+    // The selfhosted bundle installs itself under window.dirplayer_RufflePlayer
+    // so we don't collide with stock Ruffle if another copy is on the page
+    // (e.g. via a browser extension or another script).
     const win = window as any;
-    if (win.RufflePlayer) {
-      const ruffle = win.RufflePlayer.newest();
+    if (win.dirplayer_RufflePlayer) {
+      const ruffle = win.dirplayer_RufflePlayer.newest();
       return ruffle;
     }
 
-    throw new Error('Ruffle not found. Ensure ruffle.js is loaded via a script tag.');
+    throw new Error('dirplayer Ruffle fork not found. Ensure ruffle.js is loaded via a script tag.');
   })();
 
   return rufflePromise;
+}
+
+/**
+ * Whether the host page has explicitly disabled Flash via
+ * `__dirplayerFlashConfig.disableFlash` (set by the polyfill's
+ * `data-disable-flash` attribute, or directly by the host page).
+ *
+ * When true, `createFlashInstance` skips Ruffle entirely. Any
+ * subsequent calls into the `window.dirplayer_ruffle*` shims are still safe —
+ * they early-return because no instances exist in the per-(castLib,
+ * castMember) map.
+ */
+function isFlashDisabled(): boolean {
+  const win = window as any;
+  return !!win.__dirplayerFlashConfig?.disableFlash;
 }
 
 /**
@@ -144,6 +162,17 @@ export async function createFlashInstance(
   height: number,
 ): Promise<void> {
   const key = instanceKey(castLib, castMember);
+
+  // Skip when Flash is explicitly disabled by the host. The Lingo
+  // bridge functions all early-return on missing instance, so the
+  // movie won't error — Flash sprites just stay invisible / inert.
+  if (isFlashDisabled()) {
+    console.log(
+      `[Flash] disableFlash is set; skipping Ruffle instance for ${key} ` +
+      `(Lingo Flash calls will safely no-op).`
+    );
+    return;
+  }
 
   // Destroy existing instance if any
   destroyFlashInstance(castLib, castMember);
@@ -318,7 +347,7 @@ export function destroyFlashInstance(castLib: number, castMember: number): void 
 
 /**
  * Get a Flash variable from a Ruffle instance.
- * Called from WASM via window.ruffleGetVariable.
+ * Called from WASM via window.dirplayer_ruffleGetVariable.
  */
 function translateLevel0(path: string): string {
   if (path.startsWith('_level0')) {
@@ -346,7 +375,7 @@ function getVariable(castLib: number, castMember: number, path: string): string 
 
 /**
  * Set a Flash variable on a Ruffle instance.
- * Called from WASM via window.ruffleSetVariable.
+ * Called from WASM via window.dirplayer_ruffleSetVariable.
  */
 function setVariable(castLib: number, castMember: number, path: string, value: string): boolean {
   const key = instanceKey(castLib, castMember);
@@ -366,7 +395,7 @@ function setVariable(castLib: number, castMember: number, path: string, value: s
 
 /**
  * Go to a specific frame on a Ruffle instance.
- * Called from WASM via window.ruffleGoToFrame.
+ * Called from WASM via window.dirplayer_ruffleGoToFrame.
  * frame is 1-based (Director convention).
  */
 function goToFrame(castLib: number, castMember: number, frame: number): void {
@@ -386,7 +415,7 @@ function goToFrame(castLib: number, castMember: number, frame: number): void {
 
 /**
  * Call a Flash function on a Ruffle instance.
- * Called from WASM via window.ruffleCallFunction.
+ * Called from WASM via window.dirplayer_ruffleCallFunction.
  */
 function callFunction(castLib: number, castMember: number, path: string, argsXml: string): string | null {
   const key = instanceKey(castLib, castMember);
@@ -662,10 +691,12 @@ function registerLingoCallback(
     lingoHandler,
   });
 
-  // Call Ruffle's WASM export to register the callback in LINGO_CALLBACKS
+  // Call our forked Ruffle's WASM export to register the callback in
+  // LINGO_CALLBACKS. The export is exposed under the dirplayer_ prefix to
+  // avoid colliding with stock Ruffle if it's also on the page.
   const win = window as any;
-  if (win.ruffleRegisterLingoCallback) {
-    win.ruffleRegisterLingoCallback(
+  if (win.dirplayer_ruffleRegisterLingoCallback) {
+    win.dirplayer_ruffleRegisterLingoCallback(
       movieClipPath,
       methodName,
       lingoCastLib,
@@ -676,33 +707,38 @@ function registerLingoCallback(
     );
     console.log(`Registered Lingo callback: ${key} -> #${lingoHandler} (lingo=${lingoCastLib}:${lingoCastMember}, flash=${flashCastLib}:${flashCastMember})`);
   } else {
-    console.warn('ruffleRegisterLingoCallback not available on window (Ruffle not loaded yet?)');
+    console.warn('dirplayer_ruffleRegisterLingoCallback not available on window (Ruffle not loaded yet?)');
   }
 }
 
 /**
  * Register global JS functions that the WASM module calls into.
+ *
+ * Every name uses the `dirplayer_` prefix so we don't collide with stock
+ * Ruffle if it's already loaded on the page (e.g. via a browser extension
+ * or another script tag). The matching #[wasm_bindgen(js_name = ...)]
+ * imports in the Rust side use the same prefixed names.
  */
 export function initFlashBridge(): void {
   const win = window as any;
-  win.ruffleGetVariable = getVariable;
-  win._flashInstances = instances;
-  win.ruffleSetVariable = setVariable;
-  win.ruffleCallFunction = callFunction;
-  win.ruffleGoToFrame = goToFrame;
-  win.ruffleStop = stopFlash;
-  win.rufflePlay = playFlash;
-  win.ruffleRewind = rewindFlash;
-  win.ruffleIsPlaying = isPlaying;
-  win.ruffleGetFrameCount = getFrameCount;
-  win.ruffleGetCurrentFrame = getCurrentFrame;
-  win.ruffleCallFrame = callFrame;
-  win.ruffleFindLabel = findLabel;
-  win.ruffleHitTest = hitTest;
-  win.ruffleGetFlashProperty = getFlashProperty;
-  win.ruffleSetFlashProperty = setFlashProperty;
-  win.ruffleTellTarget = tellTarget;
-  win.ruffleRegisterLingoCallback_dirplayer = registerLingoCallback;
+  win.dirplayer_ruffleGetVariable = getVariable;
+  win.dirplayer_flashInstances = instances;
+  win.dirplayer_ruffleSetVariable = setVariable;
+  win.dirplayer_ruffleCallFunction = callFunction;
+  win.dirplayer_ruffleGoToFrame = goToFrame;
+  win.dirplayer_ruffleStop = stopFlash;
+  win.dirplayer_rufflePlay = playFlash;
+  win.dirplayer_ruffleRewind = rewindFlash;
+  win.dirplayer_ruffleIsPlaying = isPlaying;
+  win.dirplayer_ruffleGetFrameCount = getFrameCount;
+  win.dirplayer_ruffleGetCurrentFrame = getCurrentFrame;
+  win.dirplayer_ruffleCallFrame = callFrame;
+  win.dirplayer_ruffleFindLabel = findLabel;
+  win.dirplayer_ruffleHitTest = hitTest;
+  win.dirplayer_ruffleGetFlashProperty = getFlashProperty;
+  win.dirplayer_ruffleSetFlashProperty = setFlashProperty;
+  win.dirplayer_ruffleTellTarget = tellTarget;
+  win.dirplayer_ruffleRegisterLingoCallback_dirplayer = registerLingoCallback;
 
   // Expose dirplayer's WASM exports as window.wasmModule so that Ruffle's
   // wasm_bindgen extern (js_namespace = wasmModule) can resolve
@@ -710,7 +746,7 @@ export function initFlashBridge(): void {
   // Expose as global function for Ruffle's wasm_bindgen extern
   // Ruffle sends args as a JSON array of base64-encoded JSON values.
   // Decode them to native JS values before passing to WASM.
-  win.triggerLingoCallbackOnScript = (castLib: number, castMember: number, handlerName: string, argsJson: string, flashCastLib: number, flashCastMember: number) => {
+  win.dirplayer_triggerLingoCallbackOnScript = (castLib: number, castMember: number, handlerName: string, argsJson: string, flashCastLib: number, flashCastMember: number) => {
     try {
       const b64Args: string[] = JSON.parse(argsJson);
       const decodedArgs = b64Args.map((b64: string) => {
@@ -731,14 +767,19 @@ export function initFlashBridge(): void {
   // Expose flash loading state for WASM frame loop to check.
   // Also returns true if scripts tried to access a Flash instance that doesn't exist yet
   // (the rendering loop will dispatch it shortly).
-  win.isFlashLoading = () => flashLoadingCount > 0 || flashAccessBeforeReady;
+  win.dirplayer_isFlashLoading = () => flashLoadingCount > 0 || flashAccessBeforeReady;
 
-  // Ensure RufflePlayer config is set up before any instances are created
-  win.RufflePlayer = win.RufflePlayer || {};
-  win.RufflePlayer.config = {
-    ...(win.RufflePlayer.config || {}),
-    allowNetworking: 'all',
-  };
+  // Ensure dirplayer_RufflePlayer config is set up before any instances are
+  // created. Skip when the host disabled Flash — they may already have stock
+  // Ruffle on the page via an extension or another script tag, and we
+  // shouldn't be mutating its config when we aren't going to use it ourselves.
+  if (!isFlashDisabled()) {
+    win.dirplayer_RufflePlayer = win.dirplayer_RufflePlayer || {};
+    win.dirplayer_RufflePlayer.config = {
+      ...(win.dirplayer_RufflePlayer.config || {}),
+      allowNetworking: 'all',
+    };
+  }
 }
 
 /**
@@ -768,6 +809,14 @@ export interface FlashManagerConfig {
   fetchRewriteRules: Array<{pathPrefix: string, targetHost: string, targetPort: number, targetProtocol: string}>;
   renderer: string;
   logLevel: string;
+  /**
+   * When true, dirplayer-rs skips creating Ruffle instances for Flash
+   * cast members. All `window.dirplayer_ruffle*` Lingo bridge calls become
+   * safe no-ops (they early-return on missing instance). Use on pages
+   * that don't actually rely on Flash content — keeps Ruffle out of
+   * the bundle and silences "Ruffle not found" errors.
+   */
+  disableFlash: boolean;
 }
 
 /**
