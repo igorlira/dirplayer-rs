@@ -36,7 +36,14 @@ impl BitmapMemberHandlers {
             "height" => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
             "image" | "picture" => Ok(Datum::BitmapRef(bitmap_ref)),
             "media" => Ok(Datum::Media(Media::Bitmap(bitmap.unwrap().clone()))),
-            "paletteRef" => {
+            // `palette` and `paletteRef` are the same thing in our model —
+            // both return the bitmap's current PaletteRef. CS catalog
+            // scripts read both interchangeably (`member.palette` for
+            // applying a swap, `member.paletteRef` for inspecting). Without
+            // the alias, `put member("studiofloor_1_preview").palette`
+            // errored even though the matching setter at line 200 accepts
+            // the same name.
+            "palette" | "paletteRef" => {
                 let palette = bitmap
                     .map(|x| x.palette_ref.clone())
                     .unwrap_or(PaletteRef::BuiltIn(BuiltInPalette::GrayScale));
@@ -121,6 +128,16 @@ impl BitmapMemberHandlers {
                     let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
                     bitmap_member.info.width = new_width as u16;
                     bitmap_member.info.height = new_height as u16;
+                    // Director auto-centers regPoint when `member.image = ...` is
+                    // assigned. Without this, dynamically composed bitmaps (e.g.
+                    // Coke Studios' AvatarEngine v-ego preview, where the script
+                    // does `member("...").image = oPreviewImage` and expects the
+                    // sprite to render with the figure centered on the sprite's
+                    // loc) end up at regPoint (0, 0) and render off-center.
+                    let reg_x = (new_width as i32) / 2;
+                    let reg_y = (new_height as i32) / 2;
+                    bitmap_member.reg_point = (reg_x as i16, reg_y as i16);
+                    cast_member.reg_point = (reg_x, reg_y);
 
                     Ok(())
                 })
