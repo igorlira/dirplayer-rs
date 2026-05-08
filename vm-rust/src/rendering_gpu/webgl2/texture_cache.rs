@@ -209,7 +209,16 @@ pub struct RenderedTextCacheKey {
     /// into a parallelogram. Distinct cache entry from the flat-display
     /// path so the same member can have both a tight texture (for ordinary
     /// scenes) and a padded texture (when a sprite happens to be tilted).
+    ///
+    /// NOTE: also set for box_type_locked (#fixed/#scroll/#limit) and
+    /// multi_par_adjust_locked (#adjust + breaks) to suppress the
+    /// measure-shrink path. Use `transform_active` (below) when the
+    /// distinction matters — e.g. upload_height's no-trim only applies
+    /// to true rotation/skew transforms.
     pub keep_authored_height: bool,
+    /// True only for actual skew/rotation transforms. Subset of
+    /// `keep_authored_height`.
+    pub transform_active: bool,
 }
 
 impl RenderedTextCacheKey {
@@ -360,6 +369,7 @@ impl RenderedTextCacheKey {
             // skew/rotation transform so the cache distinguishes the
             // authored-height-padded texture from the tight one.
             keep_authored_height: false,
+            transform_active: false,
         }
     }
 }

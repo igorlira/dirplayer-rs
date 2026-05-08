@@ -488,6 +488,8 @@ pub fn render_preview_bitmap(
                                 0,
                                 0,
                                 &[],
+                                &[],
+                                &[],
                             );
                         }
                     }
@@ -2219,6 +2221,8 @@ pub fn render_score_to_bitmap_with_offset(
                         field.top_spacing,
                         0,
                         &[],
+                        &[],
+                        &[],
                     ) {
                         console_warn!("Native text render error for Button: {:?}", e);
                     }
@@ -2550,6 +2554,8 @@ pub fn render_score_to_bitmap_with_offset(
                             text_member.top_spacing,
                             text_member.bottom_spacing,
                             &text_member.tab_stops,
+                            &text_member.par_infos,
+                            &text_member.par_runs,
                         ) {
                             console_warn!("Native text render error for Text member: {:?}", e);
                         }

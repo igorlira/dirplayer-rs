@@ -1107,6 +1107,12 @@ impl WebGL2Renderer {
                 bottom_spacing: i16,
                 width: u32,
                 height: u32,
+                /// Width to use for word-wrap calculations. May be smaller
+                /// than `width` when the field's text-wrap width
+                /// (`field.width`) is narrower than the sprite display
+                /// rect (`sprite.width`). Defaults to `width` for non-
+                /// field text where the two are the same.
+                wrap_width: u32,
                 text_fg_color: ColorRef,
                 text_bg_color: ColorRef,
                 styled_spans: Option<Vec<StyledSpan>>,
@@ -1119,6 +1125,25 @@ impl WebGL2Renderer {
                 /// One entry per text-line (split by \r/\n). Empty when
                 /// the member has no per-paragraph spacing data.
                 per_line_spacings: Vec<u16>,
+                /// Per-text-line par_info index parallel to
+                /// `per_line_spacings`. Used to detect source-paragraph
+                /// transitions in the styled rendering paths and apply
+                /// `\sa` + `\sb` boundary spacing once between paragraphs.
+                per_line_par_idx: Vec<u16>,
+                /// XMED par_info table (paragraph-formatting records).
+                /// Used by the native renderer to apply `\sa`/`\sb`
+                /// boundary spacing at paragraph transitions. Empty when
+                /// the member has no per-paragraph data.
+                par_infos: Vec<crate::director::chunks::xmedia_styled_text::ParInfo>,
+                /// XMED par_run table mapping text positions to par_info
+                /// indices. Co-empty with `par_infos`.
+                par_runs: Vec<crate::director::chunks::xmedia_styled_text::ParRun>,
+                /// Member-level `the charSpacing of member`. Applied as
+                /// extra horizontal pixels between glyphs in the bitmap
+                /// rendering path. Negative values tighten (FurniFactory
+                /// displayComputer uses -2). Already factored into
+                /// `measure_text_wrapped`.
+                char_spacing: i32,
             },
             FilmLoop {
                 initial_rect: IntRect,
@@ -1439,8 +1464,10 @@ impl WebGL2Renderer {
                         font_member.fixed_line_space,
                         font_member.top_spacing,
                     );
-                    cache_key.keep_authored_height =
+                    let transform_active =
                         skew.abs() > 0.001 || rotation.abs() > 0.1;
+                    cache_key.keep_authored_height = transform_active;
+                    cache_key.transform_active = transform_active;
 
                     TextureSource::RenderedText {
                         cache_key,
@@ -1454,6 +1481,7 @@ impl WebGL2Renderer {
                         bottom_spacing: 0,
                         width,
                         height,
+                        wrap_width: width,
                         text_fg_color: fg_color.clone(),
                         text_bg_color: bg_color.clone(),
                         styled_spans: if font_member.preview_html_spans.is_empty() {
@@ -1467,6 +1495,10 @@ impl WebGL2Renderer {
                         box_drop_shadow: 0,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
+                        per_line_par_idx: Vec::new(),
+                        par_infos: Vec::new(),
+                        par_runs: Vec::new(),
+                        char_spacing: 0,
                     }
                 }
                 CastMemberType::Text(text_member) => {
@@ -1527,19 +1559,122 @@ impl WebGL2Renderer {
                     //     sprite_rect.height — which matches the dynamic
                     //     measurement Director performs there (~108).
                     let has_explicit_breaks = text.contains('\n') || text.contains('\r');
-                    let height = if long_wrapped_text
-                        && has_explicit_breaks
-                        && text_member.height > 0
-                    {
-                        text_member.height as u32
+                    // Texture render-area height priority:
+                    //  1. Puppet text members: use sprite_rect.height
+                    //     (score.rs already grew it to fit measured
+                    //     wrapped content). The stored
+                    //     `text_member.height` is parse-time authored
+                    //     and stale once a script assigns runtime text.
+                    //  2. #adjust boxType: also use sprite_rect.height.
+                    //     score.rs's `get_concrete_sprite_rect` handles
+                    //     the Junkbot-credits-vs-Buggy-info trade-off
+                    //     (70% rule: stored if close to measured, else
+                    //     grow to measured). Trusting sprite_rect here
+                    //     keeps the texture in sync with the sprite box
+                    //     so all visible content renders.
+                    //  3. Other boxTypes (#fixed, #scroll, #limit) keep
+                    //     the historical "lines × text_member.height"
+                    //     behavior — these are user-resizable boxes
+                    //     where overflow is meant to be clipped.
+                    let is_adjust = text_member.box_type == "adjust"
+                        || text_member.box_type == "#adjust";
+                    let base_height = if is_puppet || is_adjust {
+                        sprite_rect.height().max(1)
                     } else if long_wrapped_text {
-                        sprite_rect.height().max(1) as u32
+                        sprite_rect.height().max(1)
                     } else if text_member.height > 0 {
-                        ((text_member.height as i32) * _line_count)
-                            .max(1) as u32
+                        // `text_member.height` resolves to the full
+                        // member.rect.height (cast_member.rs uses Paige's
+                        // page_h / info_h, NOT per-line stride). For the
+                        // FurniFactory displayComputer (member 7,
+                        // "Time\r59.31"): info_h=48, page_h=36,
+                        // per_line=18 → text_member.height=36, the full
+                        // 2-line box. Use it directly as the texture
+                        // target height. Multiplying by line_count
+                        // (legacy code, when member.height was per-line)
+                        // produced 72 — a 2× squish into the 36-px quad.
+                        // Safety net: if member.height looks like a per-
+                        // line stride (≈ fixed_line_space and < line_count
+                        // strides), fall back to line_count × stride.
+                        let mh = text_member.height as i32;
+                        let fls = text_member.fixed_line_space as i32;
+                        let strides = fls.max(1) * _line_count;
+                        if fls > 0 && mh > 0 && mh + 2 < strides {
+                            strides
+                        } else {
+                            mh.max(1)
+                        }
                     } else {
-                        sprite_rect.height().max(1) as u32
+                        sprite_rect.height().max(1)
                     };
+                    // Allocate the bitmap generously for any text
+                    // length. Visual line count = source line count
+                    // (\r-separated paragraphs) plus an estimate of
+                    // wrap-induced extra lines (rough: text length /
+                    // chars-per-line). Per-line stride is the larger
+                    // of the authored max line_spacing and the label
+                    // auto-fallback (font_size * 5/4). The actual
+                    // rendered y is reported back via
+                    // `content_height_actual` and used to trim the
+                    // texture upload to the true content size.
+                    let spacing_pad = (text_member.top_spacing as i32)
+                        .saturating_add(text_member.bottom_spacing as i32)
+                        .max(0);
+                    let max_authored_ls = text_member
+                        .par_infos
+                        .iter()
+                        .map(|pi| pi.line_spacing)
+                        .max()
+                        .unwrap_or(0) as i32;
+                    let auto_fallback_stride = (text_member.font_size as i32) * 5 / 4;
+                    let max_stride = max_authored_ls.max(auto_fallback_stride);
+                    let source_line_count = (text.matches('\r').count()
+                        + text.matches('\n').count()
+                        - text.matches("\r\n").count()
+                        + 1) as i32;
+                    // Estimate wrap-induced extra lines from text
+                    // length and approximate chars-per-visual-line.
+                    let chars_per_line = (width as i32
+                        / ((text_member.font_size as i32) / 2).max(1))
+                        .max(1);
+                    let wrap_estimate = (text.chars().count() as i32 / chars_per_line).max(0);
+                    let visual_line_estimate = source_line_count + wrap_estimate + 2;
+                    let content_estimate = max_stride * visual_line_estimate + spacing_pad;
+                    // For #adjust text without explicit \r/\n breaks, score.rs
+                    // already grew sprite_rect.height to fit the laid-out
+                    // content (its 70% rule covers wrapped single paragraphs
+                    // too). Allocating the bigger `content_estimate` here
+                    // produces a taller bitmap than the sprite quad — the
+                    // NATIVE renderer doesn't track `content_height_actual`,
+                    // so the over-allocated rows reach the GPU and the
+                    // texture gets vertically compressed when stretched into
+                    // the smaller sprite quad. Symptom: short bold labels
+                    // ("Hahmosi nimi", "Salasana:" at 9pt) render as a tiny
+                    // ~44% gray strip across the top of the field. For these
+                    // members `base_height` (= sprite_rect.height) is the
+                    // correct budget. Keep the generous budget for explicit-
+                    // break and non-#adjust text where wrap-overflow is
+                    // possible and the PFR-bitmap renderer will trim via
+                    // content_height_actual.
+                    // Sprites with skew/rotation render at the authored
+                    // member box (`keep_authored_height` is set on the
+                    // cache_key below from the same condition). The
+                    // generous `content_estimate` would over-allocate the
+                    // texture to wrap-worst-case (e.g. FurniFactory
+                    // displayComputer member 7: base_height=36, but
+                    // content_estimate=90 = 18 stride × 5 visual lines)
+                    // and `upload_height = render_height` keeps it at 90,
+                    // which squishes 2.5× into the 36-px quad.
+                    let has_transform_for_height =
+                        skew.abs() > 0.001 || rotation.abs() > 0.1;
+                    let height = if is_adjust && !has_explicit_breaks {
+                        base_height.max(1) as u32
+                    } else if has_transform_for_height {
+                        base_height.max(1) as u32
+                    } else {
+                        (base_height.max(content_estimate)).max(1) as u32
+                    };
+                    let _ = has_explicit_breaks;
 
                     // Extract font properties from first styled span if available
                     let (font_name, font_size, font_style) = if !text_member.html_styled_spans.is_empty() {
@@ -1745,12 +1880,13 @@ impl WebGL2Renderer {
                                 };
                             }
 
-                            // ALWAYS apply text_member's fontStyle (movie may have changed it)
-                            if !text_member.font_style.is_empty() {
-                                style.bold = text_member.font_style.iter().any(|s| s == "bold");
-                                style.italic = text_member.font_style.iter().any(|s| s == "italic");
-                                style.underline = text_member.font_style.iter().any(|s| s == "underline");
-                            }
+                            // Per-span bold/italic/underline are authoritative.
+                            // Lingo writes to `member.fontStyle` already rewrite
+                            // every span's flags via the fontstyle setter
+                            // (text.rs::set_member_prop), so member-level
+                            // font_style ⇒ span flags is always in sync without
+                            // a render-time override. Forcing them here would
+                            // also wipe per-span variations.
 
                             StyledSpan {
                                 text: span.text.clone(),
@@ -1806,9 +1942,10 @@ impl WebGL2Renderer {
                         || text_member.text.contains('\n');
                     let multi_par_adjust_locked =
                         box_type_unwrapped == "adjust" && text_has_breaks;
-                    cache_key.keep_authored_height =
-                        skew.abs() > 0.001
-                        || rotation.abs() > 0.1
+                    let transform_active =
+                        skew.abs() > 0.001 || rotation.abs() > 0.1;
+                    cache_key.transform_active = transform_active;
+                    cache_key.keep_authored_height = transform_active
                         || box_type_locked
                         || multi_par_adjust_locked;
 
@@ -1829,11 +1966,18 @@ impl WebGL2Renderer {
                     let _debug_text_len = text.len();
                     let _debug_par_runs_len = text_member.par_runs.len();
                     let _debug_par_infos_len = text_member.par_infos.len();
-                    let per_line_spacings: Vec<u16> = if text_has_breaks
+                    // Compute both per_line_spacings (line_spacing override
+                    // per source text line) AND per_line_par_idx (par_info
+                    // index per source text line). The latter lets the
+                    // styled renderer detect source-paragraph transitions
+                    // and apply `\sa`/`\sb` boundary spacing once between
+                    // paragraphs (not per line).
+                    let (per_line_spacings, per_line_par_idx): (Vec<u16>, Vec<u16>) = if text_has_breaks
                         && !text_member.par_runs.is_empty()
                         && !text_member.par_infos.is_empty()
                     {
                         let mut spacings = Vec::new();
+                        let mut par_idxs = Vec::new();
                         let mut line_start: u32 = 0;
                         let mut idx: usize = 0;
                         let chars: Vec<char> = text.chars().collect();
@@ -1850,15 +1994,22 @@ impl WebGL2Renderer {
                                 }
                             }
                             // Use the par_info's `line_spacing` verbatim,
-                            // including 0 ("auto"). The renderer's fallback
-                            // chain handles 0-entries by using the line's
-                            // dominant span font_size. Substituting any
-                            // non-zero par_info here was forcing members
-                            // with mostly-0 dword270 (Junkbot brick-info
-                            // member 139: only line 22 = 6, others = 0) to
-                            // use 6 for every line, which clobbered titles
-                            // (size-12) down to 6 and made the right column
-                            // crammed.
+                            // including 0 ("auto"). Lines with par_info=0
+                            // fall through to the renderer's downstream
+                            // chain (`render_line_spacing` → `line.max_size`
+                            // → `line_height`) — typically the font's
+                            // natural cell. Substituting any non-zero
+                            // par_info value here was incorrect: Junkbot v1
+                            // brick-info member 139 has par_infos of mostly
+                            // 0 with par_info[2]=6 reserved for ONE empty
+                            // line — using 6 as a document default
+                            // collapsed every content line down from
+                            // ~12px to 6px. For members like level.num
+                            // where par_runs explicitly map content lines
+                            // to a non-zero par_info (par_info[2]=21
+                            // covers pos 0..35), the explicit match is
+                            // applied directly here, so no fallback is
+                            // needed in the common case either.
                             let mut spacing = 0u16;
                             if found {
                                 if let Some(pi) = text_member.par_infos.get(active_idx as usize) {
@@ -1868,6 +2019,7 @@ impl WebGL2Renderer {
                                 }
                             }
                             spacings.push(spacing);
+                            par_idxs.push(active_idx);
                             // Advance to next line break
                             while idx < chars.len() && chars[idx] != '\r' && chars[idx] != '\n' {
                                 idx += 1;
@@ -1881,9 +2033,9 @@ impl WebGL2Renderer {
                             }
                             line_start = idx as u32;
                         }
-                        spacings
+                        (spacings, par_idxs)
                     } else {
-                        Vec::new()
+                        (Vec::new(), Vec::new())
                     };
 
                     TextureSource::RenderedText {
@@ -1898,6 +2050,7 @@ impl WebGL2Renderer {
                         bottom_spacing: text_member.bottom_spacing,
                         width,
                         height,
+                        wrap_width: width,
                         text_fg_color,
                         text_bg_color,
                         styled_spans: styled_spans_with_defaults,
@@ -1907,6 +2060,10 @@ impl WebGL2Renderer {
                         box_drop_shadow: 0,
                         tab_stops: text_member.tab_stops.clone(),
                         per_line_spacings,
+                        per_line_par_idx,
+                        par_infos: text_member.par_infos.clone(),
+                        par_runs: text_member.par_runs.clone(),
+                        char_spacing: text_member.char_spacing,
                     }
                 }
                 CastMemberType::Field(field_member) => {
@@ -1917,6 +2074,19 @@ impl WebGL2Renderer {
                     // computes the correct size from text_height/rect/borders
                     let width = sprite_rect.width().max(1) as u32;
                     let height = sprite_rect.height().max(1) as u32;
+                    // Text-wrap width must use `field.width` — the authored
+                    // text-area width — not `sprite.width`. Director's
+                    // sprite display rect is sprite.width (e.g. 348) but
+                    // wraps text at field.width (e.g. 324). For Habbo's
+                    // hotel-navigator help-text panel, wrapping at the
+                    // sprite width fit "Goombahs, Ghosts or Bowser --" on
+                    // one line, while Director correctly wraps after
+                    // "Ghosts or".
+                    let wrap_width = if field_member.width > 0 {
+                        (field_member.width as u32).min(width)
+                    } else {
+                        width
+                    };
 
                     // Check if this field has keyboard focus AND is editable.
                     // Non-editable fields ignore focus state for the cursor-render
@@ -2006,8 +2176,10 @@ impl WebGL2Renderer {
                         field_member.fixed_line_space,
                         field_member.top_spacing,
                     );
-                    cache_key.keep_authored_height =
+                    let transform_active =
                         skew.abs() > 0.001 || rotation.abs() > 0.1;
+                    cache_key.keep_authored_height = transform_active;
+                    cache_key.transform_active = transform_active;
 
                     TextureSource::RenderedText {
                         cache_key,
@@ -2021,6 +2193,7 @@ impl WebGL2Renderer {
                         bottom_spacing: 0,
                         width,
                         height,
+                        wrap_width,
                         text_fg_color: effective_fg,
                         text_bg_color: effective_bg,
                         styled_spans: None,
@@ -2030,6 +2203,10 @@ impl WebGL2Renderer {
                         box_drop_shadow: field_member.box_drop_shadow,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
+                        per_line_par_idx: Vec::new(),
+                        par_infos: Vec::new(),
+                        par_runs: Vec::new(),
+                        char_spacing: 0,
                     }
                 }
                 CastMemberType::Button(button_member) => {
@@ -2359,6 +2536,7 @@ impl WebGL2Renderer {
                 bottom_spacing,
                 width,
                 height,
+                wrap_width,
                 ref text_fg_color,
                 ref text_bg_color,
                 ref styled_spans,
@@ -2368,6 +2546,10 @@ impl WebGL2Renderer {
                 box_drop_shadow,
                 ref tab_stops,
                 ref per_line_spacings,
+                ref per_line_par_idx,
+                ref par_infos,
+                ref par_runs,
+                char_spacing,
             } => {
                 if text.contains('\t') || !tab_stops.is_empty() {
                     warn!(
@@ -2415,6 +2597,7 @@ impl WebGL2Renderer {
                         bottom_spacing,
                         width,
                         height,
+                        wrap_width,
                         ink,
                         blend,
                         text_fg_color,
@@ -2426,6 +2609,10 @@ impl WebGL2Renderer {
                         box_drop_shadow,
                         tab_stops,
                         per_line_spacings.as_slice(),
+                        per_line_par_idx.as_slice(),
+                        par_infos.as_slice(),
+                        par_runs.as_slice(),
+                        char_spacing,
                     ) {
                         Some((tex, _actual_w, actual_h)) => {
                             // Update sprite_rect to match actual rendered dimensions.
@@ -2733,6 +2920,8 @@ impl WebGL2Renderer {
                         0,
                         0,
                         0,
+                        &[],
+                        &[],
                         &[],
                     ) {
                         warn!("Native text render error for Button (WebGL2): {:?}", e);
@@ -4178,6 +4367,11 @@ impl WebGL2Renderer {
         bottom_spacing: i16,
         width: u32,
         height: u32,
+        // Width to use for word-wrap calculations. May be smaller than
+        // `width` when the field's text-wrap width (`field.width`) is
+        // narrower than the sprite display rect. Set to `width` for
+        // non-field text where the two are the same.
+        wrap_width: u32,
         ink: i32,
         blend: i32,
         fg_color: &ColorRef,
@@ -4194,6 +4388,17 @@ impl WebGL2Renderer {
         // spacing data; the renderer then falls back to the single
         // `line_spacing` arg above.
         per_line_spacings: &[u16],
+        // Per-text-line par_info index parallel to `per_line_spacings`.
+        // The styled bitmap rendering path uses this to detect
+        // source-paragraph transitions and apply `\sa` + `\sb` boundary
+        // spacing once between paragraphs.
+        per_line_par_idx: &[u16],
+        // XMED par_info / par_run tables for paragraph-boundary spacing
+        // (`\sa` + `\sb` applied at par_info transitions). Forwarded
+        // verbatim to `render_native_text_to_bitmap`.
+        par_infos_for_native: &[crate::director::chunks::xmedia_styled_text::ParInfo],
+        par_runs_for_native: &[crate::director::chunks::xmedia_styled_text::ParRun],
+        char_spacing: i32,
     ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
         // Whether to keep the bitmap at the authored height (no shrink-to-
         // content, no fill-scaling). True when the sprite carries a skew or
@@ -4372,6 +4577,10 @@ impl WebGL2Renderer {
         let mut render_width = width as u16;
         let mut render_height = height as u16;
         let mut render_line_spacing = line_spacing;
+        // Width used for word-wrap measurement (text fold point). Defaults
+        // to render_width but can be smaller for fields where the
+        // text-wrap area is narrower than the sprite display rect.
+        let render_wrap_width = (wrap_width as u16).min(render_width);
 
         // Measure actual text height and shrink render_height if the measured
         // content is smaller. Never grow beyond the member's rect — the rect
@@ -4393,9 +4602,9 @@ impl WebGL2Renderer {
                 && per_line_spacings.iter().all(|&s| s > 0);
             let measured_h_raw = if per_line_all_nonzero {
                 per_line_spacings.iter().map(|&s| s as u32).sum::<u32>() as u16
-            } else if word_wrap && render_width > 0 {
+            } else if word_wrap && render_wrap_width > 0 {
                 measure_text_wrapped(
-                    text, &font, render_width, true,
+                    text, &font, render_wrap_width, true,
                     render_line_spacing, top_spacing, bottom_spacing, 0,
                 ).1
             } else {
@@ -4406,78 +4615,33 @@ impl WebGL2Renderer {
             let measured_h = measured_h_raw
                 + (2 * border) + (4 * box_drop_shadow);
             if measured_h > 0 && measured_h < render_height && !keep_authored_height {
-                let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
-                // Total visual line count including blanks (drives the
-                // extra-per-gap divisor when scaling fires).
-                let total_line_count = normalised.split('\n').count();
-                // Non-empty lines drive the gate: Lingo patterns like
-                // "\r\r\rLOADING\r\r\r" use empty RETURN padding to vertically
-                // centre a single content line. Without this filter that
-                // pattern reads as 7 "lines" and falsely qualifies for the
-                // fill scaling, which then spreads the lone "LOADING" word
-                // across the sprite_rect height with absurd gaps.
-                let non_empty_line_count = normalised
-                    .split('\n')
-                    .filter(|l| !l.trim().is_empty())
-                    .count();
-                // Only scale line spacing to fill the sprite_rect for tall
-                // multi-line lists (≥5 *non-empty* lines) whose styled spans
-                // were cleared (the `.text = ...` setter in text.rs clears
-                // them) AND whose sprite_rect is significantly taller than
-                // the measured text (≥1.25× — Junkbot's 16-line column is
-                // 1.31×). That combo narrows the fill-scaling to lists Lingo
-                // dynamically rebuilds for sibling-aligned column layout
-                // (Junkbot's level.num / level.name pair is the canonical
-                // case).
+                // Doesn't qualify for fill-scaling: shrink bitmap to content
+                // (preserve tight bounds for chat bubbles, button labels,
+                // BossBot letters, etc.).
                 //
-                // Without these tighter gates, any 2-line text member
-                // without styled spans got its line spacing inflated to
-                // fill whatever extra room the score happened to allocate,
-                // which caused chat bubbles, captions, and other short
-                // multi-line members to render with absurdly wide gaps.
-                let oversized_ratio = render_height as u32 * 4 >= measured_h as u32 * 5;
-                let qualifies_fill = non_empty_line_count >= 5
-                    && total_line_count > 1
-                    && styled_spans.is_none()
-                    && oversized_ratio;
-                if qualifies_fill {
-                    let extra = render_height as u32 - measured_h as u32;
-                    let extra_per_gap = (extra / (total_line_count as u32 - 1)) as u16;
-                    render_line_spacing = render_line_spacing.saturating_add(extra_per_gap);
-                } else {
-                    // Doesn't qualify for fill-scaling: shrink bitmap to content
-                    // (preserve tight bounds for chat bubbles, button labels,
-                    // BossBot letters, etc.).
-                    render_height = measured_h;
-                }
+                // The previous "fill-to-sprite_rect" hack (qualifies_fill
+                // block) used to inflate render_line_spacing for tall
+                // multi-line lists like Junkbot's level.num/level.name —
+                // back when the par_run/par_info parser couldn't derive
+                // the authored stride correctly and the heuristic gave 16
+                // instead of 21. Now that `text_member.fixed_line_space`
+                // is derived from par_run[0]'s par_info (the authoritative
+                // source for member.fixedLineSpace), the parser feeds the
+                // correct authored value (21 for level.num) and the hack
+                // is no longer needed.
+                render_height = measured_h;
             }
         }
-
-        // Safety net: if the requested per-line stride would push lines past
-        // the bitmap height, the line_spacing value is bogus (most often an
-        // XMED-parsed `fixed_line_space` that holds the field's box height
-        // rather than its real per-line height — CS InfoStandDescription's
-        // STXT reports height=55 for a 55-px-tall field, which would put
-        // line 2 of "Jukebox\rVintage jukebox" at y=55 and clip it). Fall
-        // back to the font's natural line height (pre-f641e03 behaviour),
-        // but only when actually unsafe — Junkbot's level.name (16 lines ×
-        // 21 px = 336 px in a 336-px rect) still honours its Lingo-set
-        // FixedLinespace because the math fits. Single-line text is
-        // guarded by line_count > 1.
-        if render_line_spacing > 0 {
-            let line_count = text
-                .replace("\r\n", "\n")
-                .replace('\r', "\n")
-                .split('\n')
-                .count()
-                .max(1) as u32;
-            let stride = render_line_spacing as u32
-                + top_spacing as u32
-                + bottom_spacing as u32;
-            if line_count > 1 && stride * line_count > render_height as u32 {
-                render_line_spacing = 0;
-            }
-        }
+        // Safety net previously reset render_line_spacing to 0 when the
+        // requested stride × line_count exceeded render_height, on the
+        // theory that XMED sometimes stored the field box-height in
+        // fixed_line_space. With par_run[0]-derived fixed_line_space the
+        // value is the real per-line stride, and Junkbot level.num
+        // (16 × 21 = 336 in a 331-px rect) trips the >render_height
+        // condition by 5 px and would have reset to 0 — clipping the
+        // last line. The safety net is removed; if a future member
+        // surfaces with a bogus fixed_line_space we'll address it at
+        // the parser source rather than via runtime override.
 
         // Compute alignment offset for bitmap font rendering (native text handles alignment internally).
         let mut bitmap_start_x = 0i32;
@@ -4617,6 +4781,14 @@ impl WebGL2Renderer {
             }
         }
 
+        // Track actual content y at end of rendering. Used to trim
+        // the texture upload size so the sprite_rect grows precisely
+        // to the laid-out content (Buggy info-card with desc + 4
+        // labels) instead of the over-allocated bitmap height. None
+        // means we don't have an exact value — fall back to
+        // render_height (the bitmap size).
+        let mut content_height_actual: Option<i32> = None;
+
         // Render text to the bitmap - use styled spans if available
         // BUT only use native rendering if the font is NOT a PFR bitmap font
         if let Some(spans) = spans_for_native {
@@ -4638,13 +4810,15 @@ impl WebGL2Renderer {
                 width as i32,
                 height as i32,
                 text_alignment,
-                width as i32,
+                wrap_width as i32,
                 word_wrap,
                 None, // Color is in the spans
                 render_line_spacing,
                 top_spacing,
                 bottom_spacing,
                 tab_stops,
+                par_infos_for_native,
+                par_runs_for_native,
             ) {
                 web_sys::console::warn_1(
                     &format!("WebGL2 render_text_to_texture: Native text render error: {:?}", e).into()
@@ -4674,8 +4848,20 @@ impl WebGL2Renderer {
             } else {
                 font.char_height as i32
             };
+            // Alignment uses the full canvas width: text centered/right-
+            // aligned within the sprite display rect (e.g. 348 for Habbo's
+            // hotel-navigator help text). The wrap fold-point uses the
+            // narrower `wrap_width` (e.g. field.width = 324) — see
+            // `wrap_max_width` below. For non-field text the two are
+            // equal so behavior is unchanged.
             let max_width = width as i32;
+            let wrap_max_width = wrap_width as i32;
             let mut y = top_spacing as i32;
+            // Track max y of any glyph extent (including descender) across
+            // both styled-multi and PFR-simple paths. Used to extend
+            // `content_height_actual` so the texture trim doesn't clip
+            // descenders when char_height > line stride.
+            let mut last_glyph_bottom: i32 = 0;
 
             // Resolve foreground color to RGB once for PFR direct copy
             let fg_color_rgb = resolve_color_ref(
@@ -4909,7 +5095,11 @@ impl WebGL2Renderer {
                         if bold {
                             draw_glyph(bitmap, x + 1);
                         }
-                        x += adv;
+                        // Apply member-level charSpacing between glyphs.
+                        // Negative tightens (FurniFactory displayComputer
+                        // uses -2). Already factored into measure_text_wrapped
+                        // so sprite_rect width matches.
+                        x += adv + char_spacing;
                         char_i += 1;
                     }
 
@@ -5096,10 +5286,10 @@ impl WebGL2Renderer {
                         Piece::Token(token) => {
                             let width = token_width(&token.text, &token.style);
                             if word_wrap
-                                && max_width > 0
+                                && wrap_max_width > 0
                                 && !token.is_whitespace
                                 && !current_line.runs.is_empty()
-                                && (current_line.width + width > max_width)
+                                && (current_line.width + width > wrap_max_width)
                             {
                                 // Wrap-induced break: the next visual line
                                 // is still the same text-line, so don't
@@ -5142,7 +5332,54 @@ impl WebGL2Renderer {
                     );
                 }
 
+                // Paragraph-boundary spacing rule (XMED-verified against
+                // Buggy info-card):
+                //
+                // At a par_info transition where BOTH the outgoing and
+                // incoming paragraphs have an explicit `line_spacing >
+                // font_size`, insert a virtual blank line equal to
+                // `max(prev_ls, this_ls)` — Director's interpretation
+                // of "tall paragraphs separated by tall paragraphs"
+                // adds an extra line-height of vertical space, which is
+                // the visible gap between Buggy's description (sl=14)
+                // and "Terrain: Normal" (sl=15). When the next
+                // paragraph drops below font height (e.g. labels with
+                // sl=5, clamped to font for rendering), no boundary
+                // spacing is added so consecutive labeled rows remain
+                // tightly stacked.
+                //
+                // Per-paragraph `\sa`/`\sb` from par_info still stack
+                // on top when authored (zero for Buggy but preserved
+                // for forward compatibility with other members).
+                // Boundary spacing fires at par_info transitions
+                // where BOTH adjacent paragraphs have an explicit
+                // `line_spacing > font_size` (the "tall→tall" rule).
+                // For Buggy: only desc(14)→Terrain(15) triggers the
+                // 10pt gap; Terrain→labels(5) and within-labels stay
+                // tight. Per-par_info `\sa`/`\sb` stack when authored
+                // (zero for Buggy).
+                let mut prev_par_idx_pfr: Option<u16> = None;
                 for line in lines {
+                    let this_par_idx = per_line_par_idx
+                        .get(line.text_line_idx)
+                        .copied();
+                    if let (Some(prev), Some(this)) = (prev_par_idx_pfr, this_par_idx) {
+                        if prev != this {
+                            let prev_pi = par_infos_for_native.get(prev as usize);
+                            let this_pi = par_infos_for_native.get(this as usize);
+                            let prev_ls = prev_pi.map(|pi| pi.line_spacing).unwrap_or(0);
+                            let this_ls = this_pi.map(|pi| pi.line_spacing).unwrap_or(0);
+                            let font = line.max_size.max(12);
+                            if prev_ls > font && this_ls > font {
+                                y += bottom_spacing as i32 + top_spacing as i32;
+                            }
+                            let prev_sa = prev_pi.map(|pi| pi.bottom_spacing).unwrap_or(0);
+                            let this_sb = this_pi.map(|pi| pi.top_spacing).unwrap_or(0);
+                            y += prev_sa + this_sb;
+                        }
+                    }
+                    prev_par_idx_pfr = this_par_idx;
+
                     let start_x = match alignment_key.as_str() {
                         "center" => ((max_width - line.width) / 2).max(0),
                         "right" => (max_width - line.width).max(0),
@@ -5269,10 +5506,64 @@ impl WebGL2Renderer {
                     //      of content overflow off the bottom.
                     //   3. `render_line_spacing` (member.fixedLineSpace).
                     //   4. `line_height` (font default).
+                    //
+                    // The per-line spacing is then clamped up to
+                    // `line.max_size` so an authored small `line_spacing`
+                    // (e.g. Buggy labels' `par_info.line_spacing = 5` from
+                    // Director's `\sl100`) doesn't force lines to overlap
+                    // their own 12pt content. Director appears to treat
+                    // small `\sl` values as a minimum, not a literal line
+                    // height.
+                    // par_info `line_spacing` is the line cell height
+                    // (Paige `leading_variable`: a minimum). When the
+                    // authored value is at least the font's natural
+                    // cell height (`native_char_height`, derived from
+                    // the PFR font's `char_height`), it wins —
+                    // description (14) and "Terrain: Normal" (15)
+                    // honor their authored stride. When the value is
+                    // below the font cell (Buggy labels' sl=5 vs PFR
+                    // Arial *'s 17pt cell), it would force glyph
+                    // overlap, so we clamp up to `native_char_height`
+                    // — Director's auto-fallback per the
+                    // `fixedLineSpace` docs.
                     let per_line_spacing = per_line_spacings
                         .get(line.text_line_idx)
                         .copied()
-                        .filter(|&s| s > 0);
+                        .filter(|&s| s > 0)
+                        .map(|s| {
+                            // When authored line_spacing meets/exceeds
+                            // the font size, honor it verbatim
+                            // (description=14, Terrain=15). When it
+                            // falls below the font (label paragraphs
+                            // with sl=5), Director's auto-fallback
+                            // gives the line ascent+descent — roughly
+                            // `font_size × 1.25` for typical fonts
+                            // (15pt for a 12pt font). The PFR
+                            // `native_char_height` is taller than
+                            // this (17pt for Arial *) because it
+                            // includes the cell's natural leading,
+                            // which Director doesn't add at this
+                            // step.
+                            //
+                            // EMPTY lines (no rendered glyphs, line.width
+                            // == 0) skip the clamp entirely: there's no
+                            // glyph to overlap, and Director uses the
+                            // small authored value as-is for blank lines
+                            // — used in Junkbot v1 brick-info member 139
+                            // where par_info[2] sets line_spacing=6 on
+                            // the empty paragraph before "eyeBOT" so the
+                            // gap above the label is tighter than the
+                            // surrounding 12pt empty rows.
+                            let s = s as i32;
+                            if line.width == 0 {
+                                s.max(0) as u16
+                            } else if s < line.max_size {
+                                let auto_cell = line.max_size + line.max_size / 4;
+                                auto_cell.max(line.max_size).max(0) as u16
+                            } else {
+                                s.max(line.max_size).max(0) as u16
+                            }
+                        });
                     // Per-line fallback when THIS line's par_info dword270
                     // is 0. Priority:
                     //   1. `render_line_spacing` (member-level fixedLineSpace).
@@ -5298,7 +5589,10 @@ impl WebGL2Renderer {
                                 line_height
                             }
                         });
-                    let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
+                    // top/bottom_spacing are PER-PARAGRAPH (member-level),
+                    // applied above at source-paragraph transitions —
+                    // intentionally NOT per-line here.
+                    let line_step = effective_lh;
                     if DEBUG_WEBGL2_TEXT {
                         debug!(
                             "[webgl2.text.pfr.styled] line width={} start_x={} y={} step={} next_y={}",
@@ -5321,7 +5615,7 @@ impl WebGL2Renderer {
                 // the source line's index so they inherit the same stride.
                 let mut line_text_indices: Vec<usize> = Vec::new();
 
-                if word_wrap && max_width > 0 {
+                if word_wrap && wrap_max_width > 0 {
                     for (raw_idx, raw) in raw_lines.iter().enumerate() {
                         if raw.is_empty() {
                             lines_to_draw.push(String::new());
@@ -5342,7 +5636,7 @@ impl WebGL2Renderer {
                                 .map(|c| font.get_char_advance(c as u8) as i32)
                                 .sum();
 
-                            if candidate_width <= max_width || current.is_empty() {
+                            if candidate_width <= wrap_max_width || current.is_empty() {
                                 current = candidate;
                             } else {
                                 lines_to_draw.push(current);
@@ -5397,7 +5691,6 @@ impl WebGL2Renderer {
                             line.chars().take(60).collect::<String>()
                         );
                     }
-                    render_line(line, y, &mut text_bitmap);
                     // Per-line line_spacing override (XMED par_runs/par_infos).
                     // Wrap-induced visual lines reuse the source text-line's
                     // entry. Falls back to render_line_spacing/line_height
@@ -5416,6 +5709,34 @@ impl WebGL2Renderer {
                                 line_height
                             }
                         });
+                    // Director-style leading: when the line cell is taller
+                    // than the glyph cell (effective_lh > native char_height),
+                    // the extra space is leading at the TOP of the line. The
+                    // glyph baseline sits in the lower portion of the cell —
+                    // not flush against the top. This matches Junkbot v1
+                    // level.num where each line is 21 px but the 04b_08 *
+                    // glyphs are only ~16 px tall: Director draws the "1"
+                    // ~5 px below the cell top, so the visible text rows
+                    // sit "inside" each row rather than crowding the top.
+                    let glyph_cell_h = if font.font_size > 0 {
+                        font.font_size as i32
+                    } else {
+                        font.char_height as i32
+                    };
+                    let leading_top = (effective_lh - glyph_cell_h).max(0);
+                    render_line(line, y + leading_top, &mut text_bitmap);
+                    // Track the max glyph extent (including descender). The
+                    // PFR atlas's `font.char_height` includes ascender +
+                    // descender, but `effective_lh` (line stride) is often
+                    // capped to the requested `font_size` which excludes
+                    // the descender. Without this, the texture trim at
+                    // `content_height_actual = y + line_step` clips the
+                    // descender of letters like 'g', 'p', 'y' on the LAST
+                    // line — visible on Worldbuilder Tugboat title (Arial
+                    // Black 25pt: char_height ~31, line_step 25, "Tugboat"
+                    // 'g' descender extended to ~31 but trim was at 25).
+                    let glyph_bottom = y + leading_top + font.char_height as i32;
+                    last_glyph_bottom = last_glyph_bottom.max(glyph_bottom);
                     let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
                     if DEBUG_WEBGL2_TEXT && is_pfr_font {
                         debug!(
@@ -5428,6 +5749,15 @@ impl WebGL2Renderer {
                     y += line_step;
                 }
             }
+            // Capture the final y so the bitmap can be trimmed to
+            // exactly the laid-out content height (sprite_rect grows
+            // to fit the actual rendered text rather than the
+            // pre-allocated padding budget). Take max with the actual
+            // glyph extent (including descender) so trim doesn't clip
+            // 'g'/'p'/'y' descenders on the last line when char_height
+            // exceeds the line stride (Worldbuilder Tugboat title at
+            // Arial Black 25pt).
+            content_height_actual = Some(y.max(last_glyph_bottom));
         }
 
         // Resolve the bg_color to RGB. The caller already picks the correct source:
@@ -5595,20 +5925,61 @@ impl WebGL2Renderer {
             }
         }
 
+        // Trim the texture to the actual content height so
+        // sprite_rect grows precisely to the laid-out text instead
+        // Trim the upload to the actual content height. For text members
+        // with shorter content this produces a tighter texture; for
+        // longer content, the upload tracks the real layout. Falls back
+        // to render_height when we don't have an exact value (native
+        // renderer path).
+        //
+        // EXCEPTION: when the sprite has a skew/rotation transform
+        // (`keep_authored_height`), the local quad keeps its authored
+        // size and the trimmed shorter texture would be GPU-stretched
+        // into the larger quad, visibly enlarging glyphs. FurniFactory's
+        // rotated displayComputer (member 74) had its 24-px text content
+        // stretched ~2× into a 48-px sprite quad, making "TIME" / "59.65"
+        // oversized in the rotated frame. Use full render_height so the
+        // texture maps 1:1 onto the quad — content sits at the top with
+        // empty rows below, and the rotation transforms position only.
+        // No-trim ONLY for rotation/skew transforms — not for the broader
+        // `keep_authored_height` flag. `keep_authored_height` is also set
+        // for box_type_locked (#fixed/#scroll/#limit) and
+        // multi_par_adjust_locked (#adjust + line breaks), but those flat
+        // sprites need the trim: they over-allocate `render_height` to
+        // wrap-worst-case (`content_estimate`) up at line 1666, and
+        // skipping the trim leaves an over-tall texture that GPU-stretches
+        // into the smaller sprite_rect quad — Worldbuilder Tugboat info-
+        // card #291 had its 200-px content_estimate texture squished into
+        // a 110-px quad, hiding part of the card and the NEXT button.
+        // Rotated/skewed sprites still need no-trim so the authored member
+        // box maps 1:1 (FurniFactory displayComputer member 7).
+        let upload_height: u32 = if cache_key.transform_active {
+            render_height as u32
+        } else {
+            match content_height_actual {
+                Some(h) => {
+                    let with_padding = h + bottom_spacing as i32;
+                    (with_padding.max(1) as u32).min(render_height as u32)
+                }
+                None => render_height as u32,
+            }
+        };
+
         // Upload the bitmap as a texture
         let texture = self.context.create_texture().ok()?;
         self.context
-            .upload_texture_rgba(&texture, render_width as u32, render_height as u32, &text_bitmap.data)
+            .upload_texture_rgba(&texture, render_width as u32, upload_height, &text_bitmap.data)
             .ok()?;
         // Cache the texture
         self.rendered_text_cache.insert(
             cache_key.clone(),
             texture.clone(),
             render_width as u32,
-            render_height as u32,
+            upload_height,
         );
 
-        Some((texture, render_width as u32, render_height as u32))
+        Some((texture, render_width as u32, upload_height))
     }
 
     /// Set preview size
