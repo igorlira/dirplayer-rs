@@ -3232,7 +3232,17 @@ impl CastMember {
                 {
                     info_h as u16
                 } else {
-                    per_line as u16
+                    // info_h ballooned past page_h by less than one row —
+                    // a runtime balloon (Lingo wrote text and TextInfo
+                    // grew but Paige's doc_bottom = page_h is still the
+                    // laid-out total). Use page_h, which matches Director's
+                    // reported `member.rect.height` for FurniFactory
+                    // displayComputer (member 7) and the clock display
+                    // (member 74): both have info_h=48, page_h=36,
+                    // per_line=18, line_count=2 and Director returns 36.
+                    // Earlier this branch returned `per_line` (18), giving
+                    // a single-line height that clipped the second row.
+                    page_h as u16
                 }
             } else if per_line > 0 {
                 per_line as u16
@@ -3297,6 +3307,22 @@ impl CastMember {
         let box_type = text_info.box_type_str().trim_start_matches('#').to_string();
         let word_wrap = text_info.word_wrap();
         let xmed_bg_color = styled_text.bg_color;
+        // Member-level fontStyle list: derived from the first styled span's
+        // bold/italic/underline flags so `member.fontStyle` matches Director's
+        // getter (which returns [#italic] for member 35 etc.). The XMED parse
+        // already applies Paige's gap2 -> bool conversion, so we just collect
+        // the active span's flags here.
+        let member_font_style: Vec<String> = styled_text
+            .styled_spans
+            .first()
+            .map(|s| {
+                let mut v = Vec::new();
+                if s.style.bold      { v.push("bold".to_string()); }
+                if s.style.italic    { v.push("italic".to_string()); }
+                if s.style.underline { v.push("underline".to_string()); }
+                v
+            })
+            .unwrap_or_default();
         let text_member = TextMember {
             text: styled_text.text.clone(),
             html_source: String::new(),
@@ -3306,13 +3332,18 @@ impl CastMember {
             word_wrap,
             anti_alias: true,
             font: font_name,
-            font_style: Vec::new(),
+            font_style: member_font_style,
             font_size,
-            fixed_line_space: if styled_text.line_spacing > 0 {
-                styled_text.line_spacing as u16
-            } else {
-                styled_text.fixed_line_space
-            },
+            // `styled_text.fixed_line_space` is now derived from par_run[0]'s
+            // par_info (the paragraph applied at text position 0) — that's
+            // Director's `member.fixedLineSpace` value and is the
+            // authoritative source. The older `styled_text.line_spacing`
+            // field still exists from the legacy heuristic in
+            // `parse_section_8` but is unreliable (lands on 16 for
+            // Junkbot v1 level.num where Director reports 21). Use
+            // `fixed_line_space` directly; falling through to
+            // `styled_text.line_spacing` would re-introduce that bug.
+            fixed_line_space: styled_text.fixed_line_space,
             top_spacing: styled_text.top_spacing as i16,
             bottom_spacing: styled_text.bottom_spacing as i16,
             width: box_w,
