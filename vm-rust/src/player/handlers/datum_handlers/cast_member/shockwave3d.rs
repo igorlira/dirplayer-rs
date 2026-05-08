@@ -181,6 +181,8 @@ impl Shockwave3dMemberHandlers {
             source.top_spacing.saturating_mul(supersample as i16),
             source.bottom_spacing.saturating_mul(supersample as i16),
             &scaled_tab_stops,
+            &[],
+            &[],
         );
         Some((bw as u32, bh as u32, bitmap.data))
     }
