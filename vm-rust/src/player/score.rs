@@ -4781,22 +4781,34 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             )
         }
         CastMemberType::Field(field_member) => {
-            // Director's `the rect of sprite` for fields uses the member's
-            // authored width on `#adjust` boxType. Other box types
-            // (`#scroll`, `#fixed`, `#limit`) honor sprite.width because
-            // the sprite is a user-resizable box independent of the member.
-            // We read `field_member.width` (not `rect_right - rect_left`)
-            // because CS-style runtime authoring creates members via Lingo
-            // `new(#field)` then sets `the width of member` from a .window
-            // XML — which only updates `field.width`, not the parse-time
-            // `rect_*` (they stay at FieldMember::new() defaults of 100).
-            // For .dir-loaded fields like figure8 timerbox, `field.width`
-            // was set from FieldInfo's rect at parse, so this still
-            // matches.
+            // #adjust boxType: displayed width = `field.width` + chrome
+            // (2*border + 2*margin + boxDropShadow). `field.width` is
+            // the authored TEXT-AREA width — Director's sprite display
+            // rect adds the chrome padding so the box visually frames
+            // the text area. E.g. MarioNetQuest's "How to Play":
+            // field.width=324, chrome=24 → 348 displayed (matches
+            // Director's `the rect of sprite` width). For runtime-
+            // authored CS fields where field.width is the script's
+            // .window XML setting, the same `field.width + chrome`
+            // works because the chrome is small/zero.
+            //
+            // Why not use sprite.width directly: many .dir-loaded
+            // fields with little text content have a `sprite.width`
+            // that's some default oversized score authoring — using
+            // it would render a much-too-wide box. Building width
+            // from the authored field.width + the field's own chrome
+            // settings gives a consistent, Director-faithful result.
+            //
+            // Other boxTypes (#scroll, #fixed, #limit) honor
+            // sprite.width unconditionally — those are user-resizable
+            // containers independent of the member's authored width.
             let is_adjust_for_width = field_member.box_type == "adjust";
             let member_authored_w = field_member.width as i32;
+            let chrome_w = (2 * field_member.border as i32)
+                + (2 * field_member.margin as i32)
+                + (field_member.box_drop_shadow as i32);
             let field_width = if is_adjust_for_width && member_authored_w > 0 {
-                member_authored_w
+                member_authored_w + chrome_w
             } else {
                 sprite.width
             };
@@ -4987,8 +4999,18 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // For system fonts (Arial, etc.), use a font-size-based estimate
                 // since native text uses Canvas2D which we can't measure here.
                 let font = player.font_manager.font_cache.get(&cache_key).cloned();
+                // Force wrap-aware measurement for puppet text members
+                // even when `word_wrap` is false on the member. Director
+                // grows puppet sprites to fit all visible content; if
+                // a long single-line text exceeds the box width and we
+                // measure unwrapped, the height computes as 1 line and
+                // the rendered text overflows (the renderer still
+                // wraps, but the sprite_rect is too short to show the
+                // wrapped tail). Score-authored sprites continue to
+                // honor the member's word_wrap flag.
+                let force_wrap = sprite.puppet;
                 let from_bitmap = font.map(|f| {
-                    if text_member.word_wrap {
+                    if text_member.word_wrap || force_wrap {
                         measure_text_wrapped(
                             &text_member.text, &f, text_width as u16, true,
                             text_member.fixed_line_space,
@@ -5102,7 +5124,43 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             } else {
                 info_height
             };
-            let text_height = if text_member.box_type == "adjust" && preferred_authored > 0 {
+            // Puppet-sprite text members get the simple "fit measured
+            // content" rule regardless of boxType: the authored
+            // info_height/text_member.height were typically set when the
+            // member was first created (often 100×100 default from
+            // `new(#text)`), but the script then assigns runtime text via
+            // `member.text = ...` or HTML and expects the sprite to grow
+            // to display all of it. Without this, multi-line text gets
+            // clipped at the stale authored height (e.g. tutorial dialog
+            // "Mission 1: Tutorial" + body text — the body's second/third
+            // lines were cut off even though boxType is #fixed, because
+            // the puppet's authored height was the default-small).
+            // Director's standard "boxType #fixed clips, #adjust grows"
+            // semantics apply to score-authored sprites where the
+            // authored height represents the scene designer's intent;
+            // puppet sprites have no such intent baked in.
+            let text_height = if sprite.puppet && measured_height.unwrap_or(0) > 0 {
+                let measured_h = measured_height.unwrap();
+                measured_h.max(preferred_authored)
+            } else if text_member.box_type == "adjust" && preferred_authored > 0 {
+                // Non-puppet #adjust text members: trust the authored
+                // member.height when text has explicit breaks (the value
+                // is the laid-out total Director rendered into); for
+                // wrap-only single-paragraph text, fall back to the 70%
+                // rule that grows to measured when the stored value is
+                // much smaller than the content needs.
+                //
+                // Trying to grow has_breaks members to our measured size
+                // overshoots Director — our PFR metrics for "Arial *"
+                // and friends produce slightly taller wrapped lines than
+                // Director's, so a Buggy info-card with member.height=110
+                // would expand to ~150 and visibly cover adjacent UI like
+                // the CLOSE button below it. Director apparently fits the
+                // same text into the authored 110 px and our render
+                // simply clips at the box boundary — visually a few
+                // pixels of the last line may be cut, but layout
+                // adjacency is preserved (Junkbot credits: stored 375
+                // matches Director, our re-measure 414 would inflate).
                 if text_has_breaks {
                     preferred_authored
                 } else {
@@ -5118,6 +5176,26 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     Some(m) if m > stored_height => m,
                     _ => stored_height,
                 }
+            } else if stored_member_h > 0
+                && (sprite.skew.abs() > 0.001 || sprite.rotation.abs() > 0.1)
+            {
+                // Rotated/skewed #fixed text: use member.rect.height as the
+                // quad height. `sprite.height` (and therefore stored_height)
+                // is the rotated bounding-box height, not the authored quad
+                // — FurniFactory displayComputer member 7 has
+                // member.rect.height=36 but sprite.height=48 because the
+                // sprite is skewed. Pairing this with the upload_height =
+                // render_height fix in webgl2/mod.rs gives 1:1 texture-to-
+                // quad mapping at the authored member size.
+                //
+                // Restricted to transformed sprites: for flat #fixed text
+                // members, sprite.height IS the authored quad and using
+                // member.rect.height (which can be the FULL Paige page_h
+                // — much taller than the visible score-placed sprite area)
+                // would inflate the sprite_rect and let text overflow into
+                // adjacent UI (worldbuilder unit-info card #291 was
+                // half-covering the button below).
+                stored_member_h
             } else {
                 stored_height
             };
