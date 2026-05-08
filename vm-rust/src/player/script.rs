@@ -747,6 +747,171 @@ pub fn get_obj_prop(
                     }
                     Ok(player.alloc_datum(Datum::Int(0)))
                 }
+                _ if matches!(prop_name.to_ascii_lowercase().as_str(),
+                    "fixedlinespace" | "topspacing" | "bottomspacing"
+                    | "font" | "fontsize" | "fontstyle"
+                    | "color" | "bgcolor" | "alignment") => {
+                    // Per-chunk properties — walk to the source member and
+                    // resolve the chunk's char range, then look up the
+                    // active par_info / styled span. Director exposes
+                    // `member.line[N].fixedLineSpace` etc.; without this
+                    // branch the StringChunk would fall through to the
+                    // string built-in handler and return Void / 0.
+                    use crate::player::handlers::datum_handlers::string_chunk::StringChunkHandlers;
+                    let resolved = StringChunkHandlers::walk_chunk_to_member_range(player, obj_ref);
+                    let Some((member_ref, char_start, _char_end)) = resolved else {
+                        return Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
+                            &obj_clone.string_value()?,
+                            &prop_name,
+                        )?));
+                    };
+                    let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+                        return Ok(player.alloc_datum(Datum::Void));
+                    };
+                    // Field path: lacks per-paragraph data; fall back to
+                    // member-level values for the chunk too.
+                    if let Some(_field) = member.member_type.as_field() {
+                        return Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
+                            &obj_clone.string_value()?,
+                            &prop_name,
+                        )?));
+                    }
+                    let Some(text) = member.member_type.as_text() else {
+                        return Ok(player.alloc_datum(Datum::Void));
+                    };
+                    // Look up the par_info active at the chunk's start
+                    // position — line N's first character. par_run.position
+                    // values reference text-character offsets, same as
+                    // chunk char_start, so a direct walk works.
+                    let mut active_idx: Option<u16> = None;
+                    let pos = char_start as u32;
+                    for run in &text.par_runs {
+                        if run.position <= pos {
+                            active_idx = Some(run.par_info_index);
+                        } else {
+                            break;
+                        }
+                    }
+                    let par_info = active_idx
+                        .and_then(|idx| text.par_infos.get(idx as usize))
+                        .cloned();
+
+                    // Locate the styled span containing the chunk's start
+                    // char and snapshot its style fields — `player` is
+                    // mutably borrowed below for `alloc_datum` so we can't
+                    // hold a reference into the cast member at the same
+                    // time.
+                    let mut cum = 0usize;
+                    let active_span = text.html_styled_spans.iter().find(|span| {
+                        let span_chars = span.text.chars().count();
+                        let end = cum + span_chars;
+                        let hit = pos as usize >= cum && (pos as usize) < end.max(cum + 1);
+                        cum = end;
+                        hit
+                    }).or_else(|| text.html_styled_spans.first());
+                    let span_font_face: Option<String> = active_span
+                        .and_then(|s| s.style.font_face.clone());
+                    let span_font_size: Option<i32> = active_span
+                        .and_then(|s| s.style.font_size);
+                    let span_bold = active_span.map(|s| s.style.bold).unwrap_or(false);
+                    let span_italic = active_span.map(|s| s.style.italic).unwrap_or(false);
+                    let span_underline = active_span.map(|s| s.style.underline).unwrap_or(false);
+                    let span_color: Option<u32> = active_span.and_then(|s| s.style.color);
+                    let member_color = member.color.clone();
+                    let member_bg_color = member.bg_color.clone();
+                    let member_text_font = text.font.clone();
+                    let member_text_font_size = text.font_size as i32;
+                    let member_text_alignment = text.alignment.clone();
+                    let par_infos_snapshot: Vec<i32> = text.par_infos
+                        .iter()
+                        .map(|pi| pi.line_spacing)
+                        .collect();
+
+                    // Drop the read borrow on `member` / `text` before
+                    // touching `player.alloc_datum` (which needs `&mut player`).
+                    drop(member);
+
+                    match_ci!(prop_name, {
+                        "fixedLineSpace" => {
+                            // Per-line line_spacing with the same "0 means
+                            // inherit / use document default" fallback the
+                            // renderer applies — Director's getter returns
+                            // the MAX non-zero line_spacing across the
+                            // member's par_infos when this line's own value
+                            // is 0. Junkbot v1 level.num: par_infos =
+                            // [0, 16, 21, 0]; line[1] resolves to 0 →
+                            // fallback → 21 (matches Director).
+                            let val = par_info
+                                .as_ref()
+                                .map(|pi| pi.line_spacing)
+                                .filter(|&s| s != 0)
+                                .or_else(|| par_infos_snapshot.iter()
+                                    .copied()
+                                    .filter(|&s| s != 0)
+                                    .max())
+                                .unwrap_or(0);
+                            Ok(player.alloc_datum(Datum::Int(val)))
+                        },
+                        "topSpacing" => {
+                            let val = par_info.as_ref().map(|pi| pi.top_spacing).unwrap_or(0);
+                            Ok(player.alloc_datum(Datum::Int(val)))
+                        },
+                        "bottomSpacing" => {
+                            let val = par_info.as_ref().map(|pi| pi.bottom_spacing).unwrap_or(0);
+                            Ok(player.alloc_datum(Datum::Int(val)))
+                        },
+                        "alignment" => {
+                            let val = par_info.as_ref().map(|pi| pi.justification).unwrap_or(0);
+                            let s = match val {
+                                1 => "center".to_string(),
+                                2 => "right".to_string(),
+                                3 => "justify".to_string(),
+                                _ => member_text_alignment,
+                            };
+                            Ok(player.alloc_datum(Datum::String(s)))
+                        },
+                        "font" => {
+                            let val = span_font_face.unwrap_or(member_text_font);
+                            Ok(player.alloc_datum(Datum::String(val)))
+                        },
+                        "fontSize" => {
+                            let val = span_font_size.unwrap_or(member_text_font_size);
+                            Ok(player.alloc_datum(Datum::Int(val)))
+                        },
+                        "fontStyle" => {
+                            let mut item_refs = std::collections::VecDeque::new();
+                            if span_bold {
+                                item_refs.push_back(player.alloc_datum(Datum::Symbol("bold".to_string())));
+                            }
+                            if span_italic {
+                                item_refs.push_back(player.alloc_datum(Datum::Symbol("italic".to_string())));
+                            }
+                            if span_underline {
+                                item_refs.push_back(player.alloc_datum(Datum::Symbol("underline".to_string())));
+                            }
+                            Ok(player.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, item_refs, false)))
+                        },
+                        "color" => {
+                            let color_ref = if let Some(c) = span_color {
+                                crate::player::sprite::ColorRef::Rgb(
+                                    ((c >> 16) & 0xFF) as u8,
+                                    ((c >> 8) & 0xFF) as u8,
+                                    (c & 0xFF) as u8,
+                                )
+                            } else {
+                                member_color
+                            };
+                            Ok(player.alloc_datum(Datum::ColorRef(color_ref)))
+                        },
+                        "bgColor" => {
+                            Ok(player.alloc_datum(Datum::ColorRef(member_bg_color)))
+                        },
+                        _ => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
+                            &obj_clone.string_value()?,
+                            &prop_name,
+                        )?)),
+                    })
+                }
                 _ => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
                     &obj_clone.string_value()?,
                     &prop_name,
