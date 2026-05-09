@@ -36,6 +36,13 @@ impl BitmapMemberHandlers {
                 bitmap: bitmap.unwrap().clone(),
                 reg_point: bitmap_member.reg_point,
             })),
+            // `palette` and `paletteRef` are the same thing in our model —
+            // both return the bitmap's current PaletteRef. CS catalog
+            // scripts read both interchangeably (`member.palette` for
+            // applying a swap, `member.paletteRef` for inspecting). Without
+            // the alias, `put member("studiofloor_1_preview").palette`
+            // errored even though the matching setter at line 200 accepts
+            // the same name.
             "palette" | "paletteRef" => {
                 let palette = bitmap
                     .map(|x| x.palette_ref.clone())
