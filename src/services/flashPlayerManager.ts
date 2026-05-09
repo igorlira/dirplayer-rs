@@ -7,11 +7,20 @@
  */
 
 import { update_flash_frame, trigger_lingo_callback_on_script } from 'vm-rust';
+import {
+  isBridgeRequired,
+  waitForBridge,
+  bridgeCreatePlayer,
+  bridgeFindElement,
+  bridgeCallMethod,
+  bridgeDestroyPlayer,
+} from './ruffleBridgeClient';
 
 interface FlashInstance {
   castLib: number;
   castMember: number;
-  rufflePlayer: any; // RufflePlayerElement
+  rufflePlayer: any; // RufflePlayerElement (direct) or stub element (bridge mode)
+  bridgeId: string | null; // Set when this instance is driven by the main-world bridge
   container: HTMLDivElement;
   canvas: HTMLCanvasElement | null;
   width: number;
@@ -37,7 +46,12 @@ function getFetchRewriteRules(): Array<{pathPrefix: string, targetHost: string, 
   if (win.__dirplayerFlashConfig?.fetchRewriteRules) {
     return win.__dirplayerFlashConfig.fetchRewriteRules;
   }
-  // Local dev fallback
+  // Local dev fallback — when running against the local dev proxy
+  // (`127.0.0.1:3456`), rewrite Flash AMF gateway requests so the
+  // SWF's relative `/sf/*` POST goes there instead of the dev server.
+  // Production deployments populate
+  // `window.__dirplayerFlashConfig.fetchRewriteRules` via the polyfill's
+  // `configureFlash()` API and never hit this fallback.
   return [];
 }
 
@@ -124,7 +138,13 @@ async function loadRuffle(): Promise<any> {
     // so we don't collide with stock Ruffle if another copy is on the page
     // (e.g. via a browser extension or another script).
     const win = window as any;
-    if (win.dirplayer_RufflePlayer) {
+    // Test `.newest` directly — `win.dirplayer_RufflePlayer` may already
+    // exist as a config-only stub planted by `installFlashShims()` before
+    // the actual Ruffle bundle has loaded. The stub is truthy but has
+    // no `.newest()` method, so a plain truthy check would fall through
+    // to a TypeError when we try to invoke it. Treat the stub as
+    // "Ruffle not yet loaded" and surface the clearer error message.
+    if (typeof win.dirplayer_RufflePlayer?.newest === 'function') {
       const ruffle = win.dirplayer_RufflePlayer.newest();
       return ruffle;
     }
@@ -182,7 +202,15 @@ export async function createFlashInstance(
 
   try {
 
-  const ruffle = await loadRuffle();
+  // Bridge mode: extension content scripts run in an isolated world
+  // where `customElements` is null, so Ruffle (which registers a
+  // custom element in `createPlayer`) cannot be invoked here directly.
+  // The service worker registers Ruffle in the page's main world; we
+  // talk to it via window.postMessage. See ruffleBridgeClient.ts and
+  // public/dirplayer-ruffle-bridge-host.js.
+  const bridgeMode = isBridgeRequired();
+  let player: any;
+  let bridgeId: string | null = null;
 
   // Hidden container for Ruffle - pixels are read back and composited into dirplayer's canvas
   const container = document.createElement('div');
@@ -194,16 +222,31 @@ export async function createFlashInstance(
   container.style.overflow = 'hidden';
   document.body.appendChild(container);
 
-  // Create and configure the Ruffle player element
-  const player = ruffle.createPlayer();
-  player.style.width = `${width}px`;
-  player.style.height = `${height}px`;
-  container.appendChild(player);
+  if (bridgeMode) {
+    if (!(await waitForBridge())) {
+      throw new Error('main-world Ruffle bridge did not become ready');
+    }
+    bridgeId = await bridgeCreatePlayer();
+    const elem = bridgeFindElement(bridgeId);
+    if (!elem) throw new Error('bridge created player but DOM element not found: ' + bridgeId);
+    player = elem;
+    player.style.width = `${width}px`;
+    player.style.height = `${height}px`;
+    container.appendChild(player);
+  } else {
+    // Direct mode (page-loaded polyfill, same world as Ruffle).
+    const ruffle = await loadRuffle();
+    player = ruffle.createPlayer();
+    player.style.width = `${width}px`;
+    player.style.height = `${height}px`;
+    container.appendChild(player);
+  }
 
   const instance: FlashInstance = {
     castLib,
     castMember,
     rufflePlayer: player,
+    bridgeId,
     container,
     canvas: null,
     width,
@@ -240,10 +283,11 @@ export async function createFlashInstance(
   }
   const actualSwfData = dataCopy.slice(swfOffset);
 
-  // Load the SWF data into Ruffle
-  // Use .ruffle().load() API as per Ruffle's selfhosted interface
-  const ruffleInstance = player.ruffle();
-  await ruffleInstance.load({
+  // Load the SWF data into Ruffle. Direct mode goes through
+  // `player.ruffle().load(...)` (the selfhosted API entry point);
+  // bridge mode delegates to the main-world host because chained
+  // method calls like `.ruffle().load(...)` can't cross worlds.
+  const loadConfig = {
     data: actualSwfData,
     allowScriptAccess: true,
     openUrlMode: 'deny',
@@ -254,7 +298,15 @@ export async function createFlashInstance(
     wmode: 'transparent',
     renderer: 'canvas',  // Force Canvas2D so we can read pixels back
     socketProxy: getSocketProxyConfig(),
-  });
+  };
+  if (bridgeId) {
+    // The host's `callMethod` convention: methodName='load' resolves
+    // via `player.ruffle().load(args)` on the main-world side.
+    await bridgeCallMethod(bridgeId, 'load', [loadConfig]);
+  } else {
+    const ruffleInstance = player.ruffle();
+    await ruffleInstance.load(loadConfig);
+  }
 
   // Find the internal canvas element that Ruffle renders to
   await new Promise<void>((resolve) => {
@@ -336,7 +388,14 @@ export function destroyFlashInstance(castLib: number, castMember: number): void 
   }
 
   try {
+    // The DOM element lives in the page (shared between worlds), so
+    // `.remove()` is safe to call from either side. Bridge mode also
+    // tells the main-world host to drop its registry entry so the
+    // RufflePlayer object can be GCed.
     instance.rufflePlayer.remove();
+    if (instance.bridgeId) {
+      void bridgeDestroyPlayer(instance.bridgeId);
+    }
   } catch (e) {
     // Ignore cleanup errors
   }
@@ -792,6 +851,9 @@ export function destroyAllFlashInstances(): void {
     }
     try {
       instance.rufflePlayer.remove();
+      if (instance.bridgeId) {
+        void bridgeDestroyPlayer(instance.bridgeId);
+      }
     } catch (e) {
       // Ignore
     }
