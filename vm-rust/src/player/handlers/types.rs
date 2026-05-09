@@ -539,7 +539,18 @@ impl TypeHandlers {
             return Some(final_result);
         }
 
-        None
+        // Director Lingo treats an all-digit string (optionally signed) as an
+        // integer even when the value exceeds i32 range — Habbo's parseFigure
+        // calls `integerp(integer(figure))` on a 25-digit figure string just to
+        // confirm it's numeric, and relies on `integerp` returning true. Match
+        // that by saturating the parse so the result type stays Int rather
+        // than collapsing to Void.
+        if let Ok(big) = result.parse::<i64>() {
+            return Some(big.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+        }
+        // Even larger than i64: saturate based on sign.
+        let is_negative = result.starts_with('-');
+        Some(if is_negative { i32::MIN } else { i32::MAX })
     }
 
     pub fn integer(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
