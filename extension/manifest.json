@@ -23,9 +23,20 @@
     }
   ],
   "host_permissions": ["<all_urls>"],
-  "permissions": [],
+  "permissions": ["scripting"],
+  "background": {
+    "service_worker": "extension/src/background.ts",
+    "type": "module"
+  },
   "web_accessible_resources": [{
-    "resources": ["vm-rust/pkg/*", "charmap-system.png"],
+    "resources": [
+      "vm-rust/pkg/*",
+      "charmap-system.png",
+      "dirplayer-shockwave-polyfill.js",
+      "dirplayer-ruffle-bridge-host.js",
+      "dirplayer-pre-init.js",
+      "ruffle/*"
+    ],
     "matches": ["<all_urls>"]
   }]
 }
