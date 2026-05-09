@@ -23,9 +23,6 @@ impl BitmapMemberHandlers {
         let bitmap_ref = bitmap_member.image_ref;
         let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref);
 
-        let reg_x = bitmap_member.reg_point.0 as i32;
-        let reg_y = bitmap_member.reg_point.1 as i32;
-
         if !bitmap.is_some() {
             return Err(ScriptError::new(format!(
                 "Cannot get prop of invalid bitmap ref"
@@ -35,14 +32,10 @@ impl BitmapMemberHandlers {
             "width" => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
             "height" => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
             "image" | "picture" => Ok(Datum::BitmapRef(bitmap_ref)),
-            "media" => Ok(Datum::Media(Media::Bitmap(bitmap.unwrap().clone()))),
-            // `palette` and `paletteRef` are the same thing in our model —
-            // both return the bitmap's current PaletteRef. CS catalog
-            // scripts read both interchangeably (`member.palette` for
-            // applying a swap, `member.paletteRef` for inspecting). Without
-            // the alias, `put member("studiofloor_1_preview").palette`
-            // errored even though the matching setter at line 200 accepts
-            // the same name.
+            "media" => Ok(Datum::Media(Media::Bitmap {
+                bitmap: bitmap.unwrap().clone(),
+                reg_point: bitmap_member.reg_point,
+            })),
             "palette" | "paletteRef" => {
                 let palette = bitmap
                     .map(|x| x.palette_ref.clone())
@@ -144,8 +137,8 @@ impl BitmapMemberHandlers {
             }
             "media" => {
                 let media = value.media_value()?;
-                let media_bitmap = match media {
-                    Media::Bitmap(bitmap) => bitmap,
+                let (media_bitmap, media_reg_point) = match media {
+                    Media::Bitmap { bitmap, reg_point } => (bitmap, reg_point),
                     _ => return Err(ScriptError::new("Expected a bitmap media".to_string())),
                 };
                 reserve_player_mut(|player| {
@@ -159,6 +152,15 @@ impl BitmapMemberHandlers {
                         bitmap_member.image_ref
                     };
                     player.bitmap_manager.replace_bitmap(member_image_ref, media_bitmap.clone());
+
+                    let cast_member = player
+                        .movie
+                        .cast_manager
+                        .find_mut_member_by_ref(member_ref)
+                        .unwrap();
+                    let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                    bitmap_member.reg_point = media_reg_point;
+                    cast_member.reg_point = (media_reg_point.0 as i32, media_reg_point.1 as i32);
                     Ok(())
                 })
             }
