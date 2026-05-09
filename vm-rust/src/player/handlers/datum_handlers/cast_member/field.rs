@@ -223,10 +223,29 @@ impl FieldMemberHandlers {
                         .ok_or_else(|| ScriptError::new("System font not available".to_string()))?
                 };
 
-                let (measured_w, measured_h) =
-                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
+                // Use wrap-aware measurement when word_wrap is on so the
+                // rect/height getter reports the wrapped layout — Director's
+                // `the rect of member` for a wrapped field returns the
+                // authored width and the height of the wrapped text. Without
+                // this, our rect/height returned `measure_text(...)` which
+                // measures unwrapped (single-line) — a long-line field
+                // reported a too-wide rect (right = unwrapped line width
+                // instead of field.width) and a too-short height (line
+                // count of unwrapped vs wrapped). `pageHeight` already does
+                // the wrap-aware path.
+                let (measured_w, measured_h) = if word_wrap && field_width > 0 {
+                    measure_text_wrapped(
+                        &text_clone, &font, field_width, true,
+                        fixed_line_space, top_spacing, 0, 0,
+                    )
+                } else {
+                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0)
+                };
                 let width = if field_width > 0 {
-                    field_width.max(measured_w)
+                    // Clamp to authored field.width when set — a wrapped
+                    // field's display width is the authored width, not the
+                    // measured (which may be the longest unwrapped line).
+                    if word_wrap { field_width } else { field_width.max(measured_w) }
                 } else {
                     measured_w
                 };
@@ -283,7 +302,7 @@ impl FieldMemberHandlers {
                             original_dst_rect: None,
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None,
+                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         };
 
                         bitmap.draw_text(
@@ -383,8 +402,24 @@ impl FieldMemberHandlers {
                         field_data.width = w;
                     }
                     if h > 0 {
-                        field_data.fixed_line_space = h;
+                        // Field BOX height — NOT line stride. The earlier
+                        // assignment `fixed_line_space = h` clobbered the
+                        // per-line stride with the box height (Coke Studios
+                        // InfoStandDescription: rect=(0,0,190,55) made
+                        // fixed_line_space=55 which the renderer then used
+                        // as the line stride, putting each glyph at the
+                        // bottom of a 55-px cell — only line 1 fit in the
+                        // texture and showed at the bottom of the field).
+                        field_data.height = h;
                     }
+                    // Keep rect_* in sync so callers like
+                    // get_concrete_sprite_rect (which uses these for
+                    // bounding-box arithmetic) see the script-authored
+                    // rect, not the FieldMember::new() defaults.
+                    field_data.rect_left = x1 as i16;
+                    field_data.rect_top = y1 as i16;
+                    field_data.rect_right = x2 as i16;
+                    field_data.rect_bottom = y2 as i16;
 
                     Ok(())
                 }
@@ -409,7 +444,12 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().width = value? as u16;
+                    let w = value? as u16;
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    field.width = w;
+                    // Mirror into rect_* (right = left + w) so consumers
+                    // that read rect_right/rect_left stay consistent.
+                    field.rect_right = field.rect_left.saturating_add(w as i16);
                     Ok(())
                 },
             ),
@@ -417,7 +457,15 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().fixed_line_space = value? as u16;
+                    let h = value? as u16;
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    // Field BOX height. Do NOT touch `fixed_line_space` —
+                    // that's the per-line stride (e.g. 13 for 12pt) and
+                    // setting it to the box height (e.g. 55) makes the
+                    // renderer place each glyph at the bottom of a tall
+                    // cell. See `rect` setter above for the same bug fix.
+                    field.height = h;
+                    field.rect_bottom = field.rect_top.saturating_add(h as i16);
                     Ok(())
                 },
             ),

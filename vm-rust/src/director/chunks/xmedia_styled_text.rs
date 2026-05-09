@@ -58,12 +58,21 @@ impl XmedStyledText {
                 return pi.line_spacing;
             }
         }
-        // Find the first non-zero par_info as the document default.
-        // Director treats `par_info[par_run_idx].line_spacing == 0` as
-        // "inherit" rather than "literally 0 px".
+        // When the line's par_info has line_spacing=0 ("inherit"),
+        // Director uses the MAX non-zero line_spacing across the member
+        // as the document default. Verified against Junkbot v1 level.num
+        // (par_infos = [0, 16, 21, 0], 16 lines): Director reports
+        // `line[1].fixedLineSpace = 21` even though par_run[0] points to
+        // par_info[0] (= 0); the renderer's page_height = 15 × 21 + 16 =
+        // 331 confirms the layout — most lines stride at the max value
+        // (21), with the explicit non-default 16 reserved for the last
+        // line. A "first non-zero" fallback would have returned 16, off
+        // by 5 px per line.
         self.par_infos
             .iter()
-            .find_map(|pi| if pi.line_spacing != 0 { Some(pi.line_spacing) } else { None })
+            .map(|pi| pi.line_spacing)
+            .filter(|&s| s != 0)
+            .max()
             .unwrap_or(0)
     }
 }
@@ -601,11 +610,42 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
     } else {
         active_style.word_wrap
     };
-    // Director's `fixedLineSpace` defaults to 0, meaning "use the font's natural
-    // line height". The renderer computes a font-based fallback (char_height) when
-    // this is 0; only populate a non-zero value if the XMED actually authored one
-    // via the paragraph info's line_spacing field.
-    let fixed_line_space: u16 = if paragraph_info.line_spacing > 0 {
+    // Director's `member.fixedLineSpace` reads the line_spacing of the
+    // par_info that par_run[0] points to — i.e. the paragraph applied at
+    // text position 0. This is the dominant authored stride for the
+    // member as a whole.
+    //
+    // Verified against Junkbot v1 level.num / level.name / level.moves
+    // (par_infos = [0, 16, 21, 0], par_run[0] → par_info[2] = 21):
+    // Director reports `member.fixedLineSpace = 21`. And Junkbot v1
+    // brick-info member 139 (par_run[0] → par_info[0] = 0): Director
+    // reports `member.fixedLineSpace = 0` so per-line par_info values
+    // drive the rendering (including the special 6 for the empty line
+    // before "eyeBOT").
+    //
+    // The legacy heuristic at `parse_section_8` (reading `paragraph_info
+    // .line_spacing` from a hard-coded index in the packed value stream)
+    // was unreliable — it landed on 16 for member 14 and on 21 for
+    // members 15/16, even though all three have identical par_info
+    // structures. par_run[0] is the authoritative source.
+    let fixed_line_space: u16 = if !section5_char_runs.is_empty() && !par_infos.is_empty() {
+        // par_run[0]'s par_info is the authoritative member-level
+        // line_spacing. Trust its value INCLUDING zero — a zero here
+        // means "no member-level stride; per-paragraph par_infos drive
+        // rendering". Junkbot brick info members (120 'HELP_text_1',
+        // 121 'HELP_text_2', 139 EYEBOT) all have par_run[0] →
+        // par_info[0] = 0 and rely on per-line par_info gaps for
+        // empty-paragraph spacing; without trusting the 0 the legacy
+        // heuristic below picks up unrelated values (HELP_text_1 lands
+        // on 11) and forces every line to that stride.
+        section5_char_runs
+            .first()
+            .and_then(|cr| par_infos.get(cr.style_index as usize))
+            .map(|pi| pi.line_spacing as u16)
+            .unwrap_or(0)
+    } else if paragraph_info.line_spacing > 0 {
+        // Older / simpler XMED members without par_runs+par_infos: use
+        // the legacy `parse_section_8` heuristic (single ParagraphInfo).
         paragraph_info.line_spacing as u16
     } else {
         0
@@ -693,64 +733,26 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         }
         Some(style.font_size)
     };
-    // HTML-style detector: 0x0004's first run references a real authored
-    // style. Two signals must hold:
+    // member.fontSize sources style.font_size directly. Since the parser
+    // applies Paige's `dword84` (real `point`) on every style, the first
+    // char run's style carries the correct authored point size for both
+    // Director-text and HTML members — no HTML size-class rounding is
+    // needed. The previous detector ("word48 != 0 → HTML, round up via
+    // HTML_PT") false-positived on Director-text members where word48 is
+    // also non-zero, e.g. member 35 (Verdana 9pt italic, word48=2): the
+    // 9pt point size got rounded up to 10pt via HTML_PT[1].
     //
-    //   1. word0 (font_index_raw) is small (< 8). Section 9 sometimes
-    //      declares many synthesised entries (member 74 declares 15),
-    //      so `font_index_valid` (a `< font_names.len()` check) is
-    //      unreliable. Real authored styles reference the first few
-    //      fonts only.
-    //   2. word48 is non-zero. word48 stores the per-style HTML size
-    //      class — non-zero when the wrapping `<font>` tag had a
-    //      `size=N` attribute, zero when no size was set. When zero
-    //      Director defers to the document default for member.fontSize
-    //      (verified against member 16's credits screen — every
-    //      `<font>` tag lacks `size=`, all char-run styles have
-    //      word48=0, Director returns 12).
-    const HTML_AUTHORED_FONT_INDEX_LIMIT: i32 = 8;
-    let s4_first_style_is_html = section4_char_runs
-        .first()
-        .and_then(|r| style_data.styles.get(r.style_index as usize))
-        .map(|s| {
-            s.font_index_raw >= 0
-                && s.font_index_raw < HTML_AUTHORED_FONT_INDEX_LIMIT
-                && s.font_size > 0
-                && s.word48_raw != 0
-        })
-        .unwrap_or(false);
-    fn map_html_pt(stored: u16) -> u16 {
-        const HTML_PT: [u16; 7] = [8, 10, 12, 14, 18, 24, 36];
-        for &pt in &HTML_PT {
-            if pt >= stored {
-                return pt;
-            }
-        }
-        stored
-    }
-    // Two branches for member.fontSize:
-    //   A. HTML with explicit `<font size=N>` (s4_first_style_is_html
-    //      already gates word0<8 AND word48!=0): apply HTML pt map.
-    //   B. Otherwise: use the first run's style font_size directly. We
-    //      now source style.font_size from Paige's `dword84` (real
-    //      `point`), so the first-run style carries the correct authored
-    //      size — Junkbot brick info member 141 uses style[4] with
-    //      dword84 → 6 px and Director reports `member.fontSize = 6`.
-    //      The legacy "word48==0 → fall back to styles[0].font_size"
-    //      override was a workaround for word46 (style_num) being
-    //      mis-read as fontSize and is no longer needed.
-    let default_font_size = if s4_first_style_is_html {
-        lookup_size_via(&section4_char_runs).map(map_html_pt)
-    } else {
-        let s4 = lookup_size_via(&section4_char_runs);
-        let s5 = lookup_size_via(&section5_char_runs);
-        match (s4, s5) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
-    };
+    // Prefer Section 0x0004 (style runs — the authoritative char-run table
+    // pointing into Section 7 styles). Fall back to Section 0x0005 only
+    // when 0x0004 is absent, empty, or its first run points to an invalid
+    // style (e.g. member 74 FurniFactory clock display: style[4] INVALID
+    // → s4=None → use s5=12). Worldbuilder member 290 'Guard Tower':
+    // s4=25 (style[6]=Arial Black 25), s5=12 (par_info table reused as
+    // style index, points to style[0]=Arial 12). The earlier `min` rule
+    // mis-picked the smaller value for member 290 — Director returns 25.
+    let s4 = lookup_size_via(&section4_char_runs);
+    let s5 = lookup_size_via(&section5_char_runs);
+    let default_font_size = s4.or(s5);
 
     // When Section 7 declares 0 styles AND no char-run path produced a
     // size, fall back to the HTML `<font size=N>` attribute Director
@@ -1312,9 +1314,11 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
         // S7.7 reports word46=5 but Director queries fontSize=6; the real
         // value lives in `dword84` (pg_fixed point) where 393216/65536=6.
         // Override style.font_size with the dword84 value when it's set.
+        let mut paige_slots: Vec<i32> = Vec::with_capacity(11);
         for i in 0..11 {
             if !parse_failed && packer.remaining() >= 2 {
                 let value = packer.unpack_num();
+                paige_slots.push(value);
                 // dword84 is at index 1 — Paige's `point` (font size in
                 // 16.16 fixed-point). Trust it over word46.
                 if i == 1 {
@@ -1381,9 +1385,15 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
             }
 
             if gap2.len() >= 3 {
-                style.bold = gap2[0] == 1;
-                style.italic = gap2[1] == 1;
-                style.underline = gap2[2] == 1;
+                // Paige's `style_info.styles[]` array (PAIGE.H:419-449) uses
+                // any non-zero short to mean "set". Empirically, Director text
+                // members written via the dialog use `1` while HTML imports
+                // (and pgFillStylesFromLogFont) use `-1` (= 65535). Either is
+                // truthy, so the test must be `!= 0` not `== 1` — the latter
+                // silently drops bold/italic/underline on every HTML member.
+                style.bold = gap2[0] != 0;
+                style.italic = gap2[1] != 0;
+                style.underline = gap2[2] != 0;
                 debug!("    Style {}: gap2[0-2]=[{},{},{}] -> bold={}, italic={}, underline={}",
                                                  style_idx, gap2[0], gap2[1], gap2[2],
                                                  style.bold, style.italic, style.underline);

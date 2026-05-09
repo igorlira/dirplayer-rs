@@ -44,6 +44,11 @@ pub struct CopyPixelsParams<'a> {
     /// For ink 9 (Mask): the next cast member's bitmap used as grayscale alpha mask.
     /// Black=opaque, white=transparent, grays=partial transparency.
     pub ink9_mask_bitmap: Option<&'a Bitmap>,
+    /// For ink 9: offset added to (sx, sy) when sampling the mask bitmap, so
+    /// the mask aligns to the source by their registration points
+    /// (mask_reg - src_reg). Director allows mask bitmaps to be larger or
+    /// smaller than the source — alignment is by registration point.
+    pub ink9_mask_offset: (i32, i32),
 }
 
 impl CopyPixelsParams<'_> {
@@ -63,6 +68,7 @@ impl CopyPixelsParams<'_> {
             sprite: None,
             original_dst_rect: None,
             ink9_mask_bitmap: None,
+            ink9_mask_offset: (0, 0),
         }
     }
 }
@@ -1347,9 +1353,31 @@ impl Bitmap {
             }
         }
 
-        // Fill if fillMode != 0 (solid fill)
-        if vector_data.fill_mode != 0 && all_points.len() >= 3 {
-            self.scanline_fill_polygon(&all_points, vector_data.fill_color, palettes, alpha);
+        // Fill if fillMode != 0 AND the shape is closed.
+        // fill_mode 1 = solid, fill_mode 2 = gradient (radial fill from
+        // centroid → bbox corner). Only closed paths get a fill — an
+        // open Bezier curve (like figure8 member "Intern", a thin
+        // brown curve with strokeWidth 6) has fillMode authored as
+        // #none in Director, but historically dirplayer parsed
+        // fill_mode incorrectly (always 1 due to wrong FLSH offset)
+        // AND filled regardless of `closed` — so open curves rendered
+        // as filled blobs. With FLSH offsets now corrected (fillMode
+        // at 0x84) the fill_mode is right; this `closed` gate keeps
+        // open paths un-filled even if a future shape ends up with
+        // fill_mode != 0 + closed = false (Director quirk: SVG-style
+        // implicit-close fills are NOT applied to open paths).
+        // The catalog floor preview's `floor_shape_preview` uses
+        // fill_mode 2 with closed=true → still fills correctly.
+        if vector_data.fill_mode != 0 && vector_data.closed && all_points.len() >= 3 {
+            let is_gradient = vector_data.fill_mode == 2;
+            self.scanline_fill_polygon_gradient(
+                &all_points,
+                vector_data.fill_color,
+                vector_data.end_color,
+                is_gradient,
+                palettes,
+                alpha,
+            );
         }
 
         // Anti-aliased stroke
@@ -1425,17 +1453,54 @@ impl Bitmap {
         palettes: &PaletteMap,
         alpha: f32,
     ) {
+        // Solid-fill convenience wrapper.
+        self.scanline_fill_polygon_gradient(points, color, color, false, palettes, alpha);
+    }
+
+    /// Polygon scanline fill with optional radial gradient. When
+    /// `is_gradient` is true, pixels closer to the polygon centroid get
+    /// `fill_color` and pixels at the bounding-box corners get `end_color`,
+    /// with linear interpolation in between. CS catalog floor preview
+    /// (`floor_shape_preview`) needs gradient fill so its trapezoid renders
+    /// with the brown start→end ramp instead of a flat colour.
+    fn scanline_fill_polygon_gradient(
+        &mut self,
+        points: &[(f32, f32)],
+        fill_color: (u8, u8, u8),
+        end_color: (u8, u8, u8),
+        is_gradient: bool,
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
         if points.len() < 3 || alpha == 0.0 {
             return;
         }
 
-        // Find vertical extent
+        // Find extent
+        let mut min_x = f32::MAX;
         let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
         let mut max_y = f32::MIN;
+        let mut sum_x = 0.0f32;
+        let mut sum_y = 0.0f32;
         for p in points.iter() {
+            min_x = min_x.min(p.0);
             min_y = min_y.min(p.1);
+            max_x = max_x.max(p.0);
             max_y = max_y.max(p.1);
+            sum_x += p.0;
+            sum_y += p.1;
         }
+        let cx = sum_x / points.len() as f32;
+        let cy = sum_y / points.len() as f32;
+        let max_dist = {
+            let dx1 = (max_x - cx).abs();
+            let dx2 = (cx - min_x).abs();
+            let dy1 = (max_y - cy).abs();
+            let dy2 = (cy - min_y).abs();
+            (dx1.max(dx2).powi(2) + dy1.max(dy2).powi(2)).sqrt().max(1.0)
+        };
+
         let y_start = min_y.floor() as i32;
         let y_end = max_y.ceil() as i32;
 
@@ -1465,6 +1530,18 @@ impl Bitmap {
                 let x_start = intersections[i].ceil() as i32;
                 let x_end = intersections[i + 1].floor() as i32;
                 for x in x_start..=x_end {
+                    let color = if is_gradient {
+                        let dx = x as f32 + 0.5 - cx;
+                        let dy = y as f32 + 0.5 - cy;
+                        let t = ((dx * dx + dy * dy).sqrt() / max_dist).clamp(0.0, 1.0);
+                        (
+                            ((1.0 - t) * fill_color.0 as f32 + t * end_color.0 as f32) as u8,
+                            ((1.0 - t) * fill_color.1 as f32 + t * end_color.1 as f32) as u8,
+                            ((1.0 - t) * fill_color.2 as f32 + t * end_color.2 as f32) as u8,
+                        )
+                    } else {
+                        fill_color
+                    };
                     if alpha == 1.0 {
                         self.set_pixel(x, y, color, palettes);
                     } else {
@@ -1622,6 +1699,7 @@ impl Bitmap {
             sprite,
             original_dst_rect,
             ink9_mask_bitmap: None,
+            ink9_mask_offset: (0, 0),
         };
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
@@ -1747,14 +1825,9 @@ impl Bitmap {
             _ => 0, // Director default
         }; 
 
-        // ink == 8 is Director's Matte ink: always run the matte logic
-        // regardless of the per-member trim_white_space flag. The matte is
-        // flood-filled from the edges so only bg-connected regions become
-        // transparent, which is exactly Matte ink's documented behaviour.
         let is_matte_bitmap =
             src.trim_white_space
-            || params.is_text_rendering
-            || ink == 8;
+            || params.is_text_rendering;
 
         let use_grayscale_as_alpha = match src.palette_ref {
             PaletteRef::BuiltIn(palette) => {
@@ -2039,35 +2112,65 @@ impl Bitmap {
                     };
 
                     // Bitmap ink=0 colorization: mirrors the WebGL2 shader logic.
-                    // bgColor default is white (255,255,255) → substitute white source
-                    // pixels with bg_color when has_back_color=true AND bg!=white.
-                    // foreColor default is black (0,0,0) → substitute black source
-                    // pixels with fg_color when has_fore_color=true AND fg!=black.
-                    // An explicit `#bgColor` / `#color` in the copyPixels param
-                    // list (Lingo direct bitmap op, no sprite) also counts —
-                    // Coke Studios' chat renderer tints `cc.bubble.left` with
-                    // the avatar chest color via
-                    // `bubblename.copyPixels(sourceimg, ..., [#bgColor: cColor])`.
+                    // bgColor default is white (255,255,255), foreColor default
+                    // is black (0,0,0); explicit `#bgColor` / `#color` in the
+                    // copyPixels param list (Lingo direct bitmap op, no sprite)
+                    // counts as "set". Coke Studios' chat renderer relies on
+                    // this for `bubblename.copyPixels(... [#bgColor: cColor])`,
+                    // and the catalog list does the same per separator icon.
+                    //
+                    // Lerp NEAR-grayscale pixels along the eff_fg→eff_bg ramp.
+                    // Coloured detail pixels (e.g. the brown wood-grain baked
+                    // into each catalog separator's `_small` icon) keep their
+                    // authored RGB so the icon retains its detail while the
+                    // white/grey shading picks up the requested tint.
+                    //
+                    // Strict R=G=B was too narrow — palette-indexed icons often
+                    // dither their grey shades into nearly-equal-but-not-quite
+                    // values like (200, 198, 199), so only one face of an
+                    // isometric box would tint. A small RGB span tolerance
+                    // catches those without touching the brown-ish details
+                    // (whose channels diverge by 30+).
                     let sprite_bg = params.sprite.map_or(false, |sp| sp.has_back_color);
                     let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
                     let apply_bg = sprite_bg || params.bg_color_explicit;
                     let apply_fg = sprite_fg || params.fore_color_explicit;
-                    if apply_bg && bg_color_resolved != (255, 255, 255)
-                        && (sr, sg, sb) == (255, 255, 255)
-                    {
-                        sr = bg_color_resolved.0;
-                        sg = bg_color_resolved.1;
-                        sb = bg_color_resolved.2;
-                    }
-                    if apply_fg && fg_color_resolved != (0, 0, 0)
-                        && (sr, sg, sb) == (0, 0, 0)
-                    {
-                        sr = fg_color_resolved.0;
-                        sg = fg_color_resolved.1;
-                        sb = fg_color_resolved.2;
+                    if apply_bg || apply_fg {
+                        let max_c = sr.max(sg).max(sb);
+                        let min_c = sr.min(sg).min(sb);
+                        let near_grayscale = max_c - min_c <= 16;
+                        if near_grayscale {
+                            let eff_fg = if apply_fg { fg_color_resolved } else { (0u8, 0u8, 0u8) };
+                            let eff_bg = if apply_bg { bg_color_resolved } else { (255u8, 255u8, 255u8) };
+                            if eff_fg != (0, 0, 0) || eff_bg != (255, 255, 255) {
+                                let gray = ((sr as u16 + sg as u16 + sb as u16) / 3) as u8;
+                                let t = gray as f32 / 255.0;
+                                sr = ((1.0 - t) * eff_fg.0 as f32 + t * eff_bg.0 as f32) as u8;
+                                sg = ((1.0 - t) * eff_fg.1 as f32 + t * eff_bg.1 as f32) as u8;
+                                sb = ((1.0 - t) * eff_fg.2 as f32 + t * eff_bg.2 as f32) as u8;
+                            }
+                        }
                     }
 
-                    self.set_pixel_fast(dst_x, dst_y, (sr, sg, sb), &dst_palette_cache);
+                    // Apply #blend (alpha) when < 100. The CS catalog's
+                    // WFpreview script overlays the gray studiofloor pattern
+                    // on top of the colored floor gradient using
+                    // `[#blend: FloorTextureblend, #maskImage: floormatte]`
+                    // — no ink, so the default ink:0 path runs, and without
+                    // alpha-blending here the gray pattern fully overwrote
+                    // the colored gradient. Other indexed inks (2/36) already
+                    // do this; ink:0 was a gap.
+                    let final_color = if alpha >= 0.999 {
+                        (sr, sg, sb)
+                    } else {
+                        let dst_color = if !dst_palette_cache.is_empty() {
+                            self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16)
+                        } else {
+                            self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                        };
+                        blend_color_alpha(dst_color, (sr, sg, sb), alpha)
+                    };
+                    self.set_pixel_fast(dst_x, dst_y, final_color, &dst_palette_cache);
                     continue;
                 }
 
@@ -2307,7 +2410,19 @@ impl Bitmap {
                     // If alpha channel disabled → fully opaque
                     let src_alpha = 1.0;
 
-                    let src_color = (sr, sg, sb);
+                    let mut src_color = (sr, sg, sb);
+
+                    // foreColor multiply tint (Director ink=8 + #color/sprite.color
+                    // semantics): grayscale dirt overlays in the catalog wall
+                    // preview need to multiply with the sprite/copyPixels
+                    // foreColor so the gray pattern reads as a darker shade of
+                    // the wall colour, not as a desaturating gray smear.
+                    let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
+                    let has_fg = sprite_fg || params.fore_color_explicit;
+                    if has_fg && fg_color_resolved != (0, 0, 0) {
+                        src_color = Self::apply_forecolor_tint(src_color, fg_color_resolved);
+                    }
+
                     let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
@@ -2324,8 +2439,22 @@ impl Bitmap {
                 // Black=opaque, white=transparent, grays=partial transparency
                 if ink == 9 {
                     if let Some(mask_bmp) = params.ink9_mask_bitmap {
-                        let mx = (sx).min(mask_bmp.width.saturating_sub(1));
-                        let my = (sy).min(mask_bmp.height.saturating_sub(1));
+                        // Director aligns the mask to the source by their
+                        // registration points; ink9_mask_offset =
+                        // mask_reg - src_reg. Sample positions that fall
+                        // outside the mask (negative or >= mask dim) are
+                        // treated as transparent.
+                        let mx_signed = sx as i32 + params.ink9_mask_offset.0;
+                        let my_signed = sy as i32 + params.ink9_mask_offset.1;
+                        if mx_signed < 0
+                            || my_signed < 0
+                            || mx_signed >= mask_bmp.width as i32
+                            || my_signed >= mask_bmp.height as i32
+                        {
+                            continue; // outside mask coverage → transparent
+                        }
+                        let mx = mx_signed as u16;
+                        let my = my_signed as u16;
                         let (mr, mg, mb) = mask_bmp.get_pixel_color(palettes, mx, my);
                         // Invert grayscale: black(0)→opaque(1.0), white(255)→transparent(0.0)
                         let gray = (mr as u16 + mg as u16 + mb as u16) / 3;
@@ -2346,13 +2475,47 @@ impl Bitmap {
                             src.get_pixel_color(palettes, sx, sy)
                         };
 
+                        let sa_f = mask_alpha * alpha;
+
+                        // For 32-bit alpha-aware destinations (filmloop
+                        // bitmaps), write src RGB unchanged with proper alpha
+                        // so the eventual stage composite produces the right
+                        // translucent fade. Going through set_pixel_fast
+                        // would lerp src toward transparent dst (darkening
+                        // bright src pixels) and then force dst alpha=0xFF —
+                        // turning a soft flame into an opaque dark blob.
+                        if self.bit_depth == 32 && self.use_alpha {
+                            if sa_f < 0.001 {
+                                continue;
+                            }
+                            let idx = (dst_y as usize * self.width as usize + dst_x as usize) * 4;
+                            if idx + 3 < self.data.len() {
+                                let dr = self.data[idx] as f32;
+                                let dg = self.data[idx + 1] as f32;
+                                let db = self.data[idx + 2] as f32;
+                                let da = self.data[idx + 3] as f32 / 255.0;
+                                let one_minus_sa = 1.0 - sa_f;
+                                let out_a = sa_f + da * one_minus_sa;
+                                if out_a < 0.001 {
+                                    self.data[idx + 3] = 0;
+                                } else {
+                                    let inv = 1.0 / out_a;
+                                    self.data[idx]     = ((sr as f32 * sa_f + dr * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+                                    self.data[idx + 1] = ((sg as f32 * sa_f + dg * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+                                    self.data[idx + 2] = ((sb as f32 * sa_f + db * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+                                    self.data[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+                                }
+                            }
+                            continue;
+                        }
+
                         let dst_color = if !dst_palette_cache.is_empty() {
                             self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16)
                         } else {
                             self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
                         };
 
-                        let blended = blend_color_alpha(dst_color, (sr, sg, sb), mask_alpha * alpha);
+                        let blended = blend_color_alpha(dst_color, (sr, sg, sb), sa_f);
                         self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                         continue;
                     }
@@ -2510,10 +2673,10 @@ impl Bitmap {
 
                     let mut src_color = (sr, sg, sb);
 
-                    if let Some(sprite) = params.sprite {
-                        if sprite.has_fore_color && fg_color_resolved != (0, 0, 0) {
-                            src_color = Self::apply_forecolor_tint(src_color, fg_color_resolved);
-                        }
+                    let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
+                    let has_fg = sprite_fg || params.fore_color_explicit;
+                    if has_fg && fg_color_resolved != (0, 0, 0) {
+                        src_color = Self::apply_forecolor_tint(src_color, fg_color_resolved);
                     }
 
                     let dst_color =
@@ -2617,6 +2780,47 @@ impl Bitmap {
                     continue;
                 }
 
+                // Ink 32 (Blend): the sprite uses its blend% as alpha.
+                // For 32-bit alpha-aware destinations (filmloop bitmaps),
+                // we must NOT pre-blend the RGB toward dst (which is
+                // transparent and would darken bright src pixels) and we
+                // must NOT let set_pixel_fast force dst alpha to 0xFF.
+                // Write src RGB directly with `alpha = src_alpha * blend%`
+                // so the eventual stage composite produces the correct
+                // translucent fade (white spotlight at 30% opacity = white
+                // at α=0.3, not opaque grey).
+                if !params.is_text_rendering && ink == 32
+                    && self.bit_depth == 32 && self.use_alpha
+                {
+                    let src_a = sa as f32 / 255.0;
+                    let sa_f = src_a * alpha;
+                    if sa_f < 0.001 {
+                        continue;
+                    }
+                    let idx = (dst_y as usize * self.width as usize + dst_x as usize) * 4;
+                    if idx + 3 < self.data.len() {
+                        let dr = self.data[idx] as f32;
+                        let dg = self.data[idx + 1] as f32;
+                        let db = self.data[idx + 2] as f32;
+                        let da = self.data[idx + 3] as f32 / 255.0;
+                        // Standard "src over dst" alpha composite, preserving
+                        // any pre-existing dst content (in case another sprite
+                        // already drew here in the same filmloop frame).
+                        let one_minus_sa = 1.0 - sa_f;
+                        let out_a = sa_f + da * one_minus_sa;
+                        if out_a < 0.001 {
+                            self.data[idx + 3] = 0;
+                        } else {
+                            let inv = 1.0 / out_a;
+                            self.data[idx]     = ((sr as f32 * sa_f + dr * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+                            self.data[idx + 1] = ((sg as f32 * sa_f + dg * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+                            self.data[idx + 2] = ((sb as f32 * sa_f + db * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+                            self.data[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                    continue;
+                }
+
                 // Ink 36/37/39 with auto-detected edge bg: skip when src
                 // matches the most common edge color (handles custom-palette
                 // bitmaps where bg_color_resolved is wrong).
@@ -2663,6 +2867,39 @@ impl Bitmap {
                     }
 
                     // White pixel → FULLY TRANSPARENT → skip
+                    continue;
+                }
+
+                // Ink 5 (NotTransparent) for image.copyPixels: source pixels
+                // matching `#color` (the foreground param) are TRANSPARENT —
+                // skipped entirely. Other pixels are multiply-blended with
+                // `#bgColor`, then alpha-blended with the destination using
+                // `#blend`. CS catalog floor preview uses
+                // `[#ink: 5, #color: rgb(0,0,0), #bgColor: texturecolor,
+                // #blend: 60, #maskImage: floormatte]` to tint a polygon
+                // stencil — Director's vector-shape `.image` rasterizes the
+                // outside-polygon area as solid rgb(0,0,0), and `#color:
+                // rgb(0,0,0)` keys those pixels as transparent so only the
+                // gradient-filled polygon contributes to the multiply.
+                if ink == 5 && !params.is_text_rendering {
+                    if (sr, sg, sb) == fg_color_resolved {
+                        continue;
+                    }
+                    let mr = ((sr as u16 * bg_color_resolved.0 as u16) / 255) as u8;
+                    let mg = ((sg as u16 * bg_color_resolved.1 as u16) / 255) as u8;
+                    let mb = ((sb as u16 * bg_color_resolved.2 as u16) / 255) as u8;
+                    let multiplied = (mr, mg, mb);
+                    let dst = if !dst_palette_cache.is_empty() {
+                        self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16)
+                    } else {
+                        self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                    };
+                    let blended = if alpha >= 0.999 {
+                        multiplied
+                    } else {
+                        blend_color_alpha(dst, multiplied, alpha)
+                    };
+                    self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     continue;
                 }
 

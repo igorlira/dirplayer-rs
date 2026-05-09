@@ -208,31 +208,11 @@ pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
             ColorRef::Rgb(r, g, b) => format!("rgb({}, {}, {})", r, g, b),
         },
         
-        Datum::List(_, list, _) => {
-            let elements: Vec<String> = list
-                .iter()
-                .map(|r| datum_to_string_for_concat(player.get_datum(r), player))
-                .collect();
-            let result = format!("[{}]", elements.join(", "));
-            result
-        },
-        
-        Datum::PropList(entries, _) => {
-            if entries.is_empty() {
-                return "[:]".to_string();
-            }
-            let elements: Vec<String> = entries
-                .iter()
-                .map(|(k, v)| {
-                    format!(
-                        "{}:{}",
-                        datum_to_string_for_concat(player.get_datum(k), player),
-                        datum_to_string_for_concat(player.get_datum(v), player)
-                    )
-                })
-                .collect();
-            format!("[{}]", elements.join(", "))
-        },
+        // Lists/proplists: defer to format_concrete_datum so inner strings stay
+        // quoted ([#name: "London I"], not [#name:London I]). Matches Director's
+        // behavior and is required for round-trips through value() — without the
+        // quotes, value() can't re-parse strings that contain spaces.
+        Datum::List(..) | Datum::PropList(..) => format_concrete_datum(datum, player),
         
         Datum::StringChunk(..) => {
             datum.string_value().unwrap_or(String::new())

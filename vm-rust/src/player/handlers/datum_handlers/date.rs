@@ -67,6 +67,11 @@ impl DateDatumHandlers {
                     let year = js_date.get_full_year() as i32;
                     Ok(player.alloc_datum(Datum::Int(year)))
                 }
+                "getyear" => {
+                    // Legacy AS/JS Date.getYear() returns year - 1900.
+                    let year = js_date.get_full_year() as i32 - 1900;
+                    Ok(player.alloc_datum(Datum::Int(year)))
+                }
                 "getmonth" => {
                     let month = js_date.get_month() as i32;
                     Ok(player.alloc_datum(Datum::Int(month)))
@@ -98,6 +103,23 @@ impl DateDatumHandlers {
                         date_obj.timestamp_ms as f64,
                     ));
                     js_date.set_full_year(year as u32);
+
+                    let date_obj = player.date_objects.get_mut(&date_id).unwrap();
+                    date_obj.timestamp_ms = js_date.get_time() as i64;
+                    Ok(DatumRef::Void)
+                }
+                "setyear" => {
+                    // Legacy AS/JS Date.setYear(): arg is offset from 1900.
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "setYear requires a year argument".to_string(),
+                        ));
+                    }
+                    let year_offset = player.get_datum(&args[0]).int_value()?;
+                    let mut js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
+                        date_obj.timestamp_ms as f64,
+                    ));
+                    js_date.set_full_year((year_offset + 1900) as u32);
 
                     let date_obj = player.date_objects.get_mut(&date_id).unwrap();
                     date_obj.timestamp_ms = js_date.get_time() as i64;

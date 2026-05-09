@@ -3,7 +3,6 @@ use log::{debug, error, warn};
 use num_derive::FromPrimitive;
 
 use std::convert::TryInto;
-use web_sys::console;
 
 use crate::io::reader::DirectorExt;
 
@@ -545,6 +544,323 @@ impl From<&[u8]> for FilmLoopInfo {
             sound,
             loops,
         };
+    }
+}
+
+/// One vertex of a Director Vector Shape, with its outgoing (handle1) and
+/// incoming (handle2) Bezier control-point offsets. For plain polygon
+/// vertices both handles are (0, 0). Coordinates are in member-vertex
+/// space (the same space Director's `the vertexList of member` reports).
+#[derive(Clone, Debug, Default)]
+pub struct VectorShapeVertex {
+    pub x: f32,
+    pub y: f32,
+    pub handle1_x: f32,  // outgoing control offset (relative to vertex)
+    pub handle1_y: f32,
+    pub handle2_x: f32,  // incoming control offset (relative to vertex)
+    pub handle2_y: f32,
+}
+
+/// Which slot of a `VectorShapeVertex` a parsed FLSH point refers to.
+/// FLSH tags the points within the FIRST vertex with their symbol names
+/// (`#vertex`, `#handle1`, `#handle2`); subsequent vertices use opaque
+/// 4-byte hash keys. We learn the role-by-position layout from the first
+/// vertex and re-use it for the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VertexRole {
+    Vertex,
+    Handle1,
+    Handle2,
+    Unknown,
+}
+
+/// Parsed contents of a Director Vector Shape FLSH chunk payload (the bytes
+/// after the `FLSH` fourCC + size fields).
+///
+/// Field layout — fixed-header offsets, all confirmed by diffing
+/// controlled-property FLSH samples (figure8 Slider Groove, "distinctive
+/// values" copy, #point/#exactFit/#solid copy, "Intern" closed-toggle):
+///
+/// | offset | field |
+/// |--------|-------|
+/// | 0x08 | directToStage (u32 0/1) |
+/// | 0x0C | centerRegPoint (u32 0/1) — Director auto-resets to 0 when originMode=#point |
+/// | 0x10 | regPoint.y (u32) |
+/// | 0x14 | regPoint.x (u32) |
+/// | 0x20 | member.height (u32) |
+/// | 0x24 | member.width (u32) |
+/// | 0x34 | antialias (u32 0/1) |
+/// | 0x38 | scale (f32, percent) |
+/// | 0x44 | originMode (0=center, 1=topLeft, 2=point) |
+/// | 0x64 | scaleMode (0=showAll, 1=noBorder, 2=exactFit, 3=autoSize, 4=noScale) |
+/// | 0x7C | closed (u32 0/1) |
+/// | 0x80 | strokeWidth (f32) |
+/// | 0x84 | fillMode (0=none, 1=solid, 2=gradient) |
+/// | 0x88 | gradientType (0=linear, 1=radial) |
+/// | 0x8C | fillScale (f32, percent) |
+/// | 0x90 | fillDirection (f32, degrees) |
+/// | 0x94 | fillOffset.y (i32) |
+/// | 0x98 | fillOffset.x (i32) |
+/// | 0x9C | fillCycles (u32) |
+///
+/// Vertex list begins at offset 224. `regPointVertex` is not persisted —
+/// when `originMode=#point` Director resolves the chosen vertex into
+/// `regPoint.x/.y` at write time and discards the index.
+#[derive(Clone, Debug)]
+pub struct VectorShapeInfo {
+    pub stroke_color: (u8, u8, u8),
+    pub fill_color: (u8, u8, u8),
+    pub bg_color: (u8, u8, u8),
+    pub end_color: (u8, u8, u8),
+    pub stroke_width: f32,
+    pub fill_mode: u32,        // 0=none, 1=solid, 2=gradient
+    pub closed: bool,
+    pub vertices: Vec<VectorShapeVertex>,
+    pub member_width: u32,
+    pub member_height: u32,
+    pub reg_point: (i16, i16),
+    pub gradient_type: String, // "linear" | "radial"
+    pub fill_scale: f32,       // percent (default 100.0)
+    pub fill_direction: f32,   // degrees
+    pub fill_offset: (i32, i32), // (.x, .y)
+    pub fill_cycles: i32,
+    pub scale_mode: String,    // "showAll" | "noBorder" | "exactFit" | "autoSize" | "noScale"
+    pub scale: f32,            // percent (default 100.0)
+    pub antialias: bool,
+    pub center_reg_point: bool,
+    pub reg_point_vertex: i32, // not persisted; default 0
+    pub direct_to_stage: bool,
+    pub origin_mode: String,   // "center" | "topLeft" | "point"
+}
+
+impl From<&[u8]> for VectorShapeInfo {
+    fn from(data: &[u8]) -> VectorShapeInfo {
+        let read_u32 = |off: usize| -> u32 {
+            if off + 4 <= data.len() {
+                u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+            } else { 0 }
+        };
+        let read_f32 = |off: usize| -> f32 {
+            if off + 4 <= data.len() {
+                f32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+            } else { 0.0 }
+        };
+
+        let direct_to_stage = read_u32(0x08) != 0;
+        let center_reg_point = read_u32(0x0C) != 0;
+        let reg_point_y = read_u32(0x10) as i16;
+        let reg_point_x = read_u32(0x14) as i16;
+        let member_height = read_u32(0x20);
+        let member_width = read_u32(0x24);
+        let antialias = read_u32(0x34) != 0;
+        let scale = read_f32(0x38);
+        let origin_mode_raw = read_u32(0x44);
+        let scale_mode_raw = read_u32(0x64);
+        let closed = read_u32(0x7C) != 0;
+        let stroke_width = read_f32(0x80);
+        let fill_mode = read_u32(0x84);
+        let gradient_type_raw = read_u32(0x88);
+        let fill_scale = read_f32(0x8C);
+        let fill_direction = read_f32(0x90);
+        let fill_offset_y = read_u32(0x94) as i32;
+        let fill_offset_x = read_u32(0x98) as i32;
+        let fill_cycles = read_u32(0x9C) as i32;
+
+        let origin_mode = match origin_mode_raw {
+            0 => "center", 1 => "topLeft", 2 => "point", _ => "center",
+        }.to_string();
+        let gradient_type = match gradient_type_raw {
+            0 => "linear", 1 => "radial", _ => "linear",
+        }.to_string();
+        let scale_mode = match scale_mode_raw {
+            0 => "showAll", 1 => "noBorder", 2 => "exactFit",
+            3 => "autoSize", 4 => "noScale", _ => "autoSize",
+        }.to_string();
+
+        // 4 colors at offsets 160/176/192/208, each: 4-byte marker (0x12) + 3x 4-byte RGB
+        let parse_color = |base: usize| -> (u8, u8, u8) {
+            (
+                read_u32(base + 4) as u8,
+                read_u32(base + 8) as u8,
+                read_u32(base + 12) as u8,
+            )
+        };
+        let stroke_color = parse_color(160);
+        let fill_color = parse_color(176);
+        let bg_color = parse_color(192);
+        let end_color = parse_color(208);
+
+        // Vertex list starts at offset 224.
+        // Layout: 4-byte list type (0x07) + 4-byte vertex count + per-vertex
+        // entries (each prefixed by entry_type(4) + item_count(4)).
+        //
+        // Trust the inline list count at offset 228; the field at offset 100
+        // is now `scaleMode` (was previously misread as "interior count").
+        //
+        // item_count per vertex is 1 for plain polygon vertices (just
+        // #vertex) or 3 for Bezier vertices (#vertex, #handle1, #handle2).
+        // The role of each point within a vertex block is determined by
+        // its FLSH key — string for the FIRST vertex, hash for the rest.
+        // We learn the role-by-position from the first vertex and reuse
+        // it for the rest (positional fallback works because every vertex
+        // within one shape uses the same point ordering).
+        let num_vertices = read_u32(228) as usize;
+        let mut vertices: Vec<VectorShapeVertex> = Vec::with_capacity(num_vertices);
+        let mut pos = 224 + 8; // skip list marker + count
+        let mut role_by_position: Vec<VertexRole> = Vec::new();
+
+        for i in 0..num_vertices {
+            if pos + 8 > data.len() {
+                break;
+            }
+            // Per-vertex header: type(4) + item_count(4)
+            let item_count = read_u32(pos + 4) as usize;
+            pos += 8;
+
+            let mut vertex = (0i32, 0i32);
+            let mut handle1 = (0i32, 0i32);
+            let mut handle2 = (0i32, 0i32);
+
+            for slot_idx in 0..item_count {
+                let (role, point) = if i == 0 {
+                    let (key_name, point) = parse_string_keyed_point(data, &mut pos);
+                    let role = match key_name.as_str() {
+                        "vertex" => VertexRole::Vertex,
+                        "handle1" => VertexRole::Handle1,
+                        "handle2" => VertexRole::Handle2,
+                        _ => VertexRole::Unknown,
+                    };
+                    role_by_position.push(role);
+                    (role, point)
+                } else {
+                    let (_key_hash, point) = parse_hash_keyed_point(data, &mut pos);
+                    let role = role_by_position
+                        .get(slot_idx)
+                        .copied()
+                        .unwrap_or(VertexRole::Unknown);
+                    (role, point)
+                };
+                assign_role(&mut vertex, &mut handle1, &mut handle2, role, point);
+            }
+
+            vertices.push(VectorShapeVertex {
+                x: vertex.0 as f32,
+                y: vertex.1 as f32,
+                handle1_x: handle1.0 as f32,
+                handle1_y: handle1.1 as f32,
+                handle2_x: handle2.0 as f32,
+                handle2_y: handle2.1 as f32,
+            });
+        }
+
+        debug!(
+            "  FLSH parsed: stroke=({},{},{}), strokeW={}, fillMode={}, closed={}, verts={}",
+            stroke_color.0, stroke_color.1, stroke_color.2,
+            stroke_width, fill_mode, closed, vertices.len(),
+        );
+        for (i, v) in vertices.iter().enumerate() {
+            debug!(
+                "  vertex[{}]: ({}, {}) h1=({}, {}) h2=({}, {})",
+                i, v.x, v.y, v.handle1_x, v.handle1_y, v.handle2_x, v.handle2_y,
+            );
+        }
+
+        VectorShapeInfo {
+            stroke_color,
+            fill_color,
+            bg_color,
+            end_color,
+            stroke_width,
+            fill_mode,
+            closed,
+            vertices,
+            member_width,
+            member_height,
+            reg_point: (reg_point_x, reg_point_y),
+            gradient_type,
+            fill_scale,
+            fill_direction,
+            fill_offset: (fill_offset_x, fill_offset_y),
+            fill_cycles,
+            scale_mode,
+            scale,
+            antialias,
+            center_reg_point,
+            reg_point_vertex: 0,
+            direct_to_stage,
+            origin_mode,
+        }
+    }
+}
+
+/// Parse a string-keyed point entry: `type(4) + strlen(4) + string + datasize(4) + locV(4) + locH(4)`.
+/// FLSH stores points as (locV, locH) — QuickDraw .y/.x order. Returns (key_name, (x, y)).
+fn parse_string_keyed_point(data: &[u8], pos: &mut usize) -> (String, (i32, i32)) {
+    let read_u32 = |p: usize| -> u32 {
+        if p + 4 <= data.len() {
+            u32::from_be_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+        } else { 0 }
+    };
+    let read_i32 = |p: usize| -> i32 {
+        if p + 4 <= data.len() {
+            i32::from_be_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+        } else { 0 }
+    };
+
+    *pos += 4;                                              // type marker (always 0x02)
+    let str_len = read_u32(*pos) as usize;
+    *pos += 4;
+    let key_name = if *pos + str_len <= data.len() {
+        String::from_utf8_lossy(&data[*pos..*pos + str_len]).to_string()
+    } else {
+        String::new()
+    };
+    *pos += str_len;
+    *pos += 4;                                              // datasize (always 8)
+    let loc_v = read_i32(*pos);
+    *pos += 4;
+    let loc_h = read_i32(*pos);
+    *pos += 4;
+    (key_name, (loc_h, loc_v))
+}
+
+/// Parse a hash-keyed point entry: `type(4) + hash(4) + datasize(4) + locV(4) + locH(4)`.
+/// Returns (key_hash, (x, y)) so the caller can dispatch via the hash→role table.
+fn parse_hash_keyed_point(data: &[u8], pos: &mut usize) -> (u32, (i32, i32)) {
+    let read_u32 = |p: usize| -> u32 {
+        if p + 4 <= data.len() {
+            u32::from_be_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+        } else { 0 }
+    };
+    let read_i32 = |p: usize| -> i32 {
+        if p + 4 <= data.len() {
+            i32::from_be_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+        } else { 0 }
+    };
+
+    *pos += 4;                                              // type marker (always 0x02)
+    let key_hash = read_u32(*pos);
+    *pos += 4;
+    *pos += 4;                                              // datasize (always 8)
+    let loc_v = read_i32(*pos);
+    *pos += 4;
+    let loc_h = read_i32(*pos);
+    *pos += 4;
+    (key_hash, (loc_h, loc_v))
+}
+
+fn assign_role(
+    vertex: &mut (i32, i32),
+    handle1: &mut (i32, i32),
+    handle2: &mut (i32, i32),
+    role: VertexRole,
+    point: (i32, i32),
+) {
+    match role {
+        VertexRole::Vertex => *vertex = point,
+        VertexRole::Handle1 => *handle1 = point,
+        VertexRole::Handle2 => *handle2 = point,
+        VertexRole::Unknown => { /* ignored */ }
     }
 }
 

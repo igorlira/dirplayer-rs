@@ -44,13 +44,17 @@ use super::{
     DirPlayer, ScriptError, PLAYER_OPT,
 };
 
+// JS bridge names use the `dirplayer_` prefix so this fork's globals don't
+// collide with stock Ruffle if both are loaded on the same page (e.g. via a
+// browser extension). Matching JS-side definitions live in
+// src/services/flashPlayerManager.ts::initFlashBridge.
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_name = "ruffleIsPlaying")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleIsPlaying")]
     fn ruffle_is_playing(cast_lib: i32, cast_member: i32) -> bool;
-    #[wasm_bindgen(js_name = "ruffleGetFrameCount")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetFrameCount")]
     fn ruffle_get_frame_count(cast_lib: i32, cast_member: i32) -> i32;
-    #[wasm_bindgen(js_name = "ruffleGetCurrentFrame")]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetCurrentFrame")]
     fn ruffle_get_current_frame(cast_lib: i32, cast_member: i32) -> i32;
 }
 
@@ -3269,7 +3273,21 @@ pub fn sprite_get_prop(
                 })
             });
             match datum_ref {
-                Some(ref_) => Ok(player.get_datum(&ref_).clone()),
+                // Some(ref_) => Ok(player.get_datum(&ref_).clone()),
+
+                Some(ref_) => {
+                    // Return a clone of the Datum AND cache the underlying DatumRef
+                    // in last_sprite_prop_ref so the bytecode handler uses the real
+                    // ref instead of allocating a fresh slot. Without this, mutating
+                    // a behavior-stored list/proplist via sprite(N).propName would
+                    // mutate a *clone*, severing the link to the script instance's
+                    // storage (e.g. setaProp(sprite(N).pCustomData, key, val) would
+                    // not propagate back to the behavior's pCustomData).
+                    let datum_clone = player.get_datum(&ref_).clone();
+                    player.last_sprite_prop_ref = Some(ref_);
+                    Ok(datum_clone)
+                }
+
                 None => {
                     // Unknown sprite props may be custom behavior properties — return VOID
                     warn!(
@@ -3338,10 +3356,10 @@ fn resolve_sprite_member_assignment(
                 CastMemberType::VectorShape(vs) => {
                     Some((vs.width().ceil() as i32, vs.height().ceil() as i32))
                 }
-                CastMemberType::Flash(flash) => flash.flash_info.as_ref().map(|fi| {
-                    let (l, t, r, b) = fi.flash_rect;
-                    ((r - l) as i32, (b - t) as i32)
-                }),
+                CastMemberType::Flash(flash) => {
+                    let (l, t, r, b) = flash.effective_rect();
+                    Some(((r - l) as i32, (b - t) as i32))
+                }
                 _ => None,
             };
             let is_film_loop = matches!(&m.member_type, CastMemberType::FilmLoop(_));
@@ -4211,12 +4229,13 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 sprite.trails = value.to_bool()?;
                 Ok(())
             },
-        ),
+        ),       
         prop_name => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
-                sprite
+                // First pass: try to set on a behavior that already declares/has the property
+                let first_pass = sprite
                     .script_instance_list
                     .iter()
                     .find_map(|behavior| {
@@ -4233,14 +4252,34 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                                 Err(_) => None,
                             }
                         })
-                    })
-                    .unwrap_or_else(|| {
-                        eprintln!(
-                            "Warning: Cannot set prop {} of sprite, ignoring",
-                            prop_name
-                        );
-                        Ok(())
-                    })
+                    });
+                match first_pass {
+                    Some(r) => r,
+                    None => {
+                        // No behavior declares this property. Director allows dynamic
+                        // creation of behavior properties via assignment, so create it
+                        // on the first behavior (e.g. cs `sprite(N).pCustomData = ...`
+                        // on a sprite whose only behavior doesn't declare pCustomData).
+                        if let Some(first_behavior) = sprite.script_instance_list.first().cloned() {
+                            reserve_player_mut(|player| {
+                                let value_ref = player.alloc_datum(value.clone());
+                                script_set_prop(
+                                    player,
+                                    &first_behavior,
+                                    &prop_name.to_string(),
+                                    &value_ref,
+                                    false,
+                                )
+                            })
+                        } else {
+                            eprintln!(
+                                "Warning: Cannot set prop {} of sprite (no behaviors)",
+                                prop_name
+                            );
+                            Ok(())
+                        }
+                    }
+                }
             },
         ),
     };
@@ -4742,7 +4781,37 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             )
         }
         CastMemberType::Field(field_member) => {
-            let field_width = sprite.width;
+            // #adjust boxType: displayed width = `field.width` + chrome
+            // (2*border + 2*margin + boxDropShadow). `field.width` is
+            // the authored TEXT-AREA width — Director's sprite display
+            // rect adds the chrome padding so the box visually frames
+            // the text area. E.g. MarioNetQuest's "How to Play":
+            // field.width=324, chrome=24 → 348 displayed (matches
+            // Director's `the rect of sprite` width). For runtime-
+            // authored CS fields where field.width is the script's
+            // .window XML setting, the same `field.width + chrome`
+            // works because the chrome is small/zero.
+            //
+            // Why not use sprite.width directly: many .dir-loaded
+            // fields with little text content have a `sprite.width`
+            // that's some default oversized score authoring — using
+            // it would render a much-too-wide box. Building width
+            // from the authored field.width + the field's own chrome
+            // settings gives a consistent, Director-faithful result.
+            //
+            // Other boxTypes (#scroll, #fixed, #limit) honor
+            // sprite.width unconditionally — those are user-resizable
+            // containers independent of the member's authored width.
+            let is_adjust_for_width = field_member.box_type == "adjust";
+            let member_authored_w = field_member.width as i32;
+            let chrome_w = (2 * field_member.border as i32)
+                + (2 * field_member.margin as i32)
+                + (field_member.box_drop_shadow as i32);
+            let field_width = if is_adjust_for_width && member_authored_w > 0 {
+                member_authored_w + chrome_w
+            } else {
+                sprite.width
+            };
             let rect_height = (field_member.rect_bottom - field_member.rect_top).max(0) as i32;
             let extras = (2 * field_member.border as i32)
                 + (2 * field_member.margin as i32)
@@ -4930,8 +4999,18 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // For system fonts (Arial, etc.), use a font-size-based estimate
                 // since native text uses Canvas2D which we can't measure here.
                 let font = player.font_manager.font_cache.get(&cache_key).cloned();
+                // Force wrap-aware measurement for puppet text members
+                // even when `word_wrap` is false on the member. Director
+                // grows puppet sprites to fit all visible content; if
+                // a long single-line text exceeds the box width and we
+                // measure unwrapped, the height computes as 1 line and
+                // the rendered text overflows (the renderer still
+                // wraps, but the sprite_rect is too short to show the
+                // wrapped tail). Score-authored sprites continue to
+                // honor the member's word_wrap flag.
+                let force_wrap = sprite.puppet;
                 let from_bitmap = font.map(|f| {
-                    if text_member.word_wrap {
+                    if text_member.word_wrap || force_wrap {
                         measure_text_wrapped(
                             &text_member.text, &f, text_width as u16, true,
                             text_member.fixed_line_space,
@@ -5045,7 +5124,43 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             } else {
                 info_height
             };
-            let text_height = if text_member.box_type == "adjust" && preferred_authored > 0 {
+            // Puppet-sprite text members get the simple "fit measured
+            // content" rule regardless of boxType: the authored
+            // info_height/text_member.height were typically set when the
+            // member was first created (often 100×100 default from
+            // `new(#text)`), but the script then assigns runtime text via
+            // `member.text = ...` or HTML and expects the sprite to grow
+            // to display all of it. Without this, multi-line text gets
+            // clipped at the stale authored height (e.g. tutorial dialog
+            // "Mission 1: Tutorial" + body text — the body's second/third
+            // lines were cut off even though boxType is #fixed, because
+            // the puppet's authored height was the default-small).
+            // Director's standard "boxType #fixed clips, #adjust grows"
+            // semantics apply to score-authored sprites where the
+            // authored height represents the scene designer's intent;
+            // puppet sprites have no such intent baked in.
+            let text_height = if sprite.puppet && measured_height.unwrap_or(0) > 0 {
+                let measured_h = measured_height.unwrap();
+                measured_h.max(preferred_authored)
+            } else if text_member.box_type == "adjust" && preferred_authored > 0 {
+                // Non-puppet #adjust text members: trust the authored
+                // member.height when text has explicit breaks (the value
+                // is the laid-out total Director rendered into); for
+                // wrap-only single-paragraph text, fall back to the 70%
+                // rule that grows to measured when the stored value is
+                // much smaller than the content needs.
+                //
+                // Trying to grow has_breaks members to our measured size
+                // overshoots Director — our PFR metrics for "Arial *"
+                // and friends produce slightly taller wrapped lines than
+                // Director's, so a Buggy info-card with member.height=110
+                // would expand to ~150 and visibly cover adjacent UI like
+                // the CLOSE button below it. Director apparently fits the
+                // same text into the authored 110 px and our render
+                // simply clips at the box boundary — visually a few
+                // pixels of the last line may be cut, but layout
+                // adjacency is preserved (Junkbot credits: stored 375
+                // matches Director, our re-measure 414 would inflate).
                 if text_has_breaks {
                     preferred_authored
                 } else {
@@ -5061,6 +5176,26 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     Some(m) if m > stored_height => m,
                     _ => stored_height,
                 }
+            } else if stored_member_h > 0
+                && (sprite.skew.abs() > 0.001 || sprite.rotation.abs() > 0.1)
+            {
+                // Rotated/skewed #fixed text: use member.rect.height as the
+                // quad height. `sprite.height` (and therefore stored_height)
+                // is the rotated bounding-box height, not the authored quad
+                // — FurniFactory displayComputer member 7 has
+                // member.rect.height=36 but sprite.height=48 because the
+                // sprite is skewed. Pairing this with the upload_height =
+                // render_height fix in webgl2/mod.rs gives 1:1 texture-to-
+                // quad mapping at the authored member size.
+                //
+                // Restricted to transformed sprites: for flat #fixed text
+                // members, sprite.height IS the authored quad and using
+                // member.rect.height (which can be the FULL Paige page_h
+                // — much taller than the visible score-placed sprite area)
+                // would inflate the sprite_rect and let text overflow into
+                // adjacent UI (worldbuilder unit-info card #291 was
+                // half-covering the button below).
+                stored_member_h
             } else {
                 stored_height
             };
@@ -5128,10 +5263,35 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.loc_v - reg_y + use_height,
             )
         }
-        CastMemberType::VectorShape(_vs) => {
-            // VectorShapes with centerRegPoint use center registration
-            let reg_x = sprite.width / 2;
-            let reg_y = sprite.height / 2;
+        CastMemberType::VectorShape(vs) => {
+            // Director positions a vector shape on stage so that the
+            // member's `regPoint` (in member-pixel coords) aligns with
+            // the sprite's `loc`. Because vector shapes scale to sprite
+            // dimensions (default scaleMode = #autoSize), the regPoint
+            // offset is scaled by sprite.width/member.width before being
+            // subtracted from loc:
+            //
+            //   sprite_left = loc_h - regPoint.x * (sprite.width  / member.width)
+            //   sprite_top  = loc_v - regPoint.y * (sprite.height / member.height)
+            //
+            // Verified against figure8 Slider Groove:
+            //   regPoint=(1,2), member.width=113, sprite.width=200,
+            //   loc=(91,378)  →  91 - 1*(200/113) ≈ 89  (matches Director).
+            //
+            // Falls back to centering when regPoint or member dims are
+            // missing (e.g. Lingo `new(#vectorShape)` synthesized members).
+            let mw = vs.member_width as i32;
+            let mh = vs.member_height as i32;
+            let (reg_x, reg_y) = if mw > 0 && mh > 0 {
+                let sx = sprite.width as f32 / mw as f32;
+                let sy = sprite.height as f32 / mh as f32;
+                (
+                    (vs.reg_point.0 as f32 * sx).round() as i32,
+                    (vs.reg_point.1 as f32 * sy).round() as i32,
+                )
+            } else {
+                (sprite.width / 2, sprite.height / 2)
+            };
             IntRect::from(
                 sprite.loc_h - reg_x,
                 sprite.loc_v - reg_y,
@@ -5140,12 +5300,10 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             )
         }
         CastMemberType::Flash(flash_member) => {
-            let flash_width = flash_member.flash_info.as_ref()
-                .map(|i| (i.flash_rect.2 - i.flash_rect.0) as i32)
-                .unwrap_or(sprite.width);
-            let flash_height = flash_member.flash_info.as_ref()
-                .map(|i| (i.flash_rect.3 - i.flash_rect.1) as i32)
-                .unwrap_or(sprite.height);
+            let (l, t, r, b) = flash_member.effective_rect();
+            let flash_width = if r != l { (r - l) as i32 } else { sprite.width };
+            let flash_height = if b != t { (b - t) as i32 } else { sprite.height };
+            let _ = (l, t);
 
             let mut reg_x = flash_member.reg_point.0 as i32;
             let mut reg_y = flash_member.reg_point.1 as i32;

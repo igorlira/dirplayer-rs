@@ -570,6 +570,16 @@ impl FontMemberHandlers {
         top_spacing: i16,
         bottom_spacing: i16,
         tab_stops: &[crate::player::cast_member::TabStop],
+        // XMED per-paragraph spacing tables. When non-empty, the renderer
+        // applies `\sa`/`\sb` (RTF "space after"/"space before", Director's
+        // par_info `top_spacing`/`bottom_spacing`) at paragraph boundaries
+        // — matching Director's gap between the description and the labeled
+        // rows on info-card text members (Junkbot V7 Buggy). Pass empty
+        // slices for callers that don't have par_info data; the renderer
+        // falls back to the legacy global `top_spacing`/`bottom_spacing`
+        // applied per-line.
+        par_infos: &[crate::director::chunks::xmedia_styled_text::ParInfo],
+        par_runs: &[crate::director::chunks::xmedia_styled_text::ParRun],
     ) -> Result<(), ScriptError> {
         // Create temporary canvas for text rendering (size of text area only)
         let document = web_sys::window()
@@ -631,6 +641,13 @@ impl FontMemberHandlers {
             segments: Vec<NativeSegment>,
             width: f64,
             max_font_px: f64,
+            // Cumulative text-character position where this line begins.
+            // Used to look up which paragraph (par_info) this line belongs
+            // to via par_runs. Wrap-induced visual lines get a position
+            // somewhere in their source paragraph, which still resolves to
+            // the same par_info index — boundary spacing only triggers on
+            // genuine source-paragraph transitions.
+            start_text_pos: u32,
         }
 
         let fallback_color = if let Some(color_ref) = sprite_color {
@@ -684,6 +701,11 @@ impl FontMemberHandlers {
         } else {
             f64::MAX
         };
+        // Cumulative text-character position across all spans. Used to
+        // stamp `start_text_pos` on each new line so we can map lines to
+        // par_runs / par_infos at draw time for paragraph-boundary
+        // spacing.
+        let mut cumulative_pos: u32 = 0;
 
         let mut push_line = |line: &mut NativeLine, lines_out: &mut Vec<NativeLine>| {
             lines_out.push(std::mem::take(line));
@@ -745,8 +767,12 @@ impl FontMemberHandlers {
                 // Director (Mac origin) uses \r for line breaks.
                 // Handle \r, \n, and \r\n without double-breaking.
                 if ch == '\n' && prev_was_cr {
-                    // Skip \n after \r (already broke on \r)
+                    // Skip \n after \r (already broke on \r) but still
+                    // count it toward cumulative text position so the
+                    // next line's start_text_pos lines up with par_runs.
                     prev_was_cr = false;
+                    cumulative_pos += 1;
+                    current_line.start_text_pos = cumulative_pos;
                     continue;
                 }
                 prev_was_cr = ch == '\r';
@@ -760,6 +786,8 @@ impl FontMemberHandlers {
                     );
                     token_is_ws = None;
                     push_line(&mut current_line, &mut lines);
+                    cumulative_pos += 1;
+                    current_line.start_text_pos = cumulative_pos;
                     continue;
                 }
                 if ch == '\t' {
@@ -788,6 +816,7 @@ impl FontMemberHandlers {
                             current_line.width = stop_pos;
                         }
                     }
+                    cumulative_pos += 1;
                     continue;
                 }
 
@@ -803,6 +832,7 @@ impl FontMemberHandlers {
                 }
                 token_is_ws = Some(is_ws);
                 token.push(ch);
+                cumulative_pos += 1;
             }
 
             flush_token(
@@ -819,24 +849,76 @@ impl FontMemberHandlers {
         }
 
 
+        // Map a text-character position to its par_info index via par_runs.
+        // Returns None when no par_info data is available so callers can
+        // skip boundary-spacing logic and use legacy uniform per-line
+        // top/bottom spacing.
+        let line_par_idx = |pos: u32| -> Option<u16> {
+            if par_runs.is_empty() || par_infos.is_empty() {
+                return None;
+            }
+            let mut active: Option<u16> = None;
+            for run in par_runs {
+                if run.position <= pos {
+                    active = Some(run.par_info_index);
+                } else {
+                    break;
+                }
+            }
+            active
+        };
+
         let mut y = top_spacing.max(0) as f64;
+        let mut prev_par_idx: Option<u16> = None;
         for line in &lines {
             if y >= canvas_height as f64 {
                 break;
             }
 
+            // Apply paragraph-boundary spacing at par_info transitions.
+            // Wrap-induced lines stay within one paragraph (same par_info
+            // index from `line_par_idx(line.start_text_pos)`), so this
+            // only fires at genuine source-paragraph transitions.
+            //
+            // Use `prev.bottom_spacing + this.top_spacing` directly from
+            // par_infos — the standard RTF interpretation of `\sa`/`\sb`.
+            let this_par_idx = line_par_idx(line.start_text_pos);
+            if let (Some(prev), Some(this)) = (prev_par_idx, this_par_idx) {
+                if prev != this {
+                    let prev_sa = par_infos
+                        .get(prev as usize)
+                        .map(|pi| pi.bottom_spacing)
+                        .unwrap_or(0);
+                    let this_sb = par_infos
+                        .get(this as usize)
+                        .map(|pi| pi.top_spacing)
+                        .unwrap_or(0);
+                    y += (prev_sa + this_sb) as f64;
+                }
+            }
+
+            // Alignment uses the full canvas width (`render_width`), NOT
+            // `max_width`. `max_width` is the wrap fold-point — for a
+            // field whose `field.width` is narrower than the sprite
+            // display rect (Habbo's hotel-navigator help-text panel,
+            // sprite_rect=348 / field.width=324), we want lines to fold
+            // at field.width but center within the full sprite width so
+            // the text aligns under the field's title bar / box. For
+            // non-field text the two widths are equal so behavior is
+            // unchanged.
+            let align_width = render_width.max(0) as f64;
             let x_start = match alignment {
                 TextAlignment::Left => 0.0,
                 TextAlignment::Center => {
-                    if max_width > 0 {
-                        ((max_width as f64) - line.width) / 2.0
+                    if align_width > 0.0 {
+                        (align_width - line.width) / 2.0
                     } else {
                         0.0
                     }
                 }
                 TextAlignment::Right => {
-                    if max_width > 0 {
-                        (max_width as f64) - line.width
+                    if align_width > 0.0 {
+                        align_width - line.width
                     } else {
                         0.0
                     }
@@ -901,13 +983,40 @@ impl FontMemberHandlers {
             } else {
                 12.0
             };
-            // fixedLineSpace overrides glyph height; topSpacing + bottomSpacing added on top.
-            let effective_line_height = if fixed_line_space > 0 {
+            // Per-line stride priority (matches the PFR-styled multi-span
+            // path):
+            //  1. This line's `par_info.line_spacing` when non-zero. Director
+            //     stores per-paragraph stride here (RTF `\sl<twips>`) and
+            //     uses it in preference to the global `fixedLineSpace`. For
+            //     empty paragraphs (no glyphs on the line) we apply the
+            //     authored value verbatim; for content lines we clamp to
+            //     the line's font size to avoid clipping characters when a
+            //     small `\sl` value sits below the glyph cell — this matches
+            //     Director treating `\sl` as a minimum on content lines.
+            //     Junkbot V1 brick-info member 139 uses par_info[2] with
+            //     line_spacing=6 for the single empty line before "eyeBOT";
+            //     without this lookup the stride defaults to 12 and pushes
+            //     eyeBOT ~6 px below Director's layout.
+            //  2. Global `fixed_line_space` (member-level fixedLineSpace).
+            //  3. The line's own `max_font_px` (the natural glyph cell).
+            let par_line_spacing = this_par_idx
+                .and_then(|idx| par_infos.get(idx as usize))
+                .map(|pi| pi.line_spacing)
+                .filter(|&s| s > 0)
+                .map(|s| s as f64);
+            let effective_line_height = if let Some(par_ls) = par_line_spacing {
+                if line.segments.is_empty() {
+                    par_ls
+                } else {
+                    par_ls.max(line_font_px)
+                }
+            } else if fixed_line_space > 0 {
                 fixed_line_space as f64
             } else {
                 line_font_px
             };
             y += effective_line_height + bottom_spacing as f64 + top_spacing as f64;
+            prev_par_idx = this_par_idx;
         }
 
         // Get pixel data from canvas
@@ -1417,7 +1526,7 @@ impl FontMemberHandlers {
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None,
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
                     bitmap.draw_text(
@@ -1587,7 +1696,7 @@ impl FontMemberHandlers {
                                     original_dst_rect: None,
                                     bg_color_explicit: false,
                                     fore_color_explicit: false,
-                                    ink9_mask_bitmap: None,
+                                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                                 };
 
                                 if let Some(mask) = mask {

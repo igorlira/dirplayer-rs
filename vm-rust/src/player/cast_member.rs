@@ -231,12 +231,16 @@ impl FieldMember {
 
     pub fn from_field_info(field_info: &FieldInfo) -> FieldMember {
         let (bg_r, bg_g, bg_b) = field_info.bg_color_rgb();
-        // bgpal all zeros = "no background color set" (transparent), not black
-        let back_color = if field_info.bgpal_r == 0 && field_info.bgpal_g == 0 && field_info.bgpal_b == 0 {
-            None
-        } else {
-            Some(ColorRef::Rgb(bg_r, bg_g, bg_b))
-        };
+        // Director's bgpal_r/g/b are QuickDraw u16 RGB values — full
+        // intensity per channel = 0xFFFF, zero = 0x0000. There is no
+        // palette-index encoding in this struct. Verified against figure8
+        // (Batman Supersonic): white-bg fields store (0xFFFF,0xFFFF,0xFFFF),
+        // black-bg fields like `timerbox` store (0x0000,0x0000,0x0000).
+        // An earlier heuristic remapped all-zero bgpal to PaletteIndex(0)
+        // because it was thought to mean "authored white via System-Win
+        // palette index 0"; that turned out to be a misreading and made
+        // genuinely-black fields render white.
+        let back_color = Some(ColorRef::Rgb(bg_r, bg_g, bg_b));
         FieldMember {
             text: "".to_string(),
             alignment: field_info.alignment_str(),
@@ -576,15 +580,13 @@ pub struct PaletteMember {
     pub colors: Vec<(u8, u8, u8)>,
 }
 
-#[derive(Clone, Debug)]
-pub struct VectorShapeVertex {
-    pub x: f32,
-    pub y: f32,
-    pub handle1_x: f32,  // outgoing control point offset
-    pub handle1_y: f32,
-    pub handle2_x: f32,  // incoming control point offset
-    pub handle2_y: f32,
-}
+// `VectorShapeVertex` is defined in `crate::director::enums` and re-exported
+// here so existing call sites (rasterizer, Lingo handlers) can continue to
+// import it from `cast_member::*`. The FLSH payload parser is also there
+// (as `VectorShapeInfo::from(&[u8])`) — the rest of player code keeps using
+// this flat `VectorShapeMember` (which adds the runtime-computed bbox on
+// top of the parsed `VectorShapeInfo`).
+pub use crate::director::enums::VectorShapeVertex;
 
 #[derive(Clone, Debug)]
 pub struct VectorShapeMember {
@@ -596,16 +598,134 @@ pub struct VectorShapeMember {
     pub fill_mode: u32,     // 0=none, 1=solid, 2=gradient
     pub closed: bool,
     pub vertices: Vec<VectorShapeVertex>,
-    /// Bounding box computed from vertices + control points + stroke padding
+    /// Bounding box computed from vertices + control points + stroke padding.
+    /// Used by the rasterizer / image getter — Director's `member.width` and
+    /// `member.height` come from `member_width` / `member_height` (the FLSH
+    /// header's authored values), not this.
     pub bbox_left: f32,
     pub bbox_top: f32,
     pub bbox_right: f32,
     pub bbox_bottom: f32,
+    /// Authored member rect from the FLSH header (offsets 0x20 / 0x24).
+    /// `member.rect`, `.width`, `.height` should come from these — they
+    /// match Director's report exactly, while a vertex-derived bbox is off
+    /// by ~1 due to stroke padding rounding.
+    pub member_width: u32,
+    pub member_height: u32,
+    // ---- Display / fill / origin properties surfaced via Lingo getters.
+    // Confirmed offsets from triangulating two FLSH payloads (figure8
+    // members #9 and #13 / Slider Groove). Enum / bool fields are still
+    // mapped to defaults until a third payload disambiguates them.
+    pub reg_point: (i16, i16),    // FLSH 0x14 / 0x10  (x / y)
+    pub gradient_type: String,    // default "linear"  (FLSH offset TBD)
+    pub fill_scale: f32,          // FLSH 0x38, default 100.0
+    pub fill_direction: f32,      // FLSH 0x3C, degrees, default 0.0
+    pub fill_offset: (i32, i32),  // FLSH 0x40 / 0x44, default (0, 0)
+    pub fill_cycles: i32,         // default 1  (FLSH offset TBD)
+    pub scale_mode: String,       // default "autoSize"  (FLSH offset TBD)
+    pub scale: f32,               // FLSH 0x50, percent, default 100.0
+    pub antialias: bool,          // default true  (FLSH offset TBD)
+    pub center_reg_point: bool,   // default false (FLSH offset TBD)
+    pub reg_point_vertex: i32,    // default 0     (FLSH offset TBD)
+    pub direct_to_stage: bool,    // default false (FLSH offset TBD)
+    pub origin_mode: String,      // default "center" (FLSH offset TBD)
 }
 
 impl VectorShapeMember {
-    pub fn width(&self) -> f32 { self.bbox_right - self.bbox_left }
-    pub fn height(&self) -> f32 { self.bbox_bottom - self.bbox_top }
+    /// Director's `member.width` for vector shapes — the authored member
+    /// width from the FLSH header (offset 0x24). We previously derived this
+    /// from the vertex bounding box, which was off by 1 due to stroke
+    /// padding. Falls back to bbox_right - bbox_left if member_width is 0
+    /// (synthesized members from Lingo `new(#vectorShape)`).
+    pub fn width(&self) -> f32 {
+        if self.member_width > 0 {
+            self.member_width as f32
+        } else {
+            self.bbox_right - self.bbox_left
+        }
+    }
+    pub fn height(&self) -> f32 {
+        if self.member_height > 0 {
+            self.member_height as f32
+        } else {
+            self.bbox_bottom - self.bbox_top
+        }
+    }
+    /// The vertex-bounding-box dimensions. Used by the rasterizer to size
+    /// the bitmap that backs `member.image`.
+    pub fn bbox_width(&self) -> f32 { self.bbox_right - self.bbox_left }
+    pub fn bbox_height(&self) -> f32 { self.bbox_bottom - self.bbox_top }
+}
+
+impl From<crate::director::enums::VectorShapeInfo> for VectorShapeMember {
+    /// Build a runtime `VectorShapeMember` from a parsed FLSH
+    /// `VectorShapeInfo`. The static fields are copied over verbatim; the
+    /// (bbox_left, bbox_top, bbox_right, bbox_bottom) bounding box is
+    /// computed here from the vertices + Bezier control points + stroke
+    /// padding (used by the rasterizer to size the off-screen bitmap that
+    /// backs `member.image`).
+    fn from(info: crate::director::enums::VectorShapeInfo) -> Self {
+        let mut bbox_left = f32::MAX;
+        let mut bbox_top = f32::MAX;
+        let mut bbox_right = f32::MIN;
+        let mut bbox_bottom = f32::MIN;
+        for v in &info.vertices {
+            bbox_left = bbox_left.min(v.x);
+            bbox_top = bbox_top.min(v.y);
+            bbox_right = bbox_right.max(v.x);
+            bbox_bottom = bbox_bottom.max(v.y);
+            // include absolute control points (vertex + handle offsets)
+            for &(cx, cy) in &[
+                (v.x + v.handle1_x, v.y + v.handle1_y),
+                (v.x + v.handle2_x, v.y + v.handle2_y),
+            ] {
+                bbox_left = bbox_left.min(cx);
+                bbox_top = bbox_top.min(cy);
+                bbox_right = bbox_right.max(cx);
+                bbox_bottom = bbox_bottom.max(cy);
+            }
+        }
+        let pad = info.stroke_width / 2.0;
+        bbox_left -= pad;
+        bbox_top -= pad;
+        bbox_right += pad;
+        bbox_bottom += pad;
+        if info.vertices.is_empty() {
+            bbox_left = 0.0;
+            bbox_top = 0.0;
+            bbox_right = 0.0;
+            bbox_bottom = 0.0;
+        }
+        VectorShapeMember {
+            stroke_color: info.stroke_color,
+            fill_color: info.fill_color,
+            bg_color: info.bg_color,
+            end_color: info.end_color,
+            stroke_width: info.stroke_width,
+            fill_mode: info.fill_mode,
+            closed: info.closed,
+            vertices: info.vertices,
+            bbox_left,
+            bbox_top,
+            bbox_right,
+            bbox_bottom,
+            member_width: info.member_width,
+            member_height: info.member_height,
+            reg_point: info.reg_point,
+            gradient_type: info.gradient_type,
+            fill_scale: info.fill_scale,
+            fill_direction: info.fill_direction,
+            fill_offset: info.fill_offset,
+            fill_cycles: info.fill_cycles,
+            scale_mode: info.scale_mode,
+            scale: info.scale,
+            antialias: info.antialias,
+            center_reg_point: info.center_reg_point,
+            reg_point_vertex: info.reg_point_vertex,
+            direct_to_stage: info.direct_to_stage,
+            origin_mode: info.origin_mode,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -647,6 +767,23 @@ pub struct FlashMember {
     pub data: Vec<u8>,
     pub reg_point: (i16, i16),
     pub flash_info: Option<crate::director::enums::FlashInfo>,
+}
+
+impl FlashMember {
+    /// Returns the effective stage rect (left, top, right, bottom) for this
+    /// Flash member. Director caches the rect in the FLSH chunk's FlashInfo,
+    /// but for some members it's left as 0,0,0,0 — fall back to parsing the
+    /// SWF header so width/height aren't reported as zero.
+    pub fn effective_rect(&self) -> (i32, i32, i32, i32) {
+        let cached = self.flash_info.as_ref().map(|fi| fi.flash_rect).unwrap_or((0, 0, 0, 0));
+        if cached != (0, 0, 0, 0) {
+            return cached;
+        }
+        if let Some((w, h)) = CastMember::parse_swf_dimensions(&self.data) {
+            return (0, 0, w as i32, h as i32);
+        }
+        cached
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2000,21 +2137,26 @@ impl CastMember {
                 continue;
             }
 
-            // Skip empty sprites (no cast member assigned)
+            // Inline shape sprites (no cast member): cast_lib=0xFFFE, cast_member=0,
+            // with non-zero width/height and the sprite-record geometry encoding
+            // an oval/rect/etc. directly. Coke Studios' nav_circleanim uses this
+            // to draw a radar-ping animation as growing concentric ovals.
+            let is_inline_shape = data.cast_lib == 0xFFFE && data.cast_member == 0
+                && (data.width > 0 || data.height > 0);
+
+            // Skip empty sprites (no cast member assigned, and not an inline shape).
             // Also skip sprites with cast_lib == 0 which are typically invalid/placeholder entries
-            // (cast_lib 65535 is valid - it's used for internal/embedded casts)
-            if data.cast_member == 0 || data.cast_lib == 0 || (data.width == 0 && data.height == 0) {
+            // (cast_lib 65535 is valid - it's used for internal/embedded casts;
+            //  cast_lib 65534 is the inline-shape sentinel handled above).
+            if (data.cast_member == 0 && !is_inline_shape) || data.cast_lib == 0
+                || (data.width == 0 && data.height == 0)
+            {
                 continue;
             }
 
-            // The sprite's position (pos_x, pos_y) is its loc (registration point location).
-            // In Director, loc is where the reg point is placed.
-            // Since we don't have access to cast members here, we assume CENTER registration
-            // which is the default for bitmaps. This means:
-            //   sprite_left = pos_x - width/2
-            //   sprite_top = pos_y - height/2
-            let reg_offset_x = data.width as i32 / 2;
-            let reg_offset_y = data.height as i32 / 2;
+            // Director shape sprites — including inline shapes here — center on
+            // (pos_x, pos_y). Same offset as bitmaps.
+            let (reg_offset_x, reg_offset_y) = (data.width as i32 / 2, data.height as i32 / 2);
             let sprite_left = data.pos_x as i32 - reg_offset_x;
             let sprite_top = data.pos_y as i32 - reg_offset_y;
             let sprite_right = sprite_left + data.width as i32;
@@ -2343,7 +2485,7 @@ impl CastMember {
 
     /// Parse SWF stage dimensions from uncompressed SWF header.
     /// Returns (width, height) in pixels, or None if parsing fails.
-    fn parse_swf_dimensions(data: &[u8]) -> Option<(u16, u16)> {
+    pub fn parse_swf_dimensions(data: &[u8]) -> Option<(u16, u16)> {
         if data.len() < 9 {
             return None;
         }
@@ -2584,6 +2726,10 @@ impl CastMember {
             ).into(),
         );
 
+        let reg_point = (
+            vector_member.reg_point.0 as i32,
+            vector_member.reg_point.1 as i32,
+        );
         Some(CastMember {
             number,
             name: chunk
@@ -2595,218 +2741,20 @@ impl CastMember {
             member_type: CastMemberType::VectorShape(vector_member),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
-            reg_point: (0, 0),
+            reg_point,
         })
     }
 
     /// Parse the FLSH payload into VectorShapeMember.
     /// Fixed header (160 bytes) + 4 colors (64 bytes) + vertex list.
+    /// Parse a FLSH chunk payload into a `VectorShapeMember`. The actual
+    /// FLSH byte-layout decoding now lives in
+    /// `crate::director::enums::VectorShapeInfo::from(&[u8])`; this thin
+    /// wrapper converts the parsed info into a player-side
+    /// `VectorShapeMember` and computes the runtime bbox (vertices +
+    /// control points + stroke padding) used by the rasterizer.
     fn parse_flsh_payload(data: &[u8]) -> VectorShapeMember {
-        let read_u32 = |off: usize| -> u32 {
-            if off + 4 <= data.len() {
-                u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
-            } else {
-                0
-            }
-        };
-        let read_f32 = |off: usize| -> f32 {
-            if off + 4 <= data.len() {
-                f32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
-            } else {
-                0.0
-            }
-        };
-
-        // Fixed header fields
-        let num_vertices = read_u32(100) as usize;
-        let closed = read_u32(112) != 0;
-        let fill_mode = read_u32(124);
-        let stroke_width = read_f32(128);
-
-        // 4 colors starting at offset 160, each: 4-byte marker (0x12) + 3x 4-byte RGB
-        let parse_color = |base: usize| -> (u8, u8, u8) {
-            let r = read_u32(base + 4) as u8;
-            let g = read_u32(base + 8) as u8;
-            let b = read_u32(base + 12) as u8;
-            (r, g, b)
-        };
-        let stroke_color = parse_color(160);
-        let fill_color = parse_color(176);
-        let bg_color = parse_color(192);
-        let end_color = parse_color(208);
-
-        // Vertex list starts at offset 224
-        // Format: 4-byte list type (0x07) + 4-byte numVertices
-        // Then per-vertex entries, each prefixed by: entry_type(4) + item_count(4)
-        let mut vertices = Vec::with_capacity(num_vertices);
-        let mut pos = 224 + 8; // skip list marker + count
-
-        for i in 0..num_vertices {
-            if pos + 8 > data.len() {
-                break;
-            }
-
-            // ALL vertices have an entry header: type(4) + item_count(4)
-            // (0x0A = property list, 0x03 = 3 items: vertex, handle1, handle2)
-            pos += 8;
-
-            if i == 0 {
-                // First vertex uses string keys: type(4) + strlen(4) + string + datasize(4) + data(8)
-                let vertex = Self::parse_string_keyed_point(data, &mut pos);
-                let handle1 = Self::parse_string_keyed_point(data, &mut pos);
-                let handle2 = Self::parse_string_keyed_point(data, &mut pos);
-
-                vertices.push(VectorShapeVertex {
-                    x: vertex.0 as f32,
-                    y: vertex.1 as f32,
-                    handle1_x: handle1.0 as f32,
-                    handle1_y: handle1.1 as f32,
-                    handle2_x: handle2.0 as f32,
-                    handle2_y: handle2.1 as f32,
-                });
-            } else {
-                // Subsequent vertices use hash keys: type(4) + hash(4) + datasize(4) + data(8)
-                let vertex = Self::parse_hash_keyed_point(data, &mut pos);
-                let handle1 = Self::parse_hash_keyed_point(data, &mut pos);
-                let handle2 = Self::parse_hash_keyed_point(data, &mut pos);
-
-                vertices.push(VectorShapeVertex {
-                    x: vertex.0 as f32,
-                    y: vertex.1 as f32,
-                    handle1_x: handle1.0 as f32,
-                    handle1_y: handle1.1 as f32,
-                    handle2_x: handle2.0 as f32,
-                    handle2_y: handle2.1 as f32,
-                });
-            }
-        }
-
-        // Compute bounding box from vertices + control points + stroke padding
-        let mut bbox_left = f32::MAX;
-        let mut bbox_top = f32::MAX;
-        let mut bbox_right = f32::MIN;
-        let mut bbox_bottom = f32::MIN;
-        for v in &vertices {
-            // Include vertex position
-            bbox_left = bbox_left.min(v.x);
-            bbox_top = bbox_top.min(v.y);
-            bbox_right = bbox_right.max(v.x);
-            bbox_bottom = bbox_bottom.max(v.y);
-            // Include absolute control points (vertex + handle offsets)
-            for &(cx, cy) in &[
-                (v.x + v.handle1_x, v.y + v.handle1_y),
-                (v.x + v.handle2_x, v.y + v.handle2_y),
-            ] {
-                bbox_left = bbox_left.min(cx);
-                bbox_top = bbox_top.min(cy);
-                bbox_right = bbox_right.max(cx);
-                bbox_bottom = bbox_bottom.max(cy);
-            }
-        }
-        // Add stroke padding
-        let pad = stroke_width / 2.0;
-        bbox_left -= pad;
-        bbox_top -= pad;
-        bbox_right += pad;
-        bbox_bottom += pad;
-
-        // Fallback for empty vertex lists
-        if vertices.is_empty() {
-            bbox_left = 0.0;
-            bbox_top = 0.0;
-            bbox_right = 0.0;
-            bbox_bottom = 0.0;
-        }
-
-        web_sys::console::log_1(
-            &format!(
-                "  FLSH parsed: stroke=({},{},{}), strokeW={}, fillMode={}, closed={}, verts={}",
-                stroke_color.0, stroke_color.1, stroke_color.2,
-                stroke_width, fill_mode, closed, vertices.len(),
-            ).into(),
-        );
-        for (i, v) in vertices.iter().enumerate() {
-            web_sys::console::log_1(
-                &format!(
-                    "  vertex[{}]: ({}, {}) h1=({}, {}) h2=({}, {})",
-                    i, v.x, v.y, v.handle1_x, v.handle1_y, v.handle2_x, v.handle2_y,
-                ).into(),
-            );
-        }
-
-        VectorShapeMember {
-            stroke_color,
-            fill_color,
-            bg_color,
-            end_color,
-            stroke_width,
-            fill_mode,
-            closed,
-            vertices,
-            bbox_left,
-            bbox_top,
-            bbox_right,
-            bbox_bottom,
-        }
-    }
-
-    /// Parse a string-keyed point entry from FLSH vertex data.
-    /// Format: type(4) + strlen(4) + string_bytes + datasize(4) + locV(4) + locH(4)
-    /// FLSH stores points as (locV, locH) i.e. (y, x). We return (x, y).
-    fn parse_string_keyed_point(data: &[u8], pos: &mut usize) -> (i32, i32) {
-        // type marker (4 bytes, value 0x02)
-        *pos += 4;
-        // string length
-        let str_len = if *pos + 4 <= data.len() {
-            u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]) as usize
-        } else {
-            0
-        };
-        *pos += 4;
-        // skip string bytes
-        *pos += str_len;
-        // data size (4 bytes, should be 8)
-        *pos += 4;
-        // FLSH stores locV first, then locH
-        let loc_v = if *pos + 4 <= data.len() {
-            i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
-        } else {
-            0
-        };
-        *pos += 4;
-        let loc_h = if *pos + 4 <= data.len() {
-            i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
-        } else {
-            0
-        };
-        *pos += 4;
-        (loc_h, loc_v) // return as (x, y)
-    }
-
-    /// Parse a hash-keyed point entry from FLSH vertex data.
-    /// Format: type(4) + hash(4) + datasize(4) + locV(4) + locH(4)
-    /// FLSH stores points as (locV, locH) i.e. (y, x). We return (x, y).
-    fn parse_hash_keyed_point(data: &[u8], pos: &mut usize) -> (i32, i32) {
-        // type marker (4 bytes, value 0x02)
-        *pos += 4;
-        // hash key (4 bytes, e.g. 0x80000000 for vertex)
-        *pos += 4;
-        // data size (4 bytes, should be 8)
-        *pos += 4;
-        // FLSH stores locV first, then locH
-        let loc_v = if *pos + 4 <= data.len() {
-            i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
-        } else {
-            0
-        };
-        *pos += 4;
-        let loc_h = if *pos + 4 <= data.len() {
-            i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
-        } else {
-            0
-        };
-        *pos += 4;
-        (loc_h, loc_v) // return as (x, y)
+        VectorShapeMember::from(crate::director::enums::VectorShapeInfo::from(data))
     }
 
     fn try_parse_swf(bytes: Vec<u8>, number: u32, chunk: &CastMemberChunk) -> Option<CastMember> {
@@ -3284,7 +3232,17 @@ impl CastMember {
                 {
                     info_h as u16
                 } else {
-                    per_line as u16
+                    // info_h ballooned past page_h by less than one row —
+                    // a runtime balloon (Lingo wrote text and TextInfo
+                    // grew but Paige's doc_bottom = page_h is still the
+                    // laid-out total). Use page_h, which matches Director's
+                    // reported `member.rect.height` for FurniFactory
+                    // displayComputer (member 7) and the clock display
+                    // (member 74): both have info_h=48, page_h=36,
+                    // per_line=18, line_count=2 and Director returns 36.
+                    // Earlier this branch returned `per_line` (18), giving
+                    // a single-line height that clipped the second row.
+                    page_h as u16
                 }
             } else if per_line > 0 {
                 per_line as u16
@@ -3349,6 +3307,22 @@ impl CastMember {
         let box_type = text_info.box_type_str().trim_start_matches('#').to_string();
         let word_wrap = text_info.word_wrap();
         let xmed_bg_color = styled_text.bg_color;
+        // Member-level fontStyle list: derived from the first styled span's
+        // bold/italic/underline flags so `member.fontStyle` matches Director's
+        // getter (which returns [#italic] for member 35 etc.). The XMED parse
+        // already applies Paige's gap2 -> bool conversion, so we just collect
+        // the active span's flags here.
+        let member_font_style: Vec<String> = styled_text
+            .styled_spans
+            .first()
+            .map(|s| {
+                let mut v = Vec::new();
+                if s.style.bold      { v.push("bold".to_string()); }
+                if s.style.italic    { v.push("italic".to_string()); }
+                if s.style.underline { v.push("underline".to_string()); }
+                v
+            })
+            .unwrap_or_default();
         let text_member = TextMember {
             text: styled_text.text.clone(),
             html_source: String::new(),
@@ -3358,13 +3332,18 @@ impl CastMember {
             word_wrap,
             anti_alias: true,
             font: font_name,
-            font_style: Vec::new(),
+            font_style: member_font_style,
             font_size,
-            fixed_line_space: if styled_text.line_spacing > 0 {
-                styled_text.line_spacing as u16
-            } else {
-                styled_text.fixed_line_space
-            },
+            // `styled_text.fixed_line_space` is now derived from par_run[0]'s
+            // par_info (the paragraph applied at text position 0) — that's
+            // Director's `member.fixedLineSpace` value and is the
+            // authoritative source. The older `styled_text.line_spacing`
+            // field still exists from the legacy heuristic in
+            // `parse_section_8` but is unreliable (lands on 16 for
+            // Junkbot v1 level.num where Director reports 21). Use
+            // `fixed_line_space` directly; falling through to
+            // `styled_text.line_spacing` would re-introduce that bug.
+            fixed_line_space: styled_text.fixed_line_space,
             top_spacing: styled_text.top_spacing as i16,
             bottom_spacing: styled_text.bottom_spacing as i16,
             width: box_w,
@@ -4478,6 +4457,21 @@ impl CastMember {
             CastMemberType::Bitmap(bm) => (bm.reg_point.0 as i32, bm.reg_point.1 as i32),
             _ => (0, 0),
         };
+        // Director surfaces field/button background color through `member.bgColor`.
+        // Without propagating field.back_color up to the outer CastMember, the
+        // generic getter at cast_member_ref.rs returns the default
+        // PaletteIndex(0) for every field — which is also why Coke Studios'
+        // `nav_vego_search_field` rendered without a white fill (the field had
+        // bgpal RGB white in its STXT, but the renderer's `effective_bg`
+        // fallback chain still ended up at the sprite's PaletteIndex(0) on
+        // some paths). Mirror Director by surfacing the parsed back_color here.
+        let initial_bg_color = match &member_type {
+            CastMemberType::Field(fm) => fm
+                .back_color
+                .clone()
+                .unwrap_or(ColorRef::PaletteIndex(0)),
+            _ => ColorRef::PaletteIndex(0),
+        };
         CastMember {
             number,
             name: chunk
@@ -4488,7 +4482,7 @@ impl CastMember {
             comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
             member_type: member_type,
             color: ColorRef::PaletteIndex(255),
-            bg_color: ColorRef::PaletteIndex(0),
+            bg_color: initial_bg_color,
             reg_point,
         }
     }

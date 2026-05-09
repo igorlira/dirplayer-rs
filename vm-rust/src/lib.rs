@@ -60,6 +60,21 @@ pub fn set_movie_path_override(path: String) {
     player_dispatch(PlayerVMCommand::SetMoviePathOverride(path));
 }
 
+/// Like `set_movie_path_override` but does NOT register the path with the
+/// net manager for URL rewriting. The given path becomes what `the
+/// moviePath` / `the movieName` return; URLs the script builds from it
+/// (e.g. `postNetText(the moviePath & "x.aspx")`) go out unchanged for
+/// the JS-side fetch interceptor / proxy to handle.
+///
+/// Use this when you've already wired up host-based proxying on the
+/// JS/dev-server side (see `flashPlayerManager.ts::applyFetchRewrite`)
+/// and you only want to advertise a "real" path to the movie without
+/// dirplayer rewriting any URLs that result.
+#[wasm_bindgen]
+pub fn set_movie_path_label(path: String) {
+    player_dispatch(PlayerVMCommand::SetMoviePathLabel(path));
+}
+
 #[wasm_bindgen]
 pub fn set_system_font_path(path: String) {
     player_dispatch(PlayerVMCommand::SetSystemFontPath(path));

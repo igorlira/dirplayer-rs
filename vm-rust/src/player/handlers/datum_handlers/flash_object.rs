@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, FlashObjectRef},
     player::{
+        handlers::datum_handlers::date::DateObject,
         reserve_player_mut,
         DatumRef,
         ScriptError,
@@ -11,15 +12,19 @@ use crate::{
 use wasm_bindgen::prelude::*;
 use log::warn;
 
+// JS bridge names use the `dirplayer_` prefix so this fork's globals don't
+// collide with stock Ruffle if both are loaded on the same page (e.g. via a
+// browser extension). Matching JS-side definitions live in
+// src/services/flashPlayerManager.ts::initFlashBridge.
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_name = "ruffleGetVariable", catch)]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetVariable", catch)]
     fn ruffle_get_variable_global(cast_lib: i32, cast_member: i32, path: &str) -> Result<JsValue, JsValue>;
 
-    #[wasm_bindgen(js_name = "ruffleSetVariable", catch)]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleSetVariable", catch)]
     fn ruffle_set_variable_global(cast_lib: i32, cast_member: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
 
-    #[wasm_bindgen(js_name = "ruffleCallFunction", catch)]
+    #[wasm_bindgen(js_name = "dirplayer_ruffleCallFunction", catch)]
     fn ruffle_call_function_global(cast_lib: i32, cast_member: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
 
 }
@@ -171,7 +176,19 @@ fn convert_lingo_datum_to_json_inner(player: &crate::player::DirPlayer, datum: &
             format!("\"{}\"", escaped)
         },
         Datum::Symbol(s) => format!("\"#{}\"", s),
-        Datum::Void => "null".to_string(),
+        // Match Adobe's Flash Asset Xtra: Lingo Void crosses into AS as the
+        // numeric value 0, not null. CS's outgoing AV packets need this:
+        //   - dance/stand send `(VOID, VOID, VOID, VOID, "dnc")` and the
+        //     server requires `d="0"` — getUpdateAvatarNode gates `d` on
+        //     `iDirection != null && != "" && toString() != "NaN"`. Null gets
+        //     dropped, but 0 passes (0 != null is true, 0 != "" is true under
+        //     Ruffle's equality, "0" != "NaN").
+        //   - faceAvatar sends `(VOID, VOID, VOID, iDir, VOID)`. With number 0
+        //     for the action slot the `typeof sAction == "string"` gate fails,
+        //     so we don't pollute the packet with `act="0"`.
+        //   - position args have an extra `!= 0` gate that filters 0 out, so
+        //     x/y/z stay omitted when no movement happened.
+        Datum::Void => "0".to_string(),
         Datum::FlashObjectRef(flash_ref) => {
             format!("\"__ruffle_path:{}\"", flash_ref.path)
         },
@@ -212,8 +229,39 @@ fn convert_js_result_to_lingo_datum(
         return Ok(player.alloc_datum(Datum::Int(if b { 1 } else { 0 })));
     }
 
-    // Check for arrays before generic objects (arrays are objects in JS)
+    // AS Date instances arrive as JS Date — materialize as a Lingo DateRef
+    // so subsequent .getYear()/.getMonth()/.getDate() etc. dispatch through
+    // DateDatumHandlers (case-insensitive) instead of round-tripping back into
+    // Ruffle (case-sensitive AS, which would fail).
+    if result.is_instance_of::<js_sys::Date>() {
+        let date: js_sys::Date = result.unchecked_into();
+        let ts = date.get_time() as i64;
+        let date_id = player.allocator.get_free_script_instance_id();
+        let date_obj = DateObject::from_timestamp(date_id, ts);
+        player.date_objects.insert(date_id, date_obj);
+        return Ok(player.alloc_datum(Datum::DateRef(date_id)));
+    }
+
+    // Check for arrays before generic objects (arrays are objects in JS).
+    //
+    // BUT: if the array is marked with `__dirplayer_stored_path` it means
+    // our Ruffle fork is keeping a live AS reference for it — typically
+    // because Lingo intends to push into it and pass it back to AS
+    // (e.g. Coke Studios' Studio.sendSendMessage flow:
+    //   faToScreenNameList = me.foRoom.getArray()
+    //   faToScreenNameList.push(name)
+    //   me.foRoom.sendSendMessage(msg, faToScreenNameList)).
+    // Materializing it as a Lingo Datum::List severs the AS reference, so
+    // .push() mutates a local list and the AS array stays empty. Keep it as
+    // a FlashObjectRef instead so .push round-trips back to AS.
     if js_sys::Array::is_array(&result) {
+        let stored_path = js_sys::Reflect::get(&result, &JsValue::from_str("__dirplayer_stored_path"))
+            .ok()
+            .and_then(|v| v.as_string());
+        if let Some(path) = stored_path {
+            let flash_ref = FlashObjectRef::from_path_with_member(&path, cast_lib, cast_member);
+            return Ok(player.alloc_datum(Datum::FlashObjectRef(flash_ref)));
+        }
         let array = js_sys::Array::from(&result);
         let mut items = VecDeque::new();
         for i in 0..array.length() {

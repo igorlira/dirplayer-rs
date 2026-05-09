@@ -539,7 +539,18 @@ impl TypeHandlers {
             return Some(final_result);
         }
 
-        None
+        // Director Lingo treats an all-digit string (optionally signed) as an
+        // integer even when the value exceeds i32 range — Habbo's parseFigure
+        // calls `integerp(integer(figure))` on a 25-digit figure string just to
+        // confirm it's numeric, and relies on `integerp` returning true. Match
+        // that by saturating the parse so the result type stays Int rather
+        // than collapsing to Void.
+        if let Ok(big) = result.parse::<i64>() {
+            return Some(big.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+        }
+        // Even larger than i64: saturate based on sign.
+        let is_negative = result.starts_with('-');
+        Some(if is_negative { i32::MIN } else { i32::MAX })
     }
 
     pub fn integer(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -556,6 +567,26 @@ impl TypeHandlers {
                     } else {
                         return Ok(DatumRef::Void);
                     }
+                }
+                Datum::DateRef(date_id) => {
+                    // Director's `integer(the systemDate)` returns the date
+                    // packed as YYYYMMDD (e.g. 20240328 for 28 Mar 2024).
+                    // Used by Director scripts as a numeric handshake/seed
+                    // — e.g. ClubMarian's login flow does
+                    // `key3 = bitXor(integer(the systemDate), key1)`.
+                    let date_obj = player
+                        .date_objects
+                        .get(date_id)
+                        .ok_or_else(|| ScriptError::new(format!(
+                            "Date object {} not found", date_id
+                        )))?;
+                    let js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
+                        date_obj.timestamp_ms as f64,
+                    ));
+                    let yyyymmdd = js_date.get_full_year() as i32 * 10000
+                        + (js_date.get_month() as i32 + 1) * 100  // js months are 0-based
+                        + js_date.get_date() as i32;
+                    Datum::Int(yyyymmdd)
                 }
                 Datum::Void => Datum::Void,
                 _ => {

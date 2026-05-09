@@ -24,6 +24,26 @@ use crate::{
 pub struct TextMemberHandlers {}
 const DEBUG_TEXT_IMAGE: bool = true;
 
+/// Result of parsing a Director-style RTF document back into the
+/// fields a TextMember holds. Symmetric counterpart to the data
+/// `generate_rtf_from_text_member` reads when emitting RTF.
+struct ParsedRtf {
+    text: String,
+    spans: Vec<StyledSpan>,
+    par_infos: Vec<crate::director::chunks::xmedia_styled_text::ParInfo>,
+    par_runs: Vec<crate::director::chunks::xmedia_styled_text::ParRun>,
+    /// Member-level `top_spacing` (pt) extracted from the first
+    /// `\sb<n>` value. Director's RTF stores per-paragraph `\sb`
+    /// values that are uniformly the member-level top_spacing
+    /// (Buggy: `\sb100` everywhere = 5pt). Hoisting it to the
+    /// member level lets Lingo `member.RTF = ...` round-trip the
+    /// value across distinct text members.
+    member_top_spacing: Option<i16>,
+    /// Member-level `bottom_spacing` (pt), companion to
+    /// `member_top_spacing` from `\sa<n>`.
+    member_bottom_spacing: Option<i16>,
+}
+
 impl TextMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
@@ -113,6 +133,35 @@ impl TextMemberHandlers {
                 text_member.text = new_text.trim_end_matches('\0').to_string();
                 Ok(DatumRef::Void)
             }
+            // `put X into member("name")` lowers to `setContents` (and the
+            // `into`/`after`/`before` variants) — see decompiler/handler.rs.
+            // Field members already implement these (cast_member/field.rs);
+            // text members need the same support so D6+ Text-formatted
+            // members (e.g. ClubMarian's LoginName) accept the same syntax
+            // without throwing "No handler setContents for text member type".
+            "setContents" | "setContentsAfter" | "setContentsBefore" => {
+                if args.len() != 1 {
+                    return Err(ScriptError::new(format!(
+                        "{handler_name} requires 1 argument"
+                    )));
+                }
+                let new_str = player.get_datum(&args[0]).string_value()?
+                    .trim_end_matches('\0')
+                    .to_string();
+                let cast_member = player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(&member_ref)
+                    .unwrap();
+                let text_member = cast_member.member_type.as_text_mut().unwrap();
+                text_member.text = match handler_name {
+                    "setContents" => new_str,
+                    "setContentsAfter" => format!("{}{}", text_member.text, new_str),
+                    "setContentsBefore" => format!("{}{}", new_str, text_member.text),
+                    _ => unreachable!(),
+                };
+                Ok(DatumRef::Void)
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for text member type"
             ))),
@@ -135,8 +184,39 @@ impl TextMemberHandlers {
         match prop_lc.as_str() {
             "text" => Ok(Datum::String(text_data.text.to_owned())),
             "line" => {
-                let lines: Vec<&str> = text_data.text.split('\r').collect();
-                let line_datums: VecDeque<_> = lines.into_iter().map(|l| Datum::String(l.to_string())).map(|d| player.alloc_datum(d)).collect();
+                // Return a list of StringChunk references (one per
+                // \r-separated line) rooted at the member, NOT a list of
+                // plain strings. The chunk reference preserves the member-
+                // source link so subsequent property access like
+                // `member.line[N].fixedLineSpace` (or `.fontSize`,
+                // `.alignment`, ...) can walk back to the member and
+                // resolve per-line par_info / styled-span values via
+                // script.rs's StringChunk arm. With plain strings the
+                // chained access falls through to the string built-in
+                // handler and fails with
+                // "Invalid string built-in property fixedLineSpace".
+                let item_delimiter = player.movie.item_delimiter;
+                let member_ref = cast_member_ref.clone();
+                let lines: Vec<String> = text_data.text.split('\r').map(|s| s.to_string()).collect();
+                let line_datums: VecDeque<_> = lines
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, l)| {
+                        let chunk_expr = StringChunkExpr {
+                            chunk_type: StringChunkType::Line,
+                            // Lingo line indices are 1-based.
+                            start: (i + 1) as i32,
+                            end: (i + 1) as i32,
+                            item_delimiter,
+                        };
+                        Datum::StringChunk(
+                            StringChunkSource::Member(member_ref.clone()),
+                            chunk_expr,
+                            l,
+                        )
+                    })
+                    .map(|d| player.alloc_datum(d))
+                    .collect();
                 Ok(Datum::List(DatumType::List, line_datums, false))
             }
             "alignment" => Ok(Datum::String(text_data.alignment.to_owned())),
@@ -145,9 +225,22 @@ impl TextMemberHandlers {
             "font" => Ok(Datum::String(text_data.font.to_owned())),
             "fontsize" => Ok(Datum::Int(text_data.font_size as i32)),
             "fontstyle" => {
+                // Director surfaces `[#plain]` when no bold/italic/underline
+                // is applied. We only push real styling flags into
+                // `text_data.font_style`, so an empty list here means the
+                // member has plain styling — return `[#plain]` to match
+                // Director's getter, not an empty list.
                 let mut item_refs = VecDeque::new();
-                for item in &text_data.font_style {
-                    item_refs.push_back(player.alloc_datum(Datum::Symbol(item.to_owned())));
+                if text_data.font_style.is_empty() {
+                    item_refs.push_back(
+                        player.alloc_datum(Datum::Symbol("plain".to_string())),
+                    );
+                } else {
+                    for item in &text_data.font_style {
+                        item_refs.push_back(
+                            player.alloc_datum(Datum::Symbol(item.to_owned())),
+                        );
+                    }
                 }
                 Ok(Datum::List(DatumType::List, item_refs, false))
             }
@@ -1153,6 +1246,8 @@ impl TextMemberHandlers {
                         text_data.top_spacing,
                         text_data.bottom_spacing,
                         &text_data.tab_stops,
+                        &text_data.par_infos,
+                        &text_data.par_runs,
                     ) {
                         warn!("[text.image] Native render error: {:?}", e);
                     }
@@ -1177,7 +1272,7 @@ impl TextMemberHandlers {
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None,
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
                     use crate::player::bitmap::bitmap::resolve_color_ref;
@@ -1387,7 +1482,7 @@ impl TextMemberHandlers {
                                 original_dst_rect: params.original_dst_rect.clone(),
                                 bg_color_explicit: false,
                                 fore_color_explicit: false,
-                                ink9_mask_bitmap: None,
+                                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             };
                             if use_tight {
                                 bitmap_font_copy_char_tight(
@@ -1538,14 +1633,14 @@ impl TextMemberHandlers {
                 if !text_data.rtf_source.is_empty() {
                     Ok(Datum::String(text_data.rtf_source.clone()))
                 } else {
-                    // Generate minimal RTF wrapper around the plain text
-                    let escaped = text_data.text
-                        .replace('\\', "\\\\")
-                        .replace('{', "\\{")
-                        .replace('}', "\\}")
-                        .replace('\r', "\\par\n")
-                        .replace('\n', "\\par\n");
-                    Ok(Datum::String(format!("{{\\rtf1 {}}}", escaped)))
+                    // Build a Director-style RTF string from the text member's
+                    // styled spans (XMED `html_styled_spans`). Round-tripping
+                    // through `member.rtf = member("X").rtf` then needs to
+                    // preserve color/bold/italic/font/size — without per-span
+                    // styling the destination's labels render as plain text
+                    // and the visual loses the gray "Terrain:"/"Speed:"/etc
+                    // labels Director emits via `\cf<n>` color runs.
+                    Ok(Datum::String(Self::generate_rtf_from_text_member(&text_data)))
                 }
             }
             "state" => Ok(Datum::Int(4)), // 4 = loaded (all embedded members are fully loaded)
@@ -1816,6 +1911,24 @@ impl TextMemberHandlers {
 
                     // Extract plain text from all spans
                     text_member.text = spans.iter().map(|s| s.text.clone()).collect();
+
+                    // Ensure the HTML-derived text ends with a paragraph
+                    // terminator. Director appends a trailing `\r` to
+                    // member.text when text is set via `member.html = ...`
+                    // even when the HTML lacks an explicit `<br>` — it's
+                    // the implicit close of the surrounding `<body>` /
+                    // `<p>` block. Without this, FurniFactory alertbox_text
+                    // (member 30) reports `length(member.text) = 138`
+                    // where Director reports 139, and `measure_text_wrapped`
+                    // sees 5 visual lines instead of Director's 6 (5
+                    // content + 1 trailing empty), so sprite_rect grows
+                    // to ~90 px instead of ~108 and the last line gets
+                    // clipped.
+                    if !text_member.text.ends_with('\r')
+                        && !text_member.text.ends_with('\n')
+                    {
+                        text_member.text.push('\n');
+                    }
 
                     // Extract alignment from <p align="..."> or <center> tag
                     let html_lower = html_string.to_lowercase();
@@ -2375,20 +2488,51 @@ impl TextMemberHandlers {
                 |cast_member, value| {
                     let rtf_string = value?;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
-                    // Store the raw RTF source
+
+                    // Round-trip preservation: if the incoming RTF byte-matches
+                    // what `generate_rtf_from_text_member` would emit from the
+                    // current state, treat as a no-op so XMED-only data the
+                    // RTF format lossy-collapses (empty paragraphs, exact
+                    // par_run boundaries) is preserved. Director's RTF emits
+                    // `\par` once per visible line break and discards
+                    // empty paragraphs — running the round-trip through our
+                    // parser otherwise resynthesizes a flatter structure
+                    // that the renderer can't recover the original visual
+                    // gap from (e.g. the Junkbot Buggy info-card has a
+                    // blank line between description and "Terrain:" that
+                    // exists as `\r\r` in the XMED text but as a single
+                    // `\par` in the emitted RTF).
+                    let current_rtf = Self::generate_rtf_from_text_member(text_member);
+                    if rtf_string == current_rtf {
+                        text_member.rtf_source = rtf_string;
+                        return Ok(());
+                    }
+
                     text_member.rtf_source = rtf_string.clone();
-                    // Extract plain text from RTF by stripping control words and groups
-                    let plain = Self::extract_text_from_rtf(&rtf_string);
-                    text_member.text = plain.clone();
-                    // Update styled spans to contain a single span with the extracted text
-                    if !text_member.html_styled_spans.is_empty() {
-                        let style = text_member.html_styled_spans[0].style.clone();
-                        text_member.html_styled_spans = vec![
-                            crate::player::handlers::datum_handlers::cast_member::font::StyledSpan {
-                                text: plain,
-                                style,
-                            }
-                        ];
+                    let parsed = Self::parse_rtf_to_styled_text(&rtf_string);
+                    // Sync member-level font/font_size from the first span so
+                    // future RTF generation emits the correct document
+                    // default `\fs<n>`. Otherwise members created blank by
+                    // Lingo (font_size=0) regenerate as `\fs2` and break the
+                    // no-op round-trip detection.
+                    if let Some(first) = parsed.spans.first() {
+                        if let Some(sz) = first.style.font_size.filter(|s| *s > 0) {
+                            text_member.font_size = sz as u16;
+                        }
+                        if let Some(face) = first.style.font_face.as_ref().filter(|f| !f.is_empty()) {
+                            text_member.font = face.clone();
+                        }
+                    }
+
+                    text_member.text = parsed.text.clone();
+                    text_member.html_styled_spans = parsed.spans;
+                    text_member.par_infos = parsed.par_infos;
+                    text_member.par_runs = parsed.par_runs;
+                    if let Some(ts) = parsed.member_top_spacing {
+                        text_member.top_spacing = ts;
+                    }
+                    if let Some(bs) = parsed.member_bottom_spacing {
+                        text_member.bottom_spacing = bs;
                     }
                     Ok(())
                 },
@@ -2483,6 +2627,909 @@ impl TextMemberHandlers {
                 prop
             ))),
         }
+    }
+
+    /// Build a Director-style RTF document from a TextMember's styled spans.
+    ///
+    /// Mirrors the format Director emits for `the rtf of member`:
+    /// header (`\rtf1\ansi\deff0`), `\fonttbl` with the unique font names,
+    /// `\colortbl` with each unique span color (entry 0 reserved for
+    /// default black), a minimal `\stylesheet`, document margins, then
+    /// per-span `{\pard \plain\f<n>\fs<n>\sb<n>\sa<n>\sl<n>... text}`
+    /// blocks. Per-span paragraph spacing (`\sb`/`\sa`/`\sl`) is sourced
+    /// from `par_infos`/`par_runs` indexed by the span's text position.
+    ///
+    /// Default colon-escape `:` -> `\:` matches Director's output.
+    /// Trailing `\par` is emitted on the final span so the document ends
+    /// with a paragraph terminator (Director appends one).
+    ///
+    /// This is the encode side of the round-trip Director scripts rely on
+    /// (`member("Y").rtf = member("X").rtf`). Without per-span styling,
+    /// labels like "Terrain:"/"Speed:" rendered as plain text instead of
+    /// the authored gray (Junkbot V7 Buggy info-card).
+    fn generate_rtf_from_text_member(text_data: &crate::player::cast_member::TextMember) -> String {
+        let spans = &text_data.html_styled_spans;
+        let default_size_halfpts = (text_data.font_size as i32).max(1) * 2;
+
+        // Build font table. Director emits two fonts for this Buggy member
+        // (`Arial` at f0, `Arial *` at f1 — the `*`-suffixed form is the
+        // PFR cast member alias). To keep our table aligned with that
+        // convention, always seed `Arial` at index 0 and append the
+        // member's actual font (and any unique span fonts) after it.
+        let mut fonts: Vec<String> = Vec::new();
+        fonts.push("Arial".to_string());
+        let member_font = if text_data.font.is_empty() {
+            String::new()
+        } else {
+            text_data.font.clone()
+        };
+        if !member_font.is_empty() && !fonts.iter().any(|f| f == &member_font) {
+            fonts.push(member_font);
+        }
+        for span in spans {
+            if let Some(face) = &span.style.font_face {
+                if !face.is_empty() && !fonts.iter().any(|f| f == face) {
+                    fonts.push(face.clone());
+                }
+            }
+        }
+        // Index for the member's primary font (used for spans that don't
+        // override font_face). When the member font isn't "Arial", the
+        // primary index is 1; otherwise 0.
+        let primary_font_idx = if text_data.font.is_empty() || text_data.font == "Arial" {
+            0
+        } else {
+            fonts.iter().position(|f| f == &text_data.font).unwrap_or(0)
+        };
+
+        // Build color table. Director seeds the table with a preset
+        // palette so spans emit `\cf<n>` at well-known indices regardless
+        // of which colors the document actually uses:
+        //   0: black (0,0,0) — default text
+        //   1: blue  (0,0,224)
+        //   2: red   (224,0,0)
+        //   3: magenta (224,0,224)
+        //   4: gray  (119,119,119) — used for `\cf4` labels
+        // Match that ordering so a script that does
+        // `member("Y").rtf = member("X").rtf` round-trips with the same
+        // `\cf<n>` indices. Unique span colors not already in the preset
+        // palette are appended after index 4.
+        let mut colors: Vec<u32> = vec![
+            0x000000, // black
+            0x0000E0, // blue (0, 0, 224)
+            0xE00000, // red (224, 0, 0)
+            0xE000E0, // magenta (224, 0, 224)
+            0x777777, // gray (119, 119, 119)
+        ];
+        for span in spans {
+            if let Some(c) = span.style.color {
+                let c_rgb = c & 0x00FFFFFF;
+                if !colors.iter().any(|x| *x == c_rgb) {
+                    colors.push(c_rgb);
+                }
+            }
+        }
+
+        let mut rtf = String::new();
+        rtf.push_str("{\\rtf1\\ansi\\deff0 ");
+
+        // Font table
+        rtf.push_str("{\\fonttbl");
+        for (idx, font) in fonts.iter().enumerate() {
+            rtf.push_str(&format!("{{\\f{}\\fswiss {};}}", idx, font));
+        }
+        rtf.push('}');
+
+        // Color table
+        rtf.push_str("{\\colortbl");
+        for c in &colors {
+            let r = (c >> 16) & 0xFF;
+            let g = (c >> 8) & 0xFF;
+            let b = c & 0xFF;
+            rtf.push_str(&format!("\\red{}\\green{}\\blue{};", r, g, b));
+        }
+        rtf.push('}');
+
+        // Minimal stylesheet. Director emits this; some RTF readers
+        // require it for default-style fallback.
+        rtf.push_str(&format!("{{\\stylesheet{{\\s0\\fs{} Normal Text;}}}}", default_size_halfpts));
+
+        // Document margins (twips) — Director's defaults.
+        rtf.push_str("\\margl1800 \\margr1800 \\margt1440 \\margb1440 ");
+
+        // Document-level paragraph defaults.
+        rtf.push_str(&format!("\\pard \\f0\\fs{}", default_size_halfpts));
+
+        // Helper to escape a text run's payload. Director escapes `:` as
+        // `\:`; mirror that so round-trip fidelity is preserved.
+        let escape_run = |s: &str, out: &mut String, ends_with_par: bool| {
+            // Iterate chars; on `\r`/`\n` emit `\par\n`. The terminal
+            // `\par` is appended outside this fn (when ends_with_par is
+            // true) so the helper doesn't have to track final-position.
+            let chars: Vec<char> = s.chars().collect();
+            for (i, ch) in chars.iter().enumerate() {
+                let is_last = i + 1 == chars.len();
+                match ch {
+                    '\\' => out.push_str("\\\\"),
+                    '{' => out.push_str("\\{"),
+                    '}' => out.push_str("\\}"),
+                    ':' => out.push_str("\\:"),
+                    '\r' | '\n' => {
+                        // Last char break is handled by caller's
+                        // `\par\n` emission to avoid double-stamping.
+                        if !(is_last && ends_with_par) {
+                            out.push_str("\\par\n");
+                        }
+                    }
+                    other => out.push(*other),
+                }
+            }
+        };
+
+        // Compute par_info-derived spacing for a span at a given text byte
+        // offset. Returns (sb, sa, sl) twips. Director's RTF stores all
+        // three in twips (1/20pt). Our `par_info.line_spacing` is the
+        // pixel/point value Paige reports (e.g. 14 for the description's
+        // 14pt line height); convert by ×20 to match Director's twips.
+        // Director's `\sb`/`\sa` are typically a fixed 100 twips for text
+        // members regardless of par_info content, so use 100 as the
+        // floor.
+        let par_spacing_at = |position: u32| -> (i32, i32, i32) {
+            if text_data.par_runs.is_empty() || text_data.par_infos.is_empty() {
+                return (100, 100, 100);
+            }
+            // Find the par_run whose `position` is the largest <= this offset.
+            let mut active_idx: u16 = 0;
+            for run in &text_data.par_runs {
+                if run.position <= position {
+                    active_idx = run.par_info_index;
+                } else {
+                    break;
+                }
+            }
+            let par_info = text_data.par_infos.get(active_idx as usize)
+                .cloned()
+                .unwrap_or_default();
+            let sb = if par_info.top_spacing > 0 { par_info.top_spacing * 20 } else { 100 };
+            let sa = if par_info.bottom_spacing > 0 { par_info.bottom_spacing * 20 } else { 100 };
+            let sl = if par_info.line_spacing > 0 { par_info.line_spacing * 20 } else { 100 };
+            (sb, sa, sl)
+        };
+
+        if spans.is_empty() {
+            // No styled spans — single paragraph with member-level font/size.
+            let (sb, sa, sl) = par_spacing_at(0);
+            rtf.push_str(&format!(
+                "{{\\pard \\plain\\f{}\\fs{}\\sb{}\\sa{}\\sl{} ",
+                primary_font_idx, default_size_halfpts, sb, sa, sl,
+            ));
+            escape_run(&text_data.text, &mut rtf, true);
+            rtf.push_str("\\par\n}");
+        } else {
+            let span_count = spans.len();
+            let mut text_pos: u32 = 0;
+            for (idx, span) in spans.iter().enumerate() {
+                let span_start = text_pos;
+                let font_idx = span.style.font_face
+                    .as_ref()
+                    .and_then(|f| fonts.iter().position(|x| x == f))
+                    .unwrap_or(primary_font_idx);
+                let color_idx = span.style.color
+                    .map(|c| c & 0x00FFFFFF)
+                    .and_then(|c| colors.iter().position(|x| *x == c))
+                    .unwrap_or(0);
+                let size_halfpts = span.style.font_size
+                    .map(|sz| sz.max(1) * 2)
+                    .unwrap_or(default_size_halfpts);
+                let (sb, sa, sl) = par_spacing_at(span_start);
+
+                rtf.push_str("{\\pard ");
+                // `\plain` resets character formatting before this run —
+                // Director emits this for the "default style" runs (the
+                // text content). After `\plain` we must re-declare font
+                // and size; colored/bold/etc. runs inherit `\fs<default>`
+                // from the outer context so they emit only `\f<n>` and
+                // skip `\fs<n>` to match Director's compact output.
+                let is_styled_label = color_idx != 0
+                    || span.style.bold
+                    || span.style.italic
+                    || span.style.underline;
+                let emit_size = !is_styled_label || size_halfpts != default_size_halfpts;
+                if !is_styled_label {
+                    rtf.push_str("\\plain");
+                }
+                rtf.push_str(&format!("\\f{}", font_idx));
+                if emit_size {
+                    rtf.push_str(&format!("\\fs{}", size_halfpts));
+                }
+                if color_idx != 0 {
+                    rtf.push_str(&format!("\\cf{}", color_idx));
+                }
+                if span.style.bold {
+                    rtf.push_str("\\b");
+                }
+                if span.style.italic {
+                    rtf.push_str("\\i");
+                }
+                if span.style.underline {
+                    rtf.push_str("\\ul");
+                }
+                rtf.push_str(&format!("\\sb{}\\sa{}\\sl{} ", sb, sa, sl));
+
+                let is_final_span = idx + 1 == span_count;
+                let span_ends_with_break = span.text.ends_with('\r')
+                    || span.text.ends_with('\n');
+                let needs_terminal_par = is_final_span && !span_ends_with_break;
+
+                escape_run(&span.text, &mut rtf, false);
+                if needs_terminal_par {
+                    rtf.push_str("\\par\n");
+                }
+                rtf.push('}');
+
+                text_pos += span.text.chars().count() as u32;
+            }
+        }
+
+        rtf.push('}');
+        rtf
+    }
+
+    /// Parse a Director-style RTF document into text + styled spans +
+    /// paragraph spacing data. Symmetric counterpart to
+    /// `generate_rtf_from_text_member` for the
+    /// `member.rtf = member("X").rtf` round-trip.
+    ///
+    /// Handles:
+    ///  - `{\fonttbl ...}` — collects font names indexed by `\fN`.
+    ///  - `{\colortbl \red<r>\green<g>\blue<b>;...}` — collects RGB colors
+    ///    indexed by `\cfN`.
+    ///  - `{\stylesheet ...}` / `{\info ...}` / `{\fonttbl{\*...}}` —
+    ///    skipped as metadata.
+    ///  - Per-character-run styling: `\f<n>`, `\fs<n>`, `\cf<n>`, `\b`,
+    ///    `\i`, `\ul`, `\plain` (resets to defaults).
+    ///  - Per-paragraph spacing: `\sb<n>`, `\sa<n>`, `\sl<n>` (twips).
+    ///    Stored in `par_infos` and indexed via `par_runs` keyed on the
+    ///    paragraph's text-position.
+    ///  - `\par` / `\line` — emit `\r` and start a new paragraph.
+    ///  - `\tab` — emit `\t`.
+    ///  - `\'XX` — hex escape → byte → char.
+    ///  - `\:` etc. — literal char.
+    ///  - `{` / `}` — push/pop style stack.
+    fn parse_rtf_to_styled_text(rtf: &str) -> ParsedRtf {
+        use crate::player::handlers::datum_handlers::cast_member::font::{HtmlStyle, StyledSpan};
+        use crate::director::chunks::xmedia_styled_text::{ParInfo, ParRun};
+
+        // First pass: extract font table and color table.
+        let fonts = Self::rtf_extract_font_table(rtf);
+        let colors = Self::rtf_extract_color_table(rtf);
+
+        // State frame for the style stack. Each `{` pushes a copy of the
+        // current frame; `}` pops back. RTF formatting flows down the
+        // group hierarchy and resets at group boundaries.
+        #[derive(Clone)]
+        struct Frame {
+            font_idx: Option<usize>,
+            font_size_halfpts: Option<u32>,
+            color_idx: Option<usize>,
+            bold: bool,
+            italic: bool,
+            underline: bool,
+            // Per-paragraph spacing in twips. These attach to the
+            // paragraph the run is part of, not the run itself.
+            sb: Option<i32>,
+            sa: Option<i32>,
+            sl: Option<i32>,
+        }
+        impl Default for Frame {
+            fn default() -> Self {
+                Frame {
+                    font_idx: None,
+                    font_size_halfpts: None,
+                    color_idx: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    sb: None,
+                    sa: None,
+                    sl: None,
+                }
+            }
+        }
+
+        let mut text = String::new();
+        let mut spans: Vec<StyledSpan> = Vec::new();
+        let mut par_infos: Vec<ParInfo> = Vec::new();
+        let mut par_runs: Vec<ParRun> = Vec::new();
+
+        // Ensure index 0 exists with paragraph defaults so par_runs always
+        // has something to point at.
+        par_infos.push(ParInfo::default());
+
+        let mut stack: Vec<Frame> = vec![Frame::default()];
+        let mut depth: i32 = 0;
+        let mut skip_depth: Option<i32> = None;
+
+        // Current paragraph state — accumulated until a `\par` is hit.
+        let mut current_par_sb: Option<i32> = None;
+        let mut current_par_sa: Option<i32> = None;
+        let mut current_par_sl: Option<i32> = None;
+        // First `\sb`/`\sa` value (twips) — hoisted to member-level
+        // top_spacing/bottom_spacing in the setter.
+        let mut first_sb_twips: Option<i32> = None;
+        let mut first_sa_twips: Option<i32> = None;
+
+        // Current paragraph's text start position (chars). Each `\par`
+        // commits a par_info entry and a par_run for this position.
+        let mut paragraph_start_pos: u32 = 0;
+
+        // Buffer for the run currently being built. Flushed into a
+        // StyledSpan whenever the active style changes or a paragraph
+        // break is emitted.
+        let mut run_buf = String::new();
+        let mut run_style: Option<HtmlStyle> = None;
+
+        let chars: Vec<char> = rtf.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+
+        // Build an HtmlStyle from a frame, resolving font_idx → font name
+        // and color_idx → RGB.
+        let frame_to_style = |frame: &Frame, fonts: &[String], colors: &[u32]| -> HtmlStyle {
+            HtmlStyle {
+                font_face: frame.font_idx
+                    .and_then(|i| fonts.get(i))
+                    .filter(|f| !f.is_empty())
+                    .cloned(),
+                font_size: frame.font_size_halfpts.map(|halfpts| (halfpts / 2) as i32),
+                color: frame.color_idx
+                    .and_then(|i| colors.get(i))
+                    .copied(),
+                bg_color: None,
+                bold: frame.bold,
+                italic: frame.italic,
+                underline: frame.underline,
+                kerning: 0,
+                char_spacing: 0,
+            }
+        };
+
+        // Flush the current run buffer to a StyledSpan with the current
+        // style. Called before a style change OR before a `\par`.
+        let mut flush_run = |run_buf: &mut String,
+                             run_style: &mut Option<HtmlStyle>,
+                             spans: &mut Vec<StyledSpan>| {
+            if !run_buf.is_empty() {
+                let style = run_style.clone().unwrap_or_default();
+                spans.push(StyledSpan {
+                    text: std::mem::take(run_buf),
+                    style,
+                });
+            }
+            *run_style = None;
+        };
+
+        while i < len {
+            let ch = chars[i];
+            match ch {
+                '{' => {
+                    depth += 1;
+                    // Detect groups whose contents we should skip entirely.
+                    let rest: String = chars[i + 1..len.min(i + 32)].iter().collect();
+                    if rest.starts_with("\\fonttbl")
+                        || rest.starts_with("\\colortbl")
+                        || rest.starts_with("\\stylesheet")
+                        || rest.starts_with("\\info")
+                        || rest.starts_with("\\*")
+                    {
+                        if skip_depth.is_none() {
+                            skip_depth = Some(depth);
+                        }
+                    }
+                    // Push a copy of the current frame so the `}` later
+                    // restores the outer state.
+                    let top = stack.last().cloned().unwrap_or_default();
+                    stack.push(top);
+                    i += 1;
+                }
+                '}' => {
+                    if skip_depth == Some(depth) {
+                        skip_depth = None;
+                    }
+                    if !skip_depth.is_some() {
+                        // Style about to change at the `}` — flush.
+                        flush_run(&mut run_buf, &mut run_style, &mut spans);
+                    }
+                    if stack.len() > 1 {
+                        stack.pop();
+                    }
+                    depth -= 1;
+                    i += 1;
+                }
+                '\\' if skip_depth.is_none() => {
+                    i += 1;
+                    if i >= len {
+                        break;
+                    }
+                    let next = chars[i];
+                    if next == '\'' && i + 2 < len {
+                        // \'XX hex escape
+                        let hex: String = chars[i + 1..i + 3].iter().collect();
+                        if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                            // Ensure run_style matches current frame.
+                            if run_style.is_none() {
+                                run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                            }
+                            run_buf.push(byte as char);
+                            text.push(byte as char);
+                        }
+                        i += 3;
+                    } else if next == '\\' || next == '{' || next == '}' {
+                        if run_style.is_none() {
+                            run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                        }
+                        run_buf.push(next);
+                        text.push(next);
+                        i += 1;
+                    } else if next == '\n' || next == '\r' {
+                        // Line break right after backslash — RTF source
+                        // formatting, skip.
+                        i += 1;
+                    } else if !next.is_ascii_alphabetic() {
+                        // Non-letter escape (`\:`, `\-`, etc.) — emit literal.
+                        if run_style.is_none() {
+                            run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                        }
+                        run_buf.push(next);
+                        text.push(next);
+                        i += 1;
+                    } else {
+                        // Control word
+                        let mut word = String::new();
+                        while i < len && chars[i].is_ascii_alphabetic() {
+                            word.push(chars[i]);
+                            i += 1;
+                        }
+                        // Optional numeric param
+                        let mut numeric_param: Option<i32> = None;
+                        if i < len && (chars[i] == '-' || chars[i].is_ascii_digit()) {
+                            let mut num_str = String::new();
+                            if chars[i] == '-' {
+                                num_str.push('-');
+                                i += 1;
+                            }
+                            while i < len && chars[i].is_ascii_digit() {
+                                num_str.push(chars[i]);
+                                i += 1;
+                            }
+                            numeric_param = num_str.parse::<i32>().ok();
+                        }
+                        // Skip single trailing space delimiter
+                        if i < len && chars[i] == ' ' {
+                            i += 1;
+                        }
+
+                        // Style-changing words flush the current run before
+                        // applying so the previous style is preserved.
+                        match word.as_str() {
+                            "par" | "line" => {
+                                flush_run(&mut run_buf, &mut run_style, &mut spans);
+                                // Commit current paragraph spacing to
+                                // par_infos, recording a par_run pointing
+                                // at the paragraph's start position.
+                                let par_info_idx = if current_par_sb.is_some()
+                                    || current_par_sa.is_some()
+                                    || current_par_sl.is_some()
+                                {
+                                    // Verified against XMED-load dumps:
+                                    //   - `\sb`/`\sa` are 0 in authored
+                                    //     par_infos across the board.
+                                    //     Director emits `\sb100\sa100` as
+                                    //     a default sentinel; map exact
+                                    //     100 twips back to 0 to match.
+                                    //   - `\sl` is authored as a literal
+                                    //     value (Buggy labels: sl=5, desc:
+                                    //     sl=14, Terrain:Normal: sl=15).
+                                    //     Sentinel-mapping `\sl100` to 0
+                                    //     would lose the 5pt label value
+                                    //     and diverge from the truth, so
+                                    //     pass `\sl` through verbatim.
+                                    //     The renderer must clamp the
+                                    //     effective line height to
+                                    //     `max(line_spacing, line.max_size)`
+                                    //     so a 5pt sl with a 12pt font
+                                    //     still gets a 12pt line stride.
+                                    let unsentinel_sb_sa = |t: Option<i32>| -> i32 {
+                                        match t {
+                                            Some(100) | None => 0,
+                                            Some(v) => v / 20,
+                                        }
+                                    };
+                                    let pt_sl = |t: Option<i32>| -> i32 {
+                                        t.map(|v| v / 20).unwrap_or(0)
+                                    };
+                                    let new_par = ParInfo {
+                                        line_spacing: pt_sl(current_par_sl),
+                                        line_height: 0,
+                                        left_indent: 0,
+                                        right_indent: 0,
+                                        first_indent: 0,
+                                        top_spacing: unsentinel_sb_sa(current_par_sb),
+                                        bottom_spacing: unsentinel_sb_sa(current_par_sa),
+                                        justification: 0,
+                                    };
+                                    // Deduplicate par_infos: Director's
+                                    // XMED stores ONE par_info per distinct
+                                    // value-set and points multiple
+                                    // paragraphs at the same index via
+                                    // par_runs (Buggy labels Speed/Actions/
+                                    // Drop Off/Capacity all share par_info
+                                    // sl=5). Without this, every `\par`
+                                    // gets its own par_info and the
+                                    // renderer sees a paragraph transition
+                                    // between every line — adding member-
+                                    // level top/bottom_spacing at every
+                                    // `\par` instead of only at genuine
+                                    // par_info group changes.
+                                    let existing_idx = par_infos.iter().enumerate().find_map(|(i, pi)| {
+                                        if pi.line_spacing == new_par.line_spacing
+                                            && pi.line_height == new_par.line_height
+                                            && pi.left_indent == new_par.left_indent
+                                            && pi.right_indent == new_par.right_indent
+                                            && pi.first_indent == new_par.first_indent
+                                            && pi.top_spacing == new_par.top_spacing
+                                            && pi.bottom_spacing == new_par.bottom_spacing
+                                            && pi.justification == new_par.justification
+                                        { Some(i as u16) } else { None }
+                                    });
+                                    match existing_idx {
+                                        Some(idx) => idx,
+                                        None => {
+                                            par_infos.push(new_par);
+                                            par_infos.len() as u16 - 1
+                                        }
+                                    }
+                                } else {
+                                    0
+                                };
+                                // Push a par_run only when the par_info
+                                // index actually changes — Director's
+                                // par_runs are coalesced (one entry per
+                                // par_info group, not per `\par`).
+                                let push_run = par_runs
+                                    .last()
+                                    .map_or(true, |r| r.par_info_index != par_info_idx);
+                                if push_run {
+                                    par_runs.push(ParRun {
+                                        position: paragraph_start_pos,
+                                        par_info_index: par_info_idx,
+                                    });
+                                }
+                                // Don't reset paragraph spacing on `\par` —
+                                // RTF semantics keep `\sb`/`\sa`/`\sl` in
+                                // effect for subsequent paragraphs in the
+                                // same group until `\pard` resets them or a
+                                // new value overrides. Resetting here made
+                                // "Drop Off\par" (which lives in the same
+                                // `{\pard ... Pick Up,\par\nDrop Off\par}`
+                                // group as Pick Up) lose the group's
+                                // `\sl100\sb100\sa100` and fall back to the
+                                // default par_info[0] entry.
+                                // Append the actual `\r` to text and to the
+                                // current run buffer (so the span carries
+                                // its terminating break the same way the
+                                // generator emits).
+                                if run_style.is_none() {
+                                    run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                                }
+                                run_buf.push('\r');
+                                text.push('\r');
+                                paragraph_start_pos = text.chars().count() as u32;
+                            }
+                            "tab" => {
+                                if run_style.is_none() {
+                                    run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                                }
+                                run_buf.push('\t');
+                            }
+                            "plain" => {
+                                flush_run(&mut run_buf, &mut run_style, &mut spans);
+                                let frame = stack.last_mut().unwrap();
+                                frame.bold = false;
+                                frame.italic = false;
+                                frame.underline = false;
+                                frame.color_idx = None;
+                                // \plain doesn't reset font_idx/font_size
+                                // by RTF spec — those follow `\fN\fsN`
+                                // that appears next.
+                            }
+                            "f" => {
+                                flush_run(&mut run_buf, &mut run_style, &mut spans);
+                                let frame = stack.last_mut().unwrap();
+                                frame.font_idx = numeric_param.map(|n| n.max(0) as usize);
+                            }
+                            "fs" => {
+                                flush_run(&mut run_buf, &mut run_style, &mut spans);
+                                let frame = stack.last_mut().unwrap();
+                                frame.font_size_halfpts = numeric_param.map(|n| n.max(1) as u32);
+                            }
+                            "cf" => {
+                                flush_run(&mut run_buf, &mut run_style, &mut spans);
+                                let frame = stack.last_mut().unwrap();
+                                frame.color_idx = numeric_param.map(|n| n.max(0) as usize);
+                            }
+                            "b" => {
+                                flush_run(&mut run_buf, &mut run_style, &mut spans);
+                                let frame = stack.last_mut().unwrap();
+                                frame.bold = numeric_param != Some(0);
+                            }
+                            "i" => {
+                                flush_run(&mut run_buf, &mut run_style, &mut spans);
+                                let frame = stack.last_mut().unwrap();
+                                frame.italic = numeric_param != Some(0);
+                            }
+                            "ul" | "ulnone" => {
+                                flush_run(&mut run_buf, &mut run_style, &mut spans);
+                                let frame = stack.last_mut().unwrap();
+                                frame.underline = word == "ul" && numeric_param != Some(0);
+                            }
+                            "sb" => {
+                                current_par_sb = numeric_param;
+                                if first_sb_twips.is_none() {
+                                    first_sb_twips = numeric_param;
+                                }
+                            }
+                            "sa" => {
+                                current_par_sa = numeric_param;
+                                if first_sa_twips.is_none() {
+                                    first_sa_twips = numeric_param;
+                                }
+                            }
+                            "sl" => {
+                                current_par_sl = numeric_param;
+                            }
+                            "pard" => {
+                                // Reset paragraph properties to defaults.
+                                current_par_sb = None;
+                                current_par_sa = None;
+                                current_par_sl = None;
+                            }
+                            // Ignore everything else (margins, deff, ansi,
+                            // stylesheet refs, etc.). Already-skipped groups
+                            // (fonttbl, colortbl) handled by skip_depth.
+                            _ => {}
+                        }
+                    }
+                }
+                '\n' | '\r' => {
+                    // Bare newlines in RTF source are formatting whitespace.
+                    i += 1;
+                }
+                _ => {
+                    if skip_depth.is_none() {
+                        // Initialize run style on first content char of a
+                        // run so style changes flush the previous run
+                        // before applying.
+                        if run_style.is_none() {
+                            run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                        }
+                        run_buf.push(ch);
+                        text.push(ch);
+                    }
+                    i += 1;
+                }
+            }
+        }
+
+        // Flush any trailing run.
+        flush_run(&mut run_buf, &mut run_style, &mut spans);
+
+        ParsedRtf {
+            text,
+            spans,
+            par_infos,
+            par_runs,
+            member_top_spacing: first_sb_twips.map(|t| (t / 20) as i16),
+            member_bottom_spacing: first_sa_twips.map(|t| (t / 20) as i16),
+        }
+    }
+
+    /// Walk an RTF string and extract `{\fonttbl{\fN\fswiss <name>;}...}`
+    /// into a Vec where index N holds the font name. Missing indices are
+    /// filled with empty strings.
+    fn rtf_extract_font_table(rtf: &str) -> Vec<String> {
+        let mut fonts: Vec<String> = Vec::new();
+        let bytes = rtf.as_bytes();
+        let len = bytes.len();
+        let Some(start) = rtf.find("\\fonttbl") else {
+            return fonts;
+        };
+        // Find the matching `}` for the `{\fonttbl ...}` group.
+        let mut depth = 1;
+        let mut i = start + "\\fonttbl".len();
+        // Walk from start of group; we entered at depth 1.
+        while i < len && depth > 0 {
+            match bytes[i] as char {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let group_end = i;
+        let group = &rtf[start..group_end.min(rtf.len())];
+
+        // Each font entry is `{\fN ...; }` or `{\fN\fswiss <name>;}`.
+        let chars: Vec<char> = group.chars().collect();
+        let mut p = 0;
+        while p < chars.len() {
+            if chars[p] == '\\' && p + 1 < chars.len() && chars[p + 1] == 'f' {
+                // Try to read \fN
+                let mut q = p + 2;
+                let mut num_str = String::new();
+                while q < chars.len() && chars[q].is_ascii_digit() {
+                    num_str.push(chars[q]);
+                    q += 1;
+                }
+                if let Ok(idx) = num_str.parse::<usize>() {
+                    // Find the font name — next text up to `;` or `}`.
+                    let mut name = String::new();
+                    let mut depth_inner = 0;
+                    while q < chars.len() {
+                        let c = chars[q];
+                        if c == '{' {
+                            depth_inner += 1;
+                            q += 1;
+                            continue;
+                        }
+                        if c == '}' {
+                            if depth_inner == 0 {
+                                break;
+                            }
+                            depth_inner -= 1;
+                            q += 1;
+                            continue;
+                        }
+                        if c == ';' {
+                            break;
+                        }
+                        if c == '\\' {
+                            // Skip control word (e.g. \fswiss, \froman).
+                            q += 1;
+                            while q < chars.len() && chars[q].is_ascii_alphabetic() {
+                                q += 1;
+                            }
+                            // optional numeric
+                            if q < chars.len() && (chars[q] == '-' || chars[q].is_ascii_digit()) {
+                                if chars[q] == '-' {
+                                    q += 1;
+                                }
+                                while q < chars.len() && chars[q].is_ascii_digit() {
+                                    q += 1;
+                                }
+                            }
+                            // optional space delim
+                            if q < chars.len() && chars[q] == ' ' {
+                                q += 1;
+                            }
+                            continue;
+                        }
+                        name.push(c);
+                        q += 1;
+                    }
+                    let trimmed = name.trim().to_string();
+                    while fonts.len() <= idx {
+                        fonts.push(String::new());
+                    }
+                    fonts[idx] = trimmed;
+                    p = q;
+                    continue;
+                }
+            }
+            p += 1;
+        }
+        fonts
+    }
+
+    /// Walk an RTF string and extract `{\colortbl \red<r>\green<g>\blue<b>;...}`
+    /// into a Vec<u32> of 0xRRGGBB values. Index 0 always exists (default
+    /// black).
+    fn rtf_extract_color_table(rtf: &str) -> Vec<u32> {
+        let mut colors: Vec<u32> = vec![0x000000];
+        let Some(start) = rtf.find("\\colortbl") else {
+            return colors;
+        };
+        // Find matching `}` for the colortbl group.
+        let bytes = rtf.as_bytes();
+        let len = bytes.len();
+        let mut depth = 1;
+        let mut i = start + "\\colortbl".len();
+        while i < len && depth > 0 {
+            match bytes[i] as char {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let group = &rtf[start..i.min(rtf.len())];
+
+        // Reset colors to empty so we collect strictly from the table
+        // (the caller-side default-black at index 0 will be the first
+        // entry parsed below for Director's table).
+        colors.clear();
+
+        // Walk control words in order, accumulating r/g/b until we hit
+        // a `;` which commits the color.
+        let chars: Vec<char> = group.chars().collect();
+        let mut p = 0;
+        let mut cur_r: u32 = 0;
+        let mut cur_g: u32 = 0;
+        let mut cur_b: u32 = 0;
+        let mut have_any = false;
+        while p < chars.len() {
+            let c = chars[p];
+            if c == '\\' && p + 1 < chars.len() {
+                let mut q = p + 1;
+                let mut word = String::new();
+                while q < chars.len() && chars[q].is_ascii_alphabetic() {
+                    word.push(chars[q]);
+                    q += 1;
+                }
+                let mut num_str = String::new();
+                while q < chars.len() && chars[q].is_ascii_digit() {
+                    num_str.push(chars[q]);
+                    q += 1;
+                }
+                let num = num_str.parse::<u32>().unwrap_or(0);
+                match word.as_str() {
+                    "red" => {
+                        cur_r = num.min(255);
+                        have_any = true;
+                    }
+                    "green" => {
+                        cur_g = num.min(255);
+                        have_any = true;
+                    }
+                    "blue" => {
+                        cur_b = num.min(255);
+                        have_any = true;
+                    }
+                    _ => {}
+                }
+                p = q;
+                continue;
+            }
+            if c == ';' {
+                if have_any {
+                    let color = (cur_r << 16) | (cur_g << 8) | cur_b;
+                    colors.push(color);
+                } else {
+                    // `;` with no preceding triplet → default black.
+                    colors.push(0x000000);
+                }
+                cur_r = 0;
+                cur_g = 0;
+                cur_b = 0;
+                have_any = false;
+            }
+            p += 1;
+        }
+
+        if colors.is_empty() {
+            colors.push(0x000000);
+        }
+        colors
     }
 
     /// Extract plain text from an RTF string by stripping control words and groups.

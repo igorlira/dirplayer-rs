@@ -164,8 +164,23 @@ impl CastLib {
         best
     }
 
+
     fn clear(&mut self) {
-        if self.state != CastLibState::Loaded {
+        // Clear regardless of state. The previous early-return-when-not-Loaded
+        // guard left stale members in place when a swap-in-place reload went
+        // through the network path of `preload`: that path sets
+        // `state = Loading` *before* awaiting the fetch, and by the time
+        // `load_from_dir_file` calls `clear()` the guard short-circuited so
+        // the OLD cast's members survived. `apply_cast_def` then merged the
+        // new cast on top, leaving any slot the new cast didn't redefine
+        // pinned to the previous cast's content (e.g. Coke Studios' first-time
+        // swap from one public studio to another bled walls/floor/decor from
+        // the previously visited studio).
+        if self.members.is_empty()
+            && self.scripts.is_empty()
+            && self.lctx.is_none()
+            && self.state == CastLibState::None
+        {
             return;
         }
         self.members.clear();

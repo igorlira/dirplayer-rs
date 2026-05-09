@@ -385,7 +385,7 @@ pub fn render_preview_bitmap(
                 original_dst_rect: None,
                 bg_color_explicit: false,
                 fore_color_explicit: false,
-                ink9_mask_bitmap: None,
+                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
             };
 
             for char_code in 0u16..256 {
@@ -412,7 +412,7 @@ pub fn render_preview_bitmap(
                             original_dst_rect: None,
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None,
+                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         };
                         bitmap.draw_text(
                             &label,
@@ -487,6 +487,8 @@ pub fn render_preview_bitmap(
                                 cell_h,
                                 0,
                                 0,
+                                &[],
+                                &[],
                                 &[],
                             );
                         }
@@ -715,18 +717,51 @@ fn render_filmloop_from_channel_data(
                 let mut channel_map: std::collections::HashMap<u16, (u32, crate::director::chunks::score::ScoreFrameChannelData)> =
                     std::collections::HashMap::new();
 
+                // Sprite-span gating: the score writes explicit "clear" deltas
+                // (all-zero bytes) at end_frame to deactivate channels, but the
+                // score parser drops those entries (its has_sprite_data check
+                // is all-or-nothing). Without checking spans, "most recent
+                // active data" keeps every channel alive forever, so a
+                // 6-channel radar-ping filmloop (nav_circleanim) accumulates
+                // all six rings instead of cycling.
+                //
+                // Build a per-channel set of active spans up front. A channel
+                // entry is only kept when current_frame falls inside one of
+                // its spans (1-based, like the parsed FrameIntervalPrimary).
+                let frame_intervals = &film_loop_member.score_chunk.frame_intervals;
+                let has_spans = !frame_intervals.is_empty();
+
                 for (frame_idx, channel_idx, data) in film_loop_member.score.channel_initialization_data.iter() {
                     // Skip effect channels (0-5)
                     if *channel_idx < 6 {
                         continue;
                     }
-                    // Skip empty sprites (cast_member 0 means no sprite)
-                    if data.cast_member == 0 {
+                    // Inline shape sprites use cast_lib=0xFFFE / cast_member=0 as a
+                    // sentinel — they draw an oval/rect from the sprite-record
+                    // geometry, no cast member required. Keep those entries.
+                    let is_inline_shape = data.cast_lib == 0xFFFE && data.cast_member == 0
+                        && (data.width > 0 || data.height > 0);
+                    // Skip empty sprites (cast_member 0 with no inline-shape geometry).
+                    if data.cast_member == 0 && !is_inline_shape {
                         continue;
                     }
                     // Only consider frames <= current frame (keyframe interpolation)
                     if *frame_idx > frame_idx_target {
                         continue;
+                    }
+                    // Span gating: skip channels whose span doesn't include the
+                    // current frame. Only applies when the filmloop ships
+                    // frame_intervals — older filmloops without them keep the
+                    // legacy "most recent data wins" behaviour.
+                    if has_spans {
+                        let in_span = frame_intervals.iter().any(|(primary, _)| {
+                            primary.channel_index == *channel_idx as u32
+                                && primary.start_frame <= frame
+                                && frame <= primary.end_frame
+                        });
+                        if !in_span {
+                            continue;
+                        }
                     }
                     // Keep the most recent (highest frame_idx) data for each channel
                     let entry = channel_map.entry(*channel_idx);
@@ -795,6 +830,63 @@ fn render_filmloop_from_channel_data(
 
     for (_frame_idx, channel_idx, data) in sorted_data {
         let channel_num = get_channel_number_from_index(channel_idx as u32);
+
+        // Inline shape sprite (no cast member): cast_lib=0xFFFE / cast_member=0.
+        // The sprite-record geometry encodes an oval/rect drawn directly. CS uses
+        // this in nav_circleanim to animate growing concentric ovals as a
+        // radar-ping effect. Render it here and skip the cast-member path.
+        let is_inline_shape = data.cast_lib == 0xFFFE && data.cast_member == 0
+            && (data.width > 0 || data.height > 0);
+        if is_inline_shape {
+            // Director shape sprites centre on (pos_x, pos_y). For the radar-
+            // ping nav_circleanim, every channel records the same pos and
+            // grows width/height across frames, so all rings share a centre —
+            // top-left positioning would scatter them by their increasing
+            // half-widths and miss the city dot.
+            let sprite_left = data.pos_x as i32 - (data.width as i32) / 2;
+            let sprite_top = data.pos_y as i32 - (data.height as i32) / 2;
+            let rel_x = sprite_left - initial_rect.left;
+            let rel_y = sprite_top - initial_rect.top;
+            let sprite_rect = IntRect::from(
+                rel_x, rel_y,
+                rel_x + data.width as i32,
+                rel_y + data.height as i32,
+            );
+
+            // Inline shapes encode colour as RGB across the 6 D8+ extended
+            // colour bytes: fore = (byte 2, byte 24, byte 26), back = (byte 3,
+            // byte 25, byte 27). resolve_filmloop_child_colors only emits Rgb
+            // when color_flag is set, but inline-shape records leave color_flag
+            // at 0 and rely on the explicit RGB triplets directly — without
+            // this, foreColor=0xFF resolves through SystemWin index 255 to
+            // black, instead of nav_circleanim's authored red (255, 0, 0).
+            let r = data.fore_color;
+            let g = data.fore_color_g;
+            let b = data.fore_color_b;
+            let blend_pct = if data.blend == 255 || data.blend == 0 {
+                100
+            } else {
+                ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
+            };
+            let alpha = (blend_pct as f32 / 100.0).clamp(0.0, 1.0);
+
+            // Stroke directly with thickness=1 — bypasses
+            // draw_shape_with_sprite's "subtract 1 for unfilled" convention so
+            // the outline is exactly 1 pixel. Filling every channel produced
+            // one solid blob because the largest concentric oval covered all
+            // the smaller ones; real radar-ping is expanding rings.
+            bitmap.stroke_ellipse(
+                sprite_rect.left,
+                sprite_rect.top,
+                sprite_rect.right,
+                sprite_rect.bottom,
+                (r, g, b),
+                &palettes,
+                alpha,
+                1,
+            );
+            continue;
+        }
 
         // Build member ref from channel data
         // cast_lib 65535 means "use the filmloop's cast library"
@@ -932,7 +1024,7 @@ fn render_filmloop_from_channel_data(
                 // applies to the composited filmloop bitmap as a whole (at
                 // the stage layer), it does NOT cascade down to override
                 // individual child inks.
-                let (ink, sprite_color, sprite_bg_color) = {
+                let (mut ink, sprite_color, sprite_bg_color) = {
                     let (fg, bg) = resolve_filmloop_child_colors(&data);
                     // Mask off bit 7 (stretch flag) from the ink byte.
                     ((data.ink as u32) & 0x3F, fg, bg)
@@ -941,13 +1033,24 @@ fn render_filmloop_from_channel_data(
                 // For ink 9 (Mask), the mask bitmap is the next cast member
                 // (cast_member + 1) in the same library. Resolve and clone it
                 // before taking the mutable borrow on bitmap_manager below.
-                let ink9_mask = if ink == 9 {
+                // The mask is aligned to the source by their registration
+                // points (Director allows mismatched dimensions: mask 55x63 vs
+                // source 51x58 in CS rightwall torch).
+                let src_reg = (bitmap_member.reg_point.0 as i32, bitmap_member.reg_point.1 as i32);
+                let ink9_mask: Option<(Bitmap, (i32, i32))> = if ink == 9 {
                     let mask_ref = CastMemberRef {
                         cast_lib: if data.cast_lib == 65535 { filmloop_cast_lib } else { data.cast_lib as i32 },
                         cast_member: data.cast_member as i32 + 1,
                     };
-                    player.movie.cast_manager
-                        .find_filmloop_inner_member(&mask_ref)
+                    let found_member = player.movie.cast_manager
+                        .find_filmloop_inner_member(&mask_ref);
+                    let mask_reg = match found_member.as_ref().map(|m| &m.member_type) {
+                        Some(CastMemberType::Bitmap(bm)) => {
+                            (bm.reg_point.0 as i32, bm.reg_point.1 as i32)
+                        }
+                        _ => src_reg,
+                    };
+                    found_member
                         .and_then(|m| {
                             if let CastMemberType::Bitmap(bm) = &m.member_type {
                                 Some(bm.image_ref)
@@ -957,6 +1060,7 @@ fn render_filmloop_from_channel_data(
                         })
                         .and_then(|img_ref| player.bitmap_manager.get_bitmap(img_ref))
                         .cloned()
+                        .map(|bmp| (bmp, (mask_reg.0 - src_reg.0, mask_reg.1 - src_reg.1)))
                 } else {
                     None
                 };
@@ -1102,7 +1206,8 @@ fn render_filmloop_from_channel_data(
                     original_dst_rect: Some(sprite_rect.clone()),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: ink9_mask.as_ref(),
+                    ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
+                    ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -1178,7 +1283,7 @@ fn render_filmloop_from_channel_data(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None,
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
                     bitmap.draw_text(
@@ -1256,7 +1361,7 @@ fn render_filmloop_from_channel_data(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None,
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
                     bitmap.draw_text(
@@ -1303,7 +1408,7 @@ fn render_filmloop_from_channel_data(
                             original_dst_rect: Some(dst_rect.clone()),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None,
+                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -1390,7 +1495,7 @@ fn render_filmloop_from_channel_data(
                     original_dst_rect: Some(sprite_rect.clone()),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None,
+                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -1620,14 +1725,28 @@ pub fn render_score_to_bitmap_with_offset(
                 let sprite_rect = get_concrete_sprite_rect(player, sprite);
                 let logical_rect = sprite_rect.clone();
 
-                // For ink 9 (Mask), find the mask bitmap BEFORE mutable borrow of bitmap_manager
-                let ink9_mask = if sprite.ink == 9 {
+                // For ink 9 (Mask), find the mask bitmap BEFORE mutable borrow
+                // of bitmap_manager. Director aligns the mask to the source by
+                // their registration points; mask dimensions need not match
+                // the source.
+                let stage_src_reg = (
+                    bitmap_member.reg_point.0 as i32,
+                    bitmap_member.reg_point.1 as i32,
+                );
+                let ink9_mask: Option<(Bitmap, (i32, i32))> = if sprite.ink == 9 {
                     sprite.member.as_ref().and_then(|mref| {
                         let mask_ref = CastMemberRef {
                             cast_lib: mref.cast_lib,
                             cast_member: mref.cast_member + 1,
                         };
-                        player.movie.cast_manager.find_member_by_ref(&mask_ref)
+                        let found = player.movie.cast_manager.find_member_by_ref(&mask_ref);
+                        let mask_reg = match found.as_ref().map(|m| &m.member_type) {
+                            Some(CastMemberType::Bitmap(bm)) => {
+                                (bm.reg_point.0 as i32, bm.reg_point.1 as i32)
+                            }
+                            _ => stage_src_reg,
+                        };
+                        found
                             .and_then(|m| {
                                 if let CastMemberType::Bitmap(bm) = &m.member_type {
                                     Some(bm.image_ref)
@@ -1637,6 +1756,7 @@ pub fn render_score_to_bitmap_with_offset(
                             })
                             .and_then(|img_ref| player.bitmap_manager.get_bitmap(img_ref))
                             .cloned()
+                            .map(|bmp| (bmp, (mask_reg.0 - stage_src_reg.0, mask_reg.1 - stage_src_reg.1)))
                     })
                 } else {
                     None
@@ -1725,7 +1845,8 @@ pub fn render_score_to_bitmap_with_offset(
                     sprite: Some(sprite),
                     mask_offset: (0, 0),
                     original_dst_rect: Some(logical_rect),
-                    ink9_mask_bitmap: ink9_mask.as_ref(),
+                    ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
+                    ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
                 };
 
                 if let Some(mask) = mask {
@@ -1865,7 +1986,7 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None,
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
                     bitmap.draw_text_wrapped(
@@ -2038,7 +2159,7 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None,
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
                     temp.draw_text_wrapped(
@@ -2099,6 +2220,8 @@ pub fn render_score_to_bitmap_with_offset(
                         field.fixed_line_space,
                         field.top_spacing,
                         0,
+                        &[],
+                        &[],
                         &[],
                     ) {
                         console_warn!("Native text render error for Button: {:?}", e);
@@ -2203,7 +2326,7 @@ pub fn render_score_to_bitmap_with_offset(
                     original_dst_rect: None,
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None,
+                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                 };
 
                 if let Some(mask) = mask {
@@ -2342,7 +2465,7 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None,
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
                     // Use styled text rendering if html_styled_spans is populated
@@ -2431,6 +2554,8 @@ pub fn render_score_to_bitmap_with_offset(
                             text_member.top_spacing,
                             text_member.bottom_spacing,
                             &text_member.tab_stops,
+                            &text_member.par_infos,
+                            &text_member.par_runs,
                         ) {
                             console_warn!("Native text render error for Text member: {:?}", e);
                         }
@@ -2562,7 +2687,7 @@ pub fn render_score_to_bitmap_with_offset(
                     original_dst_rect: Some(logical_rect),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None,
+                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                 };
 
                 // Debug: log filmloop bitmap properties before compositing
@@ -2623,7 +2748,7 @@ pub fn render_score_to_bitmap_with_offset(
                             original_dst_rect: Some(dst_rect.clone()),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None,
+                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -2862,7 +2987,7 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
                 original_dst_rect: None,
                 bg_color_explicit: false,
                 fore_color_explicit: false,
-                ink9_mask_bitmap: None,
+                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
             },
         );
     }
@@ -3002,7 +3127,7 @@ impl PlayerCanvasRenderer {
                 original_dst_rect: None,
                 bg_color_explicit: false,
                 fore_color_explicit: false,
-                ink9_mask_bitmap: None,
+                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
             };
 
             bitmap.draw_text(

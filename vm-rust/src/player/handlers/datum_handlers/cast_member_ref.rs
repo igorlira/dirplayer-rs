@@ -8,6 +8,7 @@ use super::cast_member::{
     havok::HavokPhysicsMemberHandlers,
     shockwave3d::Shockwave3dMemberHandlers,
     sound::SoundMemberHandlers, text::TextMemberHandlers, palette::PaletteMemberHandlers,
+    vector_shape::VectorShapeMemberHandlers,
 };
 
 use crate::{
@@ -568,7 +569,16 @@ impl CastMemberRefHandlers {
                             Ok(Datum::Symbol(symbol.to_string()))
                         }
                         "filled" => Ok(datum_bool(info.fill_type != 0)),
-                        "lineSize" => Ok(Datum::Int(info.line_thickness as i32)),
+                        // Director stores line thickness 1-based: 1 = no
+                        // border ("hairline" / invisible), 2 = 1px, 3 = 2px,
+                        // …, 6 = 5px (max). The Lingo `lineSize of member`
+                        // getter returns the 0-based form (file value − 1),
+                        // so file=1 → Lingo=0 (matches Director on a
+                        // sprite-4 shape with no border).
+                        "lineSize" => {
+                            let raw = info.line_thickness as i32;
+                            Ok(Datum::Int((raw - 1).max(0)))
+                        }
                         "pattern" => Ok(Datum::Int(info.pattern as i32)),
                         "foreColor" => Ok(Datum::Int(info.fore_color as i32)),
                         "backColor" => Ok(Datum::Int(info.back_color as i32)),
@@ -581,116 +591,13 @@ impl CastMemberRefHandlers {
                 }
             }
             CastMemberTypeId::VectorShape => {
-                let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
-                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-
-                if let CastMemberType::VectorShape(vs) = &cast_member.member_type {
-                    // Extract data we need before dropping the borrow on player
-                    let result: Result<Datum, ScriptError> = match prop {
-                        "width" => Ok(Datum::Int(vs.width().ceil() as i32)),
-                        "height" => Ok(Datum::Int(vs.height().ceil() as i32)),
-                        "strokeColor" => {
-                            let (r, g, b) = vs.stroke_color;
-                            Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
-                        }
-                        "strokeWidth" => Ok(Datum::Float(vs.stroke_width as f64)),
-                        "closed" => Ok(datum_bool(vs.closed)),
-                        "fillMode" => {
-                            let sym = match vs.fill_mode {
-                                0 => "none",
-                                1 => "solid",
-                                2 => "gradient",
-                                _ => "none",
-                            };
-                            Ok(Datum::Symbol(sym.to_string()))
-                        }
-                        "fillColor" => {
-                            let (r, g, b) = vs.fill_color;
-                            Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
-                        }
-                        "backgroundColor" => {
-                            let (r, g, b) = vs.bg_color;
-                            Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
-                        }
-                        "endColor" => {
-                            let (r, g, b) = vs.end_color;
-                            Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
-                        }
-                        _ => Err(ScriptError::new(format!(
-                            "VectorShape members don't support property {}", prop
-                        ))),
-                    };
-                    // Handle props that need alloc_datum separately (to avoid borrow conflict)
-                    if prop == "image" {
-                        let w = vs.width().ceil() as u16;
-                        let h = vs.height().ceil() as u16;
-                        let fill = vs.fill_color;
-                        let fill_mode = vs.fill_mode;
-                        drop(cast_member);
-                        // Create a bitmap filled with the fill color
-                        let mut bitmap = crate::player::bitmap::bitmap::Bitmap::new(
-                            w.max(1), h.max(1), 32, 32, 0,
-                            crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
-                                crate::player::bitmap::bitmap::BuiltInPalette::GrayScale
-                            ),
-                        );
-                        if fill_mode > 0 {
-                            // Fill with fill_color
-                            let palettes = player.movie.cast_manager.palettes();
-                            bitmap.flood_fill((0, 0), fill, &palettes);
-                        }
-                        // Vector shape `.image` rasterizes the shape into a
-                        // fresh bitmap that isn't tied to any cast member's
-                        // image_ref — refcount via DatumRef so it's freed
-                        // when the script's reference goes away.
-                        let bitmap_id = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
-                        return Ok(Datum::BitmapRef(bitmap_id));
-                    } else if prop == "rect" {
-                        let w = vs.width().ceil() as i32;
-                        let h = vs.height().ceil() as i32;
-                        drop(cast_member);
-                        Ok(Datum::Rect([0.0, 0.0, w as f64, h as f64], 0))
-                    } else if prop == "vertexList" {
-                        let vert_data: Vec<(i32, i32, i32, i32, i32, i32)> = vs.vertices.iter()
-                            .map(|v| (
-                                v.x as i32, v.y as i32,
-                                v.handle1_x as i32, v.handle1_y as i32,
-                                v.handle2_x as i32, v.handle2_y as i32,
-                            ))
-                            .collect();
-                        drop(cast_member);
-                        let list: VecDeque<DatumRef> = vert_data.iter().map(|(vx, vy, h1x, h1y, h2x, h2y)| {
-                            let vertex_key = player.alloc_datum(Datum::Symbol("vertex".to_string()));
-                            let vertex_val = player.alloc_datum(Datum::Point([*vx as f64, *vy as f64], 0));
-
-                            let h1_key = player.alloc_datum(Datum::Symbol("handle1".to_string()));
-                            let h1_val = player.alloc_datum(Datum::Point([*h1x as f64, *h1y as f64], 0));
-
-                            let h2_key = player.alloc_datum(Datum::Symbol("handle2".to_string()));
-                            let h2_val = player.alloc_datum(Datum::Point([*h2x as f64, *h2y as f64], 0));
-
-                            let prop_list = Datum::PropList(VecDeque::from(vec![
-                                (vertex_key, vertex_val),
-                                (h1_key, h1_val),
-                                (h2_key, h2_val),
-                            ]), false);
-                            player.alloc_datum(prop_list)
-                        }).collect::<VecDeque<_>>();
-                        Ok(Datum::List(DatumType::List, list, false))
-                    } else {
-                        result
-                    }
-                } else {
-                    Err(ScriptError::new("Expected vectorShape member".to_string()))
-                }
+                return VectorShapeMemberHandlers::get_prop(player, cast_member_ref, prop);
             }
             CastMemberTypeId::Flash => {
                 let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
                 if let CastMemberType::Flash(flash) = &cast_member.member_type {
-                    let (l, t, r, b) = flash.flash_info.as_ref()
-                        .map(|fi| fi.flash_rect)
-                        .unwrap_or((0, 0, 0, 0));
+                    let (l, t, r, b) = flash.effective_rect();
                     match prop {
                         "width" => Ok(Datum::Int((r - l) as i32)),
                         "height" => Ok(Datum::Int((b - t) as i32)),
@@ -827,55 +734,9 @@ impl CastMemberRefHandlers {
             CastMemberTypeId::Palette => reserve_player_mut(|player| {
                 PaletteMemberHandlers::set_prop(player, member_ref, prop, value)
             }),
-            CastMemberTypeId::VectorShape => {
-                borrow_member_mut(
-                    member_ref,
-                    |_| {},
-                    |cast_member, _| {
-                        if let CastMemberType::VectorShape(vs) = &mut cast_member.member_type {
-                            match prop {
-                                "fillColor" => {
-                                    let color = value.to_color_ref()?;
-                                    if let ColorRef::Rgb(r, g, b) = color {
-                                        vs.fill_color = (*r, *g, *b);
-                                    }
-                                    Ok(())
-                                }
-                                "endColor" => {
-                                    let color = value.to_color_ref()?;
-                                    if let ColorRef::Rgb(r, g, b) = color {
-                                        vs.end_color = (*r, *g, *b);
-                                    }
-                                    Ok(())
-                                }
-                                "bgColor" => {
-                                    let color = value.to_color_ref()?;
-                                    if let ColorRef::Rgb(r, g, b) = color {
-                                        vs.bg_color = (*r, *g, *b);
-                                    }
-                                    Ok(())
-                                }
-                                "strokeColor" => {
-                                    let color = value.to_color_ref()?;
-                                    if let ColorRef::Rgb(r, g, b) = color {
-                                        vs.stroke_color = (*r, *g, *b);
-                                    }
-                                    Ok(())
-                                }
-                                "strokeWidth" => {
-                                    vs.stroke_width = value.to_float()? as f32;
-                                    Ok(())
-                                }
-                                _ => Err(ScriptError::new(format!(
-                                    "Cannot set VectorShape prop {}", prop
-                                ))),
-                            }
-                        } else {
-                            Err(ScriptError::new("Expected VectorShape member".to_string()))
-                        }
-                    },
-                )
-            }
+            CastMemberTypeId::VectorShape => reserve_player_mut(|player| {
+                VectorShapeMemberHandlers::set_prop(player, member_ref, prop, value)
+            }),
             CastMemberTypeId::Flash => {
                 // Flash members accept various properties silently
                 // (directToStage, quality, scaleMode, etc.)
