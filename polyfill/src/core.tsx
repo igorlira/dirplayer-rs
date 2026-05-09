@@ -5,6 +5,15 @@ import EmbedPlayer from '../../src/components/EmbedPlayer';
 import VMProvider from '../../src/components/VMProvider';
 import store from '../../src/store';
 import { Provider as StoreProvider } from 'react-redux';
+import { installShockwavePlugin } from './plugin-polyfill';
+
+// Install the fake `Shockwave for Director` entry into navigator.plugins
+// at module load — BEFORE any page script runs detection. Page-level
+// polyfill (standalone.tsx) and the extension content script both
+// import core.tsx, so this single call covers both delivery paths.
+// Idempotent: a no-op when a real plugin or a previous run already
+// installed the entry.
+installShockwavePlugin();
 
 export interface PolyfillConfig {
   wasmUrl: string;
