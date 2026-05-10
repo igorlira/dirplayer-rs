@@ -772,7 +772,7 @@ impl StringChunkHandlers {
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
         match prop {
-            "font" | "fontStyle" | "color" => {
+            "font" | "fontStyle" | "color" | "hyperlink" => {
                 return Self::set_chunk_style_prop(player, datum_ref, prop, value_ref);
             }
             "fontSize" => {
@@ -872,10 +872,14 @@ impl StringChunkHandlers {
             Font(String),
             FontStyle { bold: bool, italic: bool, underline: bool },
             Color(u32),
+            /// Director chapter 15 `hyperlink` — per-character link target
+            /// stored on `HtmlStyle.hyperlink`. Setting empty string clears.
+            Hyperlink(String),
         }
         let value_datum = player.get_datum(value_ref).clone();
         let change = match prop {
             "font" => StyleChange::Font(value_datum.string_value()?),
+            "hyperlink" => StyleChange::Hyperlink(value_datum.string_value().unwrap_or_default()),
             "fontStyle" => {
                 // Director accepts either a single symbol (#bold) or a list
                 // of symbols ([#bold, #underline]). #plain resets the style.
@@ -965,6 +969,9 @@ impl StringChunkHandlers {
                             style.underline = *underline;
                         }
                         StyleChange::Color(rgb) => style.color = Some(*rgb),
+                        StyleChange::Hyperlink(link) => {
+                            style.hyperlink = if link.is_empty() { None } else { Some(link.clone()) };
+                        }
                     },
                 );
                 let _ = mem_name;
@@ -990,6 +997,11 @@ impl StringChunkHandlers {
                         let b = (*rgb & 0xFF) as u8;
                         field.fore_color = Some(ColorRef::Rgb(r, g, b));
                     }
+                    // FieldMember has no per-char hyperlink storage; silently
+                    // accept the write (Director's behaviour matches — the
+                    // hyperlink shows up in `member.hyperlinks` only on text
+                    // members, not fields).
+                    StyleChange::Hyperlink(_) => {}
                 }
             }
             _ => {}

@@ -2048,6 +2048,7 @@ fn xmed_style_to_html_style(xmed_style: &XmedStyle) -> HtmlStyle {
         underline: xmed_style.underline,
         kerning: xmed_style.kerning,
         char_spacing: xmed_style.char_spacing,
+        hyperlink: None,
     }
 }
 
