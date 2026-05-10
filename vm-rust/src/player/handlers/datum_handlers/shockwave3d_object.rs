@@ -3632,6 +3632,19 @@ impl Shockwave3dObjectDatumHandlers {
             "transform" => {
                 Ok(get_persistent_node_transform(player, member_ref, model_name))
             },
+            "userData" => {
+                // Director chapter 15 (`director_reference.md:80586`):
+                // returns the userData property list of a model. Default is
+                // an empty PropList `[:]`. The returned ref must be the same
+                // across reads so `model.userData.setaProp(#k, v)` mutations
+                // are visible on subsequent accesses (Director's userData is
+                // a live reference, not a snapshot).
+                //
+                // Lazy allocation: first access creates an empty PropList
+                // datum and stashes its DatumRef on the cast member's
+                // runtime_state; subsequent reads return the same ref.
+                Ok(get_or_create_node_user_data(player, member_ref, model_name))
+            },
             "worldPosition" => {
                 let wp = get_world_position(player, member_ref, model_name);
                 Ok(player.alloc_datum(Datum::Vector(wp)))
@@ -4974,6 +4987,47 @@ fn get_persistent_node_transform(
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
             w3d.runtime_state.node_transform_datums.insert(key, datum_ref.clone());
+        }
+    }
+    datum_ref
+}
+
+/// Returns a `DatumRef` to the userData PropList for the named 3D node.
+/// Lazy-allocates an empty PropList on first access and caches it on the
+/// cast member's `runtime_state.user_data` so subsequent reads return the
+/// same ref — required because Lingo scripts mutate userData in place via
+/// `setaProp` / `addProp` / `deleteProp`.
+fn get_or_create_node_user_data(
+    player: &mut crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    node_name: &str,
+) -> DatumRef {
+    let key = canonical_node_key(player, member_ref, node_name);
+
+    // Try to fetch cached ref first (case-insensitive lookup, mirroring
+    // node_transform_datums above).
+    let existing = {
+        let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+        member.and_then(|m| m.member_type.as_shockwave3d())
+            .and_then(|w3d| {
+                w3d.runtime_state.user_data.get(&key)
+                    .or_else(|| {
+                        w3d.runtime_state.user_data.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                            .map(|(_, v)| v)
+                    })
+            })
+            .cloned()
+    };
+    if let Some(datum_ref) = existing {
+        return datum_ref;
+    }
+
+    // First access — allocate empty PropList and stash on the runtime state.
+    let datum_ref = player.alloc_datum(Datum::PropList(VecDeque::new(), false));
+    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+            w3d.runtime_state.user_data.insert(key, datum_ref.clone());
         }
     }
     datum_ref
