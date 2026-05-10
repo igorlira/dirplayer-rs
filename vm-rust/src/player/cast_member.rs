@@ -1001,6 +1001,14 @@ pub struct Shockwave3dRuntimeState {
     /// member.directionalPreset value (1-9 matching topLeft..bottomRight,
     /// 0 = #None, 2 = #topCenter = Director default).
     pub directional_preset: u32,
+
+    // ─── userData per node (Director chapter 15: model.userData / group.userData) ───
+    /// Per-node `.userData` PropList datum-ref. Lazily allocated on first
+    /// access — `model.userData` returns the cached DatumRef so subsequent
+    /// `setaProp` / `addProp` mutations on the returned PropList stay
+    /// visible across reads. Keyed by node name (case-insensitive lookup
+    /// done at access time).
+    pub user_data: std::collections::HashMap<String, crate::player::DatumRef>,
 }
 
 /// Stores intermediate data for newMesh() model resources before build() is called.
@@ -1735,6 +1743,275 @@ impl HavokPhysicsMember {
     }
 }
 
+// ---- PhysX (AGEIA) Physics Member ----
+//
+// Direct Rust port of the C# AGEIA wrapper layer in
+// `E:\Claude Project\PhysXReference\`. Mirrors how Havok is wired above.
+//
+// PhysX members carry NO authored binary state on disk — they're
+// MemberType::Ole with PROGID "Physics" and an empty children list.
+// All world state is constructed at runtime via Lingo calls.
+//
+// Property names align with the Director Physics Xtra reference docs
+// (E:\Documents\Director\director_reference.md ch. 15).
+
+/// A single rigid body in the PhysX world. Mirrors the C# wrapper class
+/// `CPhysicsRigidBodyAGEIA` plus its Director-visible cached state.
+#[derive(Debug, Clone)]
+pub struct PhysXRigidBody {
+    pub id: u32,
+    pub name: String,
+    pub model_name: String,
+    pub body_type: PhysXBodyType,           // Static / Dynamic / Kinematic
+    pub shape: PhysXShapeKind,              // box / sphere / convex / concave
+    pub position: [f64; 3],
+    /// Axis-angle: (axis.x, axis.y, axis.z, angleDeg). Director's
+    /// `Orientation` type — NOT a quaternion despite the typedef.
+    pub orientation: [f64; 4],
+    pub linear_velocity: [f64; 3],
+    pub angular_velocity: [f64; 3],
+    pub mass: f64,
+    pub center_of_mass: [f64; 3],
+    pub use_center_of_mass: bool,
+    pub friction: f64,
+    pub restitution: f64,
+    pub linear_damping: f64,
+    pub angular_damping: f64,
+    pub sleep_threshold: f64,
+    pub sleep_mode: i32,
+    pub collision_group: i32,
+    pub is_trigger: bool,
+    pub ccd_enabled: bool,
+    pub pinned: bool,                       // Director "isPinned" (chapter 15)
+    pub axis_affinity: bool,                // Director "axisAffinity"; default true
+    pub cached_is_sleeping: bool,           // mirrors C# byte +176 cache
+    pub user_data: i32,                     // opaque pointer-equivalent
+    pub constraint_ids: Vec<u32>,
+    // ---- Shape dimensions ----
+    // Populated by createRigidBody from the Lingo-side shape parameters
+    // (Director chapter 15: `#box`, `#sphere`, `#convexShape`, etc.). Read
+    // by the Gu* narrowphase. Defaults are 1.0 sphere when no info given.
+    pub radius: f64,                        // sphere / capsule
+    pub half_extents: [f64; 3],             // box (and convex/concave AABB fallback)
+    pub half_height: f64,                   // capsule (axis along body local +X)
+
+    /// Convex hull data — set by `setConvexHull(verts, faces)` on the
+    /// rigid-body Datum, consumed by the convex narrowphase. None until
+    /// a script populates it (or the cooked mesh gets wired in later).
+    pub convex_hull: Option<crate::player::handlers::datum_handlers::cast_member::physx_gu_convex::PolygonalData>,
+
+    /// Triangle-mesh data for #concaveShape bodies. Set by
+    /// `setTriangleMesh(verts, triangles)` on the rigid-body Datum, consumed
+    /// by the mesh-vs-shape narrowphase in `physx_gu_mesh`. None until a
+    /// script populates it (typical: `createConcaveMesh` ⇒ assign verts/faces).
+    pub triangle_mesh: Option<crate::player::handlers::datum_handlers::cast_member::physx_gu_mesh::GuTriangleMesh>,
+}
+
+impl Default for PhysXRigidBody {
+    fn default() -> Self {
+        Self {
+            id: 0, name: String::new(), model_name: String::new(),
+            body_type: PhysXBodyType::Dynamic,
+            shape: PhysXShapeKind::Box,
+            position: [0.0; 3], orientation: [1.0, 0.0, 0.0, 0.0],
+            linear_velocity: [0.0; 3], angular_velocity: [0.0; 3],
+            mass: 1.0, center_of_mass: [0.0; 3], use_center_of_mass: false,
+            friction: 0.5, restitution: 0.5,
+            linear_damping: 0.0, angular_damping: 0.0,
+            sleep_threshold: 0.0316, sleep_mode: 0,
+            collision_group: 0, is_trigger: false, ccd_enabled: false,
+            pinned: false, axis_affinity: true, cached_is_sleeping: false,
+            user_data: 0, constraint_ids: Vec::new(),
+            radius: 1.0, half_extents: [0.5, 0.5, 0.5], half_height: 1.0,
+            convex_hull: None,
+            triangle_mesh: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysXBodyType { Static, Dynamic, Kinematic }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysXShapeKind { Box, Sphere, Capsule, ConvexShape, ConcaveShape }
+
+/// Joints + springs share one Vec keyed by ID; the variant tells us which.
+/// Mirrors the C# `CPhysicsConstraintAGEIA` hierarchy.
+#[derive(Debug, Clone)]
+pub struct PhysXConstraint {
+    pub id: u32,
+    pub name: String,
+    pub kind: PhysXConstraintKind,
+    pub body_a: Option<u32>,                 // body id
+    pub body_b: Option<u32>,
+    pub anchor_a: [f64; 3],
+    pub anchor_b: [f64; 3],
+    pub stiffness: f64,
+    pub damping: f64,
+    pub rest_length: f64,
+    /// Axis-angle (LinearJoint stores its own orientation; D6 has axis-angle drive too).
+    pub orientation: [f64; 4],
+    /// D6-only: per-axis motion[XYZ TwistSwing1Swing2] (0=Locked / 1=Limited / 2=Free).
+    pub d6_linear_motion: [u8; 3],
+    pub d6_angular_motion: [u8; 3],
+}
+
+impl Default for PhysXConstraint {
+    fn default() -> Self {
+        Self {
+            id: 0, name: String::new(),
+            kind: PhysXConstraintKind::Spring,
+            body_a: None, body_b: None,
+            anchor_a: [0.0; 3], anchor_b: [0.0; 3],
+            stiffness: 0.0, damping: 0.0, rest_length: 0.0,
+            orientation: [1.0, 0.0, 0.0, 0.0],
+            d6_linear_motion: [0; 3], d6_angular_motion: [0; 3],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysXConstraintKind { Spring, LinearJoint, AngularJoint, D6Joint }
+
+/// A static heightfield terrain. Director chapter 15: created via
+/// `world.createTerrain(name, desc, position, orientation, rowScale,
+/// columnScale, heightScale)`. The terrain is treated as a static-only
+/// collider — it never integrates and never receives impulses.
+#[derive(Debug, Clone)]
+pub struct PhysXTerrain {
+    pub id: u32,
+    pub name: String,
+    pub height_field: crate::player::handlers::datum_handlers::cast_member::physx_gu_heightfield::GuHeightField,
+    pub friction: f64,
+    pub restitution: f64,
+    /// World-space position offset applied to the heightfield's local origin.
+    pub position: [f64; 3],
+    /// Axis-angle (axis.x, axis.y, axis.z, angle_deg) — same convention as
+    /// `PhysXRigidBody.orientation`.
+    pub orientation: [f64; 4],
+}
+
+/// The full simulation world. Direct port of the C#
+/// `CPhysicsWorldAGEIA` field set, minus shape/cooking helpers.
+#[derive(Debug, Clone)]
+pub struct PhysXPhysicsState {
+    // ---- World props (Lingo getters/setters) ----
+    pub initialized: bool,                    // Lingo `isInitialized`
+    pub paused: bool,
+    pub gravity: [f64; 3],
+    pub friction: f64,
+    pub restitution: f64,
+    pub linear_damping: f64,
+    pub angular_damping: f64,
+    pub contact_tolerance: f64,
+    pub sleep_threshold: f64,
+    pub sleep_mode: PhysXSleepMode,
+    pub scaling_factor: [f64; 3],             // length, mass, time scales
+    pub time_step: f64,
+    pub time_step_mode: PhysXTimeStepMode,
+    pub sub_steps: u32,                       // Director: `subSteps` (NOT `subStepCount`)
+    pub sim_time: f64,                        // accumulated sim time → getSimulationTime()
+    pub three_d_member_name: String,          // associated 3D world member
+
+    // ---- Containers ----
+    pub bodies: Vec<PhysXRigidBody>,
+    pub constraints: Vec<PhysXConstraint>,    // joints + springs (kind tags)
+    /// Static heightfield terrains (Director chapter 15: createTerrain).
+    /// Treated as static-only; not integrated, no impulses applied.
+    pub terrains: Vec<PhysXTerrain>,
+
+    // ---- Collision callbacks (Director chapter 15) ----
+    /// `disableCollision()` global flag.
+    pub all_collisions_disabled: bool,
+    pub all_callbacks_disabled: bool,
+    /// Body-name pairs where collision is filtered. Canonical (min, max) order.
+    pub disabled_collision_pairs: std::collections::HashSet<(String, String)>,
+    pub disabled_callback_pairs: std::collections::HashSet<(String, String)>,
+    /// Single bodies whose collisions are globally disabled.
+    pub body_collision_disabled: std::collections::HashSet<String>,
+    pub body_callback_disabled: std::collections::HashSet<String>,
+    /// `registerCollisionCallback(#handler, scriptRef)`.
+    pub collision_callback_handler: Option<String>,
+    pub collision_callback_script_ref: Option<crate::player::DatumRef>,
+    /// Reports captured during the last Simulate(); drained by NotifyCollisions.
+    /// Each entry: (bodyA_id, bodyB_id, contact_points, contact_normals).
+    pub pending_collisions: Vec<(u32, u32, Vec<[f64; 3]>, Vec<[f64; 3]>)>,
+
+    // ---- Bookkeeping ----
+    pub next_body_id: u32,
+    pub next_constraint_id: u32,
+    pub next_terrain_id: u32,
+    pub last_tick_ms: u64,
+
+    /// When true, the body-vs-body iterative solver routes through the
+    /// verbatim PhysX 3.4 SOA path (`PxsSolverSoa` in
+    /// `physx_soa_solver.rs`) instead of the in-place AoS sequential-impulse
+    /// loop. Body-vs-terrain pairs always run on the AoS path. Default off —
+    /// the SoA path is parity-validated in C# but extra wiring (warm-start
+    /// cache, synthetic static body for terrains) is still pending.
+    pub use_soa_solver: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysXSleepMode { Energy, LinearVelocity }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysXTimeStepMode { Equal, Automatic }
+
+impl Default for PhysXPhysicsState {
+    fn default() -> Self {
+        Self {
+            initialized: false, paused: false,
+            gravity: [0.0, -9.81, 0.0],
+            friction: 0.5, restitution: 0.5,
+            linear_damping: 0.0, angular_damping: 0.0,
+            contact_tolerance: 0.01,
+            sleep_threshold: 0.0316, sleep_mode: PhysXSleepMode::Energy,
+            scaling_factor: [1.0, 1.0, 1.0],
+            time_step: 1.0 / 60.0,
+            time_step_mode: PhysXTimeStepMode::Equal,
+            sub_steps: 1,
+            sim_time: 0.0,
+            three_d_member_name: String::new(),
+            bodies: Vec::new(),
+            constraints: Vec::new(),
+            terrains: Vec::new(),
+            all_collisions_disabled: false,
+            all_callbacks_disabled: false,
+            disabled_collision_pairs: std::collections::HashSet::new(),
+            disabled_callback_pairs: std::collections::HashSet::new(),
+            body_collision_disabled: std::collections::HashSet::new(),
+            body_callback_disabled: std::collections::HashSet::new(),
+            collision_callback_handler: None,
+            collision_callback_script_ref: None,
+            pending_collisions: Vec::new(),
+            next_body_id: 1,
+            next_constraint_id: 1,
+            next_terrain_id: 1,
+            last_tick_ms: 0,
+            use_soa_solver: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PhysXPhysicsMember {
+    pub state: PhysXPhysicsState,
+}
+
+impl fmt::Debug for PhysXPhysicsMember {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "PhysXPhysicsMember(initialized={}, bodies={}, constraints={})",
+            self.state.initialized,
+            self.state.bodies.len(),
+            self.state.constraints.len())
+    }
+}
+
+impl PhysXPhysicsMember {
+    pub fn new() -> Self { Self { state: PhysXPhysicsState::default() } }
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum CastMemberType {
@@ -1752,6 +2029,7 @@ pub enum CastMemberType {
     Flash(FlashMember),
     Shockwave3d(Shockwave3dMember),
     HavokPhysics(HavokPhysicsMember),
+    PhysXPhysics(PhysXPhysicsMember),
     Unknown,
 }
 
@@ -1771,6 +2049,7 @@ pub enum CastMemberTypeId {
     Flash,
     Shockwave3d,
     HavokPhysics,
+    PhysXPhysics,
     Unknown,
 }
 
@@ -1819,6 +2098,9 @@ impl fmt::Debug for CastMemberType {
             Self::HavokPhysics(_) => {
                 write!(f, "HavokPhysics")
             }
+            Self::PhysXPhysics(_) => {
+                write!(f, "PhysXPhysics")
+            }
             Self::Unknown => {
                 write!(f, "Unknown")
             }
@@ -1843,6 +2125,7 @@ impl CastMemberTypeId {
             Self::Flash => Ok("flash"),
             Self::Shockwave3d => Ok("shockwave3d"),
             Self::HavokPhysics => Ok("havok"),
+            Self::PhysXPhysics => Ok("physics"),
             Self::Unknown => Ok("unknown"),
         };
     }
@@ -1865,6 +2148,7 @@ impl CastMemberType {
             Self::Flash(_) => CastMemberTypeId::Flash,
             Self::Shockwave3d(_) => CastMemberTypeId::Shockwave3d,
             Self::HavokPhysics(_) => CastMemberTypeId::HavokPhysics,
+            Self::PhysXPhysics(_) => CastMemberTypeId::PhysXPhysics,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -1885,6 +2169,7 @@ impl CastMemberType {
             Self::Flash(_) => "flash",
             Self::Shockwave3d(w3d) => if w3d.converted_from_text { "text" } else { "shockwave3d" },
             Self::HavokPhysics(_) => "havok",
+            Self::PhysXPhysics(_) => "physics",
             _ => "unknown",
         };
     }
@@ -2021,6 +2306,20 @@ impl CastMemberType {
         match self {
             Self::Shockwave3d(data) => Some(data),
             Self::Text(text) => text.w3d.as_deref_mut(),
+            _ => None,
+        }
+    }
+
+    pub fn as_physx_physics(&self) -> Option<&PhysXPhysicsMember> {
+        match self {
+            Self::PhysXPhysics(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    pub fn as_physx_physics_mut(&mut self) -> Option<&mut PhysXPhysicsMember> {
+        match self {
+            Self::PhysXPhysics(data) => Some(data),
             _ => None,
         }
     }
@@ -2713,6 +3012,34 @@ impl CastMember {
         // Fall back to checking member_info file_name or exact name "havok"
         if let Some(info) = member_info {
             if info.file_name.to_lowercase().contains("havok") || info.name.eq_ignore_ascii_case("havok") {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Detect a PhysX (AGEIA) Physics Xtra OLE member by sniffing the
+    /// length-prefixed PROGID string in specific_data_raw. The Director
+    /// Physics Xtra registers itself with PROGID "Physics".
+    fn is_physx_ole(raw: &[u8]) -> bool {
+        if raw.len() < 8 { return false; }
+        let str_len = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
+        if str_len == 0 || str_len > 256 || raw.len() < 4 + str_len { return false; }
+        let type_str = std::str::from_utf8(&raw[4..4 + str_len]).ok().unwrap_or("");
+        type_str.eq_ignore_ascii_case("physics")
+    }
+
+    /// PhysX detection by either OLE PROGID, file_name hint, or name == "PhysX".
+    /// Mirrors `is_havok_member_any`.
+    fn is_physx_member_any(raw: &[u8], member_info: &Option<crate::director::chunks::cast_member_info::CastMemberInfoChunk>) -> bool {
+        if Self::is_physx_ole(raw) {
+            return true;
+        }
+        if let Some(info) = member_info {
+            let fn_lower = info.file_name.to_lowercase();
+            if fn_lower.contains("physx") || fn_lower.contains("dynamiks")
+                || info.name.eq_ignore_ascii_case("physx")
+                || info.name.eq_ignore_ascii_case("physics") {
                 return true;
             }
         }
@@ -3942,6 +4269,22 @@ impl CastMember {
                     };
                 }
 
+                // Check if this OLE member is a PhysX (AGEIA) Physics member.
+                // PhysX members have no authored binary state — the wrapper is
+                // empty until Lingo `init()` / `createRigidBody` calls populate it.
+                if Self::is_physx_member_any(&chunk.specific_data_raw, &chunk.member_info) {
+                    debug!("PhysX (AGEIA) Physics member #{} detected", number);
+                    return CastMember {
+                        number,
+                        name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                        comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
+                        member_type: CastMemberType::PhysXPhysics(PhysXPhysicsMember::new()),
+                        color: ColorRef::PaletteIndex(255),
+                        bg_color: ColorRef::PaletteIndex(0),
+                        reg_point: (0, 0),
+                    };
+                }
+
                 // Check if this OLE member is a vectorShape by examining specific_data_raw.
                 // Format: 4-byte string length + "vectorShape" + FLSH data block
                 if let Some(cm) = Self::try_parse_vector_shape(&chunk.specific_data_raw, number, chunk) {
@@ -4459,16 +4802,22 @@ impl CastMember {
                         number, chunk.member_type, hke_data.len()
                     );
                     CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data))
+                } else if Self::is_physx_member_any(&chunk.specific_data_raw, &chunk.member_info) {
+                    debug!(
+                        "PhysX Physics member #{} detected in default branch (type={:?})",
+                        number, chunk.member_type
+                    );
+                    CastMemberType::PhysXPhysics(PhysXPhysicsMember::new())
                 } else {
                     CastMemberType::Unknown
                 }
             }
         };
 
-        // Post-processing: if the member wasn't detected as Havok by type-specific paths,
-        // but its name IS exactly "havok" (or file_name contains "havok"), override it.
+        // Post-processing: if the member wasn't detected as Havok / PhysX by type-specific paths,
+        // but its name IS exactly "havok"/"physx" (or file_name contains it), override it.
         // Only override non-Script members to avoid catching scripts like "havokManager".
-        let member_type = if !matches!(member_type, CastMemberType::HavokPhysics(_) | CastMemberType::Script(_)) {
+        let member_type = if !matches!(member_type, CastMemberType::HavokPhysics(_) | CastMemberType::PhysXPhysics(_) | CastMemberType::Script(_)) {
             let name_is_havok = chunk.member_info.as_ref()
                 .map(|i| i.name.eq_ignore_ascii_case("havok") || i.file_name.to_lowercase().contains("havok"))
                 .unwrap_or(false);
@@ -4487,7 +4836,22 @@ impl CastMember {
                 );
                 CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data))
             } else {
-                member_type
+                // Same override path for PhysX members.
+                let name_is_physx = chunk.member_info.as_ref()
+                    .map(|i| i.name.eq_ignore_ascii_case("physx")
+                        || i.name.eq_ignore_ascii_case("physics")
+                        || i.file_name.to_lowercase().contains("physx")
+                        || i.file_name.to_lowercase().contains("dynamiks"))
+                    .unwrap_or(false);
+                if name_is_physx {
+                    debug!(
+                        "PhysX Physics member #{} detected by name override (was {:?})",
+                        number, member_type
+                    );
+                    CastMemberType::PhysXPhysics(PhysXPhysicsMember::new())
+                } else {
+                    member_type
+                }
             }
         } else {
             member_type

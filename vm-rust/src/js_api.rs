@@ -2186,6 +2186,10 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
             map.str_set("type", &safe_js_string("havokObject"));
             map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", hk_ref.object_type, hk_ref.name)));
         }
+        Datum::PhysXObjectRef(px_ref) => {
+            map.str_set("type", &safe_js_string("physxObject"));
+            map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", px_ref.object_type, px_ref.name)));
+        }
     }
     return map.to_js_object();
 }
