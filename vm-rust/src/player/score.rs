@@ -4540,9 +4540,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let mut reg_x = bitmap_member.reg_point.0;
             let mut reg_y = bitmap_member.reg_point.1;
 
-            // Get bitmap dimensions from info
-            let bitmap_width = bitmap_member.info.width as i32;
-            let bitmap_height = bitmap_member.info.height as i32;
+            // Prefer actual pixel dimensions from bitmap_manager; info dimensions
+            // reflect the score channel's bounding box and can differ from the
+            // real bitmap size, which causes the heuristic to mis-classify the
+            // sprite as a bbox and stretch/clip it incorrectly.
+            let (bitmap_width, bitmap_height) =
+                if let Some(bmp) = player.bitmap_manager.get_bitmap(bitmap_member.image_ref) {
+                    (bmp.width as i32, bmp.height as i32)
+                } else {
+                    (bitmap_member.info.width as i32, bitmap_member.info.height as i32)
+                };
 
             // Determine the actual dimensions to use for the sprite rectangle.
             //
