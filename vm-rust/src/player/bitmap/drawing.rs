@@ -3115,15 +3115,17 @@ impl Bitmap {
                                 .map(|b| font.get_char_advance(b) as i32)
                                 .sum();
                         } else {
-                            // Single word longer than line — hard break at p.
-                            lines.push(LineSpan {
-                                start: line_start,
-                                end: p,
-                                text: text[line_start..p].to_string(),
-                            });
-                            line_start = p;
-                            last_space = None;
-                            line_w = 0;
+                            #[cfg(feature = "word_hard_break")]
+                            {
+                                lines.push(LineSpan {
+                                    start: line_start,
+                                    end: p,
+                                    text: text[line_start..p].to_string(),
+                                });
+                                line_start = p;
+                                last_space = None;
+                                line_w = 0;
+                            }
                         }
                     }
 

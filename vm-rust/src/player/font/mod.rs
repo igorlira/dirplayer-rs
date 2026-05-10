@@ -1444,24 +1444,55 @@ pub fn measure_text_wrapped(
             continue;
         }
         if word_wrap && max_width > 0 {
+            // Mirror wrap_lines_with_spans exactly: character-level processing
+            // with space-breaks preferred and hard-breaks for overlong words.
+            // Using the same algorithm ensures measure and render agree on line
+            // count, so the sprite rect is always tall enough for what renders.
             let max_w = max_width as i32;
-            let mut current_width: i32 = 0;
-            for word in raw.split_whitespace() {
-                let word_width: i32 = word.chars().map(char_adv).sum();
-                let space_width = char_adv(' ');
-                let candidate = if current_width == 0 {
-                    word_width
-                } else {
-                    current_width + space_width + word_width
-                };
-                if candidate <= max_w || current_width == 0 {
-                    current_width = candidate;
-                } else {
-                    visual_lines.push(current_width);
-                    current_width = word_width;
+            let raw_bytes = raw.as_bytes();
+            let rlen = raw_bytes.len();
+            let mut line_w: i32 = 0;
+            let mut line_start = 0usize;
+            let mut last_space: Option<usize> = None;
+            let mut p = 0usize;
+            while p < rlen {
+                let b = raw_bytes[p];
+                let cw = char_adv(b as char);
+                if b == b' ' {
+                    last_space = Some(p);
                 }
+                if line_w + cw > max_w && p > line_start {
+                    if let Some(sp) = last_space.filter(|&sp| sp > line_start) {
+                        let w: i32 = raw_bytes[line_start..sp]
+                            .iter()
+                            .map(|&b| char_adv(b as char))
+                            .sum();
+                        visual_lines.push(w);
+                        line_start = sp + 1;
+                        last_space = None;
+                        if line_start > p {
+                            line_w = 0;
+                            p = line_start;
+                            continue;
+                        }
+                        line_w = raw_bytes[line_start..p]
+                            .iter()
+                            .map(|&b| char_adv(b as char))
+                            .sum();
+                    } else {
+                        #[cfg(feature = "word_hard_break")]
+                        {
+                            visual_lines.push(line_w);
+                            line_start = p;
+                            last_space = None;
+                            line_w = 0;
+                        }
+                    }
+                }
+                line_w += cw;
+                p += 1;
             }
-            visual_lines.push(current_width);
+            visual_lines.push(line_w);
         } else {
             let line_width: i32 = raw.chars().map(char_adv).sum();
             visual_lines.push(line_width);
