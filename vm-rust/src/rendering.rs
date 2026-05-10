@@ -199,12 +199,17 @@ pub(crate) fn get_or_load_font_with_id(
         return font_manager.get_system_font();
     }
 
-    let cache_key = FontManager::cache_key(&format!(
+    // When PFR is disabled, skip all font lookups and use system font
+    if !font_manager.pfr_enabled {
+        return font_manager.get_system_font();
+    }
+
+    let cache_key = format!(
         "{}_{}_{}",
         font_name,
         font_size.unwrap_or(0),
         font_style.unwrap_or(0)
-    ));
+    );
 
     if let Some(font) = font_manager.font_cache.get(&cache_key) {
         return Some(Rc::clone(font));
@@ -2586,7 +2591,7 @@ pub fn render_score_to_bitmap_with_offset(
                     // BUT only use native rendering if the font is NOT a PFR bitmap font
                     // PFR fonts can't be used by Canvas2D, so we must use bitmap rendering
                     let is_pfr_font = font.char_widths.is_some();
-                    if !text_member.html_styled_spans.is_empty() && !is_pfr_font {
+                    if !text_member.html_styled_spans.is_empty() && !is_pfr_font && player.font_manager.pfr_enabled {
                         // Parse alignment from text_member
                         let alignment = match text_member.alignment.to_lowercase().as_str() {
                             "center" | "#center" => TextAlignment::Center,
@@ -3564,7 +3569,7 @@ fn set_pixelated_canvas_style(canvas: &web_sys::HtmlCanvasElement) {
 }
 
 /// Create a Canvas2D renderer (fallback)
-fn create_canvas2d_renderer(
+pub(crate) fn create_canvas2d_renderer(
     canvas_size: (u32, u32),
 ) -> PlayerCanvasRenderer {
     let canvas = web_sys::window()
@@ -3635,7 +3640,7 @@ fn create_canvas2d_renderer(
 }
 
 /// Try to create a WebGL2 renderer, returns None if not supported or fails
-fn try_create_webgl2_renderer(
+pub(crate) fn try_create_webgl2_renderer(
     canvas_size: (u32, u32),
 ) -> Option<crate::rendering_gpu::webgl2::WebGL2Renderer> {
     use crate::rendering_gpu::webgl2::WebGL2Renderer;
@@ -3686,18 +3691,65 @@ fn try_create_webgl2_renderer(
     }
 }
 
-#[wasm_bindgen]
-pub fn player_create_canvas() -> Result<(), JsValue> {
-    let container_element = web_sys::window()
+fn get_stage_container() -> Result<web_sys::HtmlElement, JsValue> {
+    web_sys::window()
         .unwrap()
         .document()
         .unwrap()
         .query_selector("#stage_canvas_container")
         .unwrap()
         .unwrap()
-        .dyn_into::<web_sys::HtmlElement>()?;
+        .dyn_into::<web_sys::HtmlElement>()
+        .map_err(|e| JsValue::from(e))
+}
 
-    // Create renderer if it doesn't exist
+fn get_canvas_size() -> (u32, u32) {
+    with_renderer_mut(|renderer_lock| {
+        if let Some(renderer) = renderer_lock {
+            renderer.size()
+        } else {
+            reserve_player_ref(|player| {
+                (
+                    player.movie.rect.width() as u32,
+                    player.movie.rect.height() as u32,
+                )
+            })
+        }
+    })
+}
+
+fn create_renderer(backend: &str, canvas_size: (u32, u32)) -> Option<DynamicRenderer> {
+    match backend {
+        "WebGL2" => {
+            try_create_webgl2_renderer(canvas_size)
+                .map(DynamicRenderer::WebGL2)
+        }
+        _ => Some(DynamicRenderer::Canvas2D(create_canvas2d_renderer(canvas_size))),
+    }
+}
+
+fn attach_renderer_to_container(container: &web_sys::HtmlElement) {
+    with_renderer_mut(|renderer_lock| {
+        if let Some(renderer) = renderer_lock {
+            match renderer {
+                DynamicRenderer::Canvas2D(canvas_renderer) => {
+                    canvas_renderer.set_container_element(container.clone());
+                }
+                DynamicRenderer::WebGL2(webgl_renderer) => {
+                    if webgl_renderer.canvas().parent_node().is_some() {
+                        webgl_renderer.canvas().remove();
+                    }
+                    container.append_child(webgl_renderer.canvas()).unwrap();
+                }
+            }
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn player_create_canvas() -> Result<(), JsValue> {
+    let container = get_stage_container()?;
+
     with_renderer_mut(|renderer_lock| {
         if renderer_lock.is_none() {
             let canvas_size = reserve_player_ref(|player| {
@@ -3726,24 +3778,27 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
         }
     });
 
-    // Set container element - need to handle both renderer types
-    with_renderer_mut(|renderer_lock| {
-        if let Some(renderer) = renderer_lock {
-            match renderer {
-                DynamicRenderer::Canvas2D(canvas_renderer) => {
-                    canvas_renderer.set_container_element(container_element.clone());
-                }
-                DynamicRenderer::WebGL2(webgl_renderer) => {
-                    // For WebGL2, we need to append the canvas to the container
-                    if webgl_renderer.canvas().parent_node().is_some() {
-                        webgl_renderer.canvas().remove();
-                    }
-                    container_element.append_child(webgl_renderer.canvas()).unwrap();
-                }
-            }
-        }
-    });
+    attach_renderer_to_container(&container);
+    Ok(())
+}
 
+#[wasm_bindgen]
+pub fn player_set_renderer_backend(backend: &str) -> Result<(), JsValue> {
+    let container = get_stage_container()?;
+
+    // Remove old canvas from container
+    while let Some(child) = container.first_child() {
+        container.remove_child(&child).unwrap();
+    }
+
+    let canvas_size = get_canvas_size();
+    if let Some(new_renderer) = create_renderer(backend, canvas_size) {
+        with_renderer_mut(|renderer_lock| {
+            *renderer_lock = Some(new_renderer);
+        });
+    }
+
+    attach_renderer_to_container(&container);
     Ok(())
 }
 

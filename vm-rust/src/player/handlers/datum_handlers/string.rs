@@ -242,7 +242,7 @@ pub fn string_get_items(value: &str, delimiter: char) -> Vec<String> {
 }
 
 fn is_director_whitespace(byte: char) -> bool {
-    if byte.is_ascii_control() || byte.is_ascii_whitespace() {
+    if byte.is_ascii_control() || byte.is_ascii_whitespace() || byte == 2 as char {
         return true;
     } else {
         return false;

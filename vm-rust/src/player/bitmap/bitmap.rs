@@ -858,6 +858,215 @@ pub fn decompress_bitmap(
     Ok(bitmap)
 }
 
+/// Encode a Bitmap back to raw byte format (pre-RLE).
+/// This reverses the decoding done by decompress_bitmap.
+pub fn encode_bitmap_data(bitmap: &Bitmap, target_bit_depth: u8, pitch: u16) -> Result<Vec<u8>, String> {
+    let scan_width = if pitch > 0 && target_bit_depth > 0 {
+        (pitch as u32 * 8 / target_bit_depth as u32) as u16
+    } else {
+        bitmap.width
+    };
+
+    match target_bit_depth {
+        1 => encode_bitmap_1bit(bitmap, scan_width),
+        2 => encode_bitmap_2bit(bitmap, scan_width),
+        4 => encode_bitmap_4bit(bitmap, scan_width),
+        8 => encode_bitmap_8bit(bitmap, scan_width),
+        16 => encode_bitmap_16bit(bitmap, scan_width),
+        32 => encode_bitmap_32bit(bitmap, scan_width),
+        _ => Err(format!("Unsupported target bit depth for encoding: {}", target_bit_depth)),
+    }
+}
+
+fn encode_bitmap_1bit(bitmap: &Bitmap, scan_width: u16) -> Result<Vec<u8>, String> {
+    // Inverse of decode_bitmap_1bit: pack 8-bit indexed (0x00/0xFF) back to 1-bit packed
+    let bytes_per_row = scan_width as usize / 8;
+    let mut result = Vec::with_capacity(bytes_per_row * bitmap.height as usize);
+
+    for y in 0..bitmap.height as usize {
+        for byte_idx in 0..bytes_per_row {
+            let mut byte = 0u8;
+            for bit_idx in 0..8u8 {
+                let x = byte_idx * 8 + bit_idx as usize;
+                if x < bitmap.width as usize {
+                    let pixel_index = y * bitmap.width as usize + x;
+                    if bitmap.data[pixel_index] >= 0x80 {
+                        byte |= 0x80 >> bit_idx;
+                    }
+                }
+            }
+            result.push(byte);
+        }
+    }
+    Ok(result)
+}
+
+fn encode_bitmap_2bit(bitmap: &Bitmap, scan_width: u16) -> Result<Vec<u8>, String> {
+    // Inverse of decode_bitmap_2bit: reverse float scaling and pack 4 pixels per byte
+    let bytes_per_row = scan_width as usize / 4;
+    let mut result = Vec::with_capacity(bytes_per_row * bitmap.height as usize);
+
+    for y in 0..bitmap.height as usize {
+        for byte_idx in 0..bytes_per_row {
+            let mut byte = 0u8;
+            for i in 0..4u8 {
+                let x = byte_idx * 4 + i as usize;
+                let val = if x < bitmap.width as usize {
+                    let pixel = bitmap.data[y * bitmap.width as usize + x];
+                    // Reverse: ((val as f32) / 3.0 * 255.0) → round(pixel * 3.0 / 255.0)
+                    ((pixel as f32 * 3.0 / 255.0).round() as u8).min(3)
+                } else {
+                    0
+                };
+                byte |= val << (6 - i * 2);
+            }
+            result.push(byte);
+        }
+    }
+    Ok(result)
+}
+
+fn encode_bitmap_4bit(bitmap: &Bitmap, scan_width: u16) -> Result<Vec<u8>, String> {
+    // Inverse of decode_bitmap_4bit: pack pairs of 8-bit indexed (0-15) into nibbles
+    let bytes_per_row = scan_width as usize / 2;
+    let mut result = Vec::with_capacity(bytes_per_row * bitmap.height as usize);
+
+    for y in 0..bitmap.height as usize {
+        for byte_idx in 0..bytes_per_row {
+            let x0 = byte_idx * 2;
+            let x1 = byte_idx * 2 + 1;
+            let v0 = if x0 < bitmap.width as usize {
+                bitmap.data[y * bitmap.width as usize + x0] & 0x0F
+            } else {
+                0
+            };
+            let v1 = if x1 < bitmap.width as usize {
+                bitmap.data[y * bitmap.width as usize + x1] & 0x0F
+            } else {
+                0
+            };
+            result.push((v0 << 4) | v1);
+        }
+    }
+    Ok(result)
+}
+
+fn encode_bitmap_8bit(bitmap: &Bitmap, scan_width: u16) -> Result<Vec<u8>, String> {
+    // Inverse of decode_generic_bitmap for 8-bit: copy pixel values with row padding
+    let mut result = Vec::with_capacity(scan_width as usize * bitmap.height as usize);
+
+    for y in 0..bitmap.height as usize {
+        for x in 0..scan_width as usize {
+            if x < bitmap.width as usize {
+                let pixel_index = y * bitmap.width as usize + x;
+                result.push(bitmap.data[pixel_index]);
+            } else {
+                result.push(0);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn encode_bitmap_16bit(bitmap: &Bitmap, scan_width: u16) -> Result<Vec<u8>, String> {
+    // Inverse of decode_bitmap_16bit (RLE/planar format):
+    // For each row: all high bytes of RGB555, then all low bytes
+    let mut result = vec![0u8; scan_width as usize * bitmap.height as usize * 2];
+
+    for y in 0..bitmap.height as usize {
+        let row_offset = y * scan_width as usize * 2;
+        for x in 0..scan_width as usize {
+            let (high, low) = if x < bitmap.width as usize {
+                let pixel_idx = (y * bitmap.width as usize + x) * 4;
+                let r = bitmap.data[pixel_idx];
+                let g = bitmap.data[pixel_idx + 1];
+                let b = bitmap.data[pixel_idx + 2];
+                // Convert to RGB555
+                let r5 = (r >> 3) as u16;
+                let g5 = (g >> 3) as u16;
+                let b5 = (b >> 3) as u16;
+                let pixel16 = (r5 << 10) | (g5 << 5) | b5;
+                let bytes = pixel16.to_be_bytes();
+                (bytes[0], bytes[1])
+            } else {
+                (0, 0)
+            };
+            result[row_offset + x] = high;
+            result[row_offset + scan_width as usize + x] = low;
+        }
+    }
+    Ok(result)
+}
+
+fn encode_bitmap_32bit(bitmap: &Bitmap, scan_width: u16) -> Result<Vec<u8>, String> {
+    // Inverse of D4+ 32-bit decode: planar per scanline [A][R][G][B]
+    let mut result = vec![0u8; scan_width as usize * bitmap.height as usize * 4];
+
+    for y in 0..bitmap.height as usize {
+        let line_offset = y * scan_width as usize * 4;
+        for x in 0..scan_width as usize {
+            if x < bitmap.width as usize {
+                let pixel_idx = (y * bitmap.width as usize + x) * 4;
+                let r = bitmap.data[pixel_idx];
+                let g = bitmap.data[pixel_idx + 1];
+                let b = bitmap.data[pixel_idx + 2];
+                let a = bitmap.data[pixel_idx + 3];
+                result[line_offset + x] = a;
+                result[line_offset + scan_width as usize + x] = r;
+                result[line_offset + 2 * scan_width as usize + x] = g;
+                result[line_offset + 3 * scan_width as usize + x] = b;
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Compress data using PackBits RLE algorithm (inverse of the decompression in decompress_bitmap).
+/// Control byte semantics:
+///   0x00..0x7F: literal run of (control + 1) bytes follows
+///   0x80:       no-op (not emitted by compressor)
+///   0x81..0xFF: repeat run, next byte repeated (257 - control) times
+pub fn compress_bitmap(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let len = data.len();
+    let mut i = 0;
+
+    while i < len {
+        // Look ahead for a run of identical bytes
+        let mut run_len = 1;
+        while i + run_len < len && data[i + run_len] == data[i] && run_len < 128 {
+            run_len += 1;
+        }
+
+        if run_len >= 3 {
+            // Emit repeat run: control = (257 - count) as u8
+            result.push((257 - run_len) as u8);
+            result.push(data[i]);
+            i += run_len;
+        } else {
+            // Collect literal bytes until we hit a run of 3+
+            let start = i;
+            let mut literal_len = 0;
+
+            while i < len && literal_len < 128 {
+                // Check if we're about to start a run of 3+ identical bytes
+                if i + 2 < len && data[i] == data[i + 1] && data[i] == data[i + 2] {
+                    break;
+                }
+                literal_len += 1;
+                i += 1;
+            }
+
+            if literal_len > 0 {
+                result.push((literal_len - 1) as u8);
+                result.extend_from_slice(&data[start..start + literal_len]);
+            }
+        }
+    }
+
+    result
+}
+
 #[inline]
 fn lookup_builtin_palette(palette: &BuiltInPalette, color_index: u8, original_bit_depth: u8) -> Option<(u8, u8, u8)> {
     match palette {

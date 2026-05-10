@@ -5,7 +5,7 @@ import {
   useReducer,
   useContext,
 } from "react";
-import init, { add_breakpoint, set_system_font_path } from "vm-rust";
+import init, { add_breakpoint, set_system_font_path, set_pfr_font_enabled } from "vm-rust";
 import * as wasm from "vm-rust";
 import { initVmCallbacks } from "../vm/callbacks";
 import { JsBridgeBreakpoint } from "dirplayer-js-api";
@@ -99,7 +99,13 @@ export default function VMProvider({ children, systemFontPath, wasmUrl }: VMProv
           }
         }
 
-        // Step 6: Mark VM as ready
+        // Step 6: Restore rendering options
+        const savedPfr = window.localStorage.getItem("dirplayer_pfr_enabled");
+        if (savedPfr !== null) {
+          set_pfr_font_enabled(savedPfr === "true");
+        }
+
+        // Step 7: Mark VM as ready
         send({ type: "INIT_OK" });
         dispatch(ready());
       } catch (err) {

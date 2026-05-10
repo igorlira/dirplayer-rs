@@ -96,7 +96,7 @@ impl ScriptChunk {
             if let Some(literal) = literals.get(i) {
                 // Property has a default value from the literal
                 if let Entry::Vacant(entry) = property_defaults.entry(*prop_id) {
-                    entry.insert(StaticDatum::from(literal.clone()));
+                    entry.insert(StaticDatum::from(literal));
                 }
             }
             // Properties without literals will be initialized to Void in ScriptInstance::new()

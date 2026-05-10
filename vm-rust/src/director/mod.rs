@@ -7,3 +7,4 @@ pub mod lingo;
 pub mod rifx;
 pub mod static_datum;
 pub mod utils;
+pub mod media;

@@ -272,7 +272,7 @@ dependencies = [
  "num-traits",
  "pastey",
  "rayon",
- "thiserror",
+ "thiserror 2.0.18",
  "v_frame",
  "y4m",
 ]
@@ -313,6 +313,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d173c51941d642588ed6a13d464617e3a9176b8fe00dc2de182434c36812a5e"
 dependencies = [
  "byteorder",
+]
+
+[[package]]
+name = "binary_rw"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61c448b21d82244ebe70b1e7595e3c3d709ec5400b859bc44329492e18d6a718"
+dependencies = [
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1647,7 +1656,7 @@ dependencies = [
  "rand",
  "rand_chacha",
  "simd_helpers",
- "thiserror",
+ "thiserror 2.0.18",
  "v_frame",
  "wasm-bindgen",
 ]
@@ -1869,11 +1878,31 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.18",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -2019,6 +2048,7 @@ dependencies = [
  "async-std",
  "base64",
  "binary-reader",
+ "binary_rw",
  "bitvec",
  "chrono",
  "console_error_panic_hook",

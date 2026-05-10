@@ -57,6 +57,7 @@ pub struct FontManager {
     pub font_cache: HashMap<String, Rc<BitmapFont>>, // Cache for loaded fonts by name
     pub font_by_id: HashMap<u16, FontRef>,           // Map font_id to FontRef
     pub default_pfr_data: HashMap<String, &'static [u8]>, // Embedded default PFR fonts
+    pub pfr_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -367,6 +368,7 @@ impl FontManager {
             font_cache: HashMap::new(),
             font_by_id: HashMap::new(),
             default_pfr_data: HashMap::new(),
+            pfr_enabled: true,
         };
     }
 

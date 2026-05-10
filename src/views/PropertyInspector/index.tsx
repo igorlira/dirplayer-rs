@@ -5,6 +5,7 @@ import { useCallback, useMemo } from "react";
 import { Layout, Model, TabNode } from "flexlayout-react";
 import PropertyTable from "../../components/PropertyTable";
 import MovieChunksView from "./MovieChunksView";
+import RenderingOptions from "./RenderingOptions";
 
 interface PropertyInspectorProps {
   selectedObject?: TSelectedObject;
@@ -49,6 +50,11 @@ export default function PropertyInspector({
               type: "tab",
               name: "Movie",
               component: "movie"
+            },
+            {
+              type: "tab",
+              name: "Options",
+              component: "options"
             }
           ]
         }
@@ -68,6 +74,8 @@ export default function PropertyInspector({
         return <PropertyTable data={secondaryMember as unknown as Record<string, unknown>} scrollable />;
       case "movie":
         return <MovieChunksView />;
+      case "options":
+        return <RenderingOptions />;
       default:
         return null;
     }

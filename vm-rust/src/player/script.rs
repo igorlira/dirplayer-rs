@@ -150,6 +150,8 @@ pub fn script_get_prop_opt(
     } else if prop_name == "script" {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
+    } else if prop_name == "ilk" {
+        return Some(player.alloc_datum(Datum::Symbol("instance".to_string())));
     }
 
     // Try to find the property on the current instance first

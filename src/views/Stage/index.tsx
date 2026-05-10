@@ -26,6 +26,7 @@ import {
   ime_composition_start,
   ime_composition_update,
   ime_composition_end,
+  set_renderer_backend,
 } from "vm-rust";
 import { useAppDispatch } from "../../store/hooks";
 import { channelSelected } from "../../store/uiSlice";
@@ -231,6 +232,10 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     if (outerWidth && outerHeight && !isStageCanvasCreated.current) {
       isStageCanvasCreated.current = true;
       player_create_canvas();
+      const savedBackend = window.localStorage.getItem("dirplayer_renderer_backend");
+      if (savedBackend) {
+        try { set_renderer_backend(savedBackend); } catch { /* ignore */ }
+      }
     }
   }, [outerWidth, outerHeight]);
 

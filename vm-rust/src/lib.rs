@@ -1583,6 +1583,27 @@ pub async fn mcp_eval_lingo(code: String) -> String {
     reserve_player_ref(|player| player::mcp::mcp_format_eval_result(player, result))
 }
 
+/// Switch the renderer backend at runtime
+#[wasm_bindgen]
+pub fn set_renderer_backend(backend: &str) -> Result<(), JsValue> {
+    rendering::player_set_renderer_backend(backend)
+}
+
+/// Set whether PFR font rasterization is enabled
+#[wasm_bindgen]
+pub fn set_pfr_font_enabled(enabled: bool) {
+    reserve_player_mut(|player| {
+        player.font_manager.pfr_enabled = enabled;
+        player.font_manager.font_cache.clear();
+    });
+}
+
+/// Get whether PFR font rasterization is enabled
+#[wasm_bindgen]
+pub fn get_pfr_font_enabled() -> bool {
+    reserve_player_ref(|player| player.font_manager.pfr_enabled)
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     set_panic_hook();

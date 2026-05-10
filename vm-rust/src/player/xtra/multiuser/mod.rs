@@ -1,6 +1,15 @@
+pub mod blowfish;
+pub mod writer;
+pub mod reader;
+pub mod types;
+
 use std::collections::VecDeque;
 use async_std::{channel::Sender, task::spawn_local};
+use binary_reader::BinaryReader;
 use fxhash::FxHashMap;
+use itertools::Itertools;
+use num::FromPrimitive;
+use num_derive::FromPrimitive;
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
 
@@ -12,25 +21,34 @@ macro_rules! multiuser_log {
 }
 
 use crate::{
-    director::lingo::datum::{Datum, DatumType},
+    director::{lingo::datum::{Datum, DatumType}, static_datum::{StaticDatum, static_datum_to_runtime}},
     player::{
-        DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref
+        DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, xtra::multiuser::{blowfish::{DEFAULT_CIPHER_KEY, MUSBlowfish}}
     },
 };
+
+#[derive(Debug, Clone, FromPrimitive)]
+pub enum MultiuserConnectionMode {
+    Binary = 0,
+    Text = 1,
+}
 
 pub struct MultiuserMessage {
     pub error_code: i32,
     pub recipients: Vec<String>,
     pub sender_id: String,
     pub subject: String,
-    pub content: Datum,
-    pub time_stamp: i64,
+    pub content: StaticDatum,
+    pub time_stamp: u32,
 }
 
 pub struct MultiuserXtraInstance {
     pub net_message_handler: Option<(DatumRef, String)>,
     pub message_queue: Vec<MultiuserMessage>,
-    pub socket_tx: Option<Sender<String>>,
+    pub socket_tx: Option<Sender<Vec<u8>>>,
+    pub connection_mode: MultiuserConnectionMode,
+    pub sender_id: String,
+    pub recv_buffer: Vec<u8>,
 }
 
 impl MultiuserXtraInstance {
@@ -53,6 +71,37 @@ impl MultiuserXtraInstance {
         }
         Some(self.message_queue.remove(0))
     }
+
+    pub fn receive_binary_data(&mut self, data: &[u8]) {
+        use crate::player::xtra::multiuser::reader::{MUS_HEADER, MUS_FRAME_HEADER_SIZE, MusReader};
+
+        self.recv_buffer.extend_from_slice(data);
+        loop {
+            if self.recv_buffer.len() < MUS_FRAME_HEADER_SIZE {
+                break;
+            }
+            let header = u16::from_be_bytes([self.recv_buffer[0], self.recv_buffer[1]]);
+            if header != MUS_HEADER {
+                multiuser_log!("Multiuser: Invalid message header 0x{:04x}, discarding recv buffer", header);
+                self.recv_buffer.clear();
+                break;
+            }
+            let payload_size = u32::from_be_bytes([
+                self.recv_buffer[2], self.recv_buffer[3],
+                self.recv_buffer[4], self.recv_buffer[5],
+            ]) as usize;
+            let total_size = MUS_FRAME_HEADER_SIZE + payload_size;
+            if self.recv_buffer.len() < total_size {
+                break;
+            }
+            let msg_bytes: Vec<u8> = self.recv_buffer.drain(..total_size).collect();
+            let payload = &msg_bytes[MUS_FRAME_HEADER_SIZE..];
+            match BinaryReader::read_mus_message_payload(payload, None) {
+                Ok(msg) => self.dispatch_message(msg),
+                Err(e) => multiuser_log!("Multiuser: Failed to read binary message: {:?}", e),
+            }
+        }
+    }
 }
 
 pub struct MultiuserXtraManager {
@@ -69,6 +118,9 @@ impl MultiuserXtraManager {
                 net_message_handler: None,
                 message_queue: vec![],
                 socket_tx: None,
+                connection_mode: MultiuserConnectionMode::Binary,
+                sender_id: String::new(),
+                recv_buffer: Vec::new(),
             },
         );
         self.instance_counter
@@ -128,7 +180,7 @@ impl MultiuserXtraManager {
                 // Form B is what ClubMarian / MaidMarian's Connection
                 // Script uses. Detect it by sniffing args[2]: a PropList
                 // means form B; otherwise assume form A.
-                let (username, password, host, port, movie_id) = reserve_player_ref(|player| {
+                let (username, password, host, port, movie_id, mode, encryption_key) = reserve_player_ref(|player| {
                     let arg2 = args.get(2).map(|d| player.get_datum(d));
                     let is_form_b = matches!(arg2, Some(Datum::PropList(..)));
                     if is_form_b {
@@ -156,7 +208,9 @@ impl MultiuserXtraManager {
                         let username = lookup_str("userID");
                         let password = lookup_str("password");
                         let movie_id = lookup_str("movieid");
-                        Ok((username, password, host, port, movie_id))
+                        let mode = args.get(3).and_then(|d| player.get_datum(d).int_value().ok()).unwrap_or(0);
+                        let encryption_key = args.get(4).and_then(|d| player.get_datum(d).string_value().ok()).unwrap_or_default();
+                        Ok((username, password, host, port, movie_id, mode, encryption_key))
                     } else {
                         // Form A: (userName, password, serverID, port, movieID, ...)
                         let username = player.get_datum(args.get(0).unwrap()).string_value().unwrap_or_default();
@@ -164,7 +218,9 @@ impl MultiuserXtraManager {
                         let host = player.get_datum(args.get(2).unwrap()).string_value()?;
                         let port = player.get_datum(args.get(3).unwrap()).int_value()?;
                         let movie_id = player.get_datum(args.get(4).unwrap()).string_value().unwrap_or_default();
-                        Ok((username, password, host, port, movie_id))
+                        let mode = args.get(5).and_then(|d| player.get_datum(d).int_value().ok()).unwrap_or(0);
+                        let encryption_key = args.get(6).and_then(|d| player.get_datum(d).string_value().ok()).unwrap_or_default();
+                        Ok((username, password, host, port, movie_id, mode, encryption_key))
                     }
                 })?;
 
@@ -197,7 +253,6 @@ impl MultiuserXtraManager {
                     "ws"
                 };
                 let ws_url = format!("{}://{}:{}{}", ws_scheme, host, port, ws_path.unwrap_or_default());
-                multiuser_log!("Multiuser: Connecting to WebSocket URL: {} (user={}, movie={})", ws_url, username, movie_id);
 
                 // Check if the page provides a socket proxy mapping via JS
                 let ws_url = {
@@ -227,6 +282,13 @@ impl MultiuserXtraManager {
                 };
                 multiuser_log!("Multiuser: Connecting to WebSocket URL: {} (original={}:{}, user={}, movie={})", ws_url, host, port, username, movie_id);
 
+                instance.sender_id = username.clone();
+                instance.connection_mode = if let Some(mode) = MultiuserConnectionMode::from_i32(mode) {
+                    mode
+                } else {
+                    return Err(ScriptError::new(format!("Invalid connection mode: {}", mode)));
+                };
+
                 let socket = match WebSocket::new(&ws_url) {
                     Ok(s) => s,
                     Err(e) => {
@@ -237,7 +299,7 @@ impl MultiuserXtraManager {
                             recipients: vec![],
                             sender_id: "System".to_string(),
                             subject: "ConnectToNetServer".to_string(),
-                            content: Datum::String(format!("Failed to create WebSocket: {:?}", e)),
+                            content: StaticDatum::String(format!("Failed to create WebSocket: {:?}", e)),
                             time_stamp: 0,
                         });
                         return Ok(DatumRef::Void);
@@ -253,31 +315,49 @@ impl MultiuserXtraManager {
                 let onmessage_callback = Closure::<dyn FnMut(_)>::new(move |e: MessageEvent| {
                     // Handle both ArrayBuffer and String messages
                     let data = e.data();
-                    let message_str = if let Ok(array_buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
+                    let message_bytes = if let Ok(array_buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
                         let array = js_sys::Uint8Array::new(&array_buffer);
-                        let vec = array.to_vec();
-                        let char_vec: Vec<char> = vec.into_iter().map(|byte| byte as char).collect();
-                        char_vec.into_iter().collect()
+                        array.to_vec()
                     } else if let Ok(js_string) = data.dyn_into::<js_sys::JsString>() {
-                        js_string.as_string().unwrap_or_default()
+                        // js_string.as_string().unwrap().into_bytes()
+                        js_string.as_string().unwrap_or_default().chars().map(|c| c as u8).collect()
                     } else {
                         multiuser_log!("Multiuser: Received unknown message type");
                         return;
                     };
+                    // let message_str = if let Ok(array_buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
+                    //     let array = js_sys::Uint8Array::new(&array_buffer);
+                    //     let vec = array.to_vec();
+                    //     let char_vec: Vec<char> = vec.into_iter().map(|byte| byte as char).collect();
+                    //     char_vec.into_iter().collect()
+                    // } else if let Ok(js_string) = data.dyn_into::<js_sys::JsString>() {
+                    //     js_string.as_string().unwrap_or_default()
+                    // } else {
+                    //     multiuser_log!("Multiuser: Received unknown message type");
+                    //     return;
+                    // };
                     // multiuser_log!("Multiuser: WebSocket message received: {:?}", message_str);
 
                     let multiusr_manager =
                         unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut() };
                     if let Some(manager) = multiusr_manager {
                         if let Some(instance) = manager.instances.get_mut(&instance_id) {
-                            instance.dispatch_message(MultiuserMessage {
-                                error_code: 0,
-                                recipients: vec!["*".to_string()],
-                                sender_id: "System".to_string(),
-                                subject: "String".to_string(),
-                                content: Datum::String(message_str),
-                                time_stamp: 0, // TODO timestamp
-                            });
+                            match instance.connection_mode {
+                                MultiuserConnectionMode::Text => {
+                                    let message_str = message_bytes.into_iter().map(|b| b as char).collect::<String>();
+                                    instance.dispatch_message(MultiuserMessage {
+                                        error_code: 0,
+                                        recipients: vec!["*".to_string()],
+                                        sender_id: "System".to_string(),
+                                        subject: "String".to_string(),
+                                        content: StaticDatum::String(message_str),
+                                        time_stamp: 0,
+                                    });
+                                }
+                                MultiuserConnectionMode::Binary => {
+                                    instance.receive_binary_data(&message_bytes);
+                                }
+                            }
                         }
                     }
                 });
@@ -296,7 +376,7 @@ impl MultiuserXtraManager {
                             recipients: vec![],
                             sender_id: "System".to_string(),
                             subject: "ConnectToNetServer".to_string(),
-                            content: Datum::String("WebSocket connection error".to_string()),
+                            content: StaticDatum::String("WebSocket connection error".to_string()),
                             time_stamp: 0,
                         });
                     }
@@ -314,7 +394,7 @@ impl MultiuserXtraManager {
                             recipients: vec![],
                             sender_id: "System".to_string(),
                             subject: "DisconnectFromServer".to_string(),
-                            content: Datum::String(e.reason()),
+                            content: StaticDatum::String(e.reason()),
                             time_stamp: 0,
                         });
                     }
@@ -331,9 +411,36 @@ impl MultiuserXtraManager {
                         recipients: vec!["*".to_string()],
                         sender_id: "System".to_string(),
                         subject: "ConnectToNetServer".to_string(),
-                        content: Datum::Void,
+                        content: StaticDatum::Void,
                         time_stamp: 0, // TODO timestamp
                     });
+                    if let MultiuserConnectionMode::Binary = instance.connection_mode {
+                        let message = MultiuserMessage {
+                            error_code: 0,
+                            recipients: vec!["System".to_string()],
+                            sender_id: username.to_string(),
+                            subject: "Logon".to_string(),
+                            content: StaticDatum::List(vec![
+                                StaticDatum::String(movie_id.clone()),
+                                StaticDatum::String(username.clone()),
+                                StaticDatum::String(password.clone()),
+                            ]),
+                            time_stamp: 0,
+                        };
+                        let resolved_encryption_key: Vec<u8> = if encryption_key.is_empty() {
+                            DEFAULT_CIPHER_KEY.to_vec()
+                        } else if encryption_key.len() < 20 {
+                            // DEFAULT_CIPHER_KEY + &encryption_key
+                            let mut key = DEFAULT_CIPHER_KEY.to_vec();
+                            key.extend_from_slice(encryption_key.as_bytes());
+                            key
+                        } else {
+                            encryption_key.as_bytes().to_vec()
+                        };
+                        let mut cipher = MUSBlowfish::new(&resolved_encryption_key);
+                        let bytes = message.to_bytes(Some(&mut cipher));
+                        instance.socket_tx.as_ref().unwrap().try_send(bytes.to_vec()).unwrap();
+                    }
                 });
                 socket.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
                 socket.set_onerror(Some(onerror_callback.as_ref().unchecked_ref()));
@@ -351,7 +458,7 @@ impl MultiuserXtraManager {
                             continue;
                         }
                         // multiuser_log!("Multiuser: Sending message: {:?}", message);
-                        if let Err(e) = socket_clone.send_with_u8_array(&message.as_bytes()) {
+                        if let Err(e) = socket_clone.send_with_u8_array(&message) {
                             multiuser_log!("Multiuser: Failed to send message: {:?}", e);
                         }
                     }
@@ -381,7 +488,7 @@ impl MultiuserXtraManager {
                             player.alloc_datum(Datum::List(DatumType::List, recipient_refs, false));
                         let sender_id = player.alloc_datum(Datum::String(message.sender_id));
                         let subject = player.alloc_datum(Datum::String(message.subject));
-                        let content = player.alloc_datum(message.content);
+                        let content = static_datum_to_runtime(&message.content, &mut player.allocator);
                         let time_stamp = player.alloc_datum(Datum::Int(message.time_stamp as i32)); // TODO: i64
 
                         let error_code_key =
@@ -414,11 +521,37 @@ impl MultiuserXtraManager {
             "sendnetmessage" => {
                 let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
-                reserve_player_ref(|player| {
-                    let msg_string = player.get_datum(args.get(2).unwrap()).string_value()?;
+                reserve_player_mut(|player| {
                     // multiuser_log!("sendNetMessage: {:?}", msg_string);
                     if let Some(tx) = &instance.socket_tx {
-                        tx.try_send(msg_string).unwrap();
+                        let msg_bytes = match instance.connection_mode {
+                            MultiuserConnectionMode::Text => {
+                                let msg_data = player.get_datum(args.get(2).unwrap());
+                                msg_data.string_value()?.chars().map(|c| c as u8).collect::<Vec<u8>>()
+                            }
+                            MultiuserConnectionMode::Binary => {
+                                let subject = player.get_datum(args.get(1).unwrap()).string_value()?;
+                                let msg_data = player.get_datum(args.get(2).unwrap());
+                                let content = StaticDatum::from(msg_data);
+                                let recipients_list = match player.get_datum(args.get(0).unwrap()) {
+                                    Datum::List(_, list, ..) => list.iter().map(|d| player.get_datum(d).string_value().unwrap_or_default()).collect_vec(),
+                                    Datum::String(s) => vec![s.clone()],
+                                    Datum::Int(0) => vec![],
+                                    _ => return Err(ScriptError::new("Invalid recipients argument, expected list or string".to_string())),
+                                };
+
+                                let message = MultiuserMessage {
+                                    error_code: 0,
+                                    recipients: recipients_list,
+                                    sender_id: instance.sender_id.clone(),
+                                    subject,
+                                    content,
+                                    time_stamp: 0,
+                                };
+                                message.to_bytes(None)
+                            }
+                        };
+                        tx.try_send(msg_bytes).unwrap();
                         Ok(DatumRef::Void)
                     } else {
                         Err(ScriptError::new("Socket not connected".to_string()))

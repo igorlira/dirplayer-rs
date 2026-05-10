@@ -66,7 +66,7 @@ pub trait TestHarness {
 
     async fn eval_datum(&self, command: &str) -> Result<StaticDatum, ScriptError> {
         let result = self.eval(command).await?;
-        Ok(StaticDatum::from(result))
+        Ok(StaticDatum::from(&result))
     }
 
     fn current_frame(&self) -> u32 {

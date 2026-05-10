@@ -846,6 +846,7 @@ impl CastMemberRefHandlers {
             "loaded" => Ok(Datum::Int(1)),
             "mediaReady" => Ok(Datum::Int(1)),
             "comments" => Ok(Datum::String(comments)),
+            "ilk" => Ok(Datum::Symbol("member".to_string())),
             // In Director, member.member returns the member reference itself
             "member" => Ok(Datum::CastMember(cast_member_ref.clone())),
             _ => Self::get_member_type_prop(player, cast_member_ref, &member_type, prop),
