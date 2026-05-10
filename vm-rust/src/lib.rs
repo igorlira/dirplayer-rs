@@ -880,6 +880,17 @@ pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
     });
 }
 
+#[wasm_bindgen]
+pub fn provide_net_task_error(task_id: u32) {
+    async_std::task::spawn_local(async move {
+        let shared_state_arc =
+            reserve_player_ref(|player| std::sync::Arc::clone(&player.net_manager.shared_state));
+        let result: player::net_task::NetResult = Err(4);
+        let mut shared_state = shared_state_arc.lock().await;
+        shared_state.fulfill_task(task_id, result).await;
+    });
+}
+
 /// Receive a rendered Flash frame from JavaScript (Ruffle) and store it as a bitmap.
 /// This allows Flash content to be composited into the Director stage rendering pipeline.
 #[wasm_bindgen]

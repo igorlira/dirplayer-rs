@@ -208,6 +208,7 @@ impl CastMemberRef {
 #[wasm_bindgen(module = "dirplayer-js-api")]
 extern "C" {
     pub fn onMovieLoaded(test: OnMovieLoadedCallbackData);
+    pub fn onMovieLoadFailed(path: &str, error: &str);
     pub fn onCastListChanged(names: Array);
     pub fn onCastLibNameChanged(cast_number: u32, name: &str);
     pub fn onCastMemberListChanged(cast_number: u32, members: js_sys::Object);
@@ -285,6 +286,10 @@ impl JsApi {
             version: dir_file.version,
             test_val: test,
         });
+    }
+
+    pub fn dispatch_movie_load_failed(path: &str, error: &str) {
+        onMovieLoadFailed(path, error);
     }
 
     /// Collects all chunk IDs that are transitive descendants of `root_id` in the KeyTable,
@@ -1688,6 +1693,7 @@ impl JsApi {
     #[allow(dead_code)]
     pub fn dispatch_clear_timeouts() {}
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
+    pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
     pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: &[u8], _: u32, _: u32) {}
     pub fn dispatch_flash_member_unloaded(_: i32, _: i32) {}
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}

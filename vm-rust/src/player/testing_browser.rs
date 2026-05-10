@@ -191,7 +191,7 @@ impl TestHarness for BrowserTestPlayer {
 
         unsafe {
             let player = PLAYER_OPT.as_mut().unwrap();
-            player.load_movie_from_file(&full_url).await;
+            let _ = player.load_movie_from_file(&full_url).await;
         }
 
         // Initialize the renderer now that the stage size is known

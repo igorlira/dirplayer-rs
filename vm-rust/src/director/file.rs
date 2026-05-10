@@ -81,7 +81,7 @@ impl DirectorFile {
             deserialized_chunks: HashMap::new(),
         };
 
-        let meta_fourcc = reader.read_u32().unwrap();
+        let meta_fourcc = reader.read_u32().map_err(|e| format!("Failed to read file header: {}", e))?;
         let endian = if meta_fourcc == FOURCC("XFIR") {
             reader.set_endian(binary_reader::Endian::Little);
             binary_reader::Endian::Little
@@ -89,8 +89,8 @@ impl DirectorFile {
             binary_reader::Endian::Big
         };
 
-        let _ = reader.read_u32().unwrap(); // meta length
-        let codec = reader.read_u32().unwrap();
+        let _ = reader.read_u32().map_err(|e| format!("Failed to read meta length: {}", e))?; // meta length
+        let codec = reader.read_u32().map_err(|e| format!("Failed to read codec: {}", e))?;
         let mut after_burned = false;
         let mut ils_body_offset: usize = 0;
 

@@ -30,6 +30,7 @@ export type DebugContent = DebugContentBitmap | DebugContentDatum;
 
 type TVmCallbacks = {
   onMovieLoaded: Function,
+  onMovieLoadFailed?: (path: string, error: string) => void,
   onCastListChanged: Function,
   onCastLibNameChanged: (castLib: number, name: string) => void,
   onCastMemberListChanged: Function,

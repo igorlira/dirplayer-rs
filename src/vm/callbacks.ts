@@ -1,7 +1,7 @@
 import { ICastMemberRef, JsBridgeBreakpoint, OnScriptErrorData, registerVmCallbacks } from "dirplayer-js-api";
 import { createFlashInstance, destroyFlashInstance, initFlashBridge } from "../services/flashPlayerManager";
 import store from "../store";
-import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
+import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import { OnMovieLoadedCallbackData, trigger_timeout, exportW3dObj, exportW3dRaw, listW3dMembers } from 'vm-rust'
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
@@ -61,6 +61,9 @@ export function initVmCallbacks() {
       } catch {}
       store.dispatch(debugMessagesCleared());
       store.dispatch(movieLoaded());
+    },
+    onMovieLoadFailed: (path: string, error: string) => {
+      store.dispatch(movieLoadFailed(`Failed to load movie: ${error}`));
     },
     onCastListChanged: (castList: string[]) => {
       store.dispatch(castListChanged(castList));

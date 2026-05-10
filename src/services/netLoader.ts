@@ -3,7 +3,7 @@
  */
 
 import { isElectron, readLocalFile, appendLocalFile } from '../utils/electron';
-import { provide_net_task_data } from 'vm-rust';
+import { provide_net_task_data, provide_net_task_error } from 'vm-rust';
 
 /**
  * Register a callback to intercept network requests and provide data from Electron
@@ -40,8 +40,7 @@ export function initializeNetLoader() {
       }
     } catch (error) {
       console.error(`[netLoader] Failed to load file from ${url}:`, error);
-      // Provide empty data to indicate failure
-      provide_net_task_data(taskId, new Uint8Array(0));
+      provide_net_task_error(taskId);
     }
   });
 

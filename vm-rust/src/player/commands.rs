@@ -9,6 +9,7 @@ use url::Url;
 use crate::{
     console_warn,
     director::lingo::datum::{Datum, TimeoutRef},
+    js_api::JsApi,
     player::PLAYER_OPT,
     utils::ToHexString,
 };
@@ -236,9 +237,15 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         }
         PlayerVMCommand::LoadMovieFromFile(file_path, autoplay) => {
             let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
-            player.load_movie_from_file(&file_path).await;
-            if autoplay {
-                player.play();
+            match player.load_movie_from_file(&file_path).await {
+                Ok(()) => {
+                    if autoplay {
+                        player.play();
+                    }
+                }
+                Err(err) => {
+                    JsApi::dispatch_movie_load_failed(&file_path, &err);
+                }
             }
         }
         PlayerVMCommand::SetStageSize(width, height) => {

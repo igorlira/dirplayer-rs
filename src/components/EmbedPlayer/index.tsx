@@ -5,6 +5,8 @@ import { load_movie_file, play, set_base_path, set_external_params } from 'vm-ru
 import { getFullPathFromOrigin, getBasePath } from '../../utils/path';
 import { initAudioBackend } from '../../audio/audioInit';
 import Stage from '../../views/Stage';
+import ShadowPortal from '../ShadowPortal';
+import ErrorOverlay from '../ErrorOverlay';
 
 type EmbedPlayerProps = {
   width: string
@@ -17,6 +19,7 @@ type EmbedPlayerProps = {
 
 export default function EmbedPlayer({width, height, src, externalParams, requireClickToPlay, enableGestures}: EmbedPlayerProps) {
   const isVmReady = useSelector<RootState>(state => state.vm.isReady);
+  const movieLoadError = useSelector<RootState, string | undefined>(state => state.vm.movieLoadError);
   const [userClicked, setUserClicked] = useState(!requireClickToPlay);
 
   useEffect(() => {
@@ -81,7 +84,14 @@ export default function EmbedPlayer({width, height, src, externalParams, require
     );
   }
 
-  return <div style={{width: widthValue, height: heightValue}}>
-    {!!isVmReady && <Stage enableGestures={enableGestures} />}
-  </div>
+  return (
+    <div style={{ width: widthValue, height: heightValue, position: 'relative', backgroundColor: '#000' }}>
+      {!!isVmReady && !movieLoadError && <Stage enableGestures={enableGestures} />}
+      {movieLoadError && (
+        <ShadowPortal style={{ position: 'absolute', inset: 0, zIndex: 9999 }}>
+          <ErrorOverlay message={movieLoadError} compact />
+        </ShadowPortal>
+      )}
+    </div>
+  );
 }

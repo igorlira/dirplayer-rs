@@ -56,8 +56,10 @@ export default defineConfig({
   },
   build: {
     outDir: "dist-polyfill",
-    // Empty the output directory before build
     emptyOutDir: true,
+    // Inline all assets up to 10 KB so the polyfill bundle is self-contained
+    // (publicDir is disabled for the polyfill build, so external URLs won't resolve)
+    assetsInlineLimit: 10240,
     lib: {
       entry: path.resolve(__dirname, "polyfill/src/standalone.tsx"),
       name: "DirPlayerPolyfill",

@@ -7,6 +7,14 @@ export function onMovieLoaded(result) {
   vmCallbacks.onMovieLoaded(result)
 }
 
+export function onMovieLoadFailed(path, error) {
+  if (vmCallbacks?.onMovieLoadFailed) {
+    vmCallbacks.onMovieLoadFailed(path, error);
+  } else {
+    console.error('[dirplayer] Movie load failed:', path, error);
+  }
+}
+
 export function onCastListChanged(castList) {
   vmCallbacks.onCastListChanged(castList)
 }
