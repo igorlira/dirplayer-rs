@@ -20,6 +20,7 @@ export function onGlobalListChanged() {}
 export function onScriptErrorCleared() {}
 export function onDebugMessage() {}
 export function onDebugContent() {}
+export function onMovieLoadFailed() {}
 
 // Timeout handling — mirrors the real Electron host behavior.
 // Uses setInterval to call trigger_timeout, which dispatches
