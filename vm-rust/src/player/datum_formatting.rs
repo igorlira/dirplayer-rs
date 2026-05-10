@@ -193,6 +193,9 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         Datum::HavokObjectRef(hr) => {
             format!("{}(\"{}\")", hr.object_type, hr.name)
         }
+        Datum::PhysXObjectRef(pr) => {
+            format!("{}(\"{}\")", pr.object_type, pr.name)
+        }
     }
 }
 
