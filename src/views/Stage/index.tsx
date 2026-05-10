@@ -164,6 +164,8 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   const hiddenInputRef = useRef<HTMLInputElement | null>(null);
   const dispatch = useAppDispatch();
 
+  const [isMiddlePanning, setIsMiddlePanning] = useState(false);
+
   const scaleRef = useRef(scale);
   const panRef = useRef(pan);
   const panModeRef = useRef(panMode);
@@ -190,6 +192,8 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   const isComposingRef = useRef(false);
   // single-finger pan (when panMode is on)
   const singlePanRef = useRef<{ startPointer: Pt; startPan: Pt } | null>(null);
+  const middlePanRef = useRef<{ startPointer: Pt; startPan: Pt } | null>(null);
+  const prevOuterSizeRef = useRef<{ w: number; h: number } | null>(null);
   const gestureRef = useRef<{
     initialDist: number;
     initialScale: number;
@@ -227,9 +231,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     set_stage_size(outerWidth, outerHeight);
   }, [outerWidth, outerHeight]);
 
-  // Center the stage in the viewport on first sizing. After that, the user owns
-  // the transform — don't reset on subsequent size changes (e.g. window resize)
-  // since that would yank their pan/zoom out from under them.
+  // Center the stage in the viewport on first sizing.
   useEffect(() => {
     if (transformInitialized) return;
     if (!outerWidth || !outerHeight || !stageWidth || !stageHeight) return;
@@ -237,8 +239,50 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
       x: (outerWidth - stageWidth) / 2,
       y: (outerHeight - stageHeight) / 2,
     });
+    prevOuterSizeRef.current = { w: outerWidth, h: outerHeight };
     setTransformInitialized(true);
   }, [outerWidth, outerHeight, stageWidth, stageHeight, transformInitialized]);
+
+  // On viewport resize, adjust pan so the existing center stays centered.
+  useEffect(() => {
+    if (!transformInitialized) return;
+    if (!outerWidth || !outerHeight) return;
+    const prev = prevOuterSizeRef.current;
+    if (prev && (prev.w !== outerWidth || prev.h !== outerHeight)) {
+      setPan(cur => ({
+        x: cur.x + (outerWidth - prev.w) / 2,
+        y: cur.y + (outerHeight - prev.h) / 2,
+      }));
+    }
+    prevOuterSizeRef.current = { w: outerWidth, h: outerHeight };
+  }, [outerWidth, outerHeight, transformInitialized]);
+
+  // Trackpad pinch-to-zoom and two-finger pan via wheel events.
+  // Must be a non-passive listener so we can call preventDefault().
+  useEffect(() => {
+    const el = outerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      if (e.ctrlKey) {
+        const factor = Math.pow(0.99, e.deltaY);
+        const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scaleRef.current * factor));
+        const anchorX = (cx - panRef.current.x) / scaleRef.current;
+        const anchorY = (cy - panRef.current.y) / scaleRef.current;
+        setScale(newScale);
+        setPan({ x: cx - anchorX * newScale, y: cy - anchorY * newScale });
+      } else {
+        setPan(prev => ({ x: prev.x - e.deltaX, y: prev.y - e.deltaY }));
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  // outerWidth/outerHeight used as a proxy for "container is mounted and measured"
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outerWidth, outerHeight]);
 
   // Handle pointer-locked mouse movement (events fire on document, not the div)
   useEffect(() => {
@@ -425,6 +469,16 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   }
 
   function onPointerDown(e: React.PointerEvent) {
+    // Middle mouse button — pan the canvas without dispatching to the VM.
+    if (e.button === 1 && e.pointerType === 'mouse') {
+      e.preventDefault();
+      const p = pointerOuterPos(e);
+      middlePanRef.current = { startPointer: p, startPan: panRef.current };
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      setIsMiddlePanning(true);
+      return;
+    }
+
     const p = pointerOuterPos(e);
     activePointersRef.current.set(e.pointerId, p);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -470,6 +524,15 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     const isTracked = activePointersRef.current.has(e.pointerId);
     if (isTracked) {
       activePointersRef.current.set(e.pointerId, p);
+    }
+
+    if (middlePanRef.current) {
+      const sp = middlePanRef.current;
+      setPan({
+        x: sp.startPan.x + (p.x - sp.startPointer.x),
+        y: sp.startPan.y + (p.y - sp.startPointer.y),
+      });
+      return;
     }
 
     if (isTracked && activePointersRef.current.size >= 2 && gestureRef.current) {
@@ -523,6 +586,12 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   }
 
   function onPointerUp(e: React.PointerEvent) {
+    if (e.button === 1 && middlePanRef.current) {
+      middlePanRef.current = null;
+      setIsMiddlePanning(false);
+      return;
+    }
+
     if (!activePointersRef.current.has(e.pointerId)) return;
     const lastP = pointerOuterPos(e);
     const wasMultiTouch = activePointersRef.current.size >= 2;
@@ -608,7 +677,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         className={styles.stageWrapper}
         style={{
           transform: `translate(${tx}px, ${ty}px) scale(${scale})`,
-          cursor: pickingMode ? "crosshair" : panMode ? "grab" : textCursor ? "text" : undefined,
+          cursor: pickingMode ? "crosshair" : isMiddlePanning ? "grabbing" : panMode ? "grab" : textCursor ? "text" : undefined,
         }}
       >
         <div
