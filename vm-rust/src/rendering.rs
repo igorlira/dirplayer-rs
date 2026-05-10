@@ -2078,6 +2078,7 @@ pub fn render_score_to_bitmap_with_offset(
                     let has_selection = is_focused && sel_lo != sel_hi;
                     // Same line stride bitmap.draw_text_wrapped uses internally.
                     let line_h = font.char_height as i32 + field_member.fixed_line_space as i32;
+                    let wrap_w = if field_member.word_wrap { sprite.width } else { 0 };
 
                     if has_selection {
                         draw_text_selection_rects(
@@ -2086,7 +2087,7 @@ pub fn render_score_to_bitmap_with_offset(
                             &font,
                             sprite.loc_h,
                             sprite.loc_v,
-                            sprite.width,
+                            wrap_w,
                             &field_member.alignment,
                             line_h,
                             field_member.top_spacing,
@@ -2102,7 +2103,7 @@ pub fn render_score_to_bitmap_with_offset(
                         font_bitmap,
                         sprite.loc_h,
                         sprite.loc_v,
-                        sprite.width,
+                        wrap_w,
                         &field_member.alignment,
                         params,
                         &palettes,
@@ -2114,7 +2115,7 @@ pub fn render_score_to_bitmap_with_offset(
                         let (dx, dy) = Bitmap::caret_index_to_xy(
                             &field_member.text,
                             &font,
-                            sprite.width,
+                            wrap_w,
                             &field_member.alignment,
                             line_h,
                             field_member.sel_end,
@@ -2274,13 +2275,14 @@ pub fn render_score_to_bitmap_with_offset(
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     };
 
+                    let wrap_w = if field.word_wrap { text_area_w } else { 0 };
                     temp.draw_text_wrapped(
                         &field.text,
                         font,
                         font_bitmap,
                         text_area_x,
                         text_y,
-                        text_area_w,
+                        wrap_w,
                         &field.alignment,
                         text_params,
                         &palettes,
