@@ -67,10 +67,24 @@
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 4px;
   padding: 4px;
+  box-sizing: border-box;
+  overflow: hidden;
   opacity: 0.65;
   transition: opacity 0.15s;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
+}
+
+.container .minimap {
+  width: var(--mw) !important;
+  height: var(--mh) !important;
+}
+
+.container .minimapViewport {
+  left: var(--vl) !important;
+  top: var(--vt) !important;
+  width: var(--vw) !important;
+  height: var(--vh) !important;
 }
 
 .minimap:hover,

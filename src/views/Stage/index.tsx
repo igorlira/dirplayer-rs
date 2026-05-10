@@ -107,9 +107,14 @@ function MiniMap({
     dragRef.current = null;
   }
 
+  // Sizes are passed as CSS custom properties so they survive the
+  // `.shockwave div { width: 100% !important }` rule from player.css.
+  // The .container .minimap selector in CSS has higher specificity and
+  // uses these vars with !important to win the cascade.
   return (
     <div
       className={styles.minimap}
+      style={{ '--mw': `${mapW + 8}px`, '--mh': `${mapH + 8}px` } as React.CSSProperties}
       onPointerDown={onDown}
       onPointerMove={onMove}
       onPointerUp={onUp}
@@ -122,11 +127,11 @@ function MiniMap({
         <div
           className={styles.minimapViewport}
           style={{
-            left: viewX * mapScale,
-            top: viewY * mapScale,
-            width: viewW * mapScale,
-            height: viewH * mapScale,
-          }}
+            '--vl': `${viewX * mapScale}px`,
+            '--vt': `${viewY * mapScale}px`,
+            '--vw': `${viewW * mapScale}px`,
+            '--vh': `${viewH * mapScale}px`,
+          } as React.CSSProperties}
         />
       </div>
     </div>
@@ -152,7 +157,6 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   const stageEl = useRef<HTMLDivElement | null>(null);
   const [scale, setScale] = useState(1);
   const [pan, setPan] = useState<Pt>({ x: 0, y: 0 });
-  const [transformInitialized, setTransformInitialized] = useState(false);
   const [pickingMode, setPickingMode] = useState(false);
   const [panMode, setPanMode] = useState(false);
   // Frontend-driven cursor override. JS keeps authority over the I-beam
@@ -194,6 +198,10 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   const singlePanRef = useRef<{ startPointer: Pt; startPan: Pt } | null>(null);
   const middlePanRef = useRef<{ startPointer: Pt; startPan: Pt } | null>(null);
   const prevOuterSizeRef = useRef<{ w: number; h: number } | null>(null);
+  // False until the user deliberately pans/zooms. While false the stage is kept
+  // auto-centered on every resize; after the first interaction we switch to
+  // delta-preserve mode so the viewport center stays locked on resize.
+  const userHasPannedRef = useRef(false);
   const gestureRef = useRef<{
     initialDist: number;
     initialScale: number;
@@ -231,22 +239,22 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     set_stage_size(outerWidth, outerHeight);
   }, [outerWidth, outerHeight]);
 
-  // Center the stage in the viewport on first sizing.
+  // Before the user pans/zooms, keep the stage auto-centered on every resize.
+  // After they interact, switch to delta-preserve mode so the viewport center
+  // stays locked. This sidesteps all initialization-timing issues: the outer
+  // container may resize several times as the WASM canvas causes layout reflows,
+  // but each time we simply re-center, which is the correct initial behavior.
   useEffect(() => {
-    if (transformInitialized) return;
-    if (!outerWidth || !outerHeight || !stageWidth || !stageHeight) return;
-    setPan({
-      x: (outerWidth - stageWidth) / 2,
-      y: (outerHeight - stageHeight) / 2,
-    });
-    prevOuterSizeRef.current = { w: outerWidth, h: outerHeight };
-    setTransformInitialized(true);
-  }, [outerWidth, outerHeight, stageWidth, stageHeight, transformInitialized]);
-
-  // On viewport resize, adjust pan so the existing center stays centered.
-  useEffect(() => {
-    if (!transformInitialized) return;
     if (!outerWidth || !outerHeight) return;
+    if (!userHasPannedRef.current) {
+      if (stageWidth && stageHeight) {
+        setPan({
+          x: (outerWidth - stageWidth) / 2,
+          y: (outerHeight - stageHeight) / 2,
+        });
+      }
+      return;
+    }
     const prev = prevOuterSizeRef.current;
     if (prev && (prev.w !== outerWidth || prev.h !== outerHeight)) {
       setPan(cur => ({
@@ -255,7 +263,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
       }));
     }
     prevOuterSizeRef.current = { w: outerWidth, h: outerHeight };
-  }, [outerWidth, outerHeight, transformInitialized]);
+  }, [outerWidth, outerHeight, stageWidth, stageHeight]);
 
   // Trackpad pinch-to-zoom and two-finger pan via wheel events.
   // Must be a non-passive listener so we can call preventDefault().
@@ -267,6 +275,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
       const rect = el.getBoundingClientRect();
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
+      markUserPanned();
       if (e.ctrlKey) {
         const factor = Math.pow(0.99, e.deltaY);
         const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scaleRef.current * factor));
@@ -367,6 +376,17 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     return rect
       ? { x: e.clientX - rect.left, y: e.clientY - rect.top }
       : { x: 0, y: 0 };
+  }
+
+  function markUserPanned() {
+    if (!userHasPannedRef.current) {
+      userHasPannedRef.current = true;
+      const el = outerRef.current;
+      if (el) {
+        const r = el.getBoundingClientRect();
+        prevOuterSizeRef.current = { w: r.width, h: r.height };
+      }
+    }
   }
 
   function outerToCanvas(p: Pt): Pt {
@@ -527,6 +547,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     }
 
     if (middlePanRef.current) {
+      markUserPanned();
       const sp = middlePanRef.current;
       setPan({
         x: sp.startPan.x + (p.x - sp.startPointer.x),
@@ -536,6 +557,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     }
 
     if (isTracked && activePointersRef.current.size >= 2 && gestureRef.current) {
+      markUserPanned();
       const { centroid, dist } = gestureCentroidAndDist();
       const g = gestureRef.current;
       let newScale = g.initialScale * (dist / g.initialDist);
@@ -551,6 +573,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     if (suppressCanvasUntilReleaseRef.current) return;
 
     if (isTracked && singlePanRef.current) {
+      markUserPanned();
       const sp = singlePanRef.current;
       setPan({
         x: sp.startPan.x + (p.x - sp.startPointer.x),
@@ -708,7 +731,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
             viewportHeight={outerHeight}
             scale={scale}
             pan={pan}
-            onPanChange={setPan}
+            onPanChange={p => { markUserPanned(); setPan(p); }}
           />
         )}
       </div>
