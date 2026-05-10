@@ -25,7 +25,7 @@ impl ColorDatumHandlers {
                     &PaletteRef::BuiltIn(get_system_default_palette()),
                     8,
                 );
-                let hex_string = format!("#{:02x}{:02x}{:02x}", r, g, b);
+                let hex_string = format!("#{:02X}{:02X}{:02X}", r, g, b);
                 Ok(player.alloc_datum(Datum::String(hex_string)))
             }),
             "duplicate" => Ok(datum.clone()),
