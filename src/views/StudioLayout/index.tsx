@@ -53,7 +53,7 @@ const StudioLayout = () => {
     if (component === "placeholder") {
       return <div>{node.getName()}</div>;
     } else if (component === "stage") {
-      return <Stage showControls />
+      return <Stage showControls enableGestures />
     } else if (component === "score") {
       return <ScoreInspector />;
     } else if (component === "playback") {

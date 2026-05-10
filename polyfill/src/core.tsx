@@ -83,7 +83,8 @@ function renderPlayer(
   width: string,
   height: string,
   src: string,
-  externalParams: Record<string, string>
+  externalParams: Record<string, string>,
+  enableGestures?: boolean
 ) {
   const root = ReactDOM.createRoot(mount);
   root.render(
@@ -96,6 +97,7 @@ function renderPlayer(
             src={src}
             externalParams={externalParams}
             requireClickToPlay={config.requireClickToPlay}
+            enableGestures={enableGestures}
           />
         </VMProvider>
       </StoreProvider>
@@ -118,6 +120,10 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
   }
   Object.assign(externalParams, parseDataExternalParams(element));
 
+  const enableGestures = element.hasAttribute('data-enable-gestures')
+    || (element.parentElement?.tagName === 'OBJECT' && element.parentElement.hasAttribute('data-enable-gestures'))
+    || undefined;
+
   const newElement = document.createElement('div');
   if (element.parentElement && element.parentElement.tagName === 'OBJECT') {
     // If the EMBED is inside an OBJECT, replace the OBJECT instead
@@ -132,7 +138,7 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
   } else {
     element.replaceWith(newElement);
   }
-  renderPlayer(config, newElement, width, height, src, externalParams);
+  renderPlayer(config, newElement, width, height, src, externalParams, enableGestures);
 }
 
 function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, params: Record<string, string | null>) {
@@ -152,9 +158,13 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
   }
   Object.assign(externalParams, parseDataExternalParams(element));
 
+  const enableGestures = element.hasAttribute('data-enable-gestures')
+    || getCaseInsensitiveValue(params, 'enableGestures') === 'true'
+    || undefined;
+
   const newElement = document.createElement('div');
   element.replaceWith(newElement);
-  renderPlayer(config, newElement, width, height, src, externalParams);
+  renderPlayer(config, newElement, width, height, src, externalParams, enableGestures);
 }
 
 function extractNoscriptElements() {

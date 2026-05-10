@@ -18,7 +18,7 @@ export default function DirStudio({
   }
   if (!showDebugUi) {
     return <div style={{ width: '100vw', height: '100vh' }}>
-      <Stage />
+      <Stage enableGestures />
     </div>
   }
   return <StudioLayout />;
