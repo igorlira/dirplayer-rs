@@ -149,7 +149,7 @@ function PanIcon() {
   );
 }
 
-export default function Stage({ showControls }: { showControls?: boolean }) {
+export default function Stage({ showControls, enableGestures }: { showControls?: boolean; enableGestures?: boolean }) {
   const [outerMeasureRef, { width: outerWidth, height: outerHeight }] = useMeasure();
   const [stageMeasureRef, { width: stageWidth, height: stageHeight }] = useMeasure();
   const isStageCanvasCreated = useRef(false);
@@ -269,7 +269,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   // Must be a non-passive listener so we can call preventDefault().
   useEffect(() => {
     const el = outerRef.current;
-    if (!el) return;
+    if (!el || !enableGestures) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const rect = el.getBoundingClientRect();
@@ -291,7 +291,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     return () => el.removeEventListener('wheel', onWheel);
   // outerWidth/outerHeight used as a proxy for "container is mounted and measured"
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [outerWidth, outerHeight]);
+  }, [outerWidth, outerHeight, enableGestures]);
 
   // Handle pointer-locked mouse movement (events fire on document, not the div)
   useEffect(() => {
@@ -490,7 +490,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
 
   function onPointerDown(e: React.PointerEvent) {
     // Middle mouse button — pan the canvas without dispatching to the VM.
-    if (e.button === 1 && e.pointerType === 'mouse') {
+    if (enableGestures && e.button === 1 && e.pointerType === 'mouse') {
       e.preventDefault();
       const p = pointerOuterPos(e);
       middlePanRef.current = { startPointer: p, startPan: panRef.current };
@@ -503,7 +503,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     activePointersRef.current.set(e.pointerId, p);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 
-    if (activePointersRef.current.size >= 2) {
+    if (enableGestures && activePointersRef.current.size >= 2) {
       // Entering a multi-touch gesture. If a single-finger interaction was in
       // progress, send mouse_up so the VM doesn't see a stuck button.
       if (singleTouchActiveRef.current) {
@@ -527,7 +527,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
 
     // Single-finger touch.
     if (suppressCanvasUntilReleaseRef.current) return;
-    if (panModeRef.current) {
+    if (enableGestures && panModeRef.current) {
       // Hand-mode: drag pans the canvas instead of dispatching to the VM.
       singlePanRef.current = { startPointer: p, startPan: panRef.current };
       return;
@@ -556,7 +556,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
       return;
     }
 
-    if (isTracked && activePointersRef.current.size >= 2 && gestureRef.current) {
+    if (enableGestures && isTracked && activePointersRef.current.size >= 2 && gestureRef.current) {
       markUserPanned();
       const { centroid, dist } = gestureCentroidAndDist();
       const g = gestureRef.current;
@@ -572,7 +572,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
 
     if (suppressCanvasUntilReleaseRef.current) return;
 
-    if (isTracked && singlePanRef.current) {
+    if (enableGestures && isTracked && singlePanRef.current) {
       markUserPanned();
       const sp = singlePanRef.current;
       setPan({
@@ -584,7 +584,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
 
     // Skip hover dispatch while in hand mode — rollover/cursor changes would be
     // distracting when the user is navigating, not interacting.
-    if (panModeRef.current && !isTracked) return;
+    if (enableGestures && panModeRef.current && !isTracked) return;
 
     // Forward to the VM. This covers both hover (mouse with no button — pointer
     // not in the tracked map) and active drags (pointer down, in the map).
@@ -714,16 +714,18 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         onPointerMove={e => e.stopPropagation()}
         onPointerUp={e => e.stopPropagation()}
       >
-        <button
-          type="button"
-          className={panMode ? styles.panToggleActive : styles.panToggle}
-          onClick={() => setPanMode(v => !v)}
-          title={panMode ? "Exit pan mode" : "Pan mode (one-finger drag pans)"}
-          aria-pressed={panMode}
-        >
-          <PanIcon />
-        </button>
-        {showMinimap && stageWidth && stageHeight && outerWidth && outerHeight && (
+        {enableGestures && (
+          <button
+            type="button"
+            className={panMode ? styles.panToggleActive : styles.panToggle}
+            onClick={() => setPanMode(v => !v)}
+            title={panMode ? "Exit pan mode" : "Pan mode (one-finger drag pans)"}
+            aria-pressed={panMode}
+          >
+            <PanIcon />
+          </button>
+        )}
+        {enableGestures && showMinimap && stageWidth && stageHeight && outerWidth && outerHeight && (
           <MiniMap
             stageWidth={stageWidth}
             stageHeight={stageHeight}

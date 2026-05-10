@@ -12,9 +12,10 @@ type EmbedPlayerProps = {
   src: string
   externalParams?: Record<string, string>
   requireClickToPlay?: boolean
+  enableGestures?: boolean
 };
 
-export default function EmbedPlayer({width, height, src, externalParams, requireClickToPlay}: EmbedPlayerProps) {
+export default function EmbedPlayer({width, height, src, externalParams, requireClickToPlay, enableGestures}: EmbedPlayerProps) {
   const isVmReady = useSelector<RootState>(state => state.vm.isReady);
   const [userClicked, setUserClicked] = useState(!requireClickToPlay);
 
@@ -81,6 +82,6 @@ export default function EmbedPlayer({width, height, src, externalParams, require
   }
 
   return <div style={{width: widthValue, height: heightValue}}>
-    {!!isVmReady && <Stage />}
+    {!!isVmReady && <Stage enableGestures={enableGestures} />}
   </div>
 }
