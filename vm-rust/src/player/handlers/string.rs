@@ -47,10 +47,10 @@ impl StringHandlers {
         reserve_player_mut(|player| {
             let obj = player.get_datum(&args[0]);
             match obj {
-                Datum::String(s) => Ok(player.alloc_datum(Datum::Int(s.len() as i32))),
+                Datum::String(s) => Ok(player.alloc_datum(Datum::Int(s.chars().count() as i32))),
                 Datum::StringChunk(..) => {
                     let s = obj.string_value()?;
-                    Ok(player.alloc_datum(Datum::Int(s.len() as i32)))
+                    Ok(player.alloc_datum(Datum::Int(s.chars().count() as i32)))
                 }
                 _ => Err(ScriptError::new(
                     "Cannot get length of non-string".to_string(),
