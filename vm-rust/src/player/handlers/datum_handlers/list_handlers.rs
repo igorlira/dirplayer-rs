@@ -160,10 +160,92 @@ impl ListDatumHandlers {
             },
             "max" => Self::max(datum, args),
             "min" => Self::min(datum, args),
+            // Director matrix methods (chapter 15): when a list-of-lists is
+            // used as a matrix (the layout `newMatrix` produces), `setVal`
+            // and `getVal` access cells by 1-based (row, col) indices.
+            // Director's API is `matrix.setVal(row, col, value)` — extra
+            // trailing arguments are silently ignored (some scripts pass a
+            // 4th arg that's a leftover from copy-paste; e.g. the Batman
+            // terrain script's `myMatrix.setVal(b+1, a+1, h, y)` — we drop the
+            // `y` to match Director's tolerant behaviour).
+            "setVal" => Self::set_val(datum, args),
+            "getVal" => Self::get_val(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for list datum"
             ))),
         }
+    }
+
+    /// `matrix.setVal(row, col, value [, ignored…])` — 1-based, row-major.
+    pub fn set_val(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() < 3 {
+                return Err(ScriptError::new(
+                    "setVal requires (row, col, value)".to_string(),
+                ));
+            }
+            let row = player.get_datum(&args[0]).int_value()? - 1;
+            let col = player.get_datum(&args[1]).int_value()? - 1;
+            let value_ref = args[2].clone();
+            if row < 0 || col < 0 {
+                return Err(ScriptError::new(format!(
+                    "setVal: row/col must be 1-based positive (got {}, {})",
+                    row + 1, col + 1
+                )));
+            }
+            // Look up the row reference.
+            let row_ref = {
+                let (_, list_vec, _) = player.get_datum(datum).to_list_tuple()?;
+                if (row as usize) >= list_vec.len() {
+                    return Err(ScriptError::new(format!(
+                        "setVal: row {} out of range (matrix has {} rows)",
+                        row + 1, list_vec.len()
+                    )));
+                }
+                list_vec[row as usize].clone()
+            };
+            // Mutate the inner row.
+            let (_, row_vec, _) = player.get_datum_mut(&row_ref).to_list_mut()?;
+            if (col as usize) >= row_vec.len() {
+                return Err(ScriptError::new(format!(
+                    "setVal: col {} out of range (row has {} cols)",
+                    col + 1, row_vec.len()
+                )));
+            }
+            row_vec[col as usize] = value_ref;
+            player.note_actor_list_mutation(datum);
+            player.note_script_instance_list_mutation(datum);
+            Ok(DatumRef::Void)
+        })
+    }
+
+    /// `matrix.getVal(row, col)` — 1-based, row-major.
+    pub fn get_val(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() < 2 {
+                return Err(ScriptError::new(
+                    "getVal requires (row, col)".to_string(),
+                ));
+            }
+            let row = player.get_datum(&args[0]).int_value()? - 1;
+            let col = player.get_datum(&args[1]).int_value()? - 1;
+            let (_, list_vec, _) = player.get_datum(datum).to_list_tuple()?;
+            if row < 0 || (row as usize) >= list_vec.len() {
+                return Err(ScriptError::new(format!(
+                    "getVal: row {} out of range (matrix has {} rows)",
+                    row + 1, list_vec.len()
+                )));
+            }
+            let row_ref = list_vec[row as usize].clone();
+            let (_, row_vec, _) = player.get_datum(&row_ref).to_list_tuple()?;
+            if col < 0 || (col as usize) >= row_vec.len() {
+                return Err(ScriptError::new(format!(
+                    "getVal: col {} out of range (row has {} cols)",
+                    col + 1, row_vec.len()
+                )));
+            }
+            Ok(row_vec[col as usize].clone())
+        })
     }
 
     pub fn max(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
