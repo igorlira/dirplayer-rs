@@ -14,10 +14,20 @@ let mcpServer = null;
 let pendingRequests = new Map(); // requestId -> response object
 let requestIdCounter = 0;
 
+function getIconPath() {
+  if (isDev) {
+    // In dev mode electron-builder hasn't run, so point directly to assets/
+    const ext = process.platform === 'win32' ? 'ico' : process.platform === 'darwin' ? 'icns' : 'png';
+    return path.join(__dirname, `../assets/icon.${ext}`);
+  }
+  return undefined; // electron-builder embeds the icon at package time
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 900,
     height: 680,
+    icon: getIconPath(),
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false
@@ -27,7 +37,13 @@ function createWindow() {
   mainWindow.on('closed', () => mainWindow = null);
 }
 
-app.on('ready', createWindow);
+app.on('ready', () => {
+  createWindow();
+  // BrowserWindow `icon` has no effect on the macOS Dock — set it separately
+  if (isDev && process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(path.join(__dirname, '../assets/icon.png'));
+  }
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
