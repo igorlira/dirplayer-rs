@@ -1,6 +1,8 @@
 const electron = require('electron');
 const app = electron.app;
 const BrowserWindow = electron.BrowserWindow;
+
+app.setName('DirPlayer');
 const ipcMain = electron.ipcMain;
 const dialog = electron.dialog;
 
