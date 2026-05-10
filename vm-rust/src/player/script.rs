@@ -544,6 +544,9 @@ pub async fn player_set_obj_prop(
         Datum::HavokObjectRef(_) => {
             crate::player::handlers::datum_handlers::havok_object::HavokObjectDatumHandlers::set_prop(obj_ref, &prop_name, value_ref.clone())
         }
+        Datum::PhysXObjectRef(_) => {
+            crate::player::handlers::datum_handlers::physx_object::PhysXObjectDatumHandlers::set_prop(obj_ref, &prop_name, value_ref.clone())
+        }
         Datum::Void | Datum::Null => {
             // In Director, setting a property on void/nothing is a no-op (silently ignored)
             // This commonly happens when scripts reference sprites/objects that have been erased
@@ -960,6 +963,9 @@ pub fn get_obj_prop(
         }
         Datum::HavokObjectRef(_) => {
             crate::player::handlers::datum_handlers::havok_object::HavokObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+        }
+        Datum::PhysXObjectRef(_) => {
+            crate::player::handlers::datum_handlers::physx_object::PhysXObjectDatumHandlers::get_prop(obj_ref, &prop_name)
         }
         _ => {
             if prop_name == "ilk" {
