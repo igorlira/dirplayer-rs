@@ -857,6 +857,157 @@ impl TypeHandlers {
         })
     }
 
+    /// Director chapter 15 `filter(filterSymbol [, propList])` global.
+    /// Source: <c>director_reference.md:24348</c>. Constructs a filter object
+    /// that can be passed to `image.applyFilter()`. The filter is represented
+    /// as a PropList with a `#filterType` entry plus the user-supplied
+    /// properties merged in. Director scripts treat the filter as opaque,
+    /// but this layout makes the filter easy to inspect from Lingo and lets
+    /// `applyFilter` dispatch by `#filterType`.
+    ///
+    /// Supported filter symbols (per chapter 15):
+    ///   #blurfilter, #glowfilter, #bevelfilter, #dropshadowfilter,
+    ///   #adjustcolorfilter, #gradientglowfilter, #gradientbevelfilter,
+    ///   #convolutionmatrixfilter, #displacementmapfilter
+    /// Currently only `#adjustcolorfilter` is honored by `applyFilter`; the
+    /// others are accepted (so scripts don't error out building them) but the
+    /// applyFilter step is a no-op for them and logs a warning.
+    pub fn filter(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.is_empty() {
+                return Err(ScriptError::new("filter() requires a filter symbol".to_string()));
+            }
+            // First arg is the filter type symbol.
+            let kind_sym = match player.get_datum(&args[0]) {
+                Datum::Symbol(s) => s.to_string(),
+                Datum::String(s) => s.to_string(),
+                _ => return Err(ScriptError::new(
+                    "filter() first argument must be a symbol".to_string(),
+                )),
+            };
+
+            // Second arg (optional): property list with filter-specific params.
+            let mut props: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
+
+            // Insert #filterType first.
+            let key_type = player.alloc_datum(Datum::Symbol("filterType".to_string()));
+            let val_type = player.alloc_datum(Datum::Symbol(kind_sym));
+            props.push_back((key_type, val_type));
+
+            if args.len() > 1 {
+                // Clone the user PropList entries verbatim. We don't validate
+                // property names against the filter kind — Director's `filter()`
+                // is similarly permissive and just stashes whatever it gets.
+                let user_props_owned = match player.get_datum(&args[1]) {
+                    Datum::PropList(items, _) => Some(items.clone()),
+                    _ => None,
+                };
+                if let Some(items) = user_props_owned {
+                    for (k, v) in items.into_iter() {
+                        props.push_back((k, v));
+                    }
+                } else {
+                    // Non-PropList second arg — accept but ignore (Director silently
+                    // discards malformed second-arg).
+                    warn!("filter(): second argument is not a property list — ignored");
+                }
+            }
+
+            Ok(player.alloc_datum(Datum::PropList(props, false)))
+        })
+    }
+
+    /// Director chapter 15 `newMatrix(rows, columns [, initialList])` — math /
+    /// terrain matrix constructor (`director_reference.md:1060`,
+    /// `director_reference.md:31053`). Returns a `rows × columns` matrix
+    /// initialized to zero, or filled from `initialList` (a flat
+    /// row-major list of `rows*columns` numbers).
+    ///
+    /// Layout: a Lingo `Datum::List` of `rows` rows, each itself a
+    /// `Datum::List` of `columns` numeric entries. This makes the matrix
+    /// directly compatible with our `createTerrainDesc(matrix, ...)` handler
+    /// which expects a list-of-lists for the elevation matrix, and lets the
+    /// `setVal`/`getVal` matrix methods reuse the existing list-mutation
+    /// machinery.
+    pub fn new_matrix(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() < 2 {
+                return Err(ScriptError::new(
+                    "newMatrix requires at least 2 arguments (rows, columns)".to_string(),
+                ));
+            }
+            let rows = player.get_datum(&args[0]).int_value()?.max(0) as usize;
+            let cols = player.get_datum(&args[1]).int_value()?.max(0) as usize;
+
+            // Optional 3rd arg: flat row-major list of values.
+            let init_values: Option<Vec<f64>> = if args.len() > 2 {
+                match player.get_datum(&args[2]) {
+                    Datum::List(_, items, _) => {
+                        let mut vals = Vec::with_capacity(items.len());
+                        for it in items.iter() {
+                            vals.push(player.get_datum(it).float_value().unwrap_or(0.0));
+                        }
+                        Some(vals)
+                    }
+                    _ => None,
+                }
+            } else { None };
+
+            // Build rows × cols list of lists.
+            let mut row_refs: VecDeque<DatumRef> = VecDeque::with_capacity(rows);
+            for r in 0..rows {
+                let mut col_refs: VecDeque<DatumRef> = VecDeque::with_capacity(cols);
+                for c in 0..cols {
+                    let val = match &init_values {
+                        Some(v) => {
+                            let idx = r * cols + c;
+                            if idx < v.len() { v[idx] } else { 0.0 }
+                        }
+                        None => 0.0,
+                    };
+                    // Store as Float when fractional, else Int — matches
+                    // Director's behaviour on numeric matrix entries.
+                    let cell = if val.fract() == 0.0 && val.abs() < (i32::MAX as f64) {
+                        Datum::Int(val as i32)
+                    } else {
+                        Datum::Float(val)
+                    };
+                    col_refs.push_back(player.alloc_datum(cell));
+                }
+                row_refs.push_back(player.alloc_datum(Datum::List(DatumType::List, col_refs, false)));
+            }
+            Ok(player.alloc_datum(Datum::List(DatumType::List, row_refs, false)))
+        })
+    }
+
+    /// Director chapter 15 `ConstraintDesc(name, A, B, ptA, ptB, stiffness, damping)`
+    /// (`director_reference.md:84716`). Builds an opaque descriptor consumed by
+    /// `world.createSpring(desc, ...)` / `createLinearJoint` / `createAngularJoint` /
+    /// `createD6Joint`.
+    ///
+    /// Director's docs describe the result as an opaque object — Lingo
+    /// scripts only ever pass it back to the create* call and never read
+    /// individual fields. We represent it as a `Datum::List` of the 7
+    /// arguments, which the constraint-create handlers in `physx.rs`
+    /// already decode via `decode_desc` (List form). The 3rd arg may be
+    /// `void` when constraining a body to a fixed point in world space
+    /// (chapter 15:84768).
+    pub fn constraint_desc(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() < 7 {
+                return Err(ScriptError::new(
+                    "ConstraintDesc requires (name, A, B, ptA, ptB, stiffness, damping)".to_string(),
+                ));
+            }
+            // Just bundle the args into a List — the create* handlers decode
+            // them. We could validate types up front, but Director itself is
+            // permissive and stores whatever the script passes in (the
+            // create* call surfaces any error later).
+            let items: VecDeque<DatumRef> = args.iter().take(7).cloned().collect();
+            Ok(player.alloc_datum(Datum::List(DatumType::List, items, false)))
+        })
+    }
+
     pub fn palette_index(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let color = player.get_datum(&args[0]).int_value()?;
