@@ -3014,6 +3014,7 @@ impl TextMemberHandlers {
                 underline: frame.underline,
                 kerning: 0,
                 char_spacing: 0,
+                hyperlink: None,
             }
         };
 
