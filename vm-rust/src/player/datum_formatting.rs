@@ -48,13 +48,15 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         }
         Datum::ScriptInstanceRef(instance_ref) => {
             let instance = player.allocator.get_script_instance(instance_ref);
-            let script = player
+            if let Some(script) = player
                 .movie
                 .cast_manager
                 .get_script_by_ref(&instance.script)
-                .unwrap();
-
-            format!("<offspring {} {} _>", script.name, instance_ref)
+            {
+                format!("<offspring {} {} _>", script.name, instance_ref)
+            } else {
+                format!("<offspring {} {} _>", "(stale)", instance_ref)
+            }
         }
         Datum::CastMember(member_ref) => {
             format!(
