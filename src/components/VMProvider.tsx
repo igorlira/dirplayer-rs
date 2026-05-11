@@ -63,7 +63,7 @@ export default function VMProvider({ children, systemFontPath, wasmUrl }: VMProv
         // Step 2: Initialize WASM and VM
         initVmCallbacks();
         if (wasmUrl) {
-          await init(wasmUrl);
+          await init({ module_or_path: wasmUrl });
         } else {
           await init({});
         }
