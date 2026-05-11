@@ -354,10 +354,18 @@ impl PhysXPhysicsMemberHandlers {
             }
 
             // -- Raycast (verbatim Gu::raycast_*) --
-            if handler_name.eq_ignore_ascii_case("getRayCastClosestShape") {
+            // Director's docs document these as `rayCastClosest` /
+            // `rayCastAll`; the AGEIA dynamiks.x32 wrapper exposed them as
+            // `getRayCastClosestShape` / `getRayCastAllShapes`. Accept both
+            // so movies that follow either spelling work without churn.
+            if handler_name.eq_ignore_ascii_case("getRayCastClosestShape")
+                || handler_name.eq_ignore_ascii_case("rayCastClosest")
+            {
                 return Self::raycast(player, &member_ref, args, /*all*/ false);
             }
-            if handler_name.eq_ignore_ascii_case("getRayCastAllShapes") {
+            if handler_name.eq_ignore_ascii_case("getRayCastAllShapes")
+                || handler_name.eq_ignore_ascii_case("rayCastAll")
+            {
                 return Self::raycast(player, &member_ref, args, true);
             }
 
@@ -587,6 +595,54 @@ impl PhysXPhysicsMemberHandlers {
             _ => return Err(ScriptError::new(format!("Unknown body type: {}", type_sym))),
         };
 
+        // Look up the linked 3D model's primitive dimensions (radius for
+        // #sphere, half_extents for #box, etc.) so the body has the right
+        // shape size. Without this, every body defaulted to radius=1, and
+        // sphere-vs-terrain contacts grazed the heightfield with separation
+        // ≈ 0 — the solver couldn't generate enough impulse to halt fall,
+        // so dynamic bodies sank through the world.
+        let (prim_radius, prim_half_extents, prim_half_height, prim_position) = {
+            let three_d_member_name = "new"; // ClubMarian's 3D world member
+            let _ = three_d_member_name;
+            // Walk every Shockwave3D member to find the model by name.
+            let mut found = (1.0_f64, [1.0_f64; 3], 1.0_f64, [0.0_f64; 3]);
+            for cast in &player.movie.cast_manager.casts {
+                for (_, member) in &cast.members {
+                    if let crate::player::cast_member::CastMemberType::Shockwave3d(w3d) = &member.member_type {
+                        if let Some(scene) = &w3d.parsed_scene {
+                            if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&model_name)) {
+                                let resource = if !node.model_resource_name.is_empty() {
+                                    &node.model_resource_name
+                                } else {
+                                    &node.resource_name
+                                };
+                                if let Some(res) = scene.model_resources.get(resource.as_str()) {
+                                    let r = res.primitive_radius as f64;
+                                    let w = res.primitive_width as f64;
+                                    let h = res.primitive_height as f64;
+                                    let l = res.primitive_length as f64;
+                                    found = (
+                                        if r > 0.0 { r } else { 1.0 },
+                                        [if w > 0.0 { w * 0.5 } else { 1.0 },
+                                         if h > 0.0 { h * 0.5 } else { 1.0 },
+                                         if l > 0.0 { l * 0.5 } else { 1.0 }],
+                                        // Capsule half-height = half_length minus radius cap (PhysX 3.4 convention).
+                                        if l > 0.0 { (l * 0.5 - r).max(0.0) } else { 1.0 },
+                                        // Initial body position from the model's local transform [12,13,14].
+                                        [node.transform[12] as f64,
+                                         node.transform[13] as f64,
+                                         node.transform[14] as f64],
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            found
+        };
+
         let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
             .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
         let physx = match &mut member.member_type {
@@ -606,6 +662,10 @@ impl PhysXPhysicsMemberHandlers {
         rb.model_name = model_name;
         rb.body_type = body_type;
         rb.shape = shape;
+        rb.radius = prim_radius;
+        rb.half_extents = prim_half_extents;
+        rb.half_height = prim_half_height;
+        rb.position = prim_position;
         rb.friction = physx.state.friction;
         rb.restitution = physx.state.restitution;
         rb.linear_damping = physx.state.linear_damping;
@@ -1072,28 +1132,48 @@ impl PhysXPhysicsMemberHandlers {
     // ============================================================
 
     fn raycast(player: &mut crate::player::DirPlayer, member_ref: &CastMemberRef, args: &Vec<DatumRef>, all: bool) -> Result<DatumRef, ScriptError> {
-        // Args: (origin, dir, distance) — Lingo `world.getRayCastClosestShape(origin, dir, distance)`.
-        if args.len() < 3 {
-            return Ok(player.alloc_datum(Datum::Int(-4)));
+        // Director's documented form is `world.rayCastClosest(origin, direction)`
+        // (2 args). The AGEIA Xtra also exposed a 3-arg form with an explicit
+        // max distance — accept that for backwards compat. When no distance
+        // is supplied, use a large sentinel so practical scenes hit anything
+        // along the ray. No-hit / bad-args returns an empty list so scripts
+        // that gate on `if rResult <> []` get the documented behaviour.
+        let empty = |player: &mut crate::player::DirPlayer| {
+            player.alloc_datum(Datum::List(
+                crate::director::lingo::datum::DatumType::List,
+                VecDeque::new(),
+                false,
+            ))
+        };
+        if args.len() < 2 {
+            return Ok(empty(player));
         }
         let origin = match player.get_datum(&args[0]) {
             Datum::Vector(v) => *v,
-            _ => return Ok(player.alloc_datum(Datum::Int(-4))),
+            _ => return Ok(empty(player)),
         };
         let dir = match player.get_datum(&args[1]) {
             Datum::Vector(v) => *v,
-            _ => return Ok(player.alloc_datum(Datum::Int(-4))),
+            _ => return Ok(empty(player)),
         };
-        let distance = player.get_datum(&args[2]).to_float().unwrap_or(0.0);
+        let distance = if args.len() >= 3 {
+            player.get_datum(&args[2]).to_float().unwrap_or(1.0e6)
+        } else {
+            1.0e6
+        };
 
         // Normalize dir defensively (Director scripts often pass non-unit vectors).
         let dl = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
-        if dl < 1e-10 { return Ok(player.alloc_datum(Datum::Void)); }
+        if dl < 1e-10 {
+            return Ok(empty(player));
+        }
         let dir = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
 
         // Walk bodies, dispatch by shape.
         let hits = Self::raycast_collect(player, member_ref, origin, dir, distance)?;
-        if hits.is_empty() { return Ok(player.alloc_datum(Datum::Void)); }
+        if hits.is_empty() {
+            return Ok(empty(player));
+        }
 
         if !all {
             // Closest hit only.
@@ -1175,16 +1255,19 @@ impl PhysXPhysicsMemberHandlers {
         let point = player.alloc_datum(Datum::Vector(h.position));
         let normal = player.alloc_datum(Datum::Vector(h.normal));
         let dist = player.alloc_datum(Datum::Float(h.distance));
-        let key_rb = player.alloc_datum(Datum::Symbol("rigidBody".to_string()));
-        let key_pt = player.alloc_datum(Datum::Symbol("point".to_string()));
-        let key_n = player.alloc_datum(Datum::Symbol("normal".to_string()));
-        let key_d = player.alloc_datum(Datum::Symbol("distance".to_string()));
-        let mut props = VecDeque::new();
-        props.push_back((key_rb, body_ref));
-        props.push_back((key_pt, point));
-        props.push_back((key_n, normal));
-        props.push_back((key_d, dist));
-        Ok(player.alloc_datum(Datum::PropList(props, false)))
+        // Director docs (rayCastClosest / rayCastAll): the result is a
+        // POSITIONAL list of [rigidBody, contactPoint, contactNormal,
+        // distance] — scripts read it as `rResult[1].name`, `rResult[2]`,
+        // etc. We previously returned a prop list, which made `rResult[1]`
+        // resolve to a (symbol, value) pair / int and broke `.name` access.
+        let mut items = VecDeque::new();
+        items.push_back(body_ref);
+        items.push_back(point);
+        items.push_back(normal);
+        items.push_back(dist);
+        Ok(player.alloc_datum(Datum::List(
+            crate::director::lingo::datum::DatumType::List, items, false,
+        )))
     }
 
     // ============================================================
