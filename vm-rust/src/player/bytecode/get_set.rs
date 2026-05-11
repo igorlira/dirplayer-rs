@@ -684,19 +684,33 @@ impl GetSetBytecodeHandler {
                         };
                         player.alloc_datum(Datum::Int(len))
                     }
-                    "char" => {
+                    "char" | "line" | "word" | "item" => {
+                        // `string.char` / `.line` / `.word` / `.item` (no
+                        // index) returns a StringChunk that represents
+                        // the *collection* of chunks of that kind. The
+                        // chunk_expr covers all chunks (start=1, end=N),
+                        // so `.count` returns N and `[i]` indexes the
+                        // i-th chunk. Without this, scripts that do
+                        // `member.text.line.count` / `text.line[i]` hit
+                        // the catch-all and error with "Invalid string
+                        // built-in property line".
                         use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
-                        let (s_len, s_clone) = if let Datum::String(s) = player.get_datum(&obj_ref)
-                        {
-                            (s.chars().count() as i32, s.clone())
+                        use crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils;
+                        let s_clone = if let Datum::String(s) = player.get_datum(&obj_ref) {
+                            s.clone()
                         } else {
                             unreachable!()
                         };
+                        let chunk_type = StringChunkType::from(prop_name.as_str());
+                        let delim = player.movie.item_delimiter;
+                        let count = StringChunkUtils::resolve_chunk_count(
+                            &s_clone, chunk_type.clone(), delim,
+                        )? as i32;
                         let chunk_expr = StringChunkExpr {
-                            chunk_type: StringChunkType::Char,
+                            chunk_type,
                             start: 1,
-                            end: s_len,
-                            item_delimiter: player.movie.item_delimiter,
+                            end: count.max(1),
+                            item_delimiter: delim,
                         };
                         player.alloc_datum(Datum::StringChunk(
                             crate::director::lingo::datum::StringChunkSource::Datum(
