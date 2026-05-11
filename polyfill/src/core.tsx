@@ -42,8 +42,24 @@ function getCaseInsensitiveValue(obj: Record<string, any>, key: string): string 
   return undefined;
 }
 
+const DIR_EXTENSIONS = ['.dcr', '.dxr', '.dir'];
+const DIR_MIME_TYPES = ['application/x-director', 'application/x-shockwave-director'];
+
+function hasDirExtension(url: string): boolean {
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    return DIR_EXTENSIONS.some(ext => pathname.endsWith(ext));
+  } catch {
+    const lower = url.toLowerCase().split('?')[0].split('#')[0];
+    return DIR_EXTENSIONS.some(ext => lower.endsWith(ext));
+  }
+}
+
 function checkDirEmbed(element: HTMLEmbedElement): boolean {
-  return element.src.endsWith('.dcr');
+  const type = (element.getAttribute('type') || '').toLowerCase();
+  if (DIR_MIME_TYPES.includes(type)) return true;
+  const src = element.src || element.getAttribute('src') || '';
+  return !!src && hasDirExtension(src);
 }
 
 const DATA_PARAM_PREFIX = 'data-sw-';
@@ -70,9 +86,16 @@ function checkDirObject(object: HTMLObjectElement): { isDirObject: boolean; para
     return acc;
   }, {} as Record<string, string | null>);
   const src = getCaseInsensitiveValue(params, 'src');
-  const classId = object.getAttribute('classid');
+  const classId = (object.getAttribute('classid') || '').toLowerCase();
+  const type = (object.getAttribute('type') || '').toLowerCase();
+  const DIR_CLASSIDS = [
+    'clsid:166b1bca-3f9c-11cf-8075-444553540000', // Shockwave Director
+    'clsid:7fd1d18d-7787-11d2-b3f7-00600832b7c6', // Director 7+
+  ];
   return {
-    isDirObject: classId?.toLowerCase() === 'clsid:166B1BCA-3F9C-11CF-8075-444553540000'.toLowerCase() || !!src?.endsWith('.dcr'),
+    isDirObject: DIR_CLASSIDS.includes(classId)
+      || DIR_MIME_TYPES.includes(type)
+      || (!!src && hasDirExtension(src)),
     params,
   };
 }
@@ -243,14 +266,28 @@ function performInit(config: PolyfillConfig, source: string, version: string) {
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
-        if (node instanceof HTMLElement) {
-          if (node.tagName === 'EMBED' && checkDirEmbed(node as HTMLEmbedElement)) {
-            replaceDirEmbed(config, node as HTMLEmbedElement);
-          } else if (node.tagName === 'OBJECT') {
-            const { isDirObject, params } = checkDirObject(node as HTMLObjectElement);
-            if (isDirObject) {
-              replaceDirObject(config, node as HTMLObjectElement, params);
-            }
+        if (!(node instanceof HTMLElement)) continue;
+        if (node.tagName === 'EMBED' && checkDirEmbed(node as HTMLEmbedElement)) {
+          replaceDirEmbed(config, node as HTMLEmbedElement);
+          continue;
+        }
+        if (node.tagName === 'OBJECT') {
+          const { isDirObject, params } = checkDirObject(node as HTMLObjectElement);
+          if (isDirObject) {
+            replaceDirObject(config, node as HTMLObjectElement, params);
+            continue;
+          }
+        }
+        // Node is a container — scan its descendants for embeds/objects
+        for (const embed of Array.from(node.getElementsByTagName('embed'))) {
+          if (checkDirEmbed(embed as HTMLEmbedElement)) {
+            replaceDirEmbed(config, embed as HTMLEmbedElement);
+          }
+        }
+        for (const object of Array.from(node.getElementsByTagName('object'))) {
+          const { isDirObject, params } = checkDirObject(object as HTMLObjectElement);
+          if (isDirObject) {
+            replaceDirObject(config, object as HTMLObjectElement, params);
           }
         }
       }
