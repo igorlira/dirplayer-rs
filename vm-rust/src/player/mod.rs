@@ -405,6 +405,7 @@ impl DirPlayer {
                 trace_log_file: String::new(),
                 debug_playback_enabled: false,
                 mouse_down: false,
+                right_mouse_down: false,
                 click_loc: (0,0),
                 frame_script_instance: None,
                 frame_script_member: None,
@@ -3293,6 +3294,28 @@ async fn run_movie_init_sequence() {
 
     dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
     let _ = dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
+
+    // Tick W3D #timeMS event registrations (member.registerForEvent).
+    // Sits next to prepareFrame so handlers run with the same per-frame
+    // semantics — the script-set state (via prepareFrame) is already in
+    // place, and the event handler can mutate things before the render
+    // pass below.
+    crate::player::events::dispatch_w3d_timer_events().await;
+
+    // Advance every W3D member's animation_time once per frame on the
+    // shared runtime state — the renderer's local clock and the bone
+    // getters used by Lingo must read the same value, otherwise scripts
+    // that mirror a bone matrix to another model (e.g. pinning the head
+    // to bone[6].worldTransform) see a stale frame and the head freezes
+    // while the body animates.
+    crate::player::events::tick_w3d_animations().await;
+
+    // After prepareFrame behaviors have run (which is where simulate()
+    // typically lives), drain any pending PhysX collision reports and
+    // dispatch the script's registered #collisionCallback. AGEIA's xtra
+    // auto-fires the handler after each simulate; we approximate that
+    // here per frame.
+    crate::player::events::dispatch_physx_collision_callbacks().await;
 
     reserve_player_mut(|player| {
         player.in_prepare_frame = false;

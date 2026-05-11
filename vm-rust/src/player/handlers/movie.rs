@@ -958,6 +958,15 @@ impl MovieHandlers {
 
         dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
 
+        // Tick W3D registered #timeMS events + animation clock + dispatch
+        // any queued PhysX collision callbacks. This is the *real* per-frame
+        // path (the one in mod.rs::start_movie_sequence only fires on
+        // startup); without these the avatar froze on its first frame after
+        // I moved the renderer's dt advance onto runtime_state.
+        crate::player::events::dispatch_w3d_timer_events().await;
+        crate::player::events::tick_w3d_animations().await;
+        crate::player::events::dispatch_physx_collision_callbacks().await;
+
         reserve_player_mut(|player| {
             player.in_prepare_frame = false;
         });

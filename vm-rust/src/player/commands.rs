@@ -48,6 +48,8 @@ pub enum PlayerVMCommand {
     MouseDown((i32, i32)),
     MouseUp((i32, i32)),
     MouseMove((i32, i32)),
+    RightMouseDown((i32, i32)),
+    RightMouseUp((i32, i32)),
     KeyDown(String, u16),
     KeyUp(String, u16),
     TriggerAlertHook,
@@ -91,6 +93,8 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         PlayerVMCommand::MouseDown((x, y)) => format!("MouseDown({}, {})", x, y),
         PlayerVMCommand::MouseUp((x, y)) => format!("MouseUp({}, {})", x, y),
         PlayerVMCommand::MouseMove((x, y)) => format!("MouseMove({}, {})", x, y),
+        PlayerVMCommand::RightMouseDown((x, y)) => format!("RightMouseDown({}, {})", x, y),
+        PlayerVMCommand::RightMouseUp((x, y)) => format!("RightMouseUp({}, {})", x, y),
         PlayerVMCommand::KeyDown(key, ..) => format!("KeyDown({})", key),
         PlayerVMCommand::KeyUp(key, ..) => format!("KeyUp({})", key),
         PlayerVMCommand::TriggerAlertHook => "TriggerAlertHook".to_string(),
@@ -350,18 +354,16 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
             }
 
-            if mouse_down_script_active {
-                reserve_player_mut(|player| {
-                    let is_double_click = (click_now - player.last_mouse_down_time) < 500;
-                    player.mouse_loc = (x, y);
-                    player.movie.mouse_down = true;
-                    player.movie.click_loc = (x, y);
-                    player.is_double_click = is_double_click;
-                    player.last_mouse_down_time = click_now;
-                });
-                player_dispatch_movie_callback("mouseDown").await?;
-                return Ok(DatumRef::Void);
-            }
+            // `the mouseDownScript` (if set) runs at the END of the
+            // mouseDown pipeline, alongside sprite/cast/frame dispatch.
+            // We deliberately do NOT short-circuit the sprite dispatch
+            // when this script is set — Director's docs say mouseDownScript
+            // suppresses sprite handlers unless the script calls pass(),
+            // but real movies (e.g. ClubMarian's `checkMouse` global
+            // observer that early-returns on most frames) rely on sprite
+            // handlers firing regardless. See the post-sprite-dispatch
+            // callback at the end of this branch.
+            let _ = mouse_down_script_active;
 
             // Use scripted=true so only sprites with scripts (behavior or cast member)
             // are detected. Non-scripted sprites (decorations, overlays) are skipped,
@@ -582,22 +584,16 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if !player_is_playing().await {
                 return Ok(DatumRef::Void);
             }
-            // In Director, mouseUpScript intercepts BEFORE sprites get the event.
-            let mouse_up_script_active = reserve_player_ref(|player| {
-                has_executable_callback(&player.movie.mouse_up_script)
-            });
-            if mouse_up_script_active {
-                reserve_player_mut(|player| {
-                    player.mouse_loc = (x, y);
-                    player.movie.mouse_down = false;
-                    player.mouse_down_sprite = -1;
-                });
-                player_dispatch_movie_callback("mouseUp").await?;
-                reserve_player_mut(|player| {
-                    player.is_double_click = false;
-                });
-                return Ok(DatumRef::Void);
-            }
+            // `the mouseUpScript` (if set) is dispatched at the END of the
+            // mouseUp pipeline (post-sprite/cast/frame), via the existing
+            // player_dispatch_movie_callback call further below. We
+            // deliberately do NOT short-circuit sprite dispatch here even
+            // when mouseUpScript is set — Director's docs say the script
+            // suppresses sprite handlers unless it explicitly calls pass(),
+            // but real movies (e.g. ClubMarian's `checkMouse` global
+            // observer that early-returns on most frames) rely on sprite
+            // mouseUp behaviors firing regardless. Without this, every
+            // button in such movies is silent.
 
             // Update mouse state and determine which sprite to notify
             let result = reserve_player_mut(|player| {
@@ -845,6 +841,53 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                         sprite_num as u16,
                     );
                 }
+            }
+        }
+        PlayerVMCommand::RightMouseDown((x, y)) => {
+            if !player_is_playing().await {
+                return Ok(DatumRef::Void);
+            }
+            // Update mouse_loc + flag is already done in lib.rs
+            // (right_mouse_down). Here we dispatch the `rightMouseDown`
+            // event to the topmost active sprite (so behaviors with
+            // `on rightMouseDown me` fire), then to the global event
+            // handler in frame/movie scripts. We don't toggle button
+            // hilite or set mouse_down_sprite — those are left-button
+            // concerns.
+            let scripted_sprite = reserve_player_ref(|player| {
+                get_sprite_at(player, x, y, true)
+            });
+            if let Some(sprite_number) = scripted_sprite {
+                player_dispatch_event_to_sprite_targeted(
+                    &"rightMouseDown".to_string(),
+                    &vec![],
+                    sprite_number as u16,
+                ).await;
+            } else {
+                player_invoke_frame_and_movie_scripts(
+                    &"rightMouseDown".to_string(),
+                    &vec![],
+                ).await;
+            }
+        }
+        PlayerVMCommand::RightMouseUp((x, y)) => {
+            if !player_is_playing().await {
+                return Ok(DatumRef::Void);
+            }
+            let scripted_sprite = reserve_player_ref(|player| {
+                get_sprite_at(player, x, y, true)
+            });
+            if let Some(sprite_number) = scripted_sprite {
+                player_dispatch_event_to_sprite_targeted(
+                    &"rightMouseUp".to_string(),
+                    &vec![],
+                    sprite_number as u16,
+                ).await;
+            } else {
+                player_invoke_frame_and_movie_scripts(
+                    &"rightMouseUp".to_string(),
+                    &vec![],
+                ).await;
             }
         }
         PlayerVMCommand::KeyDown(key, code) => {

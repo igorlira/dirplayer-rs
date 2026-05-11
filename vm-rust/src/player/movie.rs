@@ -44,6 +44,10 @@ pub struct Movie {
     pub trace_log_file: String,
     pub debug_playback_enabled: bool,
     pub mouse_down: bool,
+    /// Tracks the right mouse button independently of `mouse_down` — set by
+    /// `right_mouse_down(x, y)` / `right_mouse_up(x, y)` from the JS host.
+    /// Read by `the rightMouseDown` / `the rightMouseUp`.
+    pub right_mouse_down: bool,
     pub click_loc: (i32, i32),
     pub frame_script_instance: Option<ScriptInstanceRef>,
     pub frame_script_member: Option<CastMemberRef>,
@@ -175,6 +179,11 @@ impl Movie {
             "mouseDown" => {
                 Ok(datum_bool(self.mouse_down))
             },
+            "mouseUp" => {
+                Ok(datum_bool(!self.mouse_down))
+            },
+            "rightMouseDown" => Ok(datum_bool(self.right_mouse_down)),
+            "rightMouseUp" => Ok(datum_bool(!self.right_mouse_down)),
             "traceScript" => Ok(datum_bool(self.trace_script)),
             "activeWindow" => Ok(Datum::Stage),
             "rollOver" => {
