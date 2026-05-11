@@ -250,6 +250,7 @@ impl Transform3dDatumHandlers {
 
     fn identity(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            mark_transform_dirty(datum);
             *player.get_datum_mut(datum) = Datum::Transform3d(IDENTITY);
             Ok(DatumRef::Void)
         })
@@ -257,6 +258,7 @@ impl Transform3dDatumHandlers {
 
     fn translate(datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            mark_transform_dirty(datum);
             let (dx, dy, dz) = Self::read_xyz(player, args)?;
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => *m,
@@ -278,6 +280,7 @@ impl Transform3dDatumHandlers {
 
     fn rotate(datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            mark_transform_dirty(datum);
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => *m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
@@ -300,11 +303,19 @@ impl Transform3dDatumHandlers {
                 };
                 let angle_deg = player.get_datum(&args[2]).to_float()?;
                 let r = axis_angle_to_matrix(&axis, angle_deg);
-                // T(pivot) * R * T(-pivot) * M
+                // P = T(pivot) * R * T(-pivot) — the rotation about `pivot`.
+                // rotate(pivot,...)    : world-frame pivot → P * M
+                // preRotate(pivot,...) : object-frame pivot → M * P
+                // Previously the pivot path always did P * M, which made
+                // ClubMarian's CameraOrbit.transform.preRotate(...) treat the
+                // pivot as a world point — the orbit wobbled around the world
+                // origin instead of swinging around the player's local axis,
+                // so the camera never made it behind the avatar after Avatar
+                // Options closed.
                 let t_neg = translation_matrix(-pivot[0], -pivot[1], -pivot[2]);
                 let t_pos = translation_matrix(pivot[0], pivot[1], pivot[2]);
-                let rm = mat4_mul(&r, &mat4_mul(&t_neg, &m));
-                mat4_mul(&t_pos, &rm)
+                let p = mat4_mul(&t_pos, &mat4_mul(&r, &t_neg));
+                if pre { mat4_mul(&p, &m) } else { mat4_mul(&m, &p) }
             } else {
                 let (rx, ry, rz) = Self::read_xyz(player, args)?;
                 let r = euler_to_matrix(rx, ry, rz);
@@ -318,6 +329,7 @@ impl Transform3dDatumHandlers {
 
     fn scale(datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            mark_transform_dirty(datum);
             let (sx, sy, sz) = Self::read_xyz(player, args)?;
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => *m,
@@ -395,6 +407,7 @@ impl Transform3dDatumHandlers {
 
     fn interpolate_to(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            mark_transform_dirty(datum);
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => *m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
@@ -430,6 +443,7 @@ impl Transform3dDatumHandlers {
 
     fn set_at(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            mark_transform_dirty(datum);
             let index = (player.get_datum(&args[0]).int_value()? - 1) as usize;
             let value = player.get_datum(&args[1]).float_value()?;
             if index >= 16 {
