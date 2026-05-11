@@ -138,7 +138,7 @@ impl Movie {
             },
             "platform" => Ok(Datum::String("Windows,32".to_string())),
             "frame" => Ok(Datum::Int(self.current_frame as i32)),
-            "productversion" => Ok(Datum::String("10.1".to_string())),
+            "productversion" => Ok(Datum::String("11.0".to_string())),
             "stageright" => Ok(Datum::Int(self.rect.right as i32)),
             "stageleft" => Ok(Datum::Int(self.rect.left as i32)),
             "stagetop" => Ok(Datum::Int(self.rect.top as i32)),

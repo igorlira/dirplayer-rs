@@ -1888,7 +1888,7 @@ impl DirPlayer {
                     ),
                     (
                         self.alloc_datum(Datum::Symbol("productVersion".to_string())),
-                        self.alloc_datum(Datum::String("10.1".to_string()))
+                        self.alloc_datum(Datum::String("11.0".to_string()))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol("osVersion".to_string())),
@@ -2037,7 +2037,7 @@ impl DirPlayer {
     fn get_player_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
         match prop {
             "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
-            "productVersion" => Ok(self.alloc_datum(Datum::String("10.1".to_string()))), // TODO
+            "productVersion" => Ok(self.alloc_datum(Datum::String("11.0".to_string()))), // TODO
             "runMode" => {
                 let mode = self.external_params.get("_runMode")
                     .cloned()
