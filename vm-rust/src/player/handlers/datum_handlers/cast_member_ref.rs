@@ -302,6 +302,7 @@ impl CastMemberRefHandlers {
                     | "notifyCollisions" | "registerForCollisions" | "removeCallback"
                     | "registerCollisionCallback" | "removeCollisionCallback"
                     | "getRayCastClosestShape" | "getRayCastAllShapes"
+                    | "rayCastClosest" | "rayCastAll"
                     | "getBoundingBox" | "getBoundingSphere"
                     => true,
                 _ => false,
@@ -321,7 +322,7 @@ impl CastMemberRefHandlers {
             | "deleteTexture" | "deleteShader" | "deleteModel" | "deleteModelResource" | "deleteLight" | "deleteCamera" | "deleteGroup" | "deleteMotion"
             | "cloneModelFromCastmember" | "cloneMotionFromCastmember" | "cloneDeep"
             | "loadFile" | "extrude3d" | "getPref" | "setPref"
-            | "registerForEvent" | "registerScript"
+            | "registerForEvent" | "registerScript" | "unregisterAllEvents"
             | "image"
             | "modelsUnderRay" | "modelsUnderLoc" | "modelUnderLoc" => {
                 Shockwave3dMemberHandlers::call(datum, handler_name, args)
@@ -403,10 +404,25 @@ impl CastMemberRefHandlers {
                     ButtonMemberHandlers::call(player, datum, handler_name, args)
                 }
                 CastMemberType::HavokPhysics(_) => {
-                    Err(ScriptError::new(format!("Havok handler {} should be dispatched from call()", handler_name)))
+                    HavokPhysicsMemberHandlers::call(datum, handler_name, args)
+                }
+                // Defensive route for the physics + 3D member types: the
+                // outer dispatcher in `call()` lists known handler names
+                // explicitly and forwards them to the right per-member
+                // dispatcher, but it's easy to miss a name (e.g.
+                // unregisterAllEvents until recently). Catching them here
+                // lets the per-member handler decide whether to implement
+                // or log+stub, instead of throwing a generic "No handler"
+                // that hides the real member type.
+                CastMemberType::Shockwave3d(_) => {
+                    Shockwave3dMemberHandlers::call(datum, handler_name, args)
+                }
+                CastMemberType::PhysXPhysics(_) => {
+                    PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
                 }
                 _ => Err(ScriptError::new(format!(
-                    "No handler {handler_name} for member type"
+                    "No handler {} for member type {:?}",
+                    handler_name, cast_member.member_type.member_type_id()
                 ))),
             }
         })

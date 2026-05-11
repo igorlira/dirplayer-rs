@@ -179,10 +179,16 @@ impl BitmapDatumHandlers {
 
     pub fn create_matte(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            // TODO alpha threshold
-            if args.len() != 0 {
+            // Director: imageObject.createMatte({alphaThreshold}). The
+            // alphaThreshold (0..255) excludes pixels whose alpha falls
+            // below that value from the resulting matte; only meaningful
+            // for 32-bit images with an alpha channel. We don't honour
+            // the threshold yet (our matte builder uses the bg color key
+            // path, see Bitmap::create_matte), but accept and ignore the
+            // argument so scripts that pass it don't error out.
+            if args.len() > 1 {
                 return Err(ScriptError::new(
-                    "Invalid number of arguments for createMatte".to_string(),
+                    "createMatte takes at most 1 argument (alphaThreshold)".to_string(),
                 ));
             }
             let bitmap = player.get_datum(datum).to_bitmap_ref()?;
