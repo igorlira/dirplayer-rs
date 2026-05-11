@@ -648,6 +648,15 @@ pub fn get_obj_prop(
         }
         Datum::StringChunk(ref source, ref chunk_expr, ref _str_val) => {
             match prop_name {
+                "count" => {
+                    // Chunk count is `end - start + 1` over the chunk_expr.
+                    // For the "whole collection" form produced by
+                    // `string.line` etc. that becomes the line/word/item
+                    // total. Director's `text.line.count`, `text.word.count`
+                    // etc. read off this.
+                    let n = (chunk_expr.end - chunk_expr.start + 1).max(0);
+                    Ok(player.alloc_datum(Datum::Int(n)))
+                }
                 "ref" => {
                     // .ref returns the chunk reference itself (a StringChunk datum)
                     Ok(obj_ref.clone())
