@@ -16,7 +16,7 @@ use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
 // Use console::warn_1 directly for debugging since log level is set to Error
 macro_rules! multiuser_log {
     ($($arg:tt)*) => {
-        web_sys::console::warn_1(&format!($($arg)*).into());
+        web_sys::console::warn_1(&format!($($arg)*).into())
     };
 }
 
