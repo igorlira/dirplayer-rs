@@ -306,6 +306,28 @@ pub fn datum_equals(
             _ => false
         }),
 
+        // Two PhysX rigid-body / joint / terrain refs are the same Director
+        // object when they point to the same (cast_lib, cast_member, id).
+        // Without this, `collisionreport.objectA = Vehicle.Physics` in the
+        // registered #collisionCallback always returns false (the catch-all
+        // below returns false), so OnGround never flips and bodies don't
+        // come to rest on the ground.
+        (PhysXObjectRef(a), o) | (o, PhysXObjectRef(a)) => Ok(match o {
+            PhysXObjectRef(b) => a.cast_lib == b.cast_lib
+                && a.cast_member == b.cast_member
+                && a.id == b.id,
+            _ => false
+        }),
+
+        // Same treatment for Havok object refs — LEGO Supersonic's
+        // collision callbacks rely on this equality.
+        (HavokObjectRef(a), o) | (o, HavokObjectRef(a)) => Ok(match o {
+            HavokObjectRef(b) => a.cast_lib == b.cast_lib
+                && a.cast_member == b.cast_member
+                && a.name.eq_ignore_ascii_case(&b.name),
+            _ => false
+        }),
+
         (Media(a), o) | (o, Media(a)) => Ok(match o {
             // TODO: is equality based on value?
             _ => false
