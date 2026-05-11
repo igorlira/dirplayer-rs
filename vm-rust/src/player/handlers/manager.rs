@@ -588,6 +588,168 @@ impl BuiltInHandlerManager {
         Ok(result)
     }
 
+    /// `importFileInto member, fileOrUrl, propertyList` — replaces the content
+    /// of `member` with the decoded contents of `fileOrUrl`. Accepts both
+    /// forms: the old-Lingo global verb (`args[0]` = member ref) and the
+    /// method-form `member.importFileInto(...)` (forwarded from
+    /// `CastMemberRefHandlers::call_async` with the receiver prepended).
+    ///
+    /// v1 only handles bitmap members: PNG/JPG/GIF/etc. (anything the
+    /// `image` crate decodes) → a 32-bit RGBA Bitmap that replaces the
+    /// existing BitmapRef. The fetch goes through `NetManager`, so URLs
+    /// are resolved against `base_path` and respect any `override_base_path`
+    /// (the fake-movie-root used by tests). Returns Director's documented
+    /// integer status: 0 = success, negative = failure.
+    ///
+    /// propertyList properties honored:
+    ///   #trimWhiteSpace — non-zero stores `trim_white_space = true` on the
+    ///       Bitmap so the renderer auto-trims (matching the parsed-asset path).
+    /// Properties accepted but unused (Director defaults pass through):
+    ///   #dither, #linked, #remapImageToStage.
+    async fn import_file_into(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        use crate::player::bitmap::bitmap::{BuiltInPalette};
+        use crate::player::cast_member::CastMemberType;
+
+        if args.is_empty() {
+            return Err(ScriptError::new(
+                "importFileInto: missing member argument".to_string(),
+            ));
+        }
+        let receiver = args[0].clone();
+
+        // Phase 1 — pull args + member ref out of the player lock.
+        let (member_ref, file_or_url, trim_white_space) = reserve_player_mut(|player| {
+            let member_ref = match player.get_datum(&receiver) {
+                Datum::CastMember(r) => r.to_owned(),
+                _ => return Err(ScriptError::new(
+                    "importFileInto: receiver must be a cast member".to_string(),
+                )),
+            };
+            if args.len() < 2 {
+                return Err(ScriptError::new(
+                    "importFileInto requires a file path or URL".to_string(),
+                ));
+            }
+            let file_or_url = player.get_datum(&args[1]).string_value()?;
+            // Optional property list — Director #trimWhiteSpace defaults TRUE.
+            let mut trim_white_space = true;
+            if let Some(prop_ref) = args.get(2) {
+                if let Datum::PropList(pairs, _) = player.get_datum(prop_ref) {
+                    let pairs = pairs.clone();
+                    for (k_ref, v_ref) in pairs.iter() {
+                        let key = player.get_datum(k_ref).string_value().unwrap_or_default();
+                        if key.eq_ignore_ascii_case("trimWhiteSpace") {
+                            let v = player.get_datum(v_ref).int_value().unwrap_or(1);
+                            trim_white_space = v != 0;
+                        }
+                        // #dither / #linked / #remapImageToStage accepted but
+                        // unused — the decode path always produces 32-bit
+                        // RGBA so dither/remap have no effect, and we don't
+                        // track "linked" status on members yet.
+                    }
+                }
+            }
+            Ok((member_ref, file_or_url, trim_white_space))
+        })?;
+
+        // Validate the target is a bitmap member up front so we don't
+        // fetch + decode for nothing.
+        let existing_bitmap_ref = reserve_player_ref(|player| {
+            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+            match member.map(|m| &m.member_type) {
+                Some(CastMemberType::Bitmap(b)) => Some(b.image_ref),
+                _ => None,
+            }
+        });
+        let existing_bitmap_ref = match existing_bitmap_ref {
+            Some(r) => r,
+            None => {
+                warn!(
+                    "importFileInto: member ({}, {}) is not a bitmap (v1 scope)",
+                    member_ref.cast_lib, member_ref.cast_member
+                );
+                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-2))));
+            }
+        };
+
+        // Phase 2 — kick off the fetch via NetManager and await the result.
+        let task_id = reserve_player_mut(|player| {
+            player.net_manager.preload_net_thing(file_or_url.clone())
+        });
+        {
+            let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
+            if !player.net_manager.is_task_done(Some(task_id)) {
+                player.net_manager.await_task(task_id).await;
+            }
+        }
+        let bytes = reserve_player_ref(|player| {
+            player.net_manager.get_task_result(Some(task_id))
+        });
+        let bytes = match bytes {
+            Some(Ok(b)) if !b.is_empty() => b,
+            Some(Ok(_)) | None => {
+                warn!("importFileInto: empty/no result for '{}'", file_or_url);
+                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-200))));
+            }
+            Some(Err(code)) => {
+                warn!("importFileInto: net fetch failed ({}) for '{}'", code, file_or_url);
+                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-200))));
+            }
+        };
+
+        // Phase 3 — decode to RGBA8. `image::load_from_memory` sniffs
+        // PNG/JPG/GIF/BMP/TIFF/WebP/etc. by header magic.
+        let img = match image::load_from_memory(&bytes) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                let head: Vec<String> = bytes.iter().take(8).map(|b| format!("{:02X}", b)).collect();
+                warn!(
+                    "importFileInto: decode failed for '{}' ({} bytes, head=[{}]): {}",
+                    file_or_url, bytes.len(), head.join(" "), e
+                );
+                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-120))));
+            }
+        };
+        let (w, h) = (img.width() as u16, img.height() as u16);
+        if w == 0 || h == 0 {
+            return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-120))));
+        }
+        let rgba = img.into_raw();
+
+        // Phase 4 — build the Bitmap and swap it in. We always produce
+        // 32-bit RGBA (the decode path doesn't preserve original depth),
+        // which matches what `newMember(#bitmap)` initializes to.
+        let mut bitmap = Bitmap::new(
+            w, h,
+            32, 32, 8,
+            PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+        );
+        bitmap.data = rgba;
+        bitmap.trim_white_space = trim_white_space;
+
+        debug!(
+            "importFileInto: imported '{}' ({}x{}) into member ({}, {})",
+            file_or_url, w, h, member_ref.cast_lib, member_ref.cast_member
+        );
+
+        reserve_player_mut(|player| {
+            // Mirror new dimensions into the BitmapMember's info so getters
+            // like `member.width` / `member.height` return the imported size.
+            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                if let CastMemberType::Bitmap(b) = &mut member.member_type {
+                    b.info.width = w;
+                    b.info.height = h;
+                    b.info.bit_depth = 32;
+                    b.info.pitch = w.saturating_mul(4);
+                    b.info.trim_white_space = trim_white_space;
+                }
+            }
+            player.bitmap_manager.replace_bitmap(existing_bitmap_ref, bitmap);
+            JsApi::dispatch_cast_member_changed(member_ref.clone());
+            Ok(player.alloc_datum(Datum::Int(0)))
+        })
+    }
+
     async fn do_command(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         // Get the code string from the first argument
         let code = reserve_player_ref(|player| player.get_datum(&args[0]).string_value())?;
@@ -615,6 +777,10 @@ impl BuiltInHandlerManager {
             "updateStage" => true,
             "go" => true,
             "nothing" => true,
+            // Old-style Lingo lets `importFileInto member, url, props` be
+            // called as a global verb; route it to the same async impl as
+            // the method form `member.importFileInto(url, props)`.
+            "importFileInto" => true,
             _ => false,
         }
     }
@@ -635,6 +801,7 @@ impl BuiltInHandlerManager {
             "updateStage" => MovieHandlers::update_stage(args).await,
             "go" => MovieHandlers::go(args).await,
             "nothing" => MovieHandlers::nothing_async(args).await,
+            "importFileInto" => Self::import_file_into(args).await,
             _ => {
                 let msg = format!("No built-in async handler: {}", name);
                 return Err(ScriptError::new(msg));
