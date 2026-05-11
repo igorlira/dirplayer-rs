@@ -420,6 +420,292 @@ pub async fn player_dispatch_movie_callback(
     Ok(())
 }
 
+/// Tick the per-frame W3D `#timeMS` event registrations. Walks every
+/// Shockwave3D member's `runtime_state.registered_events`, fires any whose
+/// next deadline has passed, advances the bookkeeping, and removes
+/// completed (non-infinite) entries.
+///
+/// Per the Director docs, `#timeMS` handlers receive five positional args:
+/// type (always 0), delta (ms since the last fire), time (ms since the
+/// first fire), duration (total ms over all repetitions, or 0 for
+/// infinite), and systemTime (absolute ms). Other event types
+/// (#collideAny / #collideWith / #animationStarted / #animationEnded)
+/// are stored by registerForEvent but not fired here — their producers
+/// aren't wired up yet.
+pub async fn dispatch_w3d_timer_events() {
+    use crate::player::cast_member::CastMemberType;
+
+    let now_ms = crate::player::testing_shared::now_ms();
+
+    // Gather pending fires across all members in one borrow, then dispatch
+    // them outside it. Each fire is (member_ref, instance_opt, handler_name, args).
+    struct Fire {
+        instance: Option<crate::player::script_ref::ScriptInstanceRef>,
+        handler_name: String,
+        args: [f64; 5],
+    }
+
+    let fires: Vec<Fire> = reserve_player_mut(|player| {
+        let mut fires: Vec<Fire> = Vec::new();
+        let cast_count = player.movie.cast_manager.casts.len();
+        for cast_idx in 0..cast_count {
+            // We need to walk every member with a 3D runtime. Iterate by
+            // (cast_lib, member_number) and fetch via the manager so we can
+            // mutate the registered_events list in place.
+            let member_numbers: Vec<u32> = player
+                .movie
+                .cast_manager
+                .casts
+                .get(cast_idx)
+                .map(|c| c.members.keys().copied().collect())
+                .unwrap_or_default();
+            for member_num in member_numbers {
+                let member_ref = crate::player::cast_lib::CastMemberRef {
+                    cast_lib: cast_idx as i32,
+                    cast_member: member_num as i32,
+                };
+                let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                else { continue };
+                let CastMemberType::Shockwave3d(w3d) = &mut member.member_type else { continue };
+                let events = &mut w3d.runtime_state.registered_events;
+                if events.is_empty() { continue; }
+                let mut i = 0;
+                while i < events.len() {
+                    let ev = &mut events[i];
+                    if !ev.event_name.eq_ignore_ascii_case("timeMS") {
+                        i += 1;
+                        continue;
+                    }
+                    // Director: first fire happens at registered_at + begin.
+                    // Subsequent fires happen every period_ms after the previous fire.
+                    let next_due = if ev.fires_so_far == 0 {
+                        ev.registered_at_ms + ev.begin_ms as f64
+                    } else {
+                        ev.last_fire_ms + ev.period_ms as f64
+                    };
+                    if now_ms < next_due {
+                        i += 1;
+                        continue;
+                    }
+                    let delta = now_ms - ev.last_fire_ms;
+                    let time = if ev.fires_so_far == 0 {
+                        0.0
+                    } else {
+                        now_ms - (ev.registered_at_ms + ev.begin_ms as f64)
+                    };
+                    let duration = if ev.repetitions == 0 {
+                        0.0
+                    } else if ev.repetitions == 1 {
+                        0.0
+                    } else {
+                        (ev.repetitions as f64 - 1.0) * ev.period_ms as f64
+                    };
+                    let system_time = now_ms;
+                    fires.push(Fire {
+                        instance: ev.script_instance.clone(),
+                        handler_name: ev.handler_name.clone(),
+                        args: [0.0, delta, time, duration, system_time],
+                    });
+                    ev.fires_so_far += 1;
+                    ev.last_fire_ms = now_ms;
+                    if ev.repetitions > 0 && ev.fires_so_far >= ev.repetitions {
+                        events.remove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+        fires
+    });
+
+    if fires.is_empty() { return; }
+    player_wait_available().await;
+    for fire in fires {
+        let arg_refs = reserve_player_mut(|player| {
+            fire.args.iter()
+                .map(|v| player.alloc_datum(Datum::Float(*v)))
+                .collect::<Vec<_>>()
+        });
+        if let Some(inst_ref) = fire.instance {
+            let _ = player_invoke_event_to_instances(
+                &fire.handler_name,
+                &arg_refs,
+                &vec![inst_ref],
+            ).await;
+        } else {
+            let _ = player_invoke_static_event(&fire.handler_name, &arg_refs).await;
+        }
+    }
+}
+
+/// Per-frame W3D animation clock advance.
+///
+/// The renderer was advancing its own `self.animation_time` and never wrote
+/// back to `runtime_state.animation_time`. Anything else reading the
+/// runtime-state field (e.g. `bone[n].worldTransform` getters used by
+/// ClubMarian to pin the head to the body's bone[6]) saw a stale zero, so
+/// the body animated but the head stayed frozen at the motion's first
+/// frame. Move the dt advance into a per-frame tick on the shared runtime
+/// state so every reader sees the same time.
+pub async fn tick_w3d_animations() {
+    use crate::player::cast_member::CastMemberType;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Wall-clock dt — fixed 1/30 ran the motion at framerate-dependent speed
+    // (ClubMarian hits ~24 fps, so a 1/30 advance ran motions at ~80%).
+    // Using actual elapsed time keeps motion duration tied to real seconds
+    // regardless of the player's frame rate.
+    static LAST_TICK_MS: AtomicU64 = AtomicU64::new(0);
+    let now_ms = crate::player::testing_shared::now_ms() as u64;
+    let last = LAST_TICK_MS.swap(now_ms, Ordering::Relaxed);
+    let dt_seconds = if last == 0 {
+        1.0_f32 / 30.0
+    } else {
+        // Cap at 100ms to avoid catastrophic jumps after a tab-pause.
+        ((now_ms.saturating_sub(last)) as f32 / 1000.0).min(0.1)
+    };
+    reserve_player_mut(|player| {
+        for cast in player.movie.cast_manager.casts.iter_mut() {
+            for (_, member) in cast.members.iter_mut() {
+                if let CastMemberType::Shockwave3d(w3d) = &mut member.member_type {
+                    if !w3d.runtime_state.animation_playing { continue; }
+                    let rate = w3d.runtime_state.play_rate;
+                    let scale = w3d.runtime_state.animation_scale;
+                    w3d.runtime_state.animation_time += dt_seconds * rate * scale;
+                    if w3d.runtime_state.blend_weight < 1.0 && w3d.runtime_state.blend_duration > 0.0 {
+                        w3d.runtime_state.blend_elapsed += dt_seconds;
+                        w3d.runtime_state.blend_weight =
+                            (w3d.runtime_state.blend_elapsed / w3d.runtime_state.blend_duration).min(1.0);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Drain queued PhysX collision reports across all PhysX members and
+/// dispatch them to the script's registered `collisionCallback` handler.
+///
+/// PhysX simulate() runs synchronously inside a Lingo call and only queues
+/// collisions onto `physx.state.pending_collisions`. AGEIA's xtra fires the
+/// registered callback automatically after each simulate; we approximate
+/// that by sweeping queued reports here, after prepareFrame behaviors (the
+/// usual home of simulate()), and invoking the handler globally.
+///
+/// The arg shape mirrors `notify_collisions`: one positional `collisions`
+/// list, each entry a PropList of `#objectA / #objectB / #contactPoints /
+/// #contactNormals`. ClubMarian's `on collisionCallback collisions` reads
+/// `collisions[i].objectA.name` to test for terrain — relies on this.
+pub async fn dispatch_physx_collision_callbacks() {
+    use crate::director::lingo::datum::{DatumType, PhysXObjectRef};
+    use crate::player::cast_member::CastMemberType;
+    use std::collections::VecDeque;
+
+    struct Fire {
+        handler_name: String,
+        cast_lib: i32,
+        cast_member: i32,
+        // (a_id, b_id, a_name, b_name, points, normals)
+        collisions: Vec<(u32, u32, Option<String>, Option<String>, Vec<[f64; 3]>, Vec<[f64; 3]>)>,
+    }
+
+    let fires: Vec<Fire> = reserve_player_mut(|player| {
+        let mut fires: Vec<Fire> = Vec::new();
+        let cast_count = player.movie.cast_manager.casts.len();
+        for cast_idx in 0..cast_count {
+            let member_numbers: Vec<u32> = player
+                .movie
+                .cast_manager
+                .casts
+                .get(cast_idx)
+                .map(|c| c.members.keys().copied().collect())
+                .unwrap_or_default();
+            for member_num in member_numbers {
+                let member_ref = CastMemberRef {
+                    cast_lib: cast_idx as i32,
+                    cast_member: member_num as i32,
+                };
+                let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                else { continue };
+                let CastMemberType::PhysXPhysics(physx) = &mut member.member_type else { continue };
+                if physx.state.pending_collisions.is_empty() { continue; }
+                let Some(handler) = physx.state.collision_callback_handler.clone() else {
+                    // No handler registered — drop the queue so it doesn't grow
+                    // unbounded. Director's xtra discards reports the script
+                    // never asked to hear about.
+                    physx.state.pending_collisions.clear();
+                    continue;
+                };
+                // Resolve body names while we still hold the borrow.
+                let body_names: std::collections::HashMap<u32, String> =
+                    physx.state.bodies.iter().map(|b| (b.id, b.name.clone())).collect();
+                let mut drained: Vec<(u32, u32, Vec<[f64; 3]>, Vec<[f64; 3]>)> = Vec::new();
+                std::mem::swap(&mut drained, &mut physx.state.pending_collisions);
+                let collisions = drained.into_iter().map(|(a, b, pts, nms)| {
+                    let na = body_names.get(&a).cloned();
+                    let nb = body_names.get(&b).cloned();
+                    (a, b, na, nb, pts, nms)
+                }).collect();
+                fires.push(Fire {
+                    handler_name: handler,
+                    cast_lib: cast_idx as i32,
+                    cast_member: member_num as i32,
+                    collisions,
+                });
+            }
+        }
+        fires
+    });
+
+    if fires.is_empty() { return; }
+    player_wait_available().await;
+
+    for fire in fires {
+        let arg_refs = reserve_player_mut(|player| {
+            let cast_lib = fire.cast_lib;
+            let cast_member = fire.cast_member;
+            let mut reports = VecDeque::new();
+            for (a_id, b_id, name_a, name_b, points, normals) in &fire.collisions {
+                let a_ref = match name_a {
+                    Some(n) => player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
+                        cast_lib, cast_member,
+                        object_type: "rigidBody".to_string(),
+                        id: *a_id, name: n.clone(),
+                    })),
+                    None => DatumRef::Void,
+                };
+                let b_ref = match name_b {
+                    Some(n) => player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
+                        cast_lib, cast_member,
+                        object_type: "rigidBody".to_string(),
+                        id: *b_id, name: n.clone(),
+                    })),
+                    None => DatumRef::Void,
+                };
+                let mut pts = VecDeque::new();
+                for p in points { pts.push_back(player.alloc_datum(Datum::Vector(*p))); }
+                let pts_list = player.alloc_datum(Datum::List(DatumType::List, pts, false));
+                let mut nms = VecDeque::new();
+                for n in normals { nms.push_back(player.alloc_datum(Datum::Vector(*n))); }
+                let nms_list = player.alloc_datum(Datum::List(DatumType::List, nms, false));
+                let key_a = player.alloc_datum(Datum::Symbol("objectA".to_string()));
+                let key_b = player.alloc_datum(Datum::Symbol("objectB".to_string()));
+                let key_pts = player.alloc_datum(Datum::Symbol("contactPoints".to_string()));
+                let key_nms = player.alloc_datum(Datum::Symbol("contactNormals".to_string()));
+                let mut props = VecDeque::new();
+                props.push_back((key_a, a_ref));
+                props.push_back((key_b, b_ref));
+                props.push_back((key_pts, pts_list));
+                props.push_back((key_nms, nms_list));
+                reports.push_back(player.alloc_datum(Datum::PropList(props, false)));
+            }
+            let collisions_list = player.alloc_datum(Datum::List(DatumType::List, reports, false));
+            vec![collisions_list]
+        });
+        let _ = player_invoke_global_event(&fire.handler_name, &arg_refs).await;
+    }
+}
+
 pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
     warn!("Starting event loop");
     // Snapshot the player generation this loop belongs to. If the generation
