@@ -83,6 +83,13 @@ pub struct FieldMember {
     pub kerning_threshold: u16,
     pub use_hypertext_styles: bool,
     pub anti_alias_type: String,
+    // Cast-member-attached script (Director's "BehaviorScript" export).
+    // Mirrors ButtonMember/BitmapMember/ShapeMember so Field-typed buttons
+    // with a member script are recognised by `is_active_sprite` and the
+    // click-transparency check, instead of having clicks silently pass
+    // through them.
+    pub script_id: u32,
+    pub member_script_ref: Option<CastMemberRef>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -168,6 +175,10 @@ pub struct TextMember {
     /// Anti-alias method: "AutoAlias", "GrayScaleAllAlias", "SubpixelAllAlias",
     /// "GrayscaleLargerThanAlias", or "NoneAlias".
     pub anti_alias_type: String,
+    // Cast-member-attached script (Director's "BehaviorScript" export).
+    // See FieldMember::script_id for the rationale.
+    pub script_id: u32,
+    pub member_script_ref: Option<CastMemberRef>,
 }
 
 pub struct PfrBitmap {
@@ -232,6 +243,8 @@ impl FieldMember {
             kerning_threshold: 14,
             use_hypertext_styles: false,
             anti_alias_type: "AutoAlias".to_string(),
+            script_id: 0,
+            member_script_ref: None,
         }
     }
 
@@ -302,6 +315,8 @@ impl FieldMember {
             kerning_threshold: 14,
             use_hypertext_styles: false,
             anti_alias_type: "AutoAlias".to_string(),
+            script_id: 0,
+            member_script_ref: None,
         }
     }
 }
@@ -347,6 +362,8 @@ impl TextMember {
             sel_end: 0,
             sel_anchor: 0,
             anti_alias_type: "AutoAlias".to_string(),
+            script_id: 0,
+            member_script_ref: None,
         }
     }
 
@@ -1009,6 +1026,40 @@ pub struct Shockwave3dRuntimeState {
     /// visible across reads. Keyed by node name (case-insensitive lookup
     /// done at access time).
     pub user_data: std::collections::HashMap<String, crate::player::DatumRef>,
+
+    // ─── W3D event/timer registrations (registerForEvent / unregisterAllEvents) ───
+    /// Per-member event subscriptions. Currently only `#timeMS` is honoured
+    /// by the dispatcher; collision/animation events are stored but never
+    /// fired (their producers aren't wired up). `unregisterAllEvents`
+    /// truncates this Vec.
+    pub registered_events: Vec<RegisteredW3dEvent>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RegisteredW3dEvent {
+    /// `#timeMS`, `#collideAny`, `#collideWith`, `#animationStarted`,
+    /// `#animationEnded`, or any user-defined symbol.
+    pub event_name: String,
+    pub handler_name: String,
+    /// Script instance to dispatch the handler on. `None` corresponds to
+    /// passing `0` for `scriptObject` in Lingo — Director then searches
+    /// movie scripts for the handler.
+    pub script_instance: Option<crate::player::script_ref::ScriptInstanceRef>,
+    /// Director's `begin`: ms after registration before the first fire.
+    pub begin_ms: u32,
+    /// Director's `period`: ms between fires when `repetitions > 1` or 0
+    /// (infinite). Ignored for non-#timeMS events.
+    pub period_ms: u32,
+    /// 0 means infinite. Otherwise the total number of fires.
+    pub repetitions: u32,
+    /// Wall-clock ms when registerForEvent was called.
+    pub registered_at_ms: f64,
+    /// Number of times this event has fired so far.
+    pub fires_so_far: u32,
+    /// Wall-clock ms of the most recent fire (or `registered_at_ms` if
+    /// not yet fired). Drives the inter-fire delta computation passed
+    /// to the handler.
+    pub last_fire_ms: f64,
 }
 
 /// Stores intermediate data for newMesh() model resources before build() is called.
@@ -3154,6 +3205,7 @@ impl CastMember {
         number: u32,
         chunk: &CastMemberChunk,
         bitmap_manager: &mut BitmapManager,
+        cast_lib: u32,
     ) -> Option<CastMember>
     {
         for opt_child in &member_def.children {
@@ -3223,6 +3275,7 @@ impl CastMember {
                         chunk,
                         styled_text,
                         stxt_font_size,
+                        cast_lib,
                     ));
                 }
             }
@@ -3293,6 +3346,18 @@ impl CastMember {
                 .unwrap_or_default();
             let mut text_member = TextMember::new();
             text_member.text = text;
+            let xmed_script_id = chunk
+                .member_info
+                .as_ref()
+                .map(|info| info.header.script_id)
+                .unwrap_or(0);
+            if xmed_script_id > 0 {
+                text_member.script_id = xmed_script_id;
+                text_member.member_script_ref = Some(CastMemberRef {
+                    cast_lib: cast_lib as i32,
+                    cast_member: xmed_script_id as i32,
+                });
+            }
             return Some(CastMember {
                 number,
                 name: member_name,
@@ -3387,6 +3452,7 @@ impl CastMember {
         chunk: &CastMemberChunk,
         mut styled_text: crate::director::chunks::xmedia::XmedStyledText,
         stxt_font_size: Option<u16>,
+        cast_lib: u32,
     ) -> CastMember {
         use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
 
@@ -3689,6 +3755,19 @@ impl CastMember {
                 v
             })
             .unwrap_or_default();
+        let xmed_script_id = chunk
+            .member_info
+            .as_ref()
+            .map(|info| info.header.script_id)
+            .unwrap_or(0);
+        let xmed_member_script_ref = if xmed_script_id > 0 {
+            Some(CastMemberRef {
+                cast_lib: cast_lib as i32,
+                cast_member: xmed_script_id as i32,
+            })
+        } else {
+            None
+        };
         let text_member = TextMember {
             text: styled_text.text.clone(),
             html_source: String::new(),
@@ -3727,6 +3806,8 @@ impl CastMember {
             sel_end: 0,
             sel_anchor: 0,
             anti_alias_type: "AutoAlias".to_string(),
+            script_id: xmed_script_id,
+            member_script_ref: xmed_member_script_ref,
         };
 
         let member_name = chunk
@@ -3889,6 +3970,20 @@ impl CastMember {
                     None
                 }
             }
+            CastMemberType::Field(field) => {
+                if field.script_id > 0 {
+                    Some(field.script_id)
+                } else {
+                    None
+                }
+            }
+            CastMemberType::Text(text) => {
+                if text.script_id > 0 {
+                    Some(text.script_id)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -3898,6 +3993,8 @@ impl CastMember {
             CastMemberType::Bitmap(bitmap) => bitmap.member_script_ref.as_ref(),
             CastMemberType::Button(button) => button.member_script_ref.as_ref(),
             CastMemberType::Shape(shape) => shape.member_script_ref.as_ref(),
+            CastMemberType::Field(field) => field.member_script_ref.as_ref(),
+            CastMemberType::Text(text) => text.member_script_ref.as_ref(),
             _ => None,
         }
     }
@@ -3912,6 +4009,12 @@ impl CastMember {
             }
             CastMemberType::Shape(shape) => {
                 shape.member_script_ref = Some(script_ref);
+            }
+            CastMemberType::Field(field) => {
+                field.member_script_ref = Some(script_ref);
+            }
+            CastMemberType::Text(text) => {
+                text.member_script_ref = Some(script_ref);
             }
             _ => {}
         }
@@ -3999,18 +4102,35 @@ impl CastMember {
                     }
                 }
 
+                // Cast-member-attached "BehaviorScript" — Director ships
+                // some buttons as Field members with a member script holding
+                // mouseDown/mouseUp/mouseUpOutSide. Pulled out of the cast
+                // info header the same way ButtonMember does.
+                let field_script_id = chunk
+                    .member_info
+                    .as_ref()
+                    .map(|info| info.header.script_id)
+                    .unwrap_or(0);
+                if field_script_id > 0 {
+                    field_member.script_id = field_script_id;
+                    field_member.member_script_ref = Some(CastMemberRef {
+                        cast_lib: cast_lib as i32,
+                        cast_member: field_script_id as i32,
+                    });
+                }
+
                 debug!(
                     "FieldMember text='{}' alignment='{}' word_wrap={} font='{}' \
                      font_style='{}' font_size={} font_id={:?} fixed_line_space={} \
                      top_spacing={} box_type='{}' anti_alias={} width={} \
-                     auto_tab={} editable={} border={} fore_color={:?} back_color={:?} formatting_runs={}",
+                     auto_tab={} editable={} border={} fore_color={:?} back_color={:?} formatting_runs={} script_id={}",
                     field_member.text, field_member.alignment, field_member.word_wrap,
                     field_member.font, field_member.font_style, field_member.font_size,
                     field_member.font_id, field_member.fixed_line_space,
                     field_member.top_spacing, field_member.box_type, field_member.anti_alias,
                     field_member.width, field_member.auto_tab, field_member.editable,
                     field_member.border, field_member.fore_color, field_member.back_color,
-                    formatting_runs.len(),
+                    formatting_runs.len(), field_member.script_id,
                 );
 
                 CastMemberType::Field(field_member)
@@ -4123,7 +4243,7 @@ impl CastMember {
                     }
                 }
                 // Also scan XMedia children
-                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager) {
+                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib) {
                     return cm;
                 }
                 // Fallback: use first child bytes if available
@@ -4299,7 +4419,7 @@ impl CastMember {
                 }
 
                 // Try all XMedia children for SWF or fonts
-                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager) {
+                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib) {
                     return cm;
                 }
 
