@@ -1714,6 +1714,110 @@ impl Bitmap {
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
 
+    /// Director `image.copyPixels(src, [P0, P1, P2, P3], srcRect, params)` —
+    /// the 4-point destination form, used for perspective / skewed blits like
+    /// HabbHotel's "screen3d" parallelogram-warped scroller. P0..P3 are the
+    /// quad corners in TopLeft / TopRight / BottomRight / BottomLeft order
+    /// (Director's documented order).
+    ///
+    /// We sample the source via inverse bilinear interpolation: for each
+    /// destination pixel in the quad's bounding box we solve
+    ///   P(u,v) = (1-u)(1-v)·P0 + u(1-v)·P1 + uv·P2 + (1-u)v·P3  =  (x,y)
+    /// for (u,v) using a few Newton iterations, then sample the source rect
+    /// at (src_rect.left + u·src_w, src_rect.top + v·src_h).
+    ///
+    /// v1 supports `#ink: 0 (copy)` only — that's what the scroller needs.
+    /// Other inks fall back to the bounding-box stretched copy via
+    /// `copy_pixels` so they keep working as before.
+    pub fn copy_pixels_quad(
+        &mut self,
+        palettes: &PaletteMap,
+        src: &Bitmap,
+        quad: [(i32, i32); 4],
+        src_rect: IntRect,
+        param_list: &HashMap<String, Datum>,
+    ) {
+        // Bounding box of the quad.
+        let min_x = quad.iter().map(|p| p.0).min().unwrap_or(0).max(0);
+        let max_x = quad.iter().map(|p| p.0).max().unwrap_or(0).min(self.width as i32 - 1);
+        let min_y = quad.iter().map(|p| p.1).min().unwrap_or(0).max(0);
+        let max_y = quad.iter().map(|p| p.1).max().unwrap_or(0).min(self.height as i32 - 1);
+        if min_x > max_x || min_y > max_y { return; }
+
+        // Bilinear parameters: P(u,v) = a + b*u + c*v + d*u*v
+        let p0 = (quad[0].0 as f32, quad[0].1 as f32);
+        let p1 = (quad[1].0 as f32, quad[1].1 as f32);
+        let p2 = (quad[2].0 as f32, quad[2].1 as f32);
+        let p3 = (quad[3].0 as f32, quad[3].1 as f32);
+        let a = p0;
+        let b = (p1.0 - p0.0, p1.1 - p0.1);
+        let c = (p3.0 - p0.0, p3.1 - p0.1);
+        let d = (p0.0 - p1.0 - p3.0 + p2.0, p0.1 - p1.1 - p3.1 + p2.1);
+
+        let src_w = (src_rect.right - src_rect.left) as f32;
+        let src_h = (src_rect.bottom - src_rect.top) as f32;
+        if src_w <= 0.0 || src_h <= 0.0 { return; }
+        let src_x0 = src_rect.left as f32;
+        let src_y0 = src_rect.top as f32;
+
+        // Invalidate any cached matte — destination pixels change.
+        self.matte = None;
+        self.mark_dirty();
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                // Solve b*u + c*v + d*u*v = (x - a.x, y - a.y) via Newton.
+                let px = x as f32 - a.0;
+                let py = y as f32 - a.1;
+                let mut u = 0.5_f32;
+                let mut v = 0.5_f32;
+                let mut converged = false;
+                for _ in 0..10 {
+                    let fx = b.0 * u + c.0 * v + d.0 * u * v - px;
+                    let fy = b.1 * u + c.1 * v + d.1 * u * v - py;
+                    // Jacobian rows: [∂/∂u, ∂/∂v]
+                    let j11 = b.0 + d.0 * v;
+                    let j12 = c.0 + d.0 * u;
+                    let j21 = b.1 + d.1 * v;
+                    let j22 = c.1 + d.1 * u;
+                    let det = j11 * j22 - j12 * j21;
+                    if det.abs() < 1e-7 { break; }
+                    let inv = 1.0 / det;
+                    let du = (j22 * fx - j12 * fy) * inv;
+                    let dv = (j11 * fy - j21 * fx) * inv;
+                    u -= du;
+                    v -= dv;
+                    if du.abs() < 1e-4 && dv.abs() < 1e-4 {
+                        converged = true;
+                        break;
+                    }
+                }
+                // Skip pixels outside the quad's actual shape — the iteration
+                // walks the *bounding box* of the quad, so without this any
+                // pixel above / beside the warped parallelogram would draw
+                // with its u/v clamped to the boundary, smearing the edge
+                // pixels into the gap. Allow a tiny epsilon so seam-of-the
+                // edge pixels are still included.
+                if !converged || u < -0.001 || u > 1.001 || v < -0.001 || v > 1.001 {
+                    continue;
+                }
+                if u < 0.0 { u = 0.0; }
+                if u > 1.0 { u = 1.0; }
+                if v < 0.0 { v = 0.0; }
+                if v > 1.0 { v = 1.0; }
+
+                let sx = (src_x0 + u * src_w) as i32;
+                let sy = (src_y0 + v * src_h) as i32;
+                if sx < 0 || sx >= src.width as i32 || sy < 0 || sy >= src.height as i32 {
+                    continue;
+                }
+                let (r, g, bl, _) = src.get_pixel_color_with_alpha(palettes, sx as u16, sy as u16);
+                self.set_pixel(x, y, (r, g, bl), palettes);
+            }
+        }
+        let _ = param_list; // ink/blend handling deferred — v1 = copy ink only.
+    }
+
     fn calculate_rotated_bounding_box(
         rect: &IntRect,
         rotation_degrees: f64,

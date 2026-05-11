@@ -724,13 +724,15 @@ impl BitmapDatumHandlers {
                 }
             }
 
-            let dest_rect = match dest_rect_or_quad {
+            // Decode dest as either Rect (axis-aligned blit) or List of 4 Points (quad warp).
+            enum DestShape { Rect(IntRect), Quad([(i32, i32); 4]) }
+            let dest_shape = match dest_rect_or_quad {
                 Datum::Rect(rect_vals, _flags) => {
                     let x1 = rect_vals[0] as i32;
                     let y1 = rect_vals[1] as i32;
                     let x2 = rect_vals[2] as i32;
                     let y2 = rect_vals[3] as i32;
-                    IntRect::from_tuple((x1, y1, x2, y2))
+                    DestShape::Rect(IntRect::from_tuple((x1, y1, x2, y2)))
                 }
                 Datum::List(_, list_val, _) => {
                     let p1 = {
@@ -749,9 +751,18 @@ impl BitmapDatumHandlers {
                         let (pv, _f) = player.get_datum(&list_val[3]).to_point_inline()?;
                         (pv[0] as i32, pv[1] as i32)
                     };
-
-                    let dest_rect = IntRect::from_quad(p1, p2, p3, p4);
-                    dest_rect
+                    // Detect axis-aligned quad (top.y==top.y, etc.) — those
+                    // map cleanly to a Rect and let the existing fast path
+                    // run with ink / blend / matte support. Otherwise route
+                    // through the inverse-bilinear quad warp, which
+                    // currently supports copy ink only.
+                    let axis_aligned = p1.1 == p2.1 && p4.1 == p3.1
+                        && p1.0 == p4.0 && p2.0 == p3.0;
+                    if axis_aligned {
+                        DestShape::Rect(IntRect::from_quad(p1, p2, p3, p4))
+                    } else {
+                        DestShape::Quad([p1, p2, p3, p4])
+                    }
                 },
                 _ => {
                     return Err(ScriptError::new(
@@ -770,14 +781,27 @@ impl BitmapDatumHandlers {
                 .get_bitmap_mut(*dst_bitmap_ref)
                 .unwrap();
 
-            dst_bitmap.copy_pixels(
-                &palettes,
-                &src_bitmap,
-                dest_rect,
-                IntRect::from_tuple((sx1, sy1, sx2, sy2)),
-                &param_list_concrete,
-                Some(&player.movie.score),
-            );
+            match dest_shape {
+                DestShape::Rect(dest_rect) => {
+                    dst_bitmap.copy_pixels(
+                        &palettes,
+                        &src_bitmap,
+                        dest_rect,
+                        IntRect::from_tuple((sx1, sy1, sx2, sy2)),
+                        &param_list_concrete,
+                        Some(&player.movie.score),
+                    );
+                }
+                DestShape::Quad(quad) => {
+                    dst_bitmap.copy_pixels_quad(
+                        &palettes,
+                        &src_bitmap,
+                        quad,
+                        IntRect::from_tuple((sx1, sy1, sx2, sy2)),
+                        &param_list_concrete,
+                    );
+                }
+            }
             Ok(datum.clone())
         })
     }
