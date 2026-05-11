@@ -83,8 +83,12 @@ impl CastMemberRefHandlers {
     }
 
     /// Check if a cast member handler needs async dispatch.
-    /// Currently only Havok "step" needs it (for step callbacks and collision interest callbacks).
+    /// Havok `step` runs physics with per-substep Lingo callbacks; bitmap
+    /// `importFileInto` needs to await the network fetch.
     pub fn has_async_handler(datum: &DatumRef, handler_name: &str) -> bool {
+        if handler_name.eq_ignore_ascii_case("importFileInto") {
+            return true;
+        }
         if handler_name != "step" { return false; }
         // Check if this is a Havok member
         reserve_player_ref(|player| {
@@ -114,6 +118,18 @@ impl CastMemberRefHandlers {
         args: &'a Vec<DatumRef>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DatumRef, ScriptError>> + 'a>> {
         Box::pin(async move {
+            if _handler_name.eq_ignore_ascii_case("importFileInto") {
+                // Method form `member.importFileInto(url, props)` forwards
+                // to the global verb in BuiltInHandlerManager which holds
+                // the canonical implementation — prepend `self` so its
+                // args[0] = member, matching the old-Lingo verb form.
+                let mut forwarded = Vec::with_capacity(args.len() + 1);
+                forwarded.push(datum.clone());
+                forwarded.extend(args.iter().cloned());
+                return crate::player::handlers::manager::BuiltInHandlerManager::call_async_handler(
+                    "importFileInto", &forwarded,
+                ).await;
+            }
             // Run the full physics step via the monolithic sync path.
             // This does: Euler integrate (full_dt) + Rapier substeps + readback + W3D sync + clear forces.
             let (step_result, step_cbs, collision_cbs) = HavokPhysicsMemberHandlers::step_with_callbacks(datum, args)?;
