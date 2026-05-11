@@ -56,25 +56,37 @@
     },
   );
 
+  // Communicate via DOM CustomEvents instead of postMessage. The Wayback
+  // Machine's `wombat.js` overrides `window.postMessage` to sanitize
+  // origins and silently drops our bridge traffic; CustomEvents propagate
+  // through the shared document and are not intercepted. Standalone
+  // (non-Wayback) pages also work fine — events are a strict superset of
+  // postMessage's broadcast semantics for same-window communication.
+  var REQ_EVENT = 'dirplayer-ruffle-bridge-request';
+  var RES_EVENT = 'dirplayer-ruffle-bridge-response';
+  var EVT_EVENT = 'dirplayer-ruffle-bridge-event';
+
   function respond(requestId, payload, error) {
-    window.postMessage({
-      __dirplayerRuffleBridge: 'response',
-      requestId,
-      result: payload,
-      error: error == null ? null : (error && error.message) || String(error),
-    }, '*');
+    window.dispatchEvent(new CustomEvent(RES_EVENT, {
+      detail: {
+        requestId: requestId,
+        result: payload,
+        error: error == null ? null : (error && error.message) || String(error),
+      },
+    }));
   }
 
   function announceEvent(playerId, eventName, detail) {
     // Forward player events back to the isolated world. Detail must be
     // structured-cloneable (no DOM elements / functions). We only
     // forward the data we know dirplayer cares about today.
-    window.postMessage({
-      __dirplayerRuffleBridge: 'event',
-      playerId,
-      eventName,
-      detail,
-    }, '*');
+    window.dispatchEvent(new CustomEvent(EVT_EVENT, {
+      detail: {
+        playerId: playerId,
+        eventName: eventName,
+        detail: detail,
+      },
+    }));
   }
 
   function attachEventForwarders(playerId, player) {
@@ -103,10 +115,9 @@
     }
   }
 
-  window.addEventListener('message', async (ev) => {
-    if (ev.source !== window) return;
-    const m = ev.data;
-    if (!m || m.__dirplayerRuffleBridge !== 'request') return;
+  window.addEventListener(REQ_EVENT, async (ev) => {
+    const m = ev.detail;
+    if (!m) return;
 
     const { requestId, method, playerId, methodName, propName, args } = m;
     try {

@@ -7,7 +7,17 @@
 // `customElements`, so Ruffle (which calls `customElements.define`
 // during element registration) cannot run in the same world as
 // dirplayer's content script. We register Ruffle in the main world
-// instead and ferry method/property calls across via `postMessage`.
+// instead and ferry method/property calls across via DOM CustomEvents.
+//
+// Why CustomEvents instead of postMessage: the Wayback Machine's
+// `wombat.js` overwrites `window.postMessage` in the main world to
+// sanitize origins and rewrite URLs, which silently drops our bridge
+// traffic. DOM events propagate through the shared document and are
+// not intercepted by wombat.
+
+const REQ_EVENT = 'dirplayer-ruffle-bridge-request';
+const RES_EVENT = 'dirplayer-ruffle-bridge-response';
+const EVT_EVENT = 'dirplayer-ruffle-bridge-event';
 
 let nextRequest = 1;
 const pendingRequests = new Map<
@@ -18,27 +28,24 @@ const pendingRequests = new Map<
 type BridgeEventHandler = (eventName: string, detail: unknown) => void;
 const eventHandlers = new Map<string, Set<BridgeEventHandler>>();
 
-window.addEventListener('message', (ev) => {
-  if (ev.source !== window) return;
-  const m: any = ev.data;
+window.addEventListener(RES_EVENT, (ev) => {
+  const m: any = (ev as CustomEvent).detail;
   if (!m) return;
+  const pending = pendingRequests.get(m.requestId);
+  if (!pending) return;
+  pendingRequests.delete(m.requestId);
+  if (m.error) pending.reject(new Error(m.error));
+  else pending.resolve(m.result);
+});
 
-  if (m.__dirplayerRuffleBridge === 'response') {
-    const pending = pendingRequests.get(m.requestId);
-    if (!pending) return;
-    pendingRequests.delete(m.requestId);
-    if (m.error) pending.reject(new Error(m.error));
-    else pending.resolve(m.result);
-    return;
-  }
-
-  if (m.__dirplayerRuffleBridge === 'event') {
-    const handlers = eventHandlers.get(m.playerId);
-    if (handlers) {
-      handlers.forEach((h) => {
-        try { h(m.eventName, m.detail); } catch (e) { /* ignore */ }
-      });
-    }
+window.addEventListener(EVT_EVENT, (ev) => {
+  const m: any = (ev as CustomEvent).detail;
+  if (!m) return;
+  const handlers = eventHandlers.get(m.playerId);
+  if (handlers) {
+    handlers.forEach((h) => {
+      try { h(m.eventName, m.detail); } catch (e) { /* ignore */ }
+    });
   }
 });
 
@@ -49,10 +56,9 @@ function bridgeCall<T = unknown>(payload: Record<string, unknown>): Promise<T> {
       resolve: (v) => resolve(v as T),
       reject,
     });
-    window.postMessage(
-      { __dirplayerRuffleBridge: 'request', requestId, ...payload },
-      '*',
-    );
+    window.dispatchEvent(new CustomEvent(REQ_EVENT, {
+      detail: { requestId, ...payload },
+    }));
   });
 }
 
