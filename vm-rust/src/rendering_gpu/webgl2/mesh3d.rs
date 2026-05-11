@@ -30,6 +30,13 @@ pub struct Mesh3dBuffers {
     pub index_count: i32,
     pub has_bones: bool,
     pub has_vertex_colors: bool,
+    /// Whether the mesh has primary UVs uploaded. Meshes built via
+    /// `sp.newMesh(name, faces, verts, 0_uvs, ...)` don't supply
+    /// `textureCoordinateList`, so they must NOT use the textured shader
+    /// path — without UVs every fragment samples the diffuse texture at
+    /// (0,0). The renderer overrides `u_has_texture` to 0 for such meshes
+    /// so the non-textured path runs (vertex_color × lighting).
+    pub has_texcoord: bool,
     pub has_texcoord2: bool,
     pub texcoord2_direct: bool,
     pub meshdeform_uv_synced: bool,
@@ -249,6 +256,7 @@ impl Mesh3dBuffers {
             vbo_bone_weights,
             vbo_vertex_colors,
             ibo,
+            has_texcoord: texcoords.is_some_and(|t| !t.is_empty()),
             has_texcoord2: texcoords2.is_some(),
             texcoord2_direct: false,
             meshdeform_uv_synced: false,

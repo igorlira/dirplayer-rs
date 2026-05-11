@@ -1423,11 +1423,21 @@ void main() {
             // Apply background color from member's bgColor (parsed from 3DPR).
             // Only on the first pass (clear_fbo=true) — subsequent camera passes
             // (overlays, arrowcam) must NOT re-clear or they wipe the main scene.
+            //
+            // ALWAYS clear, regardless of whether background_color is explicitly
+            // set. Skipping the clear left the FBO showing stale contents from
+            // previous frames / uninitialised GPU memory (which on some GPUs
+            // appears as solid white) — see ClubMarian where the world member
+            // stores `bgColor = rgb(0, 0, 0)` but no explicit 3DPR background,
+            // so the unset Option became "no clear" and the scene composited
+            // over GPU garbage. Default to black matching Director's behaviour
+            // for a freshly-initialised member; movies that need a different
+            // background set it via Lingo (`member.bgColor = ...`) which feeds
+            // back into runtime_state.background_color.
             if clear_fbo {
-                if let Some((r, g, b)) = rs.background_color {
-                    gl.clear_color(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
-                    gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
-                }
+                let (r, g, b) = rs.background_color.unwrap_or((0, 0, 0));
+                gl.clear_color(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
+                gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
             }
         } else {
             gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
@@ -1518,19 +1528,22 @@ void main() {
                     self.blend_duration = runtime_state.map(|rs| rs.blend_duration).unwrap_or(0.0);
                 }
 
-                let dt = (1.0 / 30.0) * play_rate * anim_scale;
-                if is_playing {
-                    self.animation_time += dt;
-                }
-
-                // Progress blend weight
-                if self.blend_weight < 1.0 && self.blend_duration > 0.0 {
-                    self.blend_elapsed += 1.0 / 30.0;
-                    self.blend_weight = (self.blend_elapsed / self.blend_duration).min(1.0);
-                }
+                // The per-frame dt advance now lives on runtime_state in
+                // events::tick_w3d_animations so that Lingo readers (the
+                // bone.worldTransform getter used to pin the head to bone[6])
+                // see the same time as the renderer. Mirror it here.
+                self.animation_time = runtime_state.map(|rs| rs.animation_time).unwrap_or(self.animation_time);
+                self.blend_weight = runtime_state.map(|rs| rs.blend_weight).unwrap_or(self.blend_weight);
+                self.blend_elapsed = runtime_state.map(|rs| rs.blend_elapsed).unwrap_or(self.blend_elapsed);
+                self.blend_duration = runtime_state.map(|rs| rs.blend_duration).unwrap_or(self.blend_duration);
+                let _ = (play_rate, anim_scale);
 
                 let motion = if let Some(name) = current_motion_name {
-                    scene.motions.iter().find(|m| m.name == name)
+                    // Director is case-insensitive. ClubMarian queues
+                    // "root-skeleton-Motion0" while the W3D file stores
+                    // "root-skeleton-motion0" — a strict `==` here was
+                    // dropping the motion silently.
+                    scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name))
                 } else {
                     None // Don't apply a motion until the game explicitly calls play()
                 };
@@ -2020,6 +2033,14 @@ void main() {
                         shader.u_texcoord2_direct.as_ref(),
                         if mesh_buf.texcoord2_direct { 1 } else { 0 },
                     );
+                    // Force the non-textured fragment path for UV-less meshes
+                    // (e.g. ClubMarian's heightmap terrain built via
+                    // `newMesh(name, faces, verts, 0_uvs, ...)` — without
+                    // UVs the diffuse texture would otherwise sample at (0,0)
+                    // and tint the whole surface with one texel).
+                    if !mesh_buf.has_texcoord {
+                        gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+                    }
 
                     mesh_buf.bind(gl);
                     mesh_buf.draw(gl);
@@ -3288,8 +3309,10 @@ void main() {
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> bool {
         // Only skin models that have a matching skeleton — no fallback to first()
-        // to prevent walls/weapons from being skinned with the character skeleton
-        let skeleton = scene.skeletons.iter().find(|s| s.name == resource_name);
+        // to prevent walls/weapons from being skinned with the character skeleton.
+        // Director is case-insensitive — script-side cloned resources can vary
+        // case from the parsed W3D file.
+        let skeleton = scene.skeletons.iter().find(|s| s.name.eq_ignore_ascii_case(resource_name));
         let skeleton = match skeleton {
             Some(s) if s.bones.len() > 1 => s,
             _ => return false,
@@ -3316,7 +3339,7 @@ void main() {
         let is_loop = runtime_state.map(|rs| rs.animation_loop).unwrap_or(true);
         let root_lock = runtime_state.map(|rs| rs.root_lock).unwrap_or(false);
         let motion = if let Some(name) = current_motion_name {
-            scene.motions.iter().find(|m| m.name == name)
+            scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name))
         } else {
             None // Don't apply a motion until the game explicitly calls play()
         };
@@ -3361,7 +3384,7 @@ void main() {
         }
 
         if blending {
-            let prev_motion = prev_motion_name.and_then(|n| scene.motions.iter().find(|m| m.name == n));
+            let prev_motion = prev_motion_name.and_then(|n| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(n)));
             let prev_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
                 skeleton, prev_motion, t, root_lock,
             );
