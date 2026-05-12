@@ -192,6 +192,7 @@ fn run_synth(bytecode: Vec<u8>, atoms: Vec<JsAtom>) -> Result<JsValue, super::va
             bindings: Vec::new(),
             script: ir,
         }),
+        captured_scope: None,
     };
     rt.call_function(&Rc::new(f), Vec::new(), JsValue::Undefined)
 }
@@ -326,6 +327,314 @@ fn synth_typeof_returns_correct_strings() {
 }
 
 #[test]
+fn synth_forin_counts_keys() {
+    // function(obj) {
+    //   var k; var count = 0;
+    //   for (k in obj) { count++; }
+    //   return count;
+    // }
+    //
+    // Tests that FORVAR walks the iterator over the object's keys and
+    // pushes the right has-more boolean each iteration.
+    let atoms: Vec<JsAtom> = Vec::new();
+    let mut bc = Vec::new();
+
+    // count = 0
+    bc.push(JsOp::Zero as u8);                              // pc=0: push 0
+    bc.push(JsOp::Setvar as u8); bc.extend(u16_be(1));      // pc=1: count = 0 (slot 1)
+    bc.push(JsOp::Pop as u8);                               // pc=4
+
+    // Iter setup: push undefined (iter slot), then GETARG 0 (the object).
+    bc.push(JsOp::Push as u8);                              // pc=5: push undefined
+    bc.push(JsOp::Getarg as u8); bc.extend(u16_be(0));      // pc=6: push obj
+
+    // Loop top: FORVAR k
+    let loop_top = bc.len();                                // pc=9
+    bc.push(JsOp::Forvar as u8); bc.extend(u16_be(0));      // pc=9: FORVAR slot=0 (k)
+
+    let ifeq_pc = bc.len();                                 // pc=12
+    bc.push(JsOp::Ifeq as u8); bc.extend(i16_be(0));        // pc=12: placeholder, patched below
+
+    // Body: count++
+    bc.push(JsOp::Incvar as u8); bc.extend(u16_be(1));      // pc=15
+    bc.push(JsOp::Pop as u8);                               // pc=18: discard the incremented value
+
+    // Backward goto to loop_top
+    let goto_pc = bc.len();                                 // pc=19
+    bc.push(JsOp::Goto as u8); bc.extend(i16_be(0));        // pc=19: placeholder
+    let goto_off = loop_top as i32 - goto_pc as i32;
+    let goto_off_bytes = (goto_off as i16).to_be_bytes();
+    bc[goto_pc + 1] = goto_off_bytes[0];
+    bc[goto_pc + 2] = goto_off_bytes[1];
+
+    // Loop end: drop obj + iter slot
+    let loop_end = bc.len();                                // pc=22
+    bc.push(JsOp::Pop as u8);                               // remove obj
+    bc.push(JsOp::Pop as u8);                               // remove iter
+    bc.push(JsOp::Getvar as u8); bc.extend(u16_be(1));      // push count
+    bc.push(JsOp::Return as u8);
+
+    let ifeq_off = loop_end as i32 - ifeq_pc as i32;
+    let ifeq_off_bytes = (ifeq_off as i16).to_be_bytes();
+    bc[ifeq_pc + 1] = ifeq_off_bytes[0];
+    bc[ifeq_pc + 2] = ifeq_off_bytes[1];
+
+    let ir = super::xdr::JsScriptIR {
+        magic: 0xdead_0003, bytecode: bc, prolog_length: 0, version: 150,
+        atoms, source_notes: Vec::new(), filename: None, lineno: 1,
+        max_stack_depth: 8, try_notes: Vec::new(),
+    };
+    let f = super::value::JsFunction {
+        atom: Rc::new(super::xdr::JsFunctionAtom {
+            name: Some("forin_test".into()),
+            nargs: 1, extra: 0, nvars: 2, flags: 0,
+            bindings: Vec::new(),
+            script: ir,
+        }),
+        captured_scope: None,
+    };
+
+    // Build an object with 3 keys.
+    let mut obj = JsObject::new();
+    obj.set_own("alpha", JsValue::Int(1));
+    obj.set_own("beta", JsValue::Int(2));
+    obj.set_own("gamma", JsValue::Int(3));
+    let obj_val = JsValue::Object(Rc::new(RefCell::new(obj)));
+
+    let mut rt = JsRuntime::new();
+    let result = rt.call_function(&Rc::new(f), vec![obj_val], JsValue::Undefined).unwrap();
+    assert!(matches!(result, JsValue::Int(3)), "expected 3 keys, got {:?}", result);
+}
+
+#[test]
+fn synth_forin_array_walks_indices() {
+    // function(arr) { var k; var n = 0; for (k in arr) n = k; return n; }
+    // Returns the last index visited (as a string).
+    let atoms: Vec<JsAtom> = Vec::new();
+    let mut bc = Vec::new();
+
+    // n = ""
+    bc.push(JsOp::Push as u8);                              // pc=0: push undefined (we'll just write k into n on each iter, no init needed)
+    bc.push(JsOp::Setvar as u8); bc.extend(u16_be(1));      // pc=1: n = undefined
+    bc.push(JsOp::Pop as u8);                               // pc=4
+
+    bc.push(JsOp::Push as u8);                              // pc=5: iter placeholder
+    bc.push(JsOp::Getarg as u8); bc.extend(u16_be(0));      // pc=6
+
+    let loop_top = bc.len();
+    bc.push(JsOp::Forvar as u8); bc.extend(u16_be(0));      // pc=9: writes k
+    let ifeq_pc = bc.len();
+    bc.push(JsOp::Ifeq as u8); bc.extend(i16_be(0));
+
+    // n = k
+    bc.push(JsOp::Getvar as u8); bc.extend(u16_be(0));      // push k
+    bc.push(JsOp::Setvar as u8); bc.extend(u16_be(1));      // n = k (leaves k on stack)
+    bc.push(JsOp::Pop as u8);
+
+    let goto_pc = bc.len();
+    bc.push(JsOp::Goto as u8); bc.extend(i16_be(0));
+    let goto_off = (loop_top as i32 - goto_pc as i32) as i16;
+    let gb = goto_off.to_be_bytes();
+    bc[goto_pc + 1] = gb[0]; bc[goto_pc + 2] = gb[1];
+
+    let loop_end = bc.len();
+    bc.push(JsOp::Pop as u8); bc.push(JsOp::Pop as u8);
+    bc.push(JsOp::Getvar as u8); bc.extend(u16_be(1));
+    bc.push(JsOp::Return as u8);
+
+    let ifeq_off = (loop_end as i32 - ifeq_pc as i32) as i16;
+    let ib = ifeq_off.to_be_bytes();
+    bc[ifeq_pc + 1] = ib[0]; bc[ifeq_pc + 2] = ib[1];
+
+    let ir = super::xdr::JsScriptIR {
+        magic: 0xdead_0003, bytecode: bc, prolog_length: 0, version: 150,
+        atoms, source_notes: Vec::new(), filename: None, lineno: 1,
+        max_stack_depth: 8, try_notes: Vec::new(),
+    };
+    let f = super::value::JsFunction {
+        atom: Rc::new(super::xdr::JsFunctionAtom {
+            name: Some("forin_arr".into()),
+            nargs: 1, extra: 0, nvars: 2, flags: 0,
+            bindings: Vec::new(),
+            script: ir,
+        }),
+        captured_scope: None,
+    };
+
+    let arr = JsArray { items: vec![JsValue::Int(10), JsValue::Int(20), JsValue::Int(30)] };
+    let arr_val = JsValue::Array(Rc::new(RefCell::new(arr)));
+
+    let mut rt = JsRuntime::new();
+    let result = rt.call_function(&Rc::new(f), vec![arr_val], JsValue::Undefined).unwrap();
+    match result {
+        JsValue::String(s) => assert_eq!(&*s, "2", "last array index visited as string"),
+        other => panic!("expected last index \"2\", got {:?}", other),
+    }
+}
+
+#[test]
+fn synth_closure_captures_outer_arg() {
+    // function outer(x) {
+    //   function inner() { return x; }
+    //   return inner;
+    // }
+    // outer(42)()  ===  42
+    //
+    // Tests that ANONFUNOBJ captures the current scope at creation time
+    // and that when the inner function is invoked later, its NAME `x`
+    // resolves via the captured scope chain back to outer's argument.
+
+    // Inner script: NAME "x"; RETURN
+    let inner_atoms = vec![JsAtom::String("x".into())];
+    let mut inner_bc = Vec::new();
+    inner_bc.push(JsOp::Name as u8); inner_bc.extend(u16_be(0));    // push x (via NAME)
+    inner_bc.push(JsOp::Return as u8);
+    let inner_ir = super::xdr::JsScriptIR {
+        magic: 0xdead_0003, bytecode: inner_bc, prolog_length: 0, version: 150,
+        atoms: inner_atoms, source_notes: Vec::new(), filename: None, lineno: 1,
+        max_stack_depth: 2, try_notes: Vec::new(),
+    };
+    let inner_atom = super::xdr::JsFunctionAtom {
+        name: Some("inner".into()),
+        nargs: 0, extra: 0, nvars: 0, flags: 0,
+        bindings: Vec::new(),
+        script: inner_ir,
+    };
+
+    // Outer script: ANONFUNOBJ inner_atom_idx; RETURN
+    let outer_atoms = vec![
+        JsAtom::Function(Box::new(inner_atom)),
+        JsAtom::String("x".into()),
+    ];
+    let mut outer_bc = Vec::new();
+    outer_bc.push(JsOp::Anonfunobj as u8); outer_bc.extend(u16_be(0));  // push closure-over-current-scope
+    outer_bc.push(JsOp::Return as u8);
+    let outer_ir = super::xdr::JsScriptIR {
+        magic: 0xdead_0003, bytecode: outer_bc, prolog_length: 0, version: 150,
+        atoms: outer_atoms, source_notes: Vec::new(), filename: None, lineno: 1,
+        max_stack_depth: 2, try_notes: Vec::new(),
+    };
+    let outer_fn = super::value::JsFunction {
+        atom: Rc::new(super::xdr::JsFunctionAtom {
+            name: Some("outer".into()),
+            nargs: 1, extra: 0, nvars: 0, flags: 0,
+            bindings: vec![super::xdr::JsFunctionBinding {
+                kind: super::xdr::JsBindingKind::Argument,
+                name: "x".into(),
+                short_id: 0,
+            }],
+            script: outer_ir,
+        }),
+        captured_scope: None,
+    };
+
+    let mut rt = JsRuntime::new();
+    // outer(42) — returns the closure
+    let closure = rt
+        .call_function(&Rc::new(outer_fn), vec![JsValue::Int(42)], JsValue::Undefined)
+        .expect("outer call returns closure");
+
+    // Then invoke the returned closure with no args; it must return 42 (the
+    // captured x). Without scope capture this would resolve `x` to undefined.
+    let result = rt.invoke(&closure, Vec::new(), JsValue::Undefined)
+        .expect("inner call");
+    assert!(matches!(result, JsValue::Int(42)),
+        "expected 42 from captured x, got {:?}", result);
+}
+
+#[test]
+fn synth_try_catch_recovers_thrown_value() {
+    // function() {
+    //   try { throw 42; }
+    //   catch (e) { return e; }
+    // }
+    //
+    // The dispatch loop should consult try_notes when `throw` raises,
+    // jump to the catch handler, and push the thrown value (42) onto
+    // the stack -- where the catch body returns it directly.
+    let atoms = vec![JsAtom::Int(42)];
+    let mut bc = Vec::new();
+
+    // try body: push 42; throw
+    let try_start = bc.len();                                // pc=0
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(0));       // push 42
+    bc.push(JsOp::Throw as u8);                              // throw -- unwinds
+    let try_end = bc.len();
+
+    // catch handler: thrown value is already on top of the stack
+    // (pushed by the unwinder). Just RETURN it.
+    let catch_start = bc.len();
+    bc.push(JsOp::Return as u8);
+
+    let try_note = super::xdr::JsTryNote {
+        start: try_start as u32,
+        length: (try_end - try_start) as u32,
+        catch_start: catch_start as u32,
+    };
+
+    let ir = super::xdr::JsScriptIR {
+        magic: 0xdead_0003, bytecode: bc, prolog_length: 0, version: 150,
+        atoms, source_notes: Vec::new(), filename: None, lineno: 1,
+        max_stack_depth: 4,
+        try_notes: vec![try_note],
+    };
+    let f = super::value::JsFunction {
+        atom: Rc::new(super::xdr::JsFunctionAtom {
+            name: Some("trycatch".into()),
+            nargs: 0, extra: 0, nvars: 0, flags: 0,
+            bindings: Vec::new(),
+            script: ir,
+        }),
+        captured_scope: None,
+    };
+
+    let mut rt = JsRuntime::new();
+    let result = rt.call_function(&Rc::new(f), Vec::new(), JsValue::Undefined).unwrap();
+    assert!(matches!(result, JsValue::Int(42)), "catch should recover the thrown value, got {:?}", result);
+}
+
+#[test]
+fn synth_try_catch_no_throw_returns_value() {
+    // function() { try { return 7; } catch (e) { return 9; } }
+    // Try body completes normally without throwing; catch is never entered.
+    let atoms = vec![JsAtom::Int(7), JsAtom::Int(9)];
+    let mut bc = Vec::new();
+
+    let try_start = bc.len();
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(0));  // push 7
+    bc.push(JsOp::Return as u8);                         // return 7
+    let try_end = bc.len();
+
+    let catch_start = bc.len();
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(1));  // push 9
+    bc.push(JsOp::Return as u8);
+
+    let try_note = super::xdr::JsTryNote {
+        start: try_start as u32,
+        length: (try_end - try_start) as u32,
+        catch_start: catch_start as u32,
+    };
+    let ir = super::xdr::JsScriptIR {
+        magic: 0xdead_0003, bytecode: bc, prolog_length: 0, version: 150,
+        atoms, source_notes: Vec::new(), filename: None, lineno: 1,
+        max_stack_depth: 4,
+        try_notes: vec![try_note],
+    };
+    let f = super::value::JsFunction {
+        atom: Rc::new(super::xdr::JsFunctionAtom {
+            name: Some("trycatch2".into()),
+            nargs: 0, extra: 0, nvars: 0, flags: 0,
+            bindings: Vec::new(),
+            script: ir,
+        }),
+        captured_scope: None,
+    };
+    let mut rt = JsRuntime::new();
+    let result = rt.call_function(&Rc::new(f), Vec::new(), JsValue::Undefined).unwrap();
+    assert!(matches!(result, JsValue::Int(7)), "no-throw path returns from try body, got {:?}", result);
+}
+
+#[test]
 fn synth_pre_increment_var() {
     // function() { var x = 5; return ++x; }  ⇒ 6
     let atoms: Vec<JsAtom> = vec![JsAtom::Int(5)];
@@ -346,6 +655,7 @@ fn synth_pre_increment_var() {
             name: Some("inc_test".into()), nargs: 0, extra: 0,
             nvars: 1, flags: 0, bindings: Vec::new(), script: ir,
         }),
+        captured_scope: None,
     };
     let result = rt.call_function(&Rc::new(f), vec![], JsValue::Undefined).unwrap();
     assert!(matches!(result, JsValue::Int(6)), "expected 6, got {:?}", result);
@@ -461,6 +771,7 @@ fn run_with_stdlib(bc: Vec<u8>, atoms: Vec<JsAtom>, nvars: u16) -> Result<JsValu
             name: Some("synth".into()), nargs: 0, extra: 0,
             nvars, flags: 0, bindings: Vec::new(), script: ir,
         }),
+        captured_scope: None,
     };
     rt.call_function(&Rc::new(f), Vec::new(), JsValue::Undefined)
 }

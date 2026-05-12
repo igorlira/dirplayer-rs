@@ -19,7 +19,7 @@ use super::value::{
 };
 use super::variable_length::{read_i16_operand, read_i32_operand, read_u16_operand, read_u32_operand};
 use super::xdr::{
-    iter_ops, JsAtom, JsBindingKind, JsFunctionAtom, JsFunctionBinding, JsScriptIR,
+    iter_ops, JsAtom, JsBindingKind, JsFunctionAtom, JsFunctionBinding, JsScriptIR, JsTryNote,
 };
 
 /// One frame on the interpreter call stack.
@@ -54,6 +54,11 @@ pub struct JsFrame {
     /// route to args / locals when the atom names a function parameter or
     /// local. Atom indices not present here resolve via the scope chain.
     pub atom_to_slot: Vec<Option<(JsBindingKind, usize)>>,
+    /// try_notes from the function's IR -- one entry per `try` block,
+    /// listing the byte range and the catch handler's PC. The dispatch
+    /// loop consults this on each error to find the innermost catch.
+    /// Held as Rc so frames can share the IR's vector without cloning.
+    pub try_notes_ptr: Rc<Vec<JsTryNote>>,
 }
 
 /// Result of running a frame to completion (or trying to advance one step).
@@ -229,7 +234,14 @@ impl JsRuntime {
         for a in atoms.iter() {
             if let JsAtom::Function(fa) = a {
                 if let Some(name) = &fa.name {
-                    let f = JsValue::Function(Rc::new(JsFunction { atom: Rc::new((**fa).clone()) }));
+                    // Top-level hoisted functions capture the program
+                    // scope -- no closure needed, but `captured_scope = None`
+                    // makes build_function_frame fall back to the program
+                    // scope cleanly.
+                    let f = JsValue::Function(Rc::new(JsFunction {
+                        atom: Rc::new((**fa).clone()),
+                        captured_scope: None,
+                    }));
                     self.global.borrow_mut().set_own(name, f);
                 }
             }
@@ -246,6 +258,7 @@ impl JsRuntime {
             stack: Vec::new(),
             rval: JsValue::Undefined,
             atom_to_slot: Vec::new(),
+            try_notes_ptr: Rc::new(ir.try_notes.clone()),
         }
     }
 
@@ -253,6 +266,16 @@ impl JsRuntime {
     /// or hits an unimplemented op. CALL is the only op that pushes a
     /// new frame — implemented inline so we don't need a true frame stack.
     fn run_frame(&mut self, mut frame: JsFrame) -> Result<JsValue, JsError> {
+        // Try-note stack depth snapshots: the frame.stack depth at the
+        // moment we entered each try region currently in effect. SpiderMonkey
+        // 1.5's compiler ALSO emits a Setsp to fix stack depth at catch
+        // entry, but we still need to truncate ourselves for the cases
+        // where the catch parameter or the catch body relies on a known
+        // depth (and the thrown value pushed by us must land at the right
+        // level for the catch's variable initialiser).
+        //
+        // (try_notes is small in practice -- one entry per `try` block in
+        // the function -- so a linear walk on every error is fine.)
         loop {
             // Instruction budget: a runaway loop in JS otherwise freezes the
             // wasm thread with no clue why. Decrement each step; abort cleanly
@@ -292,10 +315,47 @@ impl JsRuntime {
             };
             // Default advance — overridden by jumps / CALL.
             frame.pc = operand_slice_end;
-            match self.dispatch(&mut frame, op, operand, pc)? {
-                StepOutcome::Continue => {}
-                StepOutcome::Return(v) => return Ok(v),
-                StepOutcome::Error(e) => return Err(e),
+            let outcome = self.dispatch(&mut frame, op, operand, pc);
+            match outcome {
+                Ok(StepOutcome::Continue) => {}
+                Ok(StepOutcome::Return(v)) => return Ok(v),
+                Ok(StepOutcome::Error(e)) | Err(e) => {
+                    // Try-catch unwind: look for the INNERMOST try region
+                    // (shortest length wins) containing `pc`. If one exists,
+                    // jump to its catch handler with the thrown value on
+                    // top of stack; otherwise propagate up to the caller.
+                    let try_notes = frame.try_notes_ptr.clone();
+                    let mut best: Option<&JsTryNote> = None;
+                    for tn in try_notes.iter() {
+                        let start = tn.start as usize;
+                        let end = start + tn.length as usize;
+                        if pc >= start && pc < end {
+                            match best {
+                                None => best = Some(tn),
+                                Some(prev) if tn.length < prev.length => best = Some(tn),
+                                _ => {}
+                            }
+                        }
+                    }
+                    if let Some(tn) = best {
+                        // Recover the thrown value, or synthesise an
+                        // Error-like object from the runtime message if
+                        // this was an internal (non-`throw`-originated) error.
+                        let thrown_value = match e.thrown {
+                            Some(v) => v,
+                            None => {
+                                let mut o = JsObject::new();
+                                o.set_own("message", JsValue::String(Rc::new(e.message.clone())));
+                                o.class_name = "Error";
+                                JsValue::Object(Rc::new(RefCell::new(o)))
+                            }
+                        };
+                        frame.pc = tn.catch_start as usize;
+                        frame.stack.push(thrown_value);
+                        continue;
+                    }
+                    return Err(e);
+                }
             }
         }
     }
@@ -612,7 +672,14 @@ impl JsRuntime {
                     .ok_or_else(|| JsError::new("DEFFUN atom oob"))?;
                 if let JsAtom::Function(fa) = atom {
                     if let Some(name) = fa.name.clone() {
-                        let f = JsValue::Function(Rc::new(JsFunction { atom: Rc::new((*fa).clone()) }));
+                        // Capture the current scope so nested DEFFUN forms a
+                        // closure over the outer function's locals. For
+                        // true top-level DEFFUN, frame.scope IS the global,
+                        // so this is equivalent to the no-capture default.
+                        let f = JsValue::Function(Rc::new(JsFunction {
+                            atom: Rc::new((*fa).clone()),
+                            captured_scope: Some(frame.scope.clone()),
+                        }));
                         self.global.borrow_mut().set_own(&name, f);
                     }
                 }
@@ -1021,8 +1088,11 @@ impl JsRuntime {
             // a JsError.
             JsOp::Try | JsOp::Finally => Ok(StepOutcome::Continue),
             JsOp::Throw => {
+                // Bubble up as an Err carrying the thrown value. The dispatch
+                // loop catches it and either unwinds to a matching try_note's
+                // catch handler in this frame, or propagates to the caller.
                 let v = pop(frame)?;
-                Err(JsError::new(format!("uncaught: {}", v.to_string())))
+                Err(JsError::from_thrown(v))
             }
             JsOp::Exception => {
                 // After unwind, the exception value would be on top. With our
@@ -1073,8 +1143,12 @@ impl JsRuntime {
                 let JsAtom::Function(fa) = atom else {
                     return Err(JsError::new("function-atom-op expected JsAtom::Function"));
                 };
+                // Capture the current lexical scope so an inner function can
+                // see the outer function's locals. The new frame's
+                // parent_scope will be set to this captured scope on invoke.
                 let f = JsValue::Function(Rc::new(JsFunction {
                     atom: Rc::new((*fa).clone()),
+                    captured_scope: Some(frame.scope.clone()),
                 }));
                 if op == JsOp::Closure {
                     // CLOSURE additionally installs the function on the current
@@ -1095,7 +1169,10 @@ impl JsRuntime {
                 let atom = frame.atoms.get(atom_idx).cloned()
                     .ok_or_else(|| JsError::new("DEFLOCALFUN atom oob"))?;
                 if let JsAtom::Function(fa) = atom {
-                    let f = JsValue::Function(Rc::new(JsFunction { atom: Rc::new((*fa).clone()) }));
+                    let f = JsValue::Function(Rc::new(JsFunction {
+                        atom: Rc::new((*fa).clone()),
+                        captured_scope: Some(frame.scope.clone()),
+                    }));
                     if slot < frame.locals.len() { frame.locals[slot] = f; }
                 }
                 Ok(StepOutcome::Continue)
@@ -1122,16 +1199,114 @@ impl JsRuntime {
             }
 
             // ===== `for..in` iteration =====
-            // Phase 2b stubs: keys-list is computed eagerly into a JsArray,
-            // and the FOR* ops walk it as a counter (no live iterator object).
-            // Correctness is good enough for unsorted enumeration; ordering
-            // matches insertion-order (matches SpiderMonkey for non-numeric keys).
-            JsOp::Forarg => Err(JsError::new("for-in (forarg) needs runtime iter state — Phase 6")),
-            JsOp::Forvar => Err(JsError::new("for-in (forvar) needs runtime iter state — Phase 6")),
-            JsOp::Forname => Err(JsError::new("for-in (forname) needs runtime iter state — Phase 6")),
-            JsOp::Forprop => Err(JsError::new("for-in (forprop) needs runtime iter state — Phase 6")),
-            JsOp::Forelem => Err(JsError::new("for-in (forelem) needs runtime iter state — Phase 6")),
-            JsOp::Enumelem => Err(JsError::new("for-in (enumelem) needs runtime iter state — Phase 6")),
+            // ===== for-in iteration =====
+            //
+            // SpiderMonkey 1.5 layout (jsdmx/src/jsinterp.c do_forinloop):
+            //
+            //   PUSH undefined        ; iter slot
+            //   PUSH obj_to_iterate   ; sp[-1] for FORNAME/FORARG/FORVAR/FORELEM
+            //   loop_top:
+            //     FOR* target          ; advances iter; pushes bool has_more
+            //     IFEQ loop_end        ; pops bool; on false, falls through
+            //     /* body */
+            //     GOTO loop_top
+            //   loop_end:
+            //     POP                   ; remove obj
+            //     POP                   ; remove iter
+            //
+            // The iter slot starts as `Undefined`; the FIRST FOR* op snapshots
+            // the keys of the object and stores a JsValue::Iterator back into
+            // the slot. Subsequent ops just advance the cursor.
+            //
+            // FORPROP has an additional `target_lval` on top, so its object
+            // sits at sp[-2] and its iter slot at sp[-3].
+            JsOp::Forname => {
+                let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
+                let name = atom_string(&frame.atoms, idx)?;
+                let has_more = forin_advance(frame, /*obj_at*/ -1)?;
+                if let Some(key) = has_more {
+                    store_name(frame, &name, JsValue::String(Rc::new(key)), &self.global);
+                    frame.stack.push(JsValue::Bool(true));
+                } else {
+                    frame.stack.push(JsValue::Bool(false));
+                }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Forvar => {
+                let slot = read_u16_operand(operand).map_err(JsError::new)? as usize;
+                let has_more = forin_advance(frame, -1)?;
+                if let Some(key) = has_more {
+                    let v = JsValue::String(Rc::new(key));
+                    if slot < frame.locals.len() {
+                        frame.locals[slot] = v.clone();
+                    }
+                    if let Some(name) = nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Variable, slot)
+                        .or_else(|| nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Constant, slot))
+                    {
+                        frame.scope.borrow_mut().set_own(&name, v);
+                    }
+                    frame.stack.push(JsValue::Bool(true));
+                } else {
+                    frame.stack.push(JsValue::Bool(false));
+                }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Forarg => {
+                let slot = read_u16_operand(operand).map_err(JsError::new)? as usize;
+                let has_more = forin_advance(frame, -1)?;
+                if let Some(key) = has_more {
+                    let v = JsValue::String(Rc::new(key));
+                    if slot < frame.args.len() {
+                        frame.args[slot] = v.clone();
+                    }
+                    if let Some(name) = nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Argument, slot) {
+                        frame.scope.borrow_mut().set_own(&name, v);
+                    }
+                    frame.stack.push(JsValue::Bool(true));
+                } else {
+                    frame.stack.push(JsValue::Bool(false));
+                }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Forprop => {
+                let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
+                let name = atom_string(&frame.atoms, idx)?;
+                // Stack: [..., iter_slot, obj_being_iterated, target_lval]
+                let target = pop(frame)?;
+                let has_more = forin_advance(frame, -1)?;
+                if let Some(key) = has_more {
+                    set_property(&target, &name, JsValue::String(Rc::new(key)))?;
+                    frame.stack.push(JsValue::Bool(true));
+                } else {
+                    frame.stack.push(JsValue::Bool(false));
+                }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Forelem => {
+                // Indexed-target form: FORELEM pushes the next key onto the
+                // stack, then pushes the has_more boolean. The actual
+                // assignment to target[index] is performed by a subsequent
+                // ENUMELEM op that pops [value=key, target, index] and does
+                // `target[index] = value`.
+                let has_more = forin_advance(frame, -1)?;
+                if let Some(key) = has_more {
+                    frame.stack.push(JsValue::String(Rc::new(key)));
+                    frame.stack.push(JsValue::Bool(true));
+                } else {
+                    frame.stack.push(JsValue::Bool(false));
+                }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Enumelem => {
+                // Stack: [..., value, target_obj, key_index]
+                // Performs `target_obj[key_index] = value` and pops all three.
+                let key_v = pop(frame)?;
+                let target = pop(frame)?;
+                let value = pop(frame)?;
+                let key = key_v.to_string();
+                set_property(&target, &key, value)?;
+                Ok(StepOutcome::Continue)
+            }
 
             // ===== Stack reset / misc =====
             JsOp::Setconst => {
@@ -1175,7 +1350,10 @@ impl JsRuntime {
                 let atom = frame.atoms.get(idx).cloned()
                     .ok_or_else(|| JsError::new("Object atom oob"))?;
                 let v = match atom {
-                    JsAtom::Function(fa) => JsValue::Function(Rc::new(JsFunction { atom: Rc::new((*fa).clone()) })),
+                    JsAtom::Function(fa) => JsValue::Function(Rc::new(JsFunction {
+                        atom: Rc::new((*fa).clone()),
+                        captured_scope: Some(frame.scope.clone()),
+                    })),
                     _ => JsValue::Object(Rc::new(RefCell::new(JsObject::new()))),
                 };
                 frame.stack.push(v);
@@ -1238,6 +1416,58 @@ impl JsRuntime {
 }
 
 fn byte_of(op: JsOp) -> u8 { op as u8 }
+
+/// Step the for-in iterator that sits underneath the object being
+/// iterated. `obj_at` is the negative stack index of the object
+/// (typically -1, but -2 for FORPROP where a target lval sits on top).
+///
+/// Returns `Some(next_key)` when a key was produced, `None` when the
+/// iterator is exhausted. On first call (iter slot is Undefined), it
+/// snapshots the object's keys and installs a JsValue::Iterator at
+/// `obj_at - 1` for subsequent calls.
+fn forin_advance(frame: &mut JsFrame, obj_at: isize) -> Result<Option<String>, JsError> {
+    let n = frame.stack.len();
+    let obj_idx = (n as isize + obj_at) as usize;
+    let iter_idx = obj_idx.checked_sub(1)
+        .ok_or_else(|| JsError::new("for-in: missing iter slot under object"))?;
+
+    // First-call init: snapshot keys from the object and install an iterator
+    // in the slot underneath. Subsequent calls just advance the existing one.
+    let iter_ref = match &frame.stack[iter_idx] {
+        JsValue::Iterator(it) => it.clone(),
+        JsValue::Undefined => {
+            let new_iter = match &frame.stack[obj_idx] {
+                JsValue::Object(obj_ref) => {
+                    super::value::JsIterator::from_object(&obj_ref.borrow())
+                }
+                JsValue::Array(arr_ref) => {
+                    super::value::JsIterator::from_array(&arr_ref.borrow())
+                }
+                JsValue::Null | JsValue::Undefined => {
+                    // ECMA: for-in over null/undefined enumerates nothing.
+                    super::value::JsIterator::default()
+                }
+                _ => {
+                    // Primitives: treat as empty (matches "no enumerable
+                    // own properties on Number / Boolean / String wrappers"
+                    // for our purposes). Spec is more nuanced for strings,
+                    // but Director movies never iterate primitives.
+                    super::value::JsIterator::default()
+                }
+            };
+            let r = Rc::new(RefCell::new(new_iter));
+            frame.stack[iter_idx] = JsValue::Iterator(r.clone());
+            r
+        }
+        other => {
+            return Err(JsError::new(format!(
+                "for-in: iter slot holds unexpected {:?}", other
+            )));
+        }
+    };
+
+    Ok(iter_ref.borrow_mut().next_key())
+}
 
 /// Look up the binding name at a given slot index for a particular kind
 /// (Argument / Variable / Constant). Returns None if the slot is past the
@@ -1511,7 +1741,79 @@ fn compare(a: &JsValue, b: &JsValue) -> std::cmp::Ordering {
 #[cfg(test)]
 pub fn get_property_pub(obj: &JsValue, name: &str) -> JsValue { get_property(obj, name) }
 
+/// Bridge from a `JsValue::DirectorRef` property read to Director's own
+/// sprite / cast-member handlers. Returns Undefined on any error so the
+/// JS side sees Lingo's "VOID on missing prop" behaviour rather than
+/// throwing -- matches what `sprite(N).noSuchProp` does in real Director.
+fn director_ref_get_property(kind: &super::value::DirectorRefKind, name: &str) -> JsValue {
+    use super::value::DirectorRefKind;
+    crate::player::reserve_player_mut(|player| {
+        let datum_opt = match kind {
+            DirectorRefKind::Sprite(channel) => {
+                crate::player::score::sprite_get_prop(player, *channel, name).ok()
+            }
+            DirectorRefKind::Member { cast_lib, cast_member } => {
+                let mref = crate::player::cast_lib::CastMemberRef {
+                    cast_lib: *cast_lib,
+                    cast_member: *cast_member,
+                };
+                use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
+                CastMemberRefHandlers::get_prop(player, &mref, name).ok()
+            }
+        };
+        match datum_opt {
+            Some(d) => {
+                let dref = player.alloc_datum(d);
+                super::super::js_lingo_loader::datum_ref_to_js_value(player, &dref)
+            }
+            None => JsValue::Undefined,
+        }
+    })
+}
+
+/// Bridge from a `JsValue::DirectorRef` property write to Director's own
+/// sprite / cast-member setters. Errors propagate as JsError so movie code
+/// that assigns an invalid value can `catch` it.
+fn director_ref_set_property(
+    kind: &super::value::DirectorRefKind,
+    name: &str,
+    value: JsValue,
+) -> Result<(), JsError> {
+    use super::value::DirectorRefKind;
+    let datum = crate::player::reserve_player_mut(|player| {
+        let dref = super::super::js_lingo_loader::js_value_to_datum_ref(player, &value);
+        player.get_datum(&dref).clone()
+    });
+    match kind {
+        DirectorRefKind::Sprite(channel) => {
+            crate::player::score::sprite_set_prop(*channel, name, datum)
+                .map_err(|e| JsError::new(format!("sprite({}).{} = ...: {}", channel, name, e.message)))
+        }
+        DirectorRefKind::Member { cast_lib, cast_member } => {
+            let mref = crate::player::cast_lib::CastMemberRef {
+                cast_lib: *cast_lib,
+                cast_member: *cast_member,
+            };
+            use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
+            CastMemberRefHandlers::set_prop(&mref, name, datum).map_err(|e| {
+                JsError::new(format!(
+                    "member({} of castLib {}).{} = ...: {}",
+                    cast_member, cast_lib, name, e.message
+                ))
+            })
+        }
+    }
+}
+
 fn get_property(obj: &JsValue, name: &str) -> JsValue {
+    // Live Director refs: route property reads through the same path the
+    // Lingo VM uses, so `sprite(3).locH` returns the channel's current
+    // x-coordinate (and any prior writes are visible). Falls back to
+    // Undefined on errors (out-of-range channel, unknown property, etc.)
+    // -- matches Lingo's "VOID on missing prop" behaviour.
+    if let JsValue::DirectorRef(kind) = obj {
+        return director_ref_get_property(kind, name);
+    }
     match obj {
         JsValue::Object(o) => {
             let b = o.borrow();
@@ -1799,6 +2101,9 @@ fn loose_equal_pub(a: &JsValue, b: &JsValue) -> bool {
 }
 
 fn set_property(obj: &JsValue, name: &str, value: JsValue) -> Result<(), JsError> {
+    if let JsValue::DirectorRef(kind) = obj {
+        return director_ref_set_property(kind, name, value);
+    }
     match obj {
         JsValue::Object(o) => { o.borrow_mut().set_own(name, value); Ok(()) }
         JsValue::Array(a) => {
@@ -1955,7 +2260,10 @@ fn atom_to_value(atoms: &[JsAtom], idx: usize) -> Result<JsValue, JsError> {
         JsAtom::Int(i) => JsValue::Int(*i),
         JsAtom::Double(d) => JsValue::Number(*d),
         JsAtom::String(s) => JsValue::String(Rc::new(s.clone())),
-        JsAtom::Function(fa) => JsValue::Function(Rc::new(JsFunction { atom: Rc::new((**fa).clone()) })),
+        JsAtom::Function(fa) => JsValue::Function(Rc::new(JsFunction {
+            atom: Rc::new((**fa).clone()),
+            captured_scope: None,
+        })),
         JsAtom::Unsupported(_) => JsValue::Undefined,
     })
 }
@@ -2014,18 +2322,60 @@ fn build_function_frame(
 
     let atom_to_slot = build_atom_slot_map(&atom.script.atoms, &atom.bindings);
 
+    // Closure scope chain: prefer the lexical scope captured when this
+    // JsFunction value was created. If the captured scope's own `proto`
+    // link isn't yet wired to the program scope, splice it now so NAME
+    // lookups can still reach top-level globals from inside the inner
+    // function. Functions without a captured scope (top-level hoists,
+    // atom-table materialisations) fall back to the program scope
+    // directly, matching pre-closure behaviour.
+    let parent_scope = match f.captured_scope.clone() {
+        Some(captured) => {
+            let needs_link = {
+                let mut walk = Some(captured.clone());
+                let mut found_program = false;
+                while let Some(s) = walk {
+                    if Rc::ptr_eq(&s, &program_scope) { found_program = true; break; }
+                    let next = s.borrow().proto.clone();
+                    walk = next;
+                }
+                !found_program
+            };
+            if needs_link {
+                // Splice the program scope onto the chain's tail so global
+                // names stay reachable. Find the chain's last link and
+                // attach `program_scope` as its proto. (Do not overwrite
+                // a non-null proto -- another captured scope owns it.)
+                let mut tail = captured.clone();
+                loop {
+                    let next = tail.borrow().proto.clone();
+                    match next {
+                        Some(n) => tail = n,
+                        None => break,
+                    }
+                }
+                if !Rc::ptr_eq(&tail, &program_scope) {
+                    tail.borrow_mut().proto = Some(program_scope.clone());
+                }
+            }
+            Some(captured)
+        }
+        None => Some(program_scope),
+    };
+
     JsFrame {
         bytecode: Rc::new(atom.script.bytecode.clone()),
         atoms: Rc::new(atom.script.atoms.clone()),
         args,
         locals,
         scope: scope_ref,
-        parent_scope: Some(program_scope),
+        parent_scope,
         this_value,
         pc: 0,
         stack: Vec::new(),
         rval: JsValue::Undefined,
         atom_to_slot,
+        try_notes_ptr: Rc::new(atom.script.try_notes.clone()),
     }
 }
 

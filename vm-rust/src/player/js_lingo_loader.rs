@@ -102,22 +102,24 @@ fn register_runtime(member_ref: &CastMemberRef, ir: JsScriptIR) {
                     JsValue::Null => vars.push((k.clone(), "null".into())),
                     JsValue::Array(a) => vars.push((k.clone(), format!("[len {}]", a.borrow().items.len()))),
                     JsValue::Object(_) => vars.push((k.clone(), "[object]".into())),
+                    JsValue::Iterator(_) => vars.push((k.clone(), "[for-in iter]".into())),
+                    JsValue::DirectorRef(r) => vars.push((k.clone(), format!("{:?}", r))),
                 }
             }
-            web_sys::console::log_1(&format!(
+            log::debug!(
                 "[js-lingo] {}:{} program init OK — {} functions, {} non-function globals",
                 member_ref.cast_lib, member_ref.cast_member, fns.len(), vars.len()
-            ).into());
-            web_sys::console::log_1(&format!("[js-lingo]   functions: {}", fns.join(", ")).into());
+            );
+            log::debug!("[js-lingo]   functions: {}", fns.join(", "));
             for (k, v) in &vars {
-                web_sys::console::log_1(&format!("[js-lingo]   var {} = {}", k, v).into());
+                log::debug!("[js-lingo]   var {} = {}", k, v);
             }
         }
         Err(e) => {
-            web_sys::console::warn_1(&format!(
+            log::warn!(
                 "[js-lingo] {}:{} program init FAILED: {}",
                 member_ref.cast_lib, member_ref.cast_member, e
-            ).into());
+            );
         }
     }
     JS_RUNTIMES.with(|m| {
@@ -198,10 +200,10 @@ pub fn try_invoke_js_handler(
         .map(|v| format!("{:?}", v))
         .collect::<Vec<_>>()
         .join(", ");
-    web_sys::console::log_1(&format!(
+    log::debug!(
         "[js-call v3 me={}] {}:{}::{}({})",
         me_prepended, script_member_ref.cast_lib, script_member_ref.cast_member, handler_name, arg_summary
-    ).into());
+    );
 
     // Director's JS-Lingo treats the calling script as `this` for method
     // calls. Pass the runtime's global object so `this.helper(...)` inside
@@ -223,17 +225,28 @@ struct PlayerBridge;
 impl JsHostBridge for PlayerBridge {
     fn trace(&mut self, args: &[JsValue]) {
         let line = args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
-        web_sys::console::log_1(&format!("[js-trace] {}", line).into());
         log::info!("[js-trace] {}", line);
     }
-    fn sprite(&mut self, _channel: i32) -> JsValue {
-        // Phase 5 stub: full sprite proxy lands when the property-access
-        // bridge is generalised. For now return a plain Object so writes
-        // succeed (writes are absorbed; no live effect on the sprite yet).
-        JsValue::Undefined
+    fn sprite(&mut self, channel: i32) -> JsValue {
+        // Phase 6.4: live sprite proxy. Property reads / writes routed via
+        // get_property / set_property in the interpreter round-trip through
+        // sprite_get_prop / sprite_set_prop, so `sprite(3).locH = 100`
+        // actually moves the sprite on stage.
+        JsValue::DirectorRef(crate::player::js_lingo::value::DirectorRefKind::Sprite(channel as i16))
     }
-    fn member(&mut self, _args: &[JsValue]) -> JsValue {
-        JsValue::Undefined
+    fn member(&mut self, args: &[JsValue]) -> JsValue {
+        // member(memberNameOrNum {, castNameOrNum}). The Lingo VM's
+        // existing "member" handler accepts the same shape and resolves
+        // the name to a CastMemberRef -- route through it so we get
+        // consistent name/number/cast-lib resolution, then wrap the
+        // resulting Datum back as a DirectorRef.
+        let datum_args: Vec<DatumRef> = reserve_player_mut(|player| {
+            args.iter().map(|v| js_value_to_datum_ref(player, v)).collect()
+        });
+        match crate::player::handlers::manager::BuiltInHandlerManager::call_handler("member", &datum_args) {
+            Ok(dref) => reserve_player_mut(|player| datum_ref_to_js_value(player, &dref)),
+            Err(_) => JsValue::Undefined,
+        }
     }
 
     /// Fall-through for anything else the JS script tries to invoke as a
@@ -265,7 +278,7 @@ impl JsHostBridge for PlayerBridge {
 /// become Objects (lossy because Lingo prop-lists are case-insensitive).
 /// References (Sprite, Member, etc.) wrap into JsObjects tagged with
 /// the original Datum string form so reads still see something useful.
-fn datum_ref_to_js_value(player: &mut crate::player::DirPlayer, dref: &DatumRef) -> JsValue {
+pub fn datum_ref_to_js_value(player: &mut crate::player::DirPlayer, dref: &DatumRef) -> JsValue {
     let d = player.allocator.get_datum(dref).clone();
     match d {
         Datum::Int(i) => JsValue::Int(i),
@@ -287,6 +300,19 @@ fn datum_ref_to_js_value(player: &mut crate::player::DirPlayer, dref: &DatumRef)
             JsValue::Object(Rc::new(RefCell::new(obj)))
         }
         Datum::ScriptRef(member_ref) => script_ref_to_js_proxy(member_ref),
+        // Live Director-owned references. Property reads/writes round-trip
+        // through datum_handlers via get_property / set_property in the
+        // interpreter, so `sprite(3).locH = 100` actually moves the sprite
+        // and reads back the new value.
+        Datum::SpriteRef(n) => JsValue::DirectorRef(
+            crate::player::js_lingo::value::DirectorRefKind::Sprite(n),
+        ),
+        Datum::CastMember(mref) => JsValue::DirectorRef(
+            crate::player::js_lingo::value::DirectorRefKind::Member {
+                cast_lib: mref.cast_lib,
+                cast_member: mref.cast_member,
+            },
+        ),
         _ => {
             // Coarse fallback: stringify via the existing formatter so refs
             // like `(member 3 of castLib 1)` keep their readable form.
@@ -380,7 +406,7 @@ fn datum_ref_to_string(player: &mut crate::player::DirPlayer, dref: &DatumRef) -
 }
 
 /// Convert a JsValue back into a DatumRef so the Lingo VM can consume it.
-fn js_value_to_datum_ref(player: &mut crate::player::DirPlayer, v: &JsValue) -> DatumRef {
+pub fn js_value_to_datum_ref(player: &mut crate::player::DirPlayer, v: &JsValue) -> DatumRef {
     let datum = match v {
         JsValue::Undefined => Datum::Void,
         JsValue::Null => Datum::Null,
@@ -412,6 +438,19 @@ fn js_value_to_datum_ref(player: &mut crate::player::DirPlayer, v: &JsValue) -> 
             Datum::PropList(pairs, false)
         }
         JsValue::Function(_) | JsValue::Native(_) => Datum::String("[Function]".to_string()),
+        JsValue::Iterator(_) => Datum::String("[for-in iter]".to_string()),
+        JsValue::DirectorRef(k) => {
+            use crate::player::js_lingo::value::DirectorRefKind;
+            match k {
+                DirectorRefKind::Sprite(n) => Datum::SpriteRef(*n),
+                DirectorRefKind::Member { cast_lib, cast_member } => {
+                    Datum::CastMember(crate::player::cast_lib::CastMemberRef {
+                        cast_lib: *cast_lib,
+                        cast_member: *cast_member,
+                    })
+                }
+            }
+        }
     };
     player.allocator.alloc_datum(datum).unwrap()
 }
