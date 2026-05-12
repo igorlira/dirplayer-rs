@@ -78,8 +78,47 @@ fn register_runtime(member_ref: &CastMemberRef, ir: JsScriptIR) {
 
     // Run the program once to hoist globals and execute initialisers.
     let ir = Rc::new(ir);
-    if let Err(e) = runtime.borrow_mut().run_program(&ir) {
-        log::warn!("[js-lingo] {}:{} program init failed: {}", member_ref.cast_lib, member_ref.cast_member, e);
+    // The temporary `runtime.borrow_mut()` for `.run_program(...)` outlives
+    // the match's RHS in Rust 2021; binding the result first ends the
+    // mutable borrow before we re-borrow as immutable below.
+    let init_result = runtime.borrow_mut().run_program(&ir);
+    match init_result {
+        Ok(_) => {
+            let rt = runtime.borrow();
+            let g = rt.global.borrow();
+            let mut fns: Vec<&str> = Vec::new();
+            let mut vars: Vec<(String, String)> = Vec::new();
+            for (k, v) in &g.props {
+                match v {
+                    JsValue::Function(_) | JsValue::Native(_) => fns.push(k.as_str()),
+                    JsValue::Undefined => vars.push((k.clone(), "undefined".into())),
+                    JsValue::String(s) => {
+                        let preview = if s.len() > 60 { format!("{}...", &s[..60]) } else { (**s).clone() };
+                        vars.push((k.clone(), format!("{:?}", preview)));
+                    }
+                    JsValue::Int(i) => vars.push((k.clone(), i.to_string())),
+                    JsValue::Number(n) => vars.push((k.clone(), n.to_string())),
+                    JsValue::Bool(b) => vars.push((k.clone(), b.to_string())),
+                    JsValue::Null => vars.push((k.clone(), "null".into())),
+                    JsValue::Array(a) => vars.push((k.clone(), format!("[len {}]", a.borrow().items.len()))),
+                    JsValue::Object(_) => vars.push((k.clone(), "[object]".into())),
+                }
+            }
+            web_sys::console::log_1(&format!(
+                "[js-lingo] {}:{} program init OK — {} functions, {} non-function globals",
+                member_ref.cast_lib, member_ref.cast_member, fns.len(), vars.len()
+            ).into());
+            web_sys::console::log_1(&format!("[js-lingo]   functions: {}", fns.join(", ")).into());
+            for (k, v) in &vars {
+                web_sys::console::log_1(&format!("[js-lingo]   var {} = {}", k, v).into());
+            }
+        }
+        Err(e) => {
+            web_sys::console::warn_1(&format!(
+                "[js-lingo] {}:{} program init FAILED: {}",
+                member_ref.cast_lib, member_ref.cast_member, e
+            ).into());
+        }
     }
     JS_RUNTIMES.with(|m| {
         m.borrow_mut().insert(member_ref.clone(), runtime);
@@ -87,7 +126,10 @@ fn register_runtime(member_ref: &CastMemberRef, ir: JsScriptIR) {
 }
 
 /// Hook called from `player_call_script_handler_raw_args` before the
-/// existing Lingo handler lookup. Returns:
+/// existing Lingo handler lookup. `receiver` is the Script instance that
+/// owns the handler (Director's `me`): when set, it's prepended to the
+/// arg list as JS arg0, matching the calling convention SpiderMonkey
+/// emits for `script(X).handler(a, b)` -> `handler(me, a, b)`. Returns:
 /// - `Some(Ok(datum))` — JS handler ran successfully, here's the return value.
 /// - `Some(Err(msg))` — JS handler exists but threw.
 /// - `None` — no JS handler for this script/name; fall back to Lingo.
@@ -95,6 +137,7 @@ pub fn try_invoke_js_handler(
     script_member_ref: &CastMemberRef,
     handler_name: &str,
     args: &[DatumRef],
+    has_receiver: bool,
 ) -> Option<Result<DatumRef, String>> {
     let runtime_opt = JS_RUNTIMES.with(|m| m.borrow().get(script_member_ref).cloned());
     let runtime = runtime_opt?;
@@ -108,12 +151,65 @@ pub fn try_invoke_js_handler(
         return None;
     }
 
-    // Convert args.
-    let js_args: Vec<JsValue> = reserve_player_mut(|player| {
+    // Convert args. When the call is a method on a Script object (Director's
+    // `script(X).handler(...)` syntax), Lingo bytecode reserves slot 0 for
+    // the script instance (`me`) and starts user args at slot 1. The JS
+    // SpiderMonkey emitter reads `getarg 1` / `getarg 2` for the first/second
+    // user arg, so we must prepend a `me`-equivalent value here.
+    //
+    // The upstream `receiver` Option isn't reliable for all dispatch paths:
+    // event scripts have receiver=None and JS function declares 0 args, and
+    // `script(X).method()` paths sometimes also arrive with receiver=None
+    // because of how the Lingo VM constructs the dispatch. As a precise
+    // fallback we look at the JS function's declared `nargs`: if it's
+    // exactly one more than we supply, the function expected a `me` slot
+    // and we synthesise one. Strictly-matching arity (the common case) is
+    // left alone.
+    let mut js_args: Vec<JsValue> = reserve_player_mut(|player| {
         args.iter().map(|d| datum_ref_to_js_value(player, d)).collect()
     });
+    // Prepend the `me` slot IFF the JS function's first parameter is named
+    // like a receiver (`me`, `mee`, `self`, `_me`, `this_`, `_self`). This
+    // is regardless of how Lingo dispatched -- the function declaration is
+    // the ground truth. Director's JS-Lingo convention is `me` as the
+    // first param when the function is intended as a script method; Habbo
+    // movies use `mee` variant.
+    let mut me_prepended = false;
+    if let JsValue::Function(f) = &callee {
+        let first_arg_is_me = f
+            .atom
+            .bindings
+            .iter()
+            .find(|b| b.kind == super::js_lingo::xdr::JsBindingKind::Argument)
+            .map(|b| {
+                let n = b.name.to_lowercase();
+                n == "me" || n == "mee" || n == "self" || n == "_me" || n == "this_" || n == "_self"
+            })
+            .unwrap_or(false);
+        if first_arg_is_me {
+            js_args.insert(0, JsValue::Undefined);
+            me_prepended = true;
+        }
+    }
+    let _ = has_receiver;
 
-    let result = runtime.borrow_mut().invoke(&callee, js_args, JsValue::Undefined);
+    let arg_summary = js_args
+        .iter()
+        .map(|v| format!("{:?}", v))
+        .collect::<Vec<_>>()
+        .join(", ");
+    web_sys::console::log_1(&format!(
+        "[js-call v3 me={}] {}:{}::{}({})",
+        me_prepended, script_member_ref.cast_lib, script_member_ref.cast_member, handler_name, arg_summary
+    ).into());
+
+    // Director's JS-Lingo treats the calling script as `this` for method
+    // calls. Pass the runtime's global object so `this.helper(...)` inside
+    // a handler resolves to sibling top-level functions in the same script
+    // (Habbo's BigInt port relies on this pattern heavily).
+    let this_value = JsValue::Object(runtime.borrow().global.clone());
+
+    let result = runtime.borrow_mut().invoke(&callee, js_args, this_value);
     Some(match result {
         Ok(v) => Ok(reserve_player_mut(|player| js_value_to_datum_ref(player, &v))),
         Err(e) => Err(e.message),
@@ -190,6 +286,7 @@ fn datum_ref_to_js_value(player: &mut crate::player::DirPlayer, dref: &DatumRef)
             }
             JsValue::Object(Rc::new(RefCell::new(obj)))
         }
+        Datum::ScriptRef(member_ref) => script_ref_to_js_proxy(member_ref),
         _ => {
             // Coarse fallback: stringify via the existing formatter so refs
             // like `(member 3 of castLib 1)` keep their readable form.
@@ -197,6 +294,79 @@ fn datum_ref_to_js_value(player: &mut crate::player::DirPlayer, dref: &DatumRef)
             JsValue::String(Rc::new(s))
         }
     }
+}
+
+/// Wrap a `Datum::ScriptRef` as a JsObject that re-exposes the target
+/// script's JS-Lingo handlers as callable Natives. Lets JS code do
+/// `script("X").method(args)` and have it dispatch back into the right
+/// runtime via try_invoke_js_handler.
+fn script_ref_to_js_proxy(member_ref: CastMemberRef) -> JsValue {
+    use crate::player::js_lingo::value::{JsObject, NativeFn};
+    let mut obj = JsObject::new();
+    obj.class_name = "ScriptRef";
+    // Mirror the script-ref coordinates so the proxy round-trips back to a
+    // DatumRef when JS hands it to another Lingo builtin.
+    obj.set_own("__script_lib__", JsValue::Int(member_ref.cast_lib));
+    obj.set_own("__script_member__", JsValue::Int(member_ref.cast_member));
+
+    // If the target script has a JS-Lingo runtime registered, enumerate its
+    // top-level handlers and bind each as a Native that dispatches back
+    // through try_invoke_js_handler. This is what enables
+    // `script("X").method(...)` from JS code.
+    let runtime_opt = JS_RUNTIMES.with(|m| m.borrow().get(&member_ref).cloned());
+    if let Some(runtime) = runtime_opt {
+        let handler_names: Vec<String> = {
+            let rt = runtime.borrow();
+            let g = rt.global.borrow();
+            g.props
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    JsValue::Function(_) | JsValue::Native(_) => Some(k.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        for name in handler_names {
+            let ref_clone = member_ref.clone();
+            let name_owned = name.clone();
+            let native = NativeFn {
+                name: "<script_method>",
+                call: Box::new(move |args| invoke_script_method(&ref_clone, &name_owned, args)),
+            };
+            obj.set_own(&name, JsValue::Native(Rc::new(native)));
+        }
+    }
+    JsValue::Object(Rc::new(RefCell::new(obj)))
+}
+
+/// Synchronous dispatch of a JS handler from within JS code. Bridges the
+/// args back to DatumRefs, routes through try_invoke_js_handler, converts
+/// the return value.
+fn invoke_script_method(
+    member_ref: &CastMemberRef,
+    handler_name: &str,
+    args: &[JsValue],
+) -> Result<JsValue, JsError> {
+    let datum_args: Vec<DatumRef> = reserve_player_mut(|player| {
+        args.iter().map(|v| js_value_to_datum_ref_from_jsvalue(player, v)).collect()
+    });
+    match try_invoke_js_handler(member_ref, handler_name, &datum_args, true) {
+        Some(Ok(dref)) => {
+            let v = reserve_player_mut(|player| datum_ref_to_js_value(player, &dref));
+            Ok(v)
+        }
+        Some(Err(msg)) => Err(JsError::new(format!("{}: {}", handler_name, msg))),
+        None => Err(JsError::new(format!(
+            "script handler {} not found on {}:{}",
+            handler_name, member_ref.cast_lib, member_ref.cast_member
+        ))),
+    }
+}
+
+/// Wrapper around `js_value_to_datum_ref` to break the existing function's
+/// recursion (it's already defined further down).
+fn js_value_to_datum_ref_from_jsvalue(player: &mut crate::player::DirPlayer, v: &JsValue) -> DatumRef {
+    js_value_to_datum_ref(player, v)
 }
 
 fn datum_ref_to_string(player: &mut crate::player::DirPlayer, dref: &DatumRef) -> String {
