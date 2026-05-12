@@ -1479,19 +1479,21 @@ impl JsApi {
         return sprite_map;
     }
 
-    /// Emit one synthetic "handler" entry per JS function in `ir`. Walks
-    /// nested function atoms so users can drill into closures declared
-    /// inside other handlers. The top-level program body itself is not
-    /// surfaced as a handler — Director JS files use it only to hoist var
-    /// declarations and run trivial initialisers, which would only clutter
-    /// the cast inspector. (Users who want to see it can read the disasm
-    /// in the dev console instead.)
+    /// Emit one synthetic "handler" entry per JS function in `ir`. The
+    /// top-level program body is also emitted (under the name "(toplevel)")
+    /// because it carries the script's var initializers and any
+    /// non-function top-level statements — important for diagnosing
+    /// missing-constant bugs (bi_bpe, bi_mask, etc.).
     fn push_js_handlers(
         ir: &crate::player::js_lingo::JsScriptIR,
         path_prefix: &str,
         out: &js_sys::Array,
     ) {
         use crate::player::js_lingo::xdr::JsAtom;
+
+        if path_prefix.is_empty() {
+            Self::push_one_js_handler(ir, "(toplevel)", &[], out);
+        }
 
         for atom in &ir.atoms {
             if let JsAtom::Function(fa) = atom {

@@ -71,7 +71,20 @@ pub struct JsRuntime {
     /// Director runtime bridge. Held behind RefCell so Native closures can
     /// borrow it mutably during a call (single-threaded — no contention).
     pub bridge: std::rc::Rc<std::cell::RefCell<dyn super::host_bridge::JsHostBridge>>,
+    /// Current call depth. Frames push and pop this around invoke() so we
+    /// can refuse runaway recursion before the actual Rust stack overflows.
+    call_depth: std::cell::Cell<u32>,
+    /// Instruction budget shared across an entire host-level invocation
+    /// (run_program or call_function). When zero, the dispatch loop bails
+    /// out with an error rather than freezing the browser.
+    instruction_budget: std::cell::Cell<u64>,
 }
+
+/// Hard limits that mirror Director's runtime constraints loosely. Big-enough
+/// to run real movies; small-enough that a runaway loop in a JS handler
+/// surfaces as a clear error instead of a hung tab.
+const MAX_CALL_DEPTH: u32 = 256;
+const MAX_INSTRUCTIONS_PER_INVOCATION: u64 = 50_000_000;
 
 impl JsRuntime {
     /// New runtime with the ECMA-262 stdlib (Math, parseInt, etc.) installed.
@@ -85,15 +98,33 @@ impl JsRuntime {
         let rt = JsRuntime {
             global: Rc::new(RefCell::new(JsObject::new())),
             bridge: std::rc::Rc::new(std::cell::RefCell::new(super::host_bridge::StubBridge)),
+            call_depth: std::cell::Cell::new(0),
+            instruction_budget: std::cell::Cell::new(MAX_INSTRUCTIONS_PER_INVOCATION),
         };
         // Built-in constructors: NAME "Array"/"Object" needs to resolve to
         // something at script load. The values themselves don't need to be
         // callable for array/object literal compilation -- NEWINIT does the
         // real work -- but they must exist so NAME doesn't error.
         rt.define_native("Array", |args| {
+            // JS Array constructor semantics:
+            //   new Array()          -> []
+            //   new Array(n)         -> length-n array of undefined (n must
+            //                            be a non-negative integer)
+            //   new Array(a, b, c)   -> [a, b, c]
             let arr = Rc::new(RefCell::new(JsArray::new()));
-            for (i, v) in args.iter().enumerate() {
-                arr.borrow_mut().items.insert(i, v.clone());
+            if args.len() == 1 {
+                let len_hint = match &args[0] {
+                    JsValue::Int(i) if *i >= 0 => Some(*i as usize),
+                    JsValue::Number(n) if *n >= 0.0 && *n == n.trunc() && n.is_finite() => Some(*n as usize),
+                    _ => None,
+                };
+                if let Some(n) = len_hint {
+                    arr.borrow_mut().items.resize(n, JsValue::Undefined);
+                    return Ok(JsValue::Array(arr));
+                }
+            }
+            for v in args {
+                arr.borrow_mut().items.push(v.clone());
             }
             Ok(JsValue::Array(arr))
         });
@@ -161,6 +192,7 @@ impl JsRuntime {
     /// hoisted into the global object so they can be looked up as functions
     /// later via NAME atom_idx.
     pub fn run_program(&mut self, ir: &Rc<JsScriptIR>) -> Result<JsValue, JsError> {
+        self.reset_invocation_budget();
         let frame = self.build_program_frame(ir);
         self.run_frame(frame)
     }
@@ -174,8 +206,14 @@ impl JsRuntime {
         args: Vec<JsValue>,
         this_value: JsValue,
     ) -> Result<JsValue, JsError> {
+        self.reset_invocation_budget();
         let frame = build_function_frame(f, args, this_value, self.global.clone());
         self.run_frame(frame)
+    }
+
+    fn reset_invocation_budget(&self) {
+        self.instruction_budget.set(MAX_INSTRUCTIONS_PER_INVOCATION);
+        self.call_depth.set(0);
     }
 
     fn build_program_frame(&self, ir: &Rc<JsScriptIR>) -> JsFrame {
@@ -211,6 +249,18 @@ impl JsRuntime {
     /// new frame — implemented inline so we don't need a true frame stack.
     fn run_frame(&mut self, mut frame: JsFrame) -> Result<JsValue, JsError> {
         loop {
+            // Instruction budget: a runaway loop in JS otherwise freezes the
+            // wasm thread with no clue why. Decrement each step; abort cleanly
+            // when the per-invocation quota is exhausted.
+            let remaining = self.instruction_budget.get();
+            if remaining == 0 {
+                return Err(JsError::new(format!(
+                    "execution limit exceeded after {} instructions — likely infinite loop",
+                    MAX_INSTRUCTIONS_PER_INVOCATION
+                )));
+            }
+            self.instruction_budget.set(remaining - 1);
+
             let pc = frame.pc;
             if pc >= frame.bytecode.len() {
                 return Ok(std::mem::replace(&mut frame.rval, JsValue::Undefined));
@@ -275,8 +325,28 @@ impl JsRuntime {
                 frame.rval = v;
                 Ok(StepOutcome::Continue)
             }
-            JsOp::Retrval => Ok(StepOutcome::Return(std::mem::replace(&mut frame.rval, JsValue::Undefined))),
-            JsOp::Return => Ok(StepOutcome::Return(pop(frame)?)),
+            JsOp::Retrval => {
+                if frame.parent_scope.is_none() {
+                    // Top-level RETRVAL: don't abort the script init.
+                    return Ok(StepOutcome::Continue);
+                }
+                Ok(StepOutcome::Return(std::mem::replace(&mut frame.rval, JsValue::Undefined)))
+            }
+            JsOp::Return => {
+                // SpiderMonkey 1.5 normally aborts the script on top-level
+                // RETURN, but Director's port of leemon BigInt relies on
+                // top-level `return` being treated like an expression
+                // statement -- it stashes the value as the script's return
+                // value and CONTINUES executing so the rest of the
+                // initialisers run. We mirror that: at the top-level frame
+                // (no parent scope), promote RETURN to SETRVAL.
+                if frame.parent_scope.is_none() {
+                    let v = pop(frame)?;
+                    frame.rval = v;
+                    return Ok(StepOutcome::Continue);
+                }
+                Ok(StepOutcome::Return(pop(frame)?))
+            }
 
             // ===== Constant pushes =====
             JsOp::Push => { frame.stack.push(JsValue::Undefined); Ok(StepOutcome::Continue) }
@@ -486,11 +556,18 @@ impl JsRuntime {
                 Ok(StepOutcome::Continue)
             }
             JsOp::Bindname => {
-                // SpiderMonkey pushes an LVALUE object onto the stack. We push
-                // a marker (Object) — the matching SETNAME does the real bind.
-                // For our purposes BINDNAME is a no-op since SETNAME has the
-                // atom index directly.
-                frame.stack.push(JsValue::Undefined);
+                // SpiderMonkey BINDNAME pushes the scope OBJECT that contains
+                // `name` so a subsequent GETPROP / SETPROP / SETNAME knows
+                // where to read / write. Director's BigInt port emits
+                // `BINDNAME bi_bpe; BINDNAME bi_bpe; GETPROP bi_bpe; …`
+                // for `bi_bpe = bi_bpe >> 1` -- the inner GETPROP reads the
+                // var THROUGH the scope object. Previously we pushed
+                // `Undefined`, so the GETPROP returned undefined and the
+                // assignment ended up storing 0. Push the program scope
+                // (global object) instead; that's where top-level vars and
+                // function decls live, and store_name walks the chain so
+                // the matching SETNAME still works for nested scopes too.
+                frame.stack.push(JsValue::Object(self.global.clone()));
                 Ok(StepOutcome::Continue)
             }
             JsOp::Setname => {
@@ -622,7 +699,16 @@ impl JsRuntime {
                 args.reverse();
                 let this_value = pop(frame)?;
                 let callee = pop(frame)?;
-                let result = self.invoke(&callee, args, this_value)?;
+                let result = self.invoke(&callee, args, this_value).map_err(|e| {
+                    // Annotate the error with the previous instruction's
+                    // name so users can tell which lookup produced the
+                    // undefined callee. Best-effort: walk back from this
+                    // op's PC and try to identify a NAME / GETPROP / GETELEM.
+                    if e.message.starts_with("not callable") {
+                        let hint = guess_callee_source(&frame.bytecode, &frame.atoms, op_pc);
+                        JsError::new(format!("{} (callee was {})", e.message, hint))
+                    } else { e }
+                })?;
                 frame.stack.push(result);
                 Ok(StepOutcome::Continue)
             }
@@ -1115,18 +1201,126 @@ impl JsRuntime {
         args: Vec<JsValue>,
         this_value: JsValue,
     ) -> Result<JsValue, JsError> {
-        match callee {
+        let depth = self.call_depth.get();
+        if depth >= MAX_CALL_DEPTH {
+            return Err(JsError::new(format!(
+                "call depth {} exceeds limit ({}) — likely infinite recursion",
+                depth, MAX_CALL_DEPTH
+            )));
+        }
+        self.call_depth.set(depth + 1);
+        let result = match callee {
             JsValue::Function(f) => {
                 let frame = build_function_frame(f, args, this_value, self.global.clone());
                 self.run_frame(frame)
             }
             JsValue::Native(f) => (f.call)(&args),
             other => Err(JsError::new(format!("not callable: {:?}", other))),
-        }
+        };
+        self.call_depth.set(depth);
+        result
     }
 }
 
 fn byte_of(op: JsOp) -> u8 { op as u8 }
+
+/// Walk the bytecode forwards from PC=0 to call_pc, tracking stack depth so
+/// we can identify the precise op that produced the callee for the failing
+/// CALL. For `a(b(c))` the naive "most recent lookup" heuristic would pick
+/// the innermost call's args, not the outer callee — this version handles
+/// nesting correctly.
+fn guess_callee_source(bytecode: &[u8], atoms: &[JsAtom], call_pc: usize) -> String {
+    use super::variable_length::read_u16_operand;
+
+    // For each forward-emitted op, remember (offset, op, stack_depth_after).
+    // After we finish walking, look at the entry whose depth_after equals
+    // depth_at_call_pc - argc - 2 + 1 (i.e. the moment the callee push
+    // landed). The op AT that record is the callee producer.
+    let mut history: Vec<(usize, JsOp, i32)> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut scan = 0usize;
+    let mut argc_at_call: u16 = 0;
+    while scan < bytecode.len() {
+        let byte = bytecode[scan];
+        let op = match JsOp::from_byte(byte) { Some(o) => o, None => { scan += 1; continue; } };
+        let info = op.info();
+        let len = if info.length > 0 { info.length as usize } else { 1 };
+        let uses = if info.uses >= 0 {
+            info.uses as i32
+        } else if matches!(op, JsOp::Call | JsOp::New) {
+            if scan + 3 <= bytecode.len() {
+                read_u16_operand(&bytecode[scan + 1..]).unwrap_or(0) as i32 + 2
+            } else { 2 }
+        } else { 0 };
+        let defs = info.defs as i32;
+        depth = depth - uses + defs;
+        history.push((scan, op, depth));
+        if scan == call_pc && matches!(op, JsOp::Call | JsOp::New) {
+            argc_at_call = read_u16_operand(&bytecode[scan + 1..]).unwrap_or(0);
+            break;
+        }
+        scan += len.max(1);
+    }
+
+    // depth_at_call_pc (after) = before_depth - (argc + 2) + 1.
+    // The callee was the value at stack position `before_depth - (argc + 2)`
+    // i.e. the FIRST of the (callee, this, args) trio. Going forward, that
+    // value came from the op whose `depth_after` equals
+    // `depth_at_call_pc - 1 + 1 = depth_at_call_pc`... actually the op that
+    // produced the callee left the stack at depth = base + 1, where base is
+    // the call window's bottom. We want the LATEST entry whose depth equals
+    // `(depth_after_call - 1) + 1 = depth_after_call`. Hmm — the result of
+    // CALL replaces the whole call window with one value, so depth_after_call
+    // equals base + 1. The op that produced the callee also left depth =
+    // base + 1. So search history for the latest record (before call_pc)
+    // whose depth_after == depth_after_call AND is a lookup op.
+    let depth_after_call = history.last().map(|e| e.2).unwrap_or(0);
+    let target_depth = depth_after_call;
+    let _ = argc_at_call;
+
+    // Find the latest lookup op (before call_pc) whose recorded depth_after
+    // equals target_depth.
+    let mut found: Option<(JsOp, usize)> = None;
+    for (off, op, d) in history.iter().rev() {
+        if *off >= call_pc { continue; }
+        if *d != target_depth { continue; }
+        if matches!(op, JsOp::Name | JsOp::Getprop | JsOp::Getelem
+            | JsOp::Getarg | JsOp::Getvar | JsOp::This | JsOp::Bindname) {
+            found = Some((*op, *off));
+            break;
+        }
+    }
+
+    match found {
+        Some((JsOp::Name, off)) | Some((JsOp::Bindname, off)) => {
+            let idx = read_u16_operand(&bytecode[off + 1..]).unwrap_or(0) as usize;
+            let name = match atoms.get(idx) {
+                Some(JsAtom::String(s)) => s.as_str(),
+                _ => "?",
+            };
+            format!("NAME {:?} at pc {}", name, off)
+        }
+        Some((JsOp::Getprop, off)) => {
+            let idx = read_u16_operand(&bytecode[off + 1..]).unwrap_or(0) as usize;
+            let name = match atoms.get(idx) {
+                Some(JsAtom::String(s)) => s.as_str(),
+                _ => "?",
+            };
+            format!("GETPROP .{} at pc {}", name, off)
+        }
+        Some((JsOp::Getelem, off)) => format!("GETELEM obj[key] at pc {}", off),
+        Some((JsOp::Getarg, off)) => {
+            let slot = read_u16_operand(&bytecode[off + 1..]).unwrap_or(0);
+            format!("GETARG #{} at pc {}", slot, off)
+        }
+        Some((JsOp::Getvar, off)) => {
+            let slot = read_u16_operand(&bytecode[off + 1..]).unwrap_or(0);
+            format!("GETVAR #{} at pc {}", slot, off)
+        }
+        Some((JsOp::This, off)) => format!("THIS at pc {}", off),
+        _ => format!("<unknown, call at pc {}>", call_pc),
+    }
+}
 
 fn pop(frame: &mut JsFrame) -> Result<JsValue, JsError> {
     frame.stack.pop().ok_or_else(|| JsError::new("stack underflow"))
@@ -1581,7 +1775,14 @@ fn set_property(obj: &JsValue, name: &str, value: JsValue) -> Result<(), JsError
                 b.items[i] = value;
                 return Ok(());
             }
-            Err(JsError::new(format!("array.{} not assignable", name)))
+            // Non-array-index keys (negative numbers, non-numeric strings).
+            // ECMA-262 makes these legitimate string properties on the array
+            // object. We don't currently store them anywhere (our JsArray is
+            // a flat Vec); silently drop the write so a movie that does
+            // `arr[-1] = x` in an off-by-one loop doesn't error out --
+            // the value isn't observable later, but the code that wrote it
+            // wasn't planning to read it back either.
+            Ok(())
         }
         _ => Err(JsError::new(format!("cannot set property on {:?}", obj))),
     }
@@ -1631,9 +1832,10 @@ fn incdec_slot(
     post: bool,
 ) -> Result<StepOutcome, JsError> {
     let slot = read_u16_operand(operand).map_err(JsError::new)? as usize;
+    let kind = if is_arg { "arg" } else { "var" };
     let slots = if is_arg { &mut frame.args } else { &mut frame.locals };
     if slot >= slots.len() {
-        return Err(JsError::new(format!("slot {} out of bounds (len={})", slot, slots.len())));
+        return Err(JsError::new(format!("{}-slot {} out of bounds (len={})", kind, slot, slots.len())));
     }
     let old_n = slots[slot].to_number();
     let new_n = old_n + delta as f64;
