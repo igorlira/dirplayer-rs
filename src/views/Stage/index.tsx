@@ -792,7 +792,13 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           // Forward modifier key presses to keep the keyboard manager in sync.
           // Required so is_shift_down() / is_control_down() return correct
           // values when the hidden input is focused (editable field active).
-          if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Meta' || e.key === 'Alt') {
+          // 'AltGraph' is the right-Alt key on German / Nordic layouts -- the
+          // browser fires it BEFORE the resolved character (€, @, |, [, ])
+          // arrives via onInput, and wasm's is_alt_graph_down() needs to be
+          // truthy by then so the insertion gate doesn't treat the char as
+          // a Ctrl shortcut.
+          if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Meta'
+              || e.key === 'Alt' || e.key === 'AltGraph') {
             key_down(e.key, e.keyCode);
             return;
           }
