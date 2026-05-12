@@ -2708,8 +2708,15 @@ pub async fn player_call_script_handler_raw_args(
 
     // JS Lingo handlers: if the script's literal area was an XDR JSScript
     // (recorded at cast-load time), route the call through the interpreter
-    // instead of walking Lingo bytecode.
-    if let Some(js_result) = js_lingo_loader::try_invoke_js_handler(script_member_ref, handler_name, arg_list) {
+    // instead of walking Lingo bytecode. `receiver` is Some when the call
+    // came in as `script(X).handler(...)` -- Director's calling convention
+    // makes `me` an implicit slot-0 arg in that case.
+    if let Some(js_result) = js_lingo_loader::try_invoke_js_handler(
+        script_member_ref,
+        handler_name,
+        arg_list,
+        receiver.is_some(),
+    ) {
         match js_result {
             Ok(return_value) => return Ok(ScopeResult { return_value, passed: false }),
             Err(msg) => return Err(ScriptError::new(format!("JS handler {} threw: {}", handler_name, msg))),
