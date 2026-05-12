@@ -101,7 +101,8 @@ impl FileIoXtraInstance {
             }
             end += 1;
         }
-        let result = String::from_utf8_lossy(&self.data[start..end]).to_string();
+        // UTF-8 strict first, Win-1252 fallback. See io::encoding.
+        let result = crate::io::encoding::decode_text_auto(&self.data[start..end]);
         // Advance past delimiter/newline
         self.position = end;
         if self.position < self.data.len() {
@@ -317,7 +318,7 @@ impl FileIoXtraManager {
             "readfile" => {
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
                 let result = if instance.is_open {
-                    String::from_utf8_lossy(&instance.data[instance.position..]).to_string()
+                    crate::io::encoding::decode_text_auto(&instance.data[instance.position..])
                 } else {
                     instance.last_error = -1;
                     String::new()
@@ -380,7 +381,7 @@ impl FileIoXtraManager {
                     }
                     instance.position += 1;
                 }
-                let token = String::from_utf8_lossy(&instance.data[start..instance.position]).to_string();
+                let token = crate::io::encoding::decode_text_auto(&instance.data[start..instance.position]);
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::String(token)))
                 })

@@ -140,14 +140,12 @@ impl NetHandlers {
             let task_state = player.net_manager.get_task_state(task_id).ok_or_else(|| ScriptError::new("Network task not found".to_string()))?;
             let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
             let text = if is_ok {
-                let text = task_state.result.as_ref().unwrap().as_ref().unwrap();
-                // Strip UTF-8 BOM (0xEF 0xBB 0xBF) if present
-                let text = if text.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                    &text[3..]
-                } else {
-                    text
-                };
-                Datum::String(String::from_utf8_lossy(text).to_string())
+                let bytes = task_state.result.as_ref().unwrap().as_ref().unwrap();
+                // UTF-8 strict first (modern editors), Win-1252 fallback
+                // (legacy Director-authored external_texts_*.txt etc.).
+                // Strips a UTF-8 BOM if present. See io::encoding for why
+                // strict-then-fallback is unambiguous in practice.
+                Datum::String(crate::io::encoding::decode_text_auto(bytes))
             } else {
                 Datum::String("".to_owned())
             };
