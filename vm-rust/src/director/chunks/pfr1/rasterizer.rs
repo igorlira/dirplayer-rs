@@ -585,9 +585,16 @@ pub fn rasterize_pfr1_font(
         target_height as f32
     };
 
-    // Determine character range
+    // Determine character range.
+    // 256 covers the full Windows-1252 byte range: ASCII (0x00-0x7F) plus
+    // Western European letters in 0x80-0xFF -- German umlauts (ä ö ü ß),
+    // Scandinavian (å ø æ), Spanish (á é í ó ú ñ ¿ ¡), smart quotes, Euro.
+    // The previous 128-glyph cap silently dropped every non-ASCII glyph
+    // present in the PFR font, leaving visible gaps where umlauts should
+    // render. Atlas grows from 16x8 to 16x16 cells (one extra row of
+    // rasterization work per font instance).
     let first_char: u8 = 0;
-    let num_chars: usize = 128; // ASCII range
+    let num_chars: usize = 256;
     let grid_columns: usize = 16;
     let grid_rows: usize = (num_chars + grid_columns - 1) / grid_columns;
 
