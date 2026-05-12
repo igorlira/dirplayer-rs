@@ -266,6 +266,121 @@ fn synth_string_concat_and_compare() {
 }
 
 #[test]
+fn synth_tableswitch_routes_to_correct_case() {
+    // switch(x) { case 0: return 100; case 1: return 200; default: return 999; }
+    // Tableswitch operand layout:
+    //   i16 default_offset, i16 low (=0), i16 high (=1),
+    //   i16 case0_offset, i16 case1_offset
+    let atoms = vec![
+        JsAtom::Int(1),    // 0 - discriminant
+        JsAtom::Int(100),  // 1
+        JsAtom::Int(200),  // 2
+        JsAtom::Int(999),  // 3
+    ];
+    let mut bc = Vec::new();
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(0));   // push 1 @ pc=0..2
+    let tsw_pc = bc.len();                                // pc=3
+    bc.push(JsOp::Tableswitch as u8);                     // op @ pc=3
+    let body_start = bc.len();                            // pc=4 (first operand byte)
+    bc.extend(i16_be(0)); // default_offset placeholder
+    bc.extend(i16_be(0)); // low = 0
+    bc.extend(i16_be(1)); // high = 1
+    bc.extend(i16_be(0)); // case0_offset placeholder
+    bc.extend(i16_be(0)); // case1_offset placeholder
+    let case0_at = bc.len();
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(1));   // push 100
+    bc.push(JsOp::Return as u8);
+    let case1_at = bc.len();
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(2));   // push 200
+    bc.push(JsOp::Return as u8);
+    let default_at = bc.len();
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(3));   // push 999
+    bc.push(JsOp::Return as u8);
+
+    // Patch offsets, relative to tsw_pc.
+    let patch = |bc: &mut Vec<u8>, offset_pos: usize, target: usize| {
+        let delta = target as i32 - tsw_pc as i32;
+        let bytes = (delta as i16).to_be_bytes();
+        bc[offset_pos] = bytes[0];
+        bc[offset_pos + 1] = bytes[1];
+    };
+    patch(&mut bc, body_start, default_at);     // default
+    patch(&mut bc, body_start + 6, case0_at);   // case 0
+    patch(&mut bc, body_start + 8, case1_at);   // case 1
+
+    let result = run_synth(bc, atoms).unwrap();
+    assert!(matches!(result, JsValue::Int(200)), "expected 200, got {:?}", result);
+}
+
+#[test]
+fn synth_typeof_returns_correct_strings() {
+    let atoms = vec![JsAtom::String("foo".into())];
+    let mut bc = Vec::new();
+    bc.push(JsOp::String as u8); bc.extend(u16_be(0));
+    bc.push(JsOp::Typeof as u8);
+    bc.push(JsOp::Return as u8);
+    match run_synth(bc, atoms).unwrap() {
+        JsValue::String(s) => assert_eq!(&*s, "string"),
+        other => panic!("expected \"string\", got {:?}", other),
+    }
+}
+
+#[test]
+fn synth_pre_increment_var() {
+    // function() { var x = 5; return ++x; }  ⇒ 6
+    let atoms: Vec<JsAtom> = vec![JsAtom::Int(5)];
+    let mut bc = Vec::new();
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(0));   // push 5
+    bc.push(JsOp::Setvar as u8); bc.extend(u16_be(0));   // x = 5 (leaves 5 on stack)
+    bc.push(JsOp::Pop as u8);
+    bc.push(JsOp::Incvar as u8); bc.extend(u16_be(0));   // ++x → pushes new value
+    bc.push(JsOp::Return as u8);
+    let ir = super::xdr::JsScriptIR {
+        magic: 0xdead_0003, bytecode: bc, prolog_length: 0, version: 150,
+        atoms, source_notes: Vec::new(), filename: None, lineno: 1,
+        max_stack_depth: 4, try_notes: Vec::new(),
+    };
+    let mut rt = JsRuntime::new();
+    let f = super::value::JsFunction {
+        atom: Rc::new(super::xdr::JsFunctionAtom {
+            name: Some("inc_test".into()), nargs: 0, extra: 0,
+            nvars: 1, flags: 0, bindings: Vec::new(), script: ir,
+        }),
+    };
+    let result = rt.call_function(&Rc::new(f), vec![], JsValue::Undefined).unwrap();
+    assert!(matches!(result, JsValue::Int(6)), "expected 6, got {:?}", result);
+}
+
+#[test]
+fn synth_throw_propagates_as_jserror() {
+    let atoms = vec![JsAtom::String("boom".into())];
+    let mut bc = Vec::new();
+    bc.push(JsOp::String as u8); bc.extend(u16_be(0));
+    bc.push(JsOp::Throw as u8);
+    let result = run_synth(bc, atoms);
+    assert!(result.is_err(), "throw should produce JsError");
+    let err = result.unwrap_err();
+    assert!(err.message.contains("boom"), "error message: {}", err.message);
+}
+
+#[test]
+fn synth_extended_jump_offsets() {
+    // GOTOX -8 with i32 offset.
+    let atoms: Vec<JsAtom> = vec![JsAtom::Int(42)];
+    // Layout:
+    //  pc=0:  NUMBER 0     (push 42)   ; len=3
+    //  pc=3:  RETURN                   ; len=1
+    //  pc=4:  GOTOX -4    (jump back to pc=0)  ; len=5
+    let mut bc = Vec::new();
+    bc.push(JsOp::Gotox as u8);
+    bc.extend(7_i32.to_be_bytes()); // forward 7 → target pc=7
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(0));  // 5..7 — never executes (offset>=7 jumps past)
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(0));  // 7..9 push 42
+    bc.push(JsOp::Return as u8);                        // 10 — return 42
+    assert!(matches!(run_synth(bc, atoms).unwrap(), JsValue::Int(42)));
+}
+
+#[test]
 fn synth_array_literal_via_initelem() {
     // Mirrors the compiler's array-literal emission pattern (see on_mouseUp
     // disassembly): push a Function value named "Array" + a `this` placeholder,

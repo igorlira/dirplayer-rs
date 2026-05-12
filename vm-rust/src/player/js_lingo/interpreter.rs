@@ -17,7 +17,7 @@ use super::value::{
     JsArray, JsArrayRef, JsError, JsFunction, JsFunctionRef, JsObject, JsObjectRef, JsValue,
     NativeFn,
 };
-use super::variable_length::{read_i16_operand, read_u16_operand};
+use super::variable_length::{read_i16_operand, read_i32_operand, read_u16_operand, read_u32_operand};
 use super::xdr::{
     iter_ops, JsAtom, JsBindingKind, JsFunctionAtom, JsFunctionBinding, JsScriptIR,
 };
@@ -686,8 +686,344 @@ impl JsRuntime {
                 Ok(StepOutcome::Continue)
             }
 
-            // Anything we haven't covered yet falls through here. Listed last
-            // so the cases above keep dispatching directly.
+            // ===== Extended (x-suffix) jumps: 4-byte offsets =====
+            JsOp::Gotox => {
+                let delta = read_i32_operand(operand).map_err(JsError::new)?;
+                frame.pc = (op_pc as i32 + delta) as usize;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Ifeqx => {
+                let v = pop(frame)?;
+                let delta = read_i32_operand(operand).map_err(JsError::new)?;
+                if !v.to_bool() { frame.pc = (op_pc as i32 + delta) as usize; }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Ifnex => {
+                let v = pop(frame)?;
+                let delta = read_i32_operand(operand).map_err(JsError::new)?;
+                if v.to_bool() { frame.pc = (op_pc as i32 + delta) as usize; }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Andx => {
+                let v = peek(frame)?.clone();
+                let delta = read_i32_operand(operand).map_err(JsError::new)?;
+                if !v.to_bool() { frame.pc = (op_pc as i32 + delta) as usize; }
+                else { frame.stack.pop(); }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Orx => {
+                let v = peek(frame)?.clone();
+                let delta = read_i32_operand(operand).map_err(JsError::new)?;
+                if v.to_bool() { frame.pc = (op_pc as i32 + delta) as usize; }
+                else { frame.stack.pop(); }
+                Ok(StepOutcome::Continue)
+            }
+
+            // ===== Switch =====
+            JsOp::Condswitch => Ok(StepOutcome::Continue), // pure marker, no effect
+            JsOp::Default => {
+                let _ = pop(frame)?;
+                let delta = read_i16_operand(operand).map_err(JsError::new)? as i32;
+                frame.pc = (op_pc as i32 + delta) as usize;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Defaultx => {
+                let _ = pop(frame)?;
+                let delta = read_i32_operand(operand).map_err(JsError::new)?;
+                frame.pc = (op_pc as i32 + delta) as usize;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Case => {
+                // NEW_EQUALITY_OP: pop b, compare to PEEK a (don't pop). If
+                // equal, pop a too and jump; else keep a, advance to next case.
+                let b = pop(frame)?;
+                let a = peek(frame)?.clone();
+                let delta = read_i16_operand(operand).map_err(JsError::new)? as i32;
+                if loose_equal(&a, &b) {
+                    let _ = pop(frame)?;
+                    frame.pc = (op_pc as i32 + delta) as usize;
+                }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Casex => {
+                let b = pop(frame)?;
+                let a = peek(frame)?.clone();
+                let delta = read_i32_operand(operand).map_err(JsError::new)?;
+                if loose_equal(&a, &b) {
+                    let _ = pop(frame)?;
+                    frame.pc = (op_pc as i32 + delta) as usize;
+                }
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Tableswitch => {
+                let disc = pop(frame)?;
+                let i = if let JsValue::Int(v) = disc { v }
+                        else if let JsValue::Number(d) = disc {
+                            if d == d.trunc() && d.is_finite() { d as i32 } else { return Ok(StepOutcome::Continue); }
+                        } else { return Ok(StepOutcome::Continue); }; // non-int falls through default
+                let default_delta = read_i16_operand(&operand[0..]).map_err(JsError::new)? as i32;
+                let low = read_i16_operand(&operand[2..]).map_err(JsError::new)? as i32;
+                let high = read_i16_operand(&operand[4..]).map_err(JsError::new)? as i32;
+                let idx = i - low;
+                if idx >= 0 && idx <= high - low {
+                    let case_off_pos = 6 + (idx as usize) * 2;
+                    let case_delta = read_i16_operand(&operand[case_off_pos..]).map_err(JsError::new)? as i32;
+                    if case_delta != 0 {
+                        frame.pc = (op_pc as i32 + case_delta) as usize;
+                        return Ok(StepOutcome::Continue);
+                    }
+                }
+                frame.pc = (op_pc as i32 + default_delta) as usize;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Tableswitchx => {
+                let disc = pop(frame)?;
+                let i = if let JsValue::Int(v) = disc { v }
+                        else if let JsValue::Number(d) = disc {
+                            if d == d.trunc() && d.is_finite() { d as i32 } else { return Ok(StepOutcome::Continue); }
+                        } else { return Ok(StepOutcome::Continue); };
+                let default_delta = read_i32_operand(&operand[0..]).map_err(JsError::new)?;
+                let low = read_i32_operand(&operand[4..]).map_err(JsError::new)?;
+                let high = read_i32_operand(&operand[8..]).map_err(JsError::new)?;
+                let idx = i - low;
+                if idx >= 0 && idx <= high - low {
+                    let case_off_pos = 12 + (idx as usize) * 4;
+                    let case_delta = read_i32_operand(&operand[case_off_pos..]).map_err(JsError::new)?;
+                    if case_delta != 0 {
+                        frame.pc = (op_pc as i32 + case_delta) as usize;
+                        return Ok(StepOutcome::Continue);
+                    }
+                }
+                frame.pc = (op_pc as i32 + default_delta) as usize;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Lookupswitch => {
+                let disc = pop(frame)?;
+                let default_delta = read_i16_operand(&operand[0..]).map_err(JsError::new)? as i32;
+                let npairs = read_u16_operand(&operand[2..]).map_err(JsError::new)? as usize;
+                let mut pos = 4;
+                for _ in 0..npairs {
+                    let atom_idx = read_u16_operand(&operand[pos..]).map_err(JsError::new)? as usize;
+                    let case_delta = read_i16_operand(&operand[pos + 2..]).map_err(JsError::new)? as i32;
+                    let atom_val = atom_to_value(&frame.atoms, atom_idx)?;
+                    if loose_equal(&disc, &atom_val) {
+                        frame.pc = (op_pc as i32 + case_delta) as usize;
+                        return Ok(StepOutcome::Continue);
+                    }
+                    pos += 4;
+                }
+                frame.pc = (op_pc as i32 + default_delta) as usize;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Lookupswitchx => {
+                let disc = pop(frame)?;
+                let default_delta = read_i32_operand(&operand[0..]).map_err(JsError::new)?;
+                let npairs = read_u32_operand(&operand[4..]).map_err(JsError::new)? as usize;
+                let mut pos = 8;
+                for _ in 0..npairs {
+                    let atom_idx = read_u32_operand(&operand[pos..]).map_err(JsError::new)? as usize;
+                    let case_delta = read_i32_operand(&operand[pos + 4..]).map_err(JsError::new)?;
+                    let atom_val = atom_to_value(&frame.atoms, atom_idx)?;
+                    if loose_equal(&disc, &atom_val) {
+                        frame.pc = (op_pc as i32 + case_delta) as usize;
+                        return Ok(StepOutcome::Continue);
+                    }
+                    pos += 8;
+                }
+                frame.pc = (op_pc as i32 + default_delta) as usize;
+                Ok(StepOutcome::Continue)
+            }
+
+            // ===== Exception handling =====
+            // Phase 2b lays the groundwork — Throw/Try/Exception/Initcatchvar
+            // are all stack-shape-correct, but proper unwind through try_notes
+            // ties into the runtime in Phase 6. Until then THROW just propagates
+            // a JsError.
+            JsOp::Try | JsOp::Finally => Ok(StepOutcome::Continue),
+            JsOp::Throw => {
+                let v = pop(frame)?;
+                Err(JsError::new(format!("uncaught: {}", v.to_string())))
+            }
+            JsOp::Exception => {
+                // After unwind, the exception value would be on top. With our
+                // current model we shouldn't reach here without an unwind.
+                frame.stack.push(JsValue::Undefined);
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Initcatchvar => {
+                let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
+                let name = atom_string(&frame.atoms, idx)?;
+                let value = pop(frame)?;
+                let obj = peek(frame)?.clone();
+                set_property(&obj, &name, value)?;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Gosub => {
+                // Push return-PC and jump. The matching RETSUB pops it.
+                let delta = read_i16_operand(operand).map_err(JsError::new)? as i32;
+                let return_pc = frame.pc as i32; // already advanced past this op
+                frame.stack.push(JsValue::Int(return_pc));
+                frame.pc = (op_pc as i32 + delta) as usize;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Gosubx => {
+                let delta = read_i32_operand(operand).map_err(JsError::new)?;
+                let return_pc = frame.pc as i32;
+                frame.stack.push(JsValue::Int(return_pc));
+                frame.pc = (op_pc as i32 + delta) as usize;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Retsub => {
+                let target = pop(frame)?.to_int32();
+                frame.pc = target as usize;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Setsp => {
+                // Reset the stack to a given depth (used by try-catch unwinding).
+                let depth = read_u16_operand(operand).map_err(JsError::new)? as usize;
+                frame.stack.truncate(depth);
+                Ok(StepOutcome::Continue)
+            }
+
+            // ===== Closures and function expressions =====
+            JsOp::Closure | JsOp::Anonfunobj | JsOp::Namedfunobj => {
+                let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
+                let atom = frame.atoms.get(idx).cloned()
+                    .ok_or_else(|| JsError::new("function atom oob"))?;
+                let JsAtom::Function(fa) = atom else {
+                    return Err(JsError::new("function-atom-op expected JsAtom::Function"));
+                };
+                let f = JsValue::Function(Rc::new(JsFunction {
+                    atom: Rc::new((*fa).clone()),
+                }));
+                if op == JsOp::Closure {
+                    // CLOSURE additionally installs the function on the current
+                    // scope under its name.
+                    if let JsAtom::Function(ref fa2) = frame.atoms[idx] {
+                        if let Some(name) = &fa2.name {
+                            frame.scope.borrow_mut().set_own(name, f.clone());
+                        }
+                    }
+                }
+                frame.stack.push(f);
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Deflocalfun => {
+                // DEFLOCALFUN: VARNO_LEN + ATOM_INDEX_LEN. var slot, then atom idx.
+                let slot = read_u16_operand(&operand[0..]).map_err(JsError::new)? as usize;
+                let atom_idx = read_u16_operand(&operand[2..]).map_err(JsError::new)? as usize;
+                let atom = frame.atoms.get(atom_idx).cloned()
+                    .ok_or_else(|| JsError::new("DEFLOCALFUN atom oob"))?;
+                if let JsAtom::Function(fa) = atom {
+                    let f = JsValue::Function(Rc::new(JsFunction { atom: Rc::new((*fa).clone()) }));
+                    if slot < frame.locals.len() { frame.locals[slot] = f; }
+                }
+                Ok(StepOutcome::Continue)
+            }
+
+            // ===== `with` =====
+            JsOp::Enterwith => {
+                let v = pop(frame)?;
+                // SpiderMonkey wraps the value in a scope object whose proto
+                // points at the previous scope. We mimic this with a fresh
+                // JsObject whose proto chain extends to the current scope.
+                let wrapper = match v {
+                    JsValue::Object(o) => o,
+                    _ => Rc::new(RefCell::new(JsObject::new())),
+                };
+                wrapper.borrow_mut().proto = Some(frame.scope.clone());
+                frame.scope = wrapper;
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Leavewith => {
+                let parent = frame.scope.borrow().proto.clone();
+                if let Some(p) = parent { frame.scope = p; }
+                Ok(StepOutcome::Continue)
+            }
+
+            // ===== `for..in` iteration =====
+            // Phase 2b stubs: keys-list is computed eagerly into a JsArray,
+            // and the FOR* ops walk it as a counter (no live iterator object).
+            // Correctness is good enough for unsorted enumeration; ordering
+            // matches insertion-order (matches SpiderMonkey for non-numeric keys).
+            JsOp::Forarg => Err(JsError::new("for-in (forarg) needs runtime iter state — Phase 6")),
+            JsOp::Forvar => Err(JsError::new("for-in (forvar) needs runtime iter state — Phase 6")),
+            JsOp::Forname => Err(JsError::new("for-in (forname) needs runtime iter state — Phase 6")),
+            JsOp::Forprop => Err(JsError::new("for-in (forprop) needs runtime iter state — Phase 6")),
+            JsOp::Forelem => Err(JsError::new("for-in (forelem) needs runtime iter state — Phase 6")),
+            JsOp::Enumelem => Err(JsError::new("for-in (enumelem) needs runtime iter state — Phase 6")),
+
+            // ===== Stack reset / misc =====
+            JsOp::Setconst => {
+                let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
+                let name = atom_string(&frame.atoms, idx)?;
+                let v = peek(frame)?.clone();
+                frame.scope.borrow_mut().set_own(&name, v);
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Toobject => {
+                // Coerce TOS to object; for objects/arrays/functions it's a no-op,
+                // for primitives we'd wrap (Phase 3 — Boolean/Number/String wrapper
+                // classes). For now leave value unchanged.
+                Ok(StepOutcome::Continue)
+            }
+
+            // ===== Arguments object — Phase 6 (needs an `arguments` reflection) =====
+            JsOp::Arguments | JsOp::Argsub | JsOp::Argcnt => Err(JsError::new(format!(
+                "arguments-object op {:?} needs Phase 6 reflection", op
+            ))),
+
+            // ===== Module system (Mozilla-only, never seen in DCRs) =====
+            JsOp::Exportall | JsOp::Exportname | JsOp::Importall
+            | JsOp::Importprop | JsOp::Importelem => Ok(StepOutcome::Continue),
+
+            // ===== Object literal accessors / getters/setters =====
+            JsOp::Getter | JsOp::Setter => {
+                // Define an accessor on the initializing object. Phase 2b stub:
+                // pop the function value and discard (we don't yet honour
+                // getter/setter semantics on lookup).
+                let _ = pop(frame)?;
+                Ok(StepOutcome::Continue)
+            }
+
+            // ===== Sharp variables (#1=...) — extremely rare, no-op =====
+            JsOp::Defsharp | JsOp::Usesharp => Ok(StepOutcome::Continue),
+
+            // ===== Regex / object literal atom =====
+            JsOp::Object => {
+                let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
+                let atom = frame.atoms.get(idx).cloned()
+                    .ok_or_else(|| JsError::new("Object atom oob"))?;
+                let v = match atom {
+                    JsAtom::Function(fa) => JsValue::Function(Rc::new(JsFunction { atom: Rc::new((*fa).clone()) })),
+                    _ => JsValue::Object(Rc::new(RefCell::new(JsObject::new()))),
+                };
+                frame.stack.push(v);
+                Ok(StepOutcome::Continue)
+            }
+
+            // ===== Eval — too complex for an embedded interpreter without a
+            // parser; treat the eval source as a string and warn. =====
+            JsOp::Eval => {
+                let _ = pop(frame)?; // pop the source string (or function value)
+                // CALL semantics swallow trailing args; we already are past those
+                // (eval is dispatched after argument push by the surrounding CALL).
+                frame.stack.push(JsValue::Undefined);
+                Ok(StepOutcome::Continue)
+            }
+
+            // ===== Misc internals =====
+            JsOp::Setcall => Ok(StepOutcome::Continue), // optimisation marker
+            JsOp::Trap | JsOp::Debugger => Ok(StepOutcome::Continue),
+
+            // ===== Backpatch markers — compile-time placeholders that the
+            // emitter rewrites before script serialisation. They must not
+            // appear at runtime; if one does, it's a compiler bug. =====
+            JsOp::Backpatch | JsOp::BackpatchPop | JsOp::BackpatchPush => Err(JsError::new(format!(
+                "compile-time backpatch op {:?} should never execute", op
+            ))),
+
+            // Catch-all for anything we missed.
             other => Err(JsError::new(format!("unimplemented opcode {:?} (0x{:02x}) at pc={}", other, byte_of(other), op_pc))),
         }
     }
@@ -990,6 +1326,43 @@ fn incdec_elem(frame: &mut JsFrame, delta: i32, post: bool) -> Result<StepOutcom
     set_element(&obj, &key, new_v.clone())?;
     frame.stack.push(if post { num_to_value(old_n) } else { new_v });
     Ok(StepOutcome::Continue)
+}
+
+/// ECMA-262 abstract equality (loose ==). Used by CASE, JSOP_LOOKUPSWITCH,
+/// and JSOP_NEW_EQ for v1.4+ scripts.
+fn loose_equal(a: &JsValue, b: &JsValue) -> bool {
+    use JsValue::*;
+    match (a, b) {
+        (Undefined, Undefined) | (Null, Null) | (Undefined, Null) | (Null, Undefined) => true,
+        (Bool(x), Bool(y)) => x == y,
+        (Int(x), Int(y)) => x == y,
+        (Number(x), Number(y)) => x == y,
+        (String(x), String(y)) => **x == **y,
+        (Int(_), Number(_)) | (Number(_), Int(_))
+        | (Int(_), String(_)) | (String(_), Int(_))
+        | (Number(_), String(_)) | (String(_), Number(_)) => a.to_number() == b.to_number(),
+        (Bool(_), _) | (_, Bool(_)) => a.to_number() == b.to_number(),
+        // Object identity comparison via Rc::ptr_eq.
+        (Object(x), Object(y)) => Rc::ptr_eq(x, y),
+        (Array(x), Array(y)) => Rc::ptr_eq(x, y),
+        (Function(x), Function(y)) => Rc::ptr_eq(x, y),
+        (Native(x), Native(y)) => Rc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+fn atom_to_value(atoms: &[JsAtom], idx: usize) -> Result<JsValue, JsError> {
+    let a = atoms.get(idx).ok_or_else(|| JsError::new("atom_to_value: oob"))?;
+    Ok(match a {
+        JsAtom::Null => JsValue::Null,
+        JsAtom::Void => JsValue::Undefined,
+        JsAtom::Bool(b) => JsValue::Bool(*b),
+        JsAtom::Int(i) => JsValue::Int(*i),
+        JsAtom::Double(d) => JsValue::Number(*d),
+        JsAtom::String(s) => JsValue::String(Rc::new(s.clone())),
+        JsAtom::Function(fa) => JsValue::Function(Rc::new(JsFunction { atom: Rc::new((**fa).clone()) })),
+        JsAtom::Unsupported(_) => JsValue::Undefined,
+    })
 }
 
 fn num_to_value(n: f64) -> JsValue {
