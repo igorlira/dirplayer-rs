@@ -84,7 +84,12 @@ pub struct JsRuntime {
 /// to run real movies; small-enough that a runaway loop in a JS handler
 /// surfaces as a clear error instead of a hung tab.
 const MAX_CALL_DEPTH: u32 = 256;
-const MAX_INSTRUCTIONS_PER_INVOCATION: u64 = 50_000_000;
+// Bumped from 50M -- legitimate BigInt powMod work on ~320-bit numbers needs
+// ~315 iterations, each costing ~150k instructions through mont_/squareMod_.
+// That puts a single powMod over the old 50M ceiling. 500M still bounds true
+// runaway loops (~50s on a typical browser before bailing) while letting
+// real crypto handshakes complete.
+const MAX_INSTRUCTIONS_PER_INVOCATION: u64 = 500_000_000;
 
 impl JsRuntime {
     /// New runtime with the ECMA-262 stdlib (Math, parseInt, etc.) installed.
@@ -505,7 +510,10 @@ impl JsRuntime {
                 let slot = read_u16_operand(operand).map_err(JsError::new)? as usize;
                 let v = peek(frame)?.clone();
                 if slot < frame.args.len() {
-                    frame.args[slot] = v;
+                    frame.args[slot] = v.clone();
+                }
+                if let Some(name) = nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Argument, slot) {
+                    frame.scope.borrow_mut().set_own(&name, v);
                 }
                 Ok(StepOutcome::Continue)
             }
@@ -519,7 +527,14 @@ impl JsRuntime {
                 let slot = read_u16_operand(operand).map_err(JsError::new)? as usize;
                 let v = peek(frame)?.clone();
                 if slot < frame.locals.len() {
-                    frame.locals[slot] = v;
+                    frame.locals[slot] = v.clone();
+                }
+                // Mirror to frame.scope so NAME-based reads of the same
+                // var see the latest write. Map slot -> binding name.
+                if let Some(name) = nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Variable, slot)
+                    .or_else(|| nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Constant, slot))
+                {
+                    frame.scope.borrow_mut().set_own(&name, v);
                 }
                 Ok(StepOutcome::Continue)
             }
@@ -1224,6 +1239,30 @@ impl JsRuntime {
 
 fn byte_of(op: JsOp) -> u8 { op as u8 }
 
+/// Look up the binding name at a given slot index for a particular kind
+/// (Argument / Variable / Constant). Returns None if the slot is past the
+/// last matching binding.
+fn nth_binding_name(
+    atoms: &[JsAtom],
+    atom_to_slot: &[Option<(JsBindingKind, usize)>],
+    want: JsBindingKind,
+    slot: usize,
+) -> Option<String> {
+    let _ = atoms;
+    // atom_to_slot maps atom-index -> (kind, slot). Reverse-scan to find
+    // the atom whose binding maps to (want, slot).
+    for (i, m) in atom_to_slot.iter().enumerate() {
+        if let Some((k, s)) = m {
+            if *k == want && *s == slot {
+                if let Some(JsAtom::String(name)) = atoms.get(i) {
+                    return Some(name.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Walk the bytecode forwards from PC=0 to call_pc, tracking stack depth so
 /// we can identify the precise op that produced the callee for the failing
 /// CALL. For `a(b(c))` the naive "most recent lookup" heuristic would pick
@@ -1841,6 +1880,17 @@ fn incdec_slot(
     let new_n = old_n + delta as f64;
     let new_v = num_to_value(new_n);
     slots[slot] = new_v.clone();
+    // Mirror the new value into frame.scope under the binding's name so
+    // NAME-based reads (e.g. inside `for (i=0; i<n; i++)` where `i` is
+    // also resolvable via the scope chain from nested call sites) see the
+    // updated counter. Without this, loop counters appear frozen and the
+    // loop never terminates. Same pattern as SETVAR / SETARG.
+    let binding_kind = if is_arg { JsBindingKind::Argument } else { JsBindingKind::Variable };
+    let name_opt = nth_binding_name(&frame.atoms, &frame.atom_to_slot, binding_kind, slot)
+        .or_else(|| if is_arg { None } else { nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Constant, slot) });
+    if let Some(name) = name_opt {
+        frame.scope.borrow_mut().set_own(&name, new_v.clone());
+    }
     frame.stack.push(if post { num_to_value(old_n) } else { new_v });
     Ok(StepOutcome::Continue)
 }
@@ -1934,6 +1984,34 @@ fn build_function_frame(
         args.push(args_in.get(i).cloned().unwrap_or(JsValue::Undefined));
     }
     let locals = vec![JsValue::Undefined; nvars];
+
+    // Populate frame.scope with the same properties so NAME-based reads see
+    // the args/locals too. SpiderMonkey treats the Call activation as both
+    // a scope object (NAME lookups) and a slot vector (GETVAR/GETARG).
+    // Without this dual-linkage, code that writes `bi_t` via SETVAR and
+    // reads it via NAME (or vice versa) sees stale undefined values.
+    let scope = JsObject::new();
+    let scope_ref = Rc::new(RefCell::new(scope));
+    {
+        let mut arg_slot = 0usize;
+        let mut var_slot = 0usize;
+        let mut s = scope_ref.borrow_mut();
+        for b in &atom.bindings {
+            match b.kind {
+                JsBindingKind::Argument => {
+                    let v = args.get(arg_slot).cloned().unwrap_or(JsValue::Undefined);
+                    s.set_own(&b.name, v);
+                    arg_slot += 1;
+                }
+                JsBindingKind::Variable | JsBindingKind::Constant => {
+                    s.set_own(&b.name, JsValue::Undefined);
+                    var_slot += 1;
+                }
+            }
+        }
+        let _ = (arg_slot, var_slot);
+    }
+
     let atom_to_slot = build_atom_slot_map(&atom.script.atoms, &atom.bindings);
 
     JsFrame {
@@ -1941,7 +2019,7 @@ fn build_function_frame(
         atoms: Rc::new(atom.script.atoms.clone()),
         args,
         locals,
-        scope: Rc::new(RefCell::new(JsObject::new())),
+        scope: scope_ref,
         parent_scope: Some(program_scope),
         this_value,
         pc: 0,
