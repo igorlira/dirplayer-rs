@@ -596,7 +596,15 @@ pub fn get_focused_field_selected_text() -> String {
         let len = text.len() as i32;
         let lo = lo.clamp(0, len).min(hi.clamp(0, len));
         let hi = lo.max(hi.clamp(0, len));
-        text[lo as usize..hi as usize].to_string()
+        // Snap to char boundaries before slicing. Caret indices are byte
+        // positions into a UTF-8 string; if any prior path produced one
+        // landing inside a multi-byte sequence (e.g. mid-ß), a raw slice
+        // would panic.
+        let mut lo_b = lo as usize;
+        let mut hi_b = hi as usize;
+        while lo_b < text.len() && !text.is_char_boundary(lo_b) { lo_b += 1; }
+        while hi_b < text.len() && !text.is_char_boundary(hi_b) { hi_b += 1; }
+        text[lo_b..hi_b].to_string()
     })
 }
 

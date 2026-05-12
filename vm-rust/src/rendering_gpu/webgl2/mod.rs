@@ -4994,14 +4994,18 @@ impl WebGL2Renderer {
                     let mut x = start_x;
                     let mut char_i: usize = 0;
                     for ch in line.chars() {
-                        let adv = font.get_char_advance(ch as u8) as i32;
+                        let adv = font.get_char_advance_for(ch) as i32;
                         if ch == ' ' {
                             x += adv;
                             char_i += 1;
                             continue;
                         }
 
-                        let mut glyph_code = ch as u8;
+                        // Win-1252 glyph slot for `ch` -- a plain `as u8`
+                        // truncates higher codepoints like € (U+20AC) to
+                        // the wrong byte (0xAC = ¬), so use the proper
+                        // reverse map. ASCII pass-through is preserved.
+                        let mut glyph_code = crate::io::encoding::glyph_byte_for(ch);
                         if force_uppercase_fallback && ch.is_ascii_lowercase() {
                             let lower = ch as u8;
                             let upper = lower.saturating_sub(32);
@@ -5487,10 +5491,16 @@ impl WebGL2Renderer {
                         let run_start_x = x;
 
                         for ch in run.text.chars() {
+                            // Map Unicode char -> Win-1252 atlas slot before
+                            // looking up glyph width/cell. `c as u8` truncates
+                            // codepoints like € (U+20AC=0x20AC) to 0xAC, so the
+                            // renderer would pull the wrong glyph from the
+                            // atlas.
+                            let glyph_b = crate::io::encoding::glyph_byte_for(ch);
                             let advance = if span_is_default_size {
-                                font.get_char_advance(ch as u8) as i32
+                                font.get_char_advance(glyph_b) as i32
                             } else {
-                                ((font.get_char_advance(ch as u8) as i32) * span_scale_num / span_scale_den)
+                                ((font.get_char_advance(glyph_b) as i32) * span_scale_num / span_scale_den)
                                     .max(1)
                             };
 
@@ -5509,15 +5519,15 @@ impl WebGL2Renderer {
                             let draw_glyph = |dest: &mut Bitmap, dx: i32| {
                                 if italic_default_size {
                                     bitmap_font_copy_char_italic(
-                                        &font, font_bitmap, ch as u8, dest, dx, y, &palettes, &run_params,
+                                        &font, font_bitmap, glyph_b, dest, dx, y, &palettes, &run_params,
                                     );
                                 } else if span_is_default_size {
                                     bitmap_font_copy_char(
-                                        &font, font_bitmap, ch as u8, dest, dx, y, &palettes, &run_params,
+                                        &font, font_bitmap, glyph_b, dest, dx, y, &palettes, &run_params,
                                     );
                                 } else {
                                     bitmap_font_copy_char_scaled(
-                                        &font, font_bitmap, ch as u8, dest, dx, y,
+                                        &font, font_bitmap, glyph_b, dest, dx, y,
                                         char_w, char_h, &palettes, &run_params,
                                     );
                                 }
