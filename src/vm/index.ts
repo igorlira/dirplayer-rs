@@ -120,6 +120,13 @@ export interface IScriptMemberSnapshot {
   type: 'script'
   name: string
   scriptType: 'movie' | 'parent' | 'score'
+  /**
+   * 'lingo' for the original Director Lingo syntax, 'javascript' when the
+   * cast member was authored with JavaScript syntax (Director MX 2004+).
+   * For JS scripts, `script.handlers` is synthesised from the SpiderMonkey
+   * disassembly with each top-level JS function shown as a separate handler.
+   */
+  scriptSyntax?: 'lingo' | 'javascript'
   script: IScriptSnapshot
 }
 

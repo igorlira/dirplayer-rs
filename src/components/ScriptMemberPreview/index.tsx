@@ -165,6 +165,13 @@ export default function ScriptMemberPreview({
     dispatch(scriptViewModeChanged(mode));
   };
 
+  // Rust-side surfaces the raw key `script_syntax` from get_script_snapshot();
+  // the TS type names it `scriptSyntax`. Cope with both so the badge appears
+  // regardless of any future normalisation layer.
+  const scriptSyntax: string | undefined = (snapshot as any).scriptSyntax
+    ?? (snapshot as any).script_syntax;
+  const isJavaScript = scriptSyntax === 'javascript';
+
   return (
     <div className={classNames(styles.scriptContainer, theme === 'light' && styles.light)}>
       <div className={styles.viewModeToggle}>
@@ -175,7 +182,7 @@ export default function ScriptMemberPreview({
           )}
           onClick={() => setViewMode('lingo')}
         >
-          Lingo
+          {isJavaScript ? 'JS' : 'Lingo'}
         </button>
         <button
           className={classNames(
@@ -184,8 +191,13 @@ export default function ScriptMemberPreview({
           )}
           onClick={() => setViewMode('assembly')}
         >
-          Assembly
+          {isJavaScript ? 'SM bytecode' : 'Assembly'}
         </button>
+        {isJavaScript && (
+          <span style={{ marginLeft: 'auto', padding: '2px 8px', background: '#ffd54f', color: '#000', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>
+            JavaScript
+          </span>
+        )}
       </div>
 
       {snapshot.script.handlers.map((handler) => {

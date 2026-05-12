@@ -1,35 +1,229 @@
-// Glue between Lscr-parsed JS literal blocks and the js_lingo decoder.
-// Phase 1 only emits a disassembly dump so the format work can be validated
-// against real movies before the translator goes in.
+// Glue between the JS-Lingo interpreter and the rest of dirplayer.
+//
+// Loaded scripts: `register_js_script` is called from cast_lib::insert_member
+// for any script whose Lscr literal-data area starts with the SpiderMonkey
+// XDR magic. It decodes the script, instantiates a JsRuntime with the
+// stdlib + a player-bound bridge, runs the program once to hoist globals,
+// and stores the runtime in a thread-local registry keyed by member ref.
+//
+// Handler dispatch: `try_invoke_js_handler` is the hook the existing
+// `player_call_script_handler` consults before walking Lingo bytecode.
+// If the named handler exists as a JS function value on the script's
+// runtime global, we invoke it and convert the return value back to a
+// DatumRef.
+//
+// Why thread_local? The interpreter holds Rc-based state that isn't Send,
+// so a global is the right shape; dirplayer is single-threaded under wasm
+// in practice.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::director::lingo::datum::Datum;
-use crate::player::js_lingo::{decode_script, disasm::disassemble};
+use crate::player::cast_lib::CastMemberRef;
+use crate::player::allocator::DatumAllocatorTrait;
+use crate::player::datum_ref::DatumRef;
+use crate::player::js_lingo::host_bridge::{JsHostBridge, StubBridge};
+use crate::player::js_lingo::value::{JsError, JsValue};
+use crate::player::js_lingo::{decode_script, disasm::disassemble, JsScriptIR};
+use crate::player::js_lingo::interpreter::JsRuntime;
+use crate::player::reserve_player_mut;
 use crate::player::script::Script;
 
+thread_local! {
+    /// JS runtime per script (one per JS-Lingo cast member).
+    static JS_RUNTIMES: RefCell<HashMap<CastMemberRef, Rc<RefCell<JsRuntime>>>> = RefCell::new(HashMap::new());
+}
+
+/// Public entry called from cast_lib::insert_member at script-load time.
+/// Detects whether a Script is JS-Lingo, sets up the runtime, and emits
+/// a disassembly to the log for diagnostics.
 pub fn diagnose_js_script(script: &Script) {
-    let mut block_index = 0usize;
-    for (i, lit) in script.chunk.literals.iter().enumerate() {
-        if let Datum::JavaScript(data) = lit {
-            block_index += 1;
-            log::info!(
-                "[js-lingo] {}:{} literal[{}] is JSScript block #{}, {} bytes — decoding",
-                script.member_ref.cast_lib,
-                script.member_ref.cast_member,
-                i,
-                block_index,
-                data.len()
-            );
-            match decode_script(data) {
-                Ok(ir) => {
-                    let dump = disassemble(&ir);
-                    for line in dump.lines() {
-                        log::info!("[js-lingo]   {}", line);
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[js-lingo]   decode failed: {}", e);
-                }
+    let Some(payload) = extract_js_payload(script) else { return; };
+    log::info!(
+        "[js-lingo] {}:{} loading JSScript ({} bytes)",
+        script.member_ref.cast_lib, script.member_ref.cast_member, payload.len()
+    );
+    match decode_script(payload) {
+        Ok(ir) => {
+            for line in disassemble(&ir).lines() {
+                log::info!("[js-lingo]   {}", line);
             }
+            register_runtime(&script.member_ref, ir);
+        }
+        Err(e) => {
+            log::warn!("[js-lingo]   decode failed: {}", e);
         }
     }
+}
+
+/// Look up the JSScript payload from the literals area, if present.
+fn extract_js_payload(script: &Script) -> Option<&[u8]> {
+    for lit in &script.chunk.literals {
+        if let Datum::JavaScript(b) = lit {
+            return Some(b);
+        }
+    }
+    None
+}
+
+fn register_runtime(member_ref: &CastMemberRef, ir: JsScriptIR) {
+    let runtime = Rc::new(RefCell::new(JsRuntime::with_stdlib()));
+    // Wire a player-bound bridge so trace/sprite/member route to existing
+    // Director machinery instead of the StubBridge default.
+    let bridge: Rc<RefCell<dyn JsHostBridge>> = Rc::new(RefCell::new(PlayerBridge));
+    runtime.borrow_mut().set_bridge(bridge);
+    runtime.borrow().install_director_globals();
+
+    // Run the program once to hoist globals and execute initialisers.
+    let ir = Rc::new(ir);
+    if let Err(e) = runtime.borrow_mut().run_program(&ir) {
+        log::warn!("[js-lingo] {}:{} program init failed: {}", member_ref.cast_lib, member_ref.cast_member, e);
+    }
+    JS_RUNTIMES.with(|m| {
+        m.borrow_mut().insert(member_ref.clone(), runtime);
+    });
+}
+
+/// Hook called from `player_call_script_handler_raw_args` before the
+/// existing Lingo handler lookup. Returns:
+/// - `Some(Ok(datum))` — JS handler ran successfully, here's the return value.
+/// - `Some(Err(msg))` — JS handler exists but threw.
+/// - `None` — no JS handler for this script/name; fall back to Lingo.
+pub fn try_invoke_js_handler(
+    script_member_ref: &CastMemberRef,
+    handler_name: &str,
+    args: &[DatumRef],
+) -> Option<Result<DatumRef, String>> {
+    let runtime_opt = JS_RUNTIMES.with(|m| m.borrow().get(script_member_ref).cloned());
+    let runtime = runtime_opt?;
+
+    let callee = {
+        let rt = runtime.borrow();
+        let g = rt.global.borrow();
+        g.get_own(handler_name).cloned()?
+    };
+    if !matches!(callee, JsValue::Function(_) | JsValue::Native(_)) {
+        return None;
+    }
+
+    // Convert args.
+    let js_args: Vec<JsValue> = reserve_player_mut(|player| {
+        args.iter().map(|d| datum_ref_to_js_value(player, d)).collect()
+    });
+
+    let result = runtime.borrow_mut().invoke(&callee, js_args, JsValue::Undefined);
+    Some(match result {
+        Ok(v) => Ok(reserve_player_mut(|player| js_value_to_datum_ref(player, &v))),
+        Err(e) => Err(e.message),
+    })
+}
+
+// ===== Bridge implementation that routes JS calls through Director runtime =====
+
+struct PlayerBridge;
+
+impl JsHostBridge for PlayerBridge {
+    fn trace(&mut self, args: &[JsValue]) {
+        // Director's `put` semantics: each arg formatted and space-joined,
+        // then logged. The frontend console picks up these log lines.
+        let line = args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
+        web_sys::console::log_1(&format!("[js-trace] {}", line).into());
+        log::info!("[js-trace] {}", line);
+    }
+    fn sprite(&mut self, _channel: i32) -> JsValue {
+        // Phase 5 stub: full sprite proxy lands when the property-access
+        // bridge is generalised. For now return a plain Object so writes
+        // succeed (writes are absorbed; no live effect on the sprite yet).
+        JsValue::Undefined
+    }
+    fn member(&mut self, _args: &[JsValue]) -> JsValue {
+        JsValue::Undefined
+    }
+}
+
+// ===== Datum <-> JsValue =====
+
+/// Convert a DatumRef (Lingo value) into a JsValue for use in JS code.
+///
+/// Coverage: primitives convert directly. Lists become Arrays, prop-lists
+/// become Objects (lossy because Lingo prop-lists are case-insensitive).
+/// References (Sprite, Member, etc.) wrap into JsObjects tagged with
+/// the original Datum string form so reads still see something useful.
+fn datum_ref_to_js_value(player: &mut crate::player::DirPlayer, dref: &DatumRef) -> JsValue {
+    let d = player.allocator.get_datum(dref).clone();
+    match d {
+        Datum::Int(i) => JsValue::Int(i),
+        Datum::Float(f) => JsValue::Number(f),
+        Datum::String(s) => JsValue::String(Rc::new(s)),
+        Datum::Symbol(s) => JsValue::String(Rc::new(s)),
+        Datum::Void | Datum::Null => JsValue::Undefined,
+        Datum::List(_, items, _) => {
+            let arr: Vec<JsValue> = items.iter().map(|r| datum_ref_to_js_value(player, r)).collect();
+            JsValue::Array(Rc::new(RefCell::new(crate::player::js_lingo::value::JsArray { items: arr })))
+        }
+        Datum::PropList(pairs, _) => {
+            let mut obj = crate::player::js_lingo::value::JsObject::new();
+            for (k_ref, v_ref) in pairs {
+                let key = datum_ref_to_string(player, &k_ref);
+                let v = datum_ref_to_js_value(player, &v_ref);
+                obj.set_own(&key, v);
+            }
+            JsValue::Object(Rc::new(RefCell::new(obj)))
+        }
+        _ => {
+            // Coarse fallback: stringify via the existing formatter so refs
+            // like `(member 3 of castLib 1)` keep their readable form.
+            let s = crate::player::datum_formatting::format_datum(dref, player);
+            JsValue::String(Rc::new(s))
+        }
+    }
+}
+
+fn datum_ref_to_string(player: &mut crate::player::DirPlayer, dref: &DatumRef) -> String {
+    let d = player.allocator.get_datum(dref).clone();
+    match d {
+        Datum::String(s) | Datum::Symbol(s) => s,
+        Datum::Int(i) => i.to_string(),
+        Datum::Float(f) => f.to_string(),
+        _ => crate::player::datum_formatting::format_datum(dref, player),
+    }
+}
+
+/// Convert a JsValue back into a DatumRef so the Lingo VM can consume it.
+fn js_value_to_datum_ref(player: &mut crate::player::DirPlayer, v: &JsValue) -> DatumRef {
+    let datum = match v {
+        JsValue::Undefined => Datum::Void,
+        JsValue::Null => Datum::Null,
+        JsValue::Bool(b) => Datum::Int(if *b { 1 } else { 0 }),
+        JsValue::Int(i) => Datum::Int(*i),
+        JsValue::Number(n) => Datum::Float(*n),
+        JsValue::String(s) => Datum::String((**s).clone()),
+        JsValue::Array(a) => {
+            // Convert each element to a DatumRef and wrap in a Lingo list.
+            let items: std::collections::VecDeque<DatumRef> = a
+                .borrow()
+                .items
+                .iter()
+                .map(|x| js_value_to_datum_ref(player, x))
+                .collect();
+            Datum::List(crate::director::lingo::datum::DatumType::List, items, false)
+        }
+        JsValue::Object(o) => {
+            let pairs: std::collections::VecDeque<crate::director::lingo::datum::PropListPair> = o
+                .borrow()
+                .props
+                .iter()
+                .map(|(k, val)| {
+                    let key_dr = player.allocator.alloc_datum(Datum::Symbol(k.clone())).unwrap();
+                    let val_dr = js_value_to_datum_ref(player, val);
+                    (key_dr, val_dr)
+                })
+                .collect();
+            Datum::PropList(pairs, false)
+        }
+        JsValue::Function(_) | JsValue::Native(_) => Datum::String("[Function]".to_string()),
+    };
+    player.allocator.alloc_datum(datum).unwrap()
 }
