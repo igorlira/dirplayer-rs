@@ -600,6 +600,34 @@ pub fn get_focused_field_selected_text() -> String {
     })
 }
 
+/// Select all text in the focused editable member (Cmd/Ctrl+A).
+#[wasm_bindgen]
+pub fn field_select_all() {
+    reserve_player_mut(|player| {
+        if player.keyboard_focus_sprite < 0 { return; }
+        let sprite_id = player.keyboard_focus_sprite as i16;
+        let sprite = player.movie.score.get_sprite(sprite_id);
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
+        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+            return;
+        };
+        let (len, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
+            CastMemberType::Field(f) if f.editable => {
+                (f.text.len() as i32, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor)
+            }
+            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => {
+                (t.text.len() as i32, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor)
+            }
+            _ => return,
+        };
+        *sel_start = 0;
+        *sel_end = len;
+        *sel_anchor = 0;
+        player.text_selection_start = 0;
+        player.text_selection_end = len.max(0) as u16;
+    });
+}
+
 /// Delete the current selection in the focused editable member. Used by cut.
 #[wasm_bindgen]
 pub fn delete_focused_field_selection() {

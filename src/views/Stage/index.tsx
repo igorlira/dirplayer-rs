@@ -21,6 +21,7 @@ import {
   is_field_focused,
   get_focused_field_selected_text,
   delete_focused_field_selection,
+  field_select_all,
   paste_text_into_focused_field,
   set_clipboard_mirror,
   ime_composition_start,
@@ -783,6 +784,11 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           // keyPressed() polling drives held game keys, but the hidden input
           // is only focused when an editable text/field sprite is active so
           // letting repeats through here is safe.
+          if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
+            e.preventDefault();
+            field_select_all();
+            return;
+          }
           const special = ['Enter', 'Backspace', 'Tab', 'ArrowUp', 'ArrowDown',
                            'ArrowLeft', 'ArrowRight', 'Escape', 'Delete'];
           if (special.includes(e.key)) {
