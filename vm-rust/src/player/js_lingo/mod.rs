@@ -16,7 +16,9 @@
 // For Phase 1 we go as far as IR + disassembly. Phase 2 adds translation.
 
 pub mod disasm;
+pub mod interpreter;
 pub mod opcodes;
+pub mod value;
 pub mod variable_length;
 pub mod xdr;
 
@@ -24,5 +26,7 @@ pub mod xdr;
 mod test_fixtures;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod interp_tests;
 
 pub use xdr::{decode_script, JsAtom, JsScriptIR, JsTryNote, JsXdrError};
