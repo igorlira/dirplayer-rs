@@ -17,6 +17,7 @@
 
 pub mod builtins;
 pub mod disasm;
+pub mod host_bridge;
 pub mod interpreter;
 pub mod opcodes;
 pub mod value;
