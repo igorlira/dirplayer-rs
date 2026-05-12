@@ -342,8 +342,18 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   // when an editable member holds focus so they don't steal copy/paste from
   // unrelated host inputs (settings panels, etc.).
   useEffect(() => {
+    // Returns true if the event originated from a native editable element that
+    // isn't the hidden input proxy — those elements handle clipboard events
+    // themselves and must not be intercepted even when a WASM field is focused.
+    const isNativeEditable = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target || target === hiddenInputRef.current) return false;
+      const tag = target.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
+    };
+
     const onCopy = (e: ClipboardEvent) => {
-      if (!is_field_focused()) return;
+      if (!is_field_focused() || isNativeEditable(e)) return;
       const text = get_focused_field_selected_text();
       if (!text) return;
       e.preventDefault();
@@ -351,7 +361,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       set_clipboard_mirror(text);
     };
     const onCut = (e: ClipboardEvent) => {
-      if (!is_field_focused()) return;
+      if (!is_field_focused() || isNativeEditable(e)) return;
       const text = get_focused_field_selected_text();
       if (!text) return;
       e.preventDefault();
@@ -360,7 +370,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       delete_focused_field_selection();
     };
     const onPaste = (e: ClipboardEvent) => {
-      if (!is_field_focused()) return;
+      if (!is_field_focused() || isNativeEditable(e)) return;
       const text = e.clipboardData?.getData("text/plain") ?? "";
       if (!text) return;
       e.preventDefault();
