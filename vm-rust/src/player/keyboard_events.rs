@@ -118,7 +118,16 @@ pub(crate) fn apply_text_edit(
         p as i32
     };
 
-    let active = *sel_end;
+    // The cursor (active/moving end) is the end opposite the anchor.
+    // When the anchor is at sel_end and there is a range, the cursor is at
+    // sel_start; otherwise it is at sel_end. This matters for Shift+Left: after
+    // extending leftward past the anchor, sel_end == anchor and continuing to
+    // press Shift+Left must move from sel_start, not get stuck at sel_end.
+    let active = if *sel_end == anchor && *sel_start != *sel_end {
+        (*sel_start).clamp(0, len)
+    } else {
+        (*sel_end).clamp(0, len)
+    };
     let has_range = hi > lo;
 
     match key {

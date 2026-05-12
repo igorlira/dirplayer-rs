@@ -789,8 +789,16 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
             field_select_all();
             return;
           }
+          // Forward modifier key presses to keep the keyboard manager in sync.
+          // Required so is_shift_down() / is_control_down() return correct
+          // values when the hidden input is focused (editable field active).
+          if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Meta' || e.key === 'Alt') {
+            key_down(e.key, e.keyCode);
+            return;
+          }
           const special = ['Enter', 'Backspace', 'Tab', 'ArrowUp', 'ArrowDown',
-                           'ArrowLeft', 'ArrowRight', 'Escape', 'Delete'];
+                           'ArrowLeft', 'ArrowRight', 'Escape', 'Delete',
+                           'Home', 'End'];
           if (special.includes(e.key)) {
             e.preventDefault();
             key_down(e.key, e.keyCode);
