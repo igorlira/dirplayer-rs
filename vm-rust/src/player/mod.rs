@@ -26,6 +26,8 @@ pub mod events;
 pub mod font;
 pub mod geometry;
 pub mod handlers;
+pub mod js_lingo;
+pub mod js_lingo_loader;
 pub mod keyboard;
 pub mod keyboard_events;
 pub mod keyboard_map;

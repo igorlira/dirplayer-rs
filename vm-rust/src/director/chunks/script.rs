@@ -112,56 +112,39 @@ impl ScriptChunk {
     }
 }
 
-/// JavaScript Lscr chunks store compiled JS data in the literal data area
-/// using a different format from standard Lingo literals. The data area contains
-/// a big-endian u32 total size followed by one or more data blocks, each
-/// beginning with the little-endian magic marker 0xDEAD0003.
+/// JavaScript Lscr chunks store ONE compiled JS script in the literal data area.
+/// The on-wire format is Mozilla SpiderMonkey 1.5's XDR-serialized JSScript
+/// (magic `0xDEAD0003`), produced by `js_XDRScript` in jsdmx/src/jsscript.c.
 ///
-/// The literal records for JS scripts are placeholders (type 0 with offset 0)
-/// except for the first one (type 11 / JavaScript). The actual constant data
-/// is extracted by splitting the data area at each magic marker.
+/// Top-level structure of the literal-data region:
+///   u32 BE  total_size       (Director framing, payload byte count)
+///   bytes[total_size]        XDR-serialized JSScript
+///
+/// The XDR stream starts with `0xDEAD0003 length prologLength version bytecode...`.
+/// Inner function bodies are themselves XDR'd JSScripts and re-use the same
+/// magic — earlier versions of this parser mistakenly split on every magic
+/// occurrence, producing a flat list of "blocks" that desynced the atom
+/// table. The actual decoding lives in `player::js_lingo::decode_script`,
+/// which descends function objects recursively.
+///
+/// We store the entire payload as a single `Datum::JavaScript` at literal
+/// index 0 (which is the type-11 record). The other slots stay `Void` to
+/// match the placeholder records — keeping `literals.len() == literals_count`
+/// so downstream indexing doesn't have to special-case JS scripts.
 fn parse_javascript_literals(
     reader: &mut BinaryReader,
     literals_data_offset: usize,
     literals_count: usize,
 ) -> Vec<Datum> {
-    const JS_BLOCK_MAGIC: [u8; 4] = [0x03, 0x00, 0xAD, 0xDE]; // 0xDEAD0003 LE
-
     reader.jmp(literals_data_offset);
     let total_size = reader.read_u32().unwrap() as usize;
     let data = reader.read_bytes(total_size).unwrap();
 
-    // Find block boundaries by scanning for the magic marker
-    let mut block_offsets: Vec<usize> = Vec::new();
-    for i in 0..data.len().saturating_sub(3) {
-        if data[i..i + 4] == JS_BLOCK_MAGIC {
-            block_offsets.push(i);
-        }
-    }
-
-    // Split data into blocks at each marker
-    let mut blocks: Vec<Vec<u8>> = Vec::new();
-    for (idx, &start) in block_offsets.iter().enumerate() {
-        let end = if idx + 1 < block_offsets.len() {
-            block_offsets[idx + 1]
-        } else {
-            data.len()
-        };
-        blocks.push(data[start..end].to_vec());
-    }
-
-    // Build the literals array to match the expected count.
-    // Index 0 is Void (the type-11 header record), indices 1..N hold the JS blocks.
     let mut literals = Vec::with_capacity(literals_count);
-    literals.push(Datum::Void);
-    for block in blocks {
-        literals.push(Datum::JavaScript(block));
-    }
-    // Pad with Void if needed to match literals_count
+    literals.push(Datum::JavaScript(data.to_vec()));
     while literals.len() < literals_count {
         literals.push(Datum::Void);
     }
-
     literals
 }
 
