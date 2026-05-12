@@ -126,8 +126,6 @@ struct PlayerBridge;
 
 impl JsHostBridge for PlayerBridge {
     fn trace(&mut self, args: &[JsValue]) {
-        // Director's `put` semantics: each arg formatted and space-joined,
-        // then logged. The frontend console picks up these log lines.
         let line = args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
         web_sys::console::log_1(&format!("[js-trace] {}", line).into());
         log::info!("[js-trace] {}", line);
@@ -140,6 +138,26 @@ impl JsHostBridge for PlayerBridge {
     }
     fn member(&mut self, _args: &[JsValue]) -> JsValue {
         JsValue::Undefined
+    }
+
+    /// Fall-through for anything else the JS script tries to invoke as a
+    /// global. We route through `BuiltInHandlerManager::call_handler`, which
+    /// is the same registry Lingo uses for `gotoNetPage`, `getNetText`,
+    /// `puppetTempo`, `count`, `script`, etc.
+    fn call_global(&mut self, name: &str, args: &[JsValue]) -> Result<JsValue, JsError> {
+        let result = reserve_player_mut(|player| {
+            // Convert JsValue args into DatumRefs Lingo can consume.
+            let datum_args: Vec<DatumRef> = args.iter()
+                .map(|v| js_value_to_datum_ref(player, v))
+                .collect();
+            let r = crate::player::handlers::manager::BuiltInHandlerManager::call_handler(name, &datum_args);
+            // Convert return value back.
+            match r {
+                Ok(dref) => Ok(datum_ref_to_js_value(player, &dref)),
+                Err(e) => Err(e),
+            }
+        });
+        result.map_err(|e| JsError::new(format!("{}: {}", name, e.message)))
     }
 }
 
