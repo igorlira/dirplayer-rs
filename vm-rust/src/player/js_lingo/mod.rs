@@ -15,6 +15,7 @@
 //
 // For Phase 1 we go as far as IR + disassembly. Phase 2 adds translation.
 
+pub mod builtins;
 pub mod disasm;
 pub mod interpreter;
 pub mod opcodes;

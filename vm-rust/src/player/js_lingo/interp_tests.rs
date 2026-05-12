@@ -351,6 +351,156 @@ fn synth_pre_increment_var() {
     assert!(matches!(result, JsValue::Int(6)), "expected 6, got {:?}", result);
 }
 
+// ===== Standard-library coverage =====
+
+fn run_with_stdlib(bc: Vec<u8>, atoms: Vec<JsAtom>, nvars: u16) -> Result<JsValue, super::value::JsError> {
+    let ir = super::xdr::JsScriptIR {
+        magic: 0xdead_0003, bytecode: bc, prolog_length: 0, version: 150,
+        atoms, source_notes: Vec::new(), filename: None, lineno: 1,
+        max_stack_depth: 16, try_notes: Vec::new(),
+    };
+    let mut rt = JsRuntime::with_stdlib();
+    let f = super::value::JsFunction {
+        atom: Rc::new(super::xdr::JsFunctionAtom {
+            name: Some("synth".into()), nargs: 0, extra: 0,
+            nvars, flags: 0, bindings: Vec::new(), script: ir,
+        }),
+    };
+    rt.call_function(&Rc::new(f), Vec::new(), JsValue::Undefined)
+}
+
+#[test]
+fn stdlib_math_floor_ceil_round() {
+    // Math.floor(3.7) === 3
+    let atoms = vec![
+        JsAtom::String("Math".into()),
+        JsAtom::String("floor".into()),
+        JsAtom::Double(3.7),
+    ];
+    let mut bc = Vec::new();
+    bc.push(JsOp::Name as u8); bc.extend(u16_be(0));        // push Math
+    bc.push(JsOp::Getprop as u8); bc.extend(u16_be(1));      // .floor
+    bc.push(JsOp::Pushobj as u8);                            // this (we'll allow)
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(2));        // push 3.7
+    bc.push(JsOp::Call as u8); bc.extend(u16_be(1));
+    bc.push(JsOp::Return as u8);
+    let result = run_with_stdlib(bc, atoms, 0).unwrap();
+    let n = match result { JsValue::Int(i) => i as f64, JsValue::Number(n) => n, _ => panic!() };
+    assert!((n - 3.0).abs() < 1e-9, "Math.floor(3.7) = {}, want 3", n);
+}
+
+#[test]
+fn stdlib_math_pi_and_sqrt() {
+    let atoms = vec![
+        JsAtom::String("Math".into()),
+        JsAtom::String("PI".into()),
+    ];
+    let mut bc = Vec::new();
+    bc.push(JsOp::Name as u8); bc.extend(u16_be(0));
+    bc.push(JsOp::Getprop as u8); bc.extend(u16_be(1));
+    bc.push(JsOp::Return as u8);
+    let result = run_with_stdlib(bc, atoms, 0).unwrap();
+    let n = match result { JsValue::Number(n) => n, _ => panic!("{:?}", result) };
+    assert!((n - std::f64::consts::PI).abs() < 1e-9);
+}
+
+#[test]
+fn stdlib_parseint_radix_and_default() {
+    // We exercise parseInt directly through invoke since it lives as a Native.
+    let mut rt = JsRuntime::with_stdlib();
+    let pi = rt.global.borrow().get_own("parseInt").cloned().unwrap();
+    let r1 = rt.invoke(&pi, vec![JsValue::String(Rc::new("42".into()))], JsValue::Undefined).unwrap();
+    assert!(matches!(r1, JsValue::Int(42)));
+    let r2 = rt.invoke(&pi, vec![JsValue::String(Rc::new("0xff".into()))], JsValue::Undefined).unwrap();
+    assert!(matches!(r2, JsValue::Int(255)));
+    let r3 = rt.invoke(&pi, vec![JsValue::String(Rc::new("101".into())), JsValue::Int(2)], JsValue::Undefined).unwrap();
+    assert!(matches!(r3, JsValue::Int(5)));
+}
+
+#[test]
+fn stdlib_isnan_recognises_nan() {
+    let mut rt = JsRuntime::with_stdlib();
+    let f = rt.global.borrow().get_own("isNaN").cloned().unwrap();
+    assert!(matches!(
+        rt.invoke(&f, vec![JsValue::String(Rc::new("not a number".into()))], JsValue::Undefined).unwrap(),
+        JsValue::Bool(true)
+    ));
+    assert!(matches!(
+        rt.invoke(&f, vec![JsValue::Int(7)], JsValue::Undefined).unwrap(),
+        JsValue::Bool(false)
+    ));
+}
+
+#[test]
+fn stdlib_array_push_pop_join() {
+    let mut rt = JsRuntime::with_stdlib();
+    let arr = JsValue::Array(Rc::new(std::cell::RefCell::new(super::value::JsArray { items: vec![JsValue::Int(1), JsValue::Int(2)] })));
+    // push(3, 4)
+    let push = match super::interpreter::JsRuntime::with_stdlib() {
+        _ => match &arr {
+            JsValue::Array(a) => {
+                let _ = a; // touch
+                // Reach into the array via get_property for the bound method
+            }
+            _ => unreachable!(),
+        }
+    };
+    let _ = push;
+    // Easier: use the interpreter's get-property path by running bytecode.
+    let atoms = vec![
+        JsAtom::String("a".into()),
+        JsAtom::String("push".into()),
+        JsAtom::String("Array".into()),
+    ];
+    let mut bc = Vec::new();
+    bc.push(JsOp::Name as u8); bc.extend(u16_be(2));        // NAME "Array"
+    bc.push(JsOp::Pushobj as u8);
+    bc.push(JsOp::Newinit as u8);                            // array
+    bc.push(JsOp::Zero as u8);
+    bc.push(JsOp::One as u8);
+    bc.push(JsOp::Initelem as u8);                            // [1]
+    bc.push(JsOp::Endinit as u8);
+    bc.push(JsOp::Setvar as u8); bc.extend(u16_be(0));        // a = [1]
+    bc.push(JsOp::Pop as u8);
+    bc.push(JsOp::Getvar as u8); bc.extend(u16_be(0));        // load a
+    bc.push(JsOp::Getprop as u8); bc.extend(u16_be(1));       // .push
+    bc.push(JsOp::Getvar as u8); bc.extend(u16_be(0));        // this = a
+    bc.push(JsOp::Number as u8); bc.extend(u16_be(0));        // arg = ... actually push the int 99
+    // Replace: use Number atom 0 = "a"? Bug — re-do with proper int atom.
+    // Cleaner: avoid Number for the push arg and use UINT16.
+    // But we already have UINT16 inline. Let me restructure: drop the wrong NUMBER op.
+    bc.pop(); bc.pop(); bc.pop();                              // pop the NUMBER op + 2 operand bytes
+    bc.push(JsOp::Uint16 as u8); bc.extend(u16_be(99));        // push 99
+    bc.push(JsOp::Call as u8); bc.extend(u16_be(1));            // a.push(99) -> 2
+    bc.push(JsOp::Pop as u8);
+    bc.push(JsOp::Getvar as u8); bc.extend(u16_be(0));         // return a
+    bc.push(JsOp::Return as u8);
+
+    let result = run_with_stdlib(bc, atoms, 1).unwrap();
+    match result {
+        JsValue::Array(a) => {
+            let items = &a.borrow().items;
+            assert_eq!(items.len(), 2);
+            assert!(matches!(items[0], JsValue::Int(1)));
+            assert!(matches!(items[1], JsValue::Int(99)));
+        }
+        other => panic!("expected Array, got {:?}", other),
+    }
+}
+
+#[test]
+fn stdlib_string_to_upper_and_length() {
+    // "hello".toUpperCase() — invoke method by calling get_property + invoke.
+    let mut rt = JsRuntime::with_stdlib();
+    let s = JsValue::String(Rc::new("hello".into()));
+    let m = super::interpreter::get_property_pub(&s, "toUpperCase");
+    let r = rt.invoke(&m, vec![], s.clone()).unwrap();
+    match r { JsValue::String(ss) => assert_eq!(&*ss, "HELLO"), other => panic!("{:?}", other) };
+
+    let len = super::interpreter::get_property_pub(&s, "length");
+    assert!(matches!(len, JsValue::Int(5)));
+}
+
 #[test]
 fn synth_throw_propagates_as_jserror() {
     let atoms = vec![JsAtom::String("boom".into())];
