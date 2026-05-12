@@ -1459,7 +1459,7 @@ impl TextMemberHandlers {
                                 }
                                 continue;
                             }
-                            let adv = font.get_char_advance(ch as u8) as i32;
+                            let adv = font.get_char_advance_for(ch) as i32;
                             let per = per_char
                                 .get(line_char_offset + ch_idx)
                                 .copied()
@@ -1486,24 +1486,24 @@ impl TextMemberHandlers {
                             };
                             if use_tight {
                                 bitmap_font_copy_char_tight(
-                                    &font, font_bitmap, ch as u8, bitmap,
+                                    &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
                                     x, y_pos, &palettes, &ch_params,
                                 );
                             } else {
                                 bitmap_font_copy_char(
-                                    &font, font_bitmap, ch as u8, bitmap,
+                                    &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
                                     x, y_pos, &palettes, &ch_params,
                                 );
                             }
                             if per.bold {
                                 if use_tight {
                                     bitmap_font_copy_char_tight(
-                                        &font, font_bitmap, ch as u8, bitmap,
+                                        &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
                                         x + 1, y_pos, &palettes, &ch_params,
                                     );
                                 } else {
                                     bitmap_font_copy_char(
-                                        &font, font_bitmap, ch as u8, bitmap,
+                                        &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
                                         x + 1, y_pos, &palettes, &ch_params,
                                     );
                                 }

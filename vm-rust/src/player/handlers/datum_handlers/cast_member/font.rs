@@ -1238,7 +1238,13 @@ impl FontMemberHandlers {
                             continue;
                         }
                         let inner = byte - segment.start_byte;
-                        let prefix = &segment.text[..inner.min(segment.text.len())];
+                        // Snap to a UTF-8 char boundary -- selection
+                        // indices can land mid-codepoint (e.g. inside ß)
+                        // and a raw slice would panic. Rounding DOWN
+                        // means the prefix excludes a half-finished char.
+                        let mut clamped = inner.min(segment.text.len());
+                        while clamped > 0 && !segment.text.is_char_boundary(clamped) { clamped -= 1; }
+                        let prefix = &segment.text[..clamped];
                         ctx.set_font(&segment.style.font);
                         let prefix_w = ctx.measure_text(prefix)
                             .map(|m| m.width())
@@ -1437,7 +1443,7 @@ impl FontMemberHandlers {
             // Calculate line width using proportional per-character advances
             let line_width: i32 = line.chars()
                 .map(|c| {
-                    let advance = font.get_char_advance(c as u8) as i32;
+                    let advance = font.get_char_advance_for(c) as i32;
                     (advance * requested_font_size) / native_char_height
                 })
                 .sum();
@@ -1471,7 +1477,7 @@ impl FontMemberHandlers {
                 }
 
                 // Calculate proportional advance for this character
-                let char_advance = ((font.get_char_advance(ch as u8) as i32) * requested_font_size / native_char_height).max(1);
+                let char_advance = ((font.get_char_advance_for(ch) as i32) * requested_font_size / native_char_height).max(1);
 
                 // For space character, just advance position without drawing
                 if ch == ' ' {
@@ -1485,7 +1491,7 @@ impl FontMemberHandlers {
 
                 // Draw the character with scaling (use full cell width for source mapping)
                 bitmap_font_copy_char_scaled(
-                    font, font_bitmap, ch as u8, bitmap,
+                    font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
                     char_x, y, char_width, char_height,
                     palettes, &params
                 );
@@ -1493,7 +1499,7 @@ impl FontMemberHandlers {
                 // Simulate bold by drawing again with 1px offset
                 if is_bold {
                     bitmap_font_copy_char_scaled(
-                        font, font_bitmap, ch as u8, bitmap,
+                        font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
                         char_x + 1, y, char_width, char_height,
                         palettes, &params
                     );

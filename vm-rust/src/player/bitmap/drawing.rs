@@ -3130,7 +3130,7 @@ impl Bitmap {
         for line in &lines {
             // Calculate x based on alignment
             let line_w: i32 = line.chars()
-                .map(|ch| font.get_char_advance(ch as u8) as i32)
+                .map(|ch| font.get_char_advance_for(ch) as i32)
                 .sum();
             let x = match alignment {
                 "center" => loc_h + ((max_width - line_w) / 2).max(0),
@@ -3142,10 +3142,10 @@ impl Bitmap {
             let mut cx = x;
             for ch in line.chars() {
                 bitmap_font_copy_char(
-                    font, font_bitmap, ch as u8,
+                    font, font_bitmap, crate::io::encoding::glyph_byte_for(ch),
                     self, cx, y, palettes, &params,
                 );
-                cx += font.get_char_advance(ch as u8) as i32;
+                cx += font.get_char_advance_for(ch) as i32;
             }
             y += line_height;
         }
@@ -3187,12 +3187,20 @@ impl Bitmap {
                 let mut line_w: i32 = 0;
                 let mut last_space: Option<usize> = None;
 
-                let mut p = para_start;
-                while p < para_end {
-                    let ch = bytes[p];
-                    let cw = font.get_char_advance(ch) as i32;
+                // Walk Unicode chars (via char_indices for byte positions)
+                // rather than raw UTF-8 bytes. Bytes-based iteration both
+                // (a) gave umlauts 2x phantom width by counting their
+                // lead+continuation bytes as separate glyphs, and (b)
+                // could leave `p` mid-codepoint, panicking at the next
+                // `text[line_start..p]` slice when the wrap point landed
+                // inside a multi-byte char (e.g. "lets tryäö+üß" at byte
+                // 16 inside ß).
+                let para_text = &text[para_start..para_end];
+                for (local_p, ch) in para_text.char_indices() {
+                    let p = para_start + local_p;
+                    let cw = font.get_char_advance_for(ch) as i32;
 
-                    if ch == b' ' {
+                    if ch == ' ' {
                         last_space = Some(p);
                     }
 
@@ -3203,20 +3211,22 @@ impl Bitmap {
                                 end: sp,
                                 text: text[line_start..sp].to_string(),
                             });
+                            // ' ' is ASCII so sp + 1 is always a char
+                            // boundary.
                             line_start = sp + 1;
                             last_space = None;
-                            // If the space we just wrapped at is the current
-                            // character (it was the overflowing one), the
-                            // space itself is consumed by the wrap — skip
-                            // past it without double-counting its width.
+                            // If the wrap point IS the current char (the
+                            // overflowing one), skip it without counting
+                            // its width on the new line.
                             if line_start > p {
                                 line_w = 0;
-                                p = line_start;
                                 continue;
                             }
+                            // Re-accumulate glyph advances for the chars
+                            // that now form the start of the new line.
                             line_w = text[line_start..p]
-                                .bytes()
-                                .map(|b| font.get_char_advance(b) as i32)
+                                .chars()
+                                .map(|c| font.get_char_advance(c as u8) as i32)
                                 .sum();
                         } else {
                             #[cfg(feature = "word_hard_break")]
@@ -3234,7 +3244,6 @@ impl Bitmap {
                     }
 
                     line_w += cw;
-                    p += 1;
                 }
 
                 lines.push(LineSpan {
@@ -3299,7 +3308,13 @@ impl Bitmap {
 
         let line = &lines[line_idx];
         let col = idx.saturating_sub(line.start);
-        let line_w: i32 = line.text.bytes().map(|b| font.get_char_advance(b) as i32).sum();
+        // Iterate Unicode chars, not raw UTF-8 bytes. The bitmap renderer
+        // advances one glyph per char (see render_html_text_to_bitmap_styled),
+        // so the caret-pixel calculation must mirror that. The previous
+        // .bytes() loop counted each lead+continuation byte of an umlaut
+        // as separate glyph advances, producing 4 phantom advances for
+        // "öäüß" (8 UTF-8 bytes → 8 advances instead of 4).
+        let line_w: i32 = line.text.chars().map(|c| font.get_char_advance(c as u8) as i32).sum();
         let x_offset = if max_width > 0 {
             let key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
             match key.as_str() {
@@ -3311,9 +3326,15 @@ impl Bitmap {
             0
         };
 
+        // Walk chars until we've covered `col` bytes from the line start.
+        // `col` and `idx` are byte indices into the UTF-8 string; one umlaut
+        // contributes 2 bytes but only one glyph advance.
         let mut x = x_offset;
-        for b in line.text.bytes().take(col) {
-            x += font.get_char_advance(b) as i32;
+        let mut byte_pos = 0usize;
+        for c in line.text.chars() {
+            if byte_pos >= col { break; }
+            x += font.get_char_advance(c as u8) as i32;
+            byte_pos += c.len_utf8();
         }
         (x, (line_idx as i32) * line_height)
     }
@@ -3338,7 +3359,11 @@ impl Bitmap {
         };
 
         let line = &lines[line_idx];
-        let line_w: i32 = line.text.bytes().map(|b| font.get_char_advance(b) as i32).sum();
+        // Walk chars instead of UTF-8 bytes — see caret_index_to_xy. This
+        // also keeps the returned caret index aligned to char boundaries
+        // (was bug source for the byte-index-7-mid-of-ß slice panic
+        // observed in get_focused_field_selected_text / pixel_x_for_byte).
+        let line_w: i32 = line.text.chars().map(|c| font.get_char_advance(c as u8) as i32).sum();
         let x_offset = if max_width > 0 {
             let key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
             match key.as_str() {
@@ -3355,12 +3380,14 @@ impl Bitmap {
         }
 
         let mut cx = x_offset;
-        for (i, b) in line.text.bytes().enumerate() {
-            let cw = font.get_char_advance(b) as i32;
+        let mut byte_pos = 0usize;
+        for c in line.text.chars() {
+            let cw = font.get_char_advance(c as u8) as i32;
             if x < cx + cw / 2 {
-                return (line.start + i) as i32;
+                return (line.start + byte_pos) as i32;
             }
             cx += cw;
+            byte_pos += c.len_utf8();
         }
         line.end as i32
     }

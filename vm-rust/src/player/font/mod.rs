@@ -91,6 +91,14 @@ impl BitmapFont {
         }
         self.char_width
     }
+
+    /// Advance width for a Unicode char. Maps the char to its Win-1252
+    /// glyph slot first, so codepoints like € (U+20AC) hit the correct
+    /// atlas cell (0x80) instead of `c as u8` truncating to 0xAC.
+    #[inline]
+    pub fn get_char_advance_for(&self, c: char) -> u16 {
+        self.get_char_advance(crate::io::encoding::glyph_byte_for(c))
+    }
 }
 
 pub struct DrawTextParams<'a> {
