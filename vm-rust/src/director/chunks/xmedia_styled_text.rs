@@ -1,35 +1,6 @@
 use log::debug;
+use crate::io::encoding::win1252_byte_to_char;
 use crate::player::handlers::datum_handlers::cast_member::font::{StyledSpan, HtmlStyle, TextAlignment};
-
-/// Mac Roman to Unicode mapping for bytes 0x80-0xFF.
-/// Director files from Mac use Mac Roman encoding.
-/// Source: https://www.unicode.org/Public/MAPPINGS/VENDORS/APPLE/ROMAN.TXT
-const MAC_ROMAN_TABLE: [char; 128] = [
-    '\u{00C4}', '\u{00C5}', '\u{00C7}', '\u{00C9}', '\u{00D1}', '\u{00D6}', '\u{00DC}', '\u{00E1}', // 80-87
-    '\u{00E0}', '\u{00E2}', '\u{00E4}', '\u{00E3}', '\u{00E5}', '\u{00E7}', '\u{00E9}', '\u{00E8}', // 88-8F
-    '\u{00EA}', '\u{00EB}', '\u{00ED}', '\u{00EC}', '\u{00EE}', '\u{00EF}', '\u{00F1}', '\u{00F3}', // 90-97
-    '\u{00F2}', '\u{00F4}', '\u{00F6}', '\u{00F5}', '\u{00FA}', '\u{00F9}', '\u{00FB}', '\u{00FC}', // 98-9F
-    '\u{2020}', '\u{00B0}', '\u{00A2}', '\u{00A3}', '\u{00A7}', '\u{2022}', '\u{00B6}', '\u{00DF}', // A0-A7
-    '\u{00AE}', '\u{00A9}', '\u{2122}', '\u{00B4}', '\u{00A8}', '\u{2260}', '\u{00C6}', '\u{00D8}', // A8-AF
-    '\u{221E}', '\u{00B1}', '\u{2264}', '\u{2265}', '\u{00A5}', '\u{00B5}', '\u{2202}', '\u{2211}', // B0-B7
-    '\u{220F}', '\u{03C0}', '\u{222B}', '\u{00AA}', '\u{00BA}', '\u{03A9}', '\u{00E6}', '\u{00F8}', // B8-BF
-    '\u{00BF}', '\u{00A1}', '\u{00AC}', '\u{221A}', '\u{0192}', '\u{2248}', '\u{2206}', '\u{00AB}', // C0-C7
-    '\u{00BB}', '\u{2026}', '\u{00A0}', '\u{00C0}', '\u{00C3}', '\u{00D5}', '\u{0152}', '\u{0153}', // C8-CF
-    '\u{2013}', '\u{2014}', '\u{201C}', '\u{201D}', '\u{2018}', '\u{2019}', '\u{00F7}', '\u{25CA}', // D0-D7
-    '\u{00FF}', '\u{0178}', '\u{2044}', '\u{20AC}', '\u{2039}', '\u{203A}', '\u{FB01}', '\u{FB02}', // D8-DF
-    '\u{2021}', '\u{00B7}', '\u{201A}', '\u{201E}', '\u{2030}', '\u{00C2}', '\u{00CA}', '\u{00C1}', // E0-E7
-    '\u{00CB}', '\u{00C8}', '\u{00CD}', '\u{00CE}', '\u{00CF}', '\u{00CC}', '\u{00D3}', '\u{00D4}', // E8-EF
-    '\u{F8FF}', '\u{00D2}', '\u{00DA}', '\u{00DB}', '\u{00D9}', '\u{0131}', '\u{02C6}', '\u{02DC}', // F0-F7
-    '\u{00AF}', '\u{02D8}', '\u{02D9}', '\u{02DA}', '\u{00B8}', '\u{02DD}', '\u{02DB}', '\u{02C7}', // F8-FF
-];
-
-fn mac_roman_to_char(byte: u8) -> char {
-    if byte < 0x80 {
-        byte as char
-    } else {
-        MAC_ROMAN_TABLE[(byte - 0x80) as usize]
-    }
-}
 
 impl XmedStyledText {
     /// Resolve the active `par_info` for a given text byte/char position.
@@ -837,11 +808,14 @@ fn parse_section_3(data: &[u8]) -> Result<Section3Data, String> {
         text_end = data.len(); // No end marker, use full length
     }
 
-    // Extract text, preserving all characters including \r, \n, \t
-    // Use Mac Roman decoding for bytes 0x80-0xFF (Director files use Mac Roman encoding)
+    // Extract text, preserving all characters including \r, \n, \t.
+    // Director text members store bytes as Windows-1252. The earlier
+    // Mac-Roman decoder mapped 0xE4 to U+2021 (‡) instead of U+00E4 (ä),
+    // breaking umlauts, ß, ø, ñ, and Spanish accents in Windows-authored
+    // movies (i.e. virtually all live test corpora).
     let mut text = String::new();
     for i in text_start..text_end {
-        let ch = mac_roman_to_char(data[i]);
+        let ch = win1252_byte_to_char(data[i]);
         if ch == '\0' {
             break; // Stop at first null byte (padding)
         }

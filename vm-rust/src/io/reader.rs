@@ -2,6 +2,8 @@ use std::io::Read;
 
 use binary_reader::BinaryReader;
 
+use crate::io::encoding::decode_win1252;
+
 pub trait DirectorExt {
     fn read_var_int(&mut self) -> Result<i32, std::io::Error>;
     fn read_zlib_bytes(&mut self, length: usize) -> Result<Vec<u8>, std::io::Error>;
@@ -48,8 +50,13 @@ impl DirectorExt for BinaryReader {
     }
 
     fn read_string(&mut self, len: usize) -> Result<String, std::io::Error> {
+        // Director text is Windows-1252 (CP1252), not UTF-8. The old
+        // from_utf8_lossy here silently replaced every non-ASCII byte with
+        // U+FFFD, killing umlauts (ä ö ü ß), Scandinavian (å ø æ), and
+        // Spanish (á é í ó ú ñ) characters in fields, text members, Lingo
+        // string literals, score labels, etc.
         let bytes = self.read_bytes(len).unwrap();
-        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        return Ok(decode_win1252(&bytes));
     }
 
     fn read_apple_float_80(&mut self) -> Result<f64, String> {

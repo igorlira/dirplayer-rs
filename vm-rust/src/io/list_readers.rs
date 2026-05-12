@@ -1,5 +1,6 @@
 use binary_reader::{BinaryReader, Endian};
 
+use super::encoding::decode_win1252;
 use super::reader::DirectorExt;
 
 pub fn read_pascal_string(item_bufs: &Vec<Vec<u8>>, index: usize, item_endian: Endian) -> String {
@@ -22,8 +23,9 @@ pub fn read_string(item_bufs: &Vec<Vec<u8>>, index: usize) -> String {
         return "".to_owned();
     }
 
+    // Win-1252, not UTF-8. See io::encoding for context.
     let buf = &item_bufs[index];
-    return String::from_utf8_lossy(buf).into_owned();
+    return decode_win1252(buf);
 }
 
 pub fn read_u16(item_bufs: &Vec<Vec<u8>>, index: usize, item_endian: Endian) -> u16 {
