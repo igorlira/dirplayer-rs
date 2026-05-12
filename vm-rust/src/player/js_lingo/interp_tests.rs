@@ -351,6 +351,57 @@ fn synth_pre_increment_var() {
     assert!(matches!(result, JsValue::Int(6)), "expected 6, got {:?}", result);
 }
 
+// ===== Host bridge integration =====
+
+#[test]
+fn bridge_routes_trace_sprite_and_go_from_js_mov() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use super::host_bridge::RecordingBridge;
+
+    let ir = Rc::new(decode_script(JS_MOV_PAYLOAD).expect("decode"));
+
+    let bridge = Rc::new(RefCell::new(RecordingBridge::default()));
+    let mut rt = JsRuntime::with_stdlib();
+    rt.set_bridge(bridge.clone());
+    rt.install_director_globals();
+
+    rt.run_program(&ir).expect("program");
+    let on_mouseup = rt.global.borrow().get_own("on_mouseUp").cloned().expect("hoisted");
+    rt.invoke(&on_mouseup, vec![], JsValue::Undefined).expect("invoke on_mouseUp");
+
+    let b = bridge.borrow();
+    // 3 trace calls from the for-loop body.
+    assert_eq!(b.traces.len(), 3);
+    assert_eq!(b.traces[0], "item 0 = 1");
+    assert_eq!(b.traces[1], "item 1 = 2");
+    assert_eq!(b.traces[2], "item 2 = 3");
+    // sprite(1) called twice (once in each branch of the if/else), but only
+    // one branch runs based on pCounter.
+    assert!(b.sprite_calls.iter().any(|c| *c == 1), "sprite(1) called");
+}
+
+#[test]
+fn bridge_trace_alone_for_on_preparemovie() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use super::host_bridge::RecordingBridge;
+
+    let ir = Rc::new(decode_script(JS_MOV_PAYLOAD).expect("decode"));
+    let bridge = Rc::new(RefCell::new(RecordingBridge::default()));
+    let mut rt = JsRuntime::with_stdlib();
+    rt.set_bridge(bridge.clone());
+    rt.install_director_globals();
+
+    rt.run_program(&ir).expect("program");
+    let on_prep = rt.global.borrow().get_own("on_prepareMovie").cloned().expect("hoisted");
+    rt.invoke(&on_prep, vec![], JsValue::Undefined).expect("invoke");
+
+    let b = bridge.borrow();
+    assert_eq!(b.traces.len(), 1);
+    assert_eq!(b.traces[0], "hello from js, counter=42");
+}
+
 // ===== Standard-library coverage =====
 
 fn run_with_stdlib(bc: Vec<u8>, atoms: Vec<JsAtom>, nvars: u16) -> Result<JsValue, super::value::JsError> {
