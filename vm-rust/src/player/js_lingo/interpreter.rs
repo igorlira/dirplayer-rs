@@ -71,6 +71,13 @@ pub struct JsRuntime {
 }
 
 impl JsRuntime {
+    /// New runtime with the ECMA-262 stdlib (Math, parseInt, etc.) installed.
+    pub fn with_stdlib() -> Self {
+        let rt = Self::new();
+        super::builtins::install(&rt);
+        rt
+    }
+
     pub fn new() -> Self {
         let rt = JsRuntime { global: Rc::new(RefCell::new(JsObject::new())) };
         // Built-in constructors: NAME "Array"/"Object" needs to resolve to
@@ -1195,6 +1202,10 @@ fn compare(a: &JsValue, b: &JsValue) -> std::cmp::Ordering {
     }
 }
 
+/// Test-only re-export of get_property (private otherwise).
+#[cfg(test)]
+pub fn get_property_pub(obj: &JsValue, name: &str) -> JsValue { get_property(obj, name) }
+
 fn get_property(obj: &JsValue, name: &str) -> JsValue {
     match obj {
         JsValue::Object(o) => {
@@ -1212,14 +1223,274 @@ fn get_property(obj: &JsValue, name: &str) -> JsValue {
             if let Ok(i) = name.parse::<usize>() {
                 if i < b.items.len() { return b.items[i].clone(); }
             }
+            drop(b);
+            // Array.prototype.* methods, dispatched as bound natives.
+            if let Some(m) = array_method(a.clone(), name) {
+                return m;
+            }
             JsValue::Undefined
         }
         JsValue::String(s) => {
             if name == "length" { return JsValue::Int(s.chars().count() as i32); }
+            // Numeric indexing on strings returns a 1-char string per ECMA-262.
+            if let Ok(i) = name.parse::<usize>() {
+                return s.chars().nth(i)
+                    .map(|c| JsValue::String(Rc::new(c.to_string())))
+                    .unwrap_or(JsValue::Undefined);
+            }
+            if let Some(m) = string_method(s.clone(), name) {
+                return m;
+            }
             JsValue::Undefined
         }
         _ => JsValue::Undefined,
     }
+}
+
+/// Return a bound Native for an Array.prototype method, or None if unknown.
+fn array_method(arr: super::value::JsArrayRef, name: &str) -> Option<JsValue> {
+    use super::value::NativeFn;
+    macro_rules! bind {
+        ($n:expr, $f:expr) => {
+            Some(JsValue::Native(Rc::new(NativeFn {
+                name: $n,
+                call: Box::new($f),
+            })))
+        };
+    }
+    match name {
+        "push" => {
+            let a = arr.clone();
+            bind!("push", move |args| {
+                let mut b = a.borrow_mut();
+                for v in args { b.items.push(v.clone()); }
+                Ok(JsValue::Int(b.items.len() as i32))
+            })
+        }
+        "pop" => {
+            let a = arr.clone();
+            bind!("pop", move |_| {
+                Ok(a.borrow_mut().items.pop().unwrap_or(JsValue::Undefined))
+            })
+        }
+        "shift" => {
+            let a = arr.clone();
+            bind!("shift", move |_| {
+                let mut b = a.borrow_mut();
+                if b.items.is_empty() { Ok(JsValue::Undefined) } else { Ok(b.items.remove(0)) }
+            })
+        }
+        "unshift" => {
+            let a = arr.clone();
+            bind!("unshift", move |args| {
+                let mut b = a.borrow_mut();
+                for (i, v) in args.iter().enumerate() {
+                    b.items.insert(i, v.clone());
+                }
+                Ok(JsValue::Int(b.items.len() as i32))
+            })
+        }
+        "join" => {
+            let a = arr.clone();
+            bind!("join", move |args| {
+                let sep = args.get(0).map(|v| v.to_string()).unwrap_or_else(|| ",".into());
+                let b = a.borrow();
+                Ok(JsValue::String(Rc::new(
+                    b.items.iter().map(|v| match v {
+                        JsValue::Undefined | JsValue::Null => String::new(),
+                        other => other.to_string(),
+                    }).collect::<Vec<_>>().join(&sep)
+                )))
+            })
+        }
+        "reverse" => {
+            let a = arr.clone();
+            bind!("reverse", move |_| {
+                a.borrow_mut().items.reverse();
+                Ok(JsValue::Array(a.clone()))
+            })
+        }
+        "slice" => {
+            let a = arr.clone();
+            bind!("slice", move |args| {
+                let b = a.borrow();
+                let len = b.items.len() as i32;
+                let mut start = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
+                let mut end = args.get(1).map(|v| v.to_int32()).unwrap_or(len);
+                if start < 0 { start = (len + start).max(0); }
+                if end < 0 { end = (len + end).max(0); }
+                let start = start.min(len) as usize;
+                let end = end.min(len) as usize;
+                let out: Vec<JsValue> = if start < end { b.items[start..end].to_vec() } else { Vec::new() };
+                Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(super::value::JsArray { items: out }))))
+            })
+        }
+        "concat" => {
+            let a = arr.clone();
+            bind!("concat", move |args| {
+                let mut out = a.borrow().items.clone();
+                for v in args {
+                    if let JsValue::Array(other) = v {
+                        out.extend(other.borrow().items.iter().cloned());
+                    } else {
+                        out.push(v.clone());
+                    }
+                }
+                Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(super::value::JsArray { items: out }))))
+            })
+        }
+        "indexOf" => {
+            let a = arr.clone();
+            bind!("indexOf", move |args| {
+                let needle = args.get(0).cloned().unwrap_or(JsValue::Undefined);
+                let b = a.borrow();
+                for (i, v) in b.items.iter().enumerate() {
+                    if loose_equal_pub(v, &needle) {
+                        return Ok(JsValue::Int(i as i32));
+                    }
+                }
+                Ok(JsValue::Int(-1))
+            })
+        }
+        "sort" => {
+            let a = arr.clone();
+            bind!("sort", move |_args| {
+                let mut b = a.borrow_mut();
+                b.items.sort_by(|x, y| x.to_string().cmp(&y.to_string()));
+                drop(b);
+                Ok(JsValue::Array(a.clone()))
+            })
+        }
+        _ => None,
+    }
+}
+
+fn string_method(s: Rc<String>, name: &str) -> Option<JsValue> {
+    use super::value::NativeFn;
+    macro_rules! bind {
+        ($n:expr, $f:expr) => {
+            Some(JsValue::Native(Rc::new(NativeFn { name: $n, call: Box::new($f) })))
+        };
+    }
+    match name {
+        "charAt" => {
+            let s = s.clone();
+            bind!("charAt", move |args| {
+                let i = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
+                let ch = if i < 0 { None } else { s.chars().nth(i as usize) };
+                Ok(JsValue::String(Rc::new(ch.map(|c| c.to_string()).unwrap_or_default())))
+            })
+        }
+        "charCodeAt" => {
+            let s = s.clone();
+            bind!("charCodeAt", move |args| {
+                let i = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
+                if i < 0 { return Ok(JsValue::Number(f64::NAN)); }
+                Ok(match s.chars().nth(i as usize) {
+                    Some(c) => JsValue::Int(c as i32),
+                    None => JsValue::Number(f64::NAN),
+                })
+            })
+        }
+        "indexOf" => {
+            let s = s.clone();
+            bind!("indexOf", move |args| {
+                let needle = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+                let start = args.get(1).map(|v| v.to_int32()).unwrap_or(0).max(0) as usize;
+                let hay: String = s.chars().skip(start).collect();
+                match hay.find(&needle) {
+                    Some(byte_pos) => {
+                        let char_idx = hay[..byte_pos].chars().count();
+                        Ok(JsValue::Int((start + char_idx) as i32))
+                    }
+                    None => Ok(JsValue::Int(-1)),
+                }
+            })
+        }
+        "lastIndexOf" => {
+            let s = s.clone();
+            bind!("lastIndexOf", move |args| {
+                let needle = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+                match s.rfind(&needle) {
+                    Some(byte_pos) => Ok(JsValue::Int(s[..byte_pos].chars().count() as i32)),
+                    None => Ok(JsValue::Int(-1)),
+                }
+            })
+        }
+        "slice" | "substring" => {
+            let s = s.clone();
+            bind!("slice", move |args| {
+                let chars: Vec<char> = s.chars().collect();
+                let len = chars.len() as i32;
+                let mut start = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
+                let mut end = args.get(1).map(|v| v.to_int32()).unwrap_or(len);
+                if start < 0 { start = (len + start).max(0); }
+                if end < 0 { end = (len + end).max(0); }
+                let start = start.min(len) as usize;
+                let end = end.min(len) as usize;
+                let (a, b) = if start <= end { (start, end) } else { (end, start) };
+                Ok(JsValue::String(Rc::new(chars[a..b].iter().collect())))
+            })
+        }
+        "substr" => {
+            let s = s.clone();
+            bind!("substr", move |args| {
+                let chars: Vec<char> = s.chars().collect();
+                let len = chars.len() as i32;
+                let mut start = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
+                let count = args.get(1).map(|v| v.to_int32()).unwrap_or(len);
+                if start < 0 { start = (len + start).max(0); }
+                let start = start.min(len) as usize;
+                let end = (start as i32 + count.max(0)).min(len) as usize;
+                Ok(JsValue::String(Rc::new(chars[start..end].iter().collect())))
+            })
+        }
+        "toUpperCase" => { let s = s.clone(); bind!("toUpperCase", move |_| Ok(JsValue::String(Rc::new(s.to_uppercase())))) }
+        "toLowerCase" => { let s = s.clone(); bind!("toLowerCase", move |_| Ok(JsValue::String(Rc::new(s.to_lowercase())))) }
+        "split" => {
+            let s = s.clone();
+            bind!("split", move |args| {
+                let sep = match args.get(0) {
+                    Some(v) => v.to_string(),
+                    None => return Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(
+                        super::value::JsArray { items: vec![JsValue::String(s.clone())] }
+                    )))),
+                };
+                let items: Vec<JsValue> = if sep.is_empty() {
+                    s.chars().map(|c| JsValue::String(Rc::new(c.to_string()))).collect()
+                } else {
+                    s.split(&sep).map(|p| JsValue::String(Rc::new(p.to_string()))).collect()
+                };
+                Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(super::value::JsArray { items }))))
+            })
+        }
+        "replace" => {
+            let s = s.clone();
+            bind!("replace", move |args| {
+                let from = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+                let to = args.get(1).map(|v| v.to_string()).unwrap_or_default();
+                Ok(JsValue::String(Rc::new(s.replacen(&from, &to, 1))))
+            })
+        }
+        "concat" => {
+            let s = s.clone();
+            bind!("concat", move |args| {
+                let mut out = (*s).clone();
+                for v in args { out.push_str(&v.to_string()); }
+                Ok(JsValue::String(Rc::new(out)))
+            })
+        }
+        "toString" | "valueOf" => {
+            let s = s.clone();
+            bind!("toString", move |_| Ok(JsValue::String(s.clone())))
+        }
+        _ => None,
+    }
+}
+
+// Pub wrapper so array_method can call it from outside the impl block.
+fn loose_equal_pub(a: &JsValue, b: &JsValue) -> bool {
+    loose_equal(a, b)
 }
 
 fn set_property(obj: &JsValue, name: &str, value: JsValue) -> Result<(), JsError> {
