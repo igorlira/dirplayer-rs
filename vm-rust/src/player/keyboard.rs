@@ -65,7 +65,18 @@ impl KeyboardManager {
     }
 
     pub fn is_alt_down(&self) -> bool {
-        self.is_key_down("Alt")
+        // German / Nordic / many EU layouts assign the right Alt key the
+        // "AltGraph" identifier instead of "Alt". Treat both as the same
+        // modifier so `the optionDown`/`the altDown` Lingo accessors stay
+        // truthy when the user is holding AltGr.
+        self.is_key_down("Alt") || self.is_key_down("AltGraph")
+    }
+
+    /// True specifically when the AltGr key (right-Alt on German/Nordic
+    /// layouts) is held. Used by text-insertion to distinguish "typing a
+    /// layout-modified character like @, €, |" from "Ctrl+letter shortcut".
+    pub fn is_alt_graph_down(&self) -> bool {
+        self.is_key_down("AltGraph")
     }
 
     pub fn key_code(&self) -> u16 {

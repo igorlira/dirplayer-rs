@@ -106,6 +106,28 @@ pub(crate) fn apply_text_edit(
         while p < n && !is_word(bytes_for_nav[p]) { p += 1; }
         p as i32
     };
+    // Char-boundary helpers. The text buffer is UTF-8 (Rust String), so a
+    // single visible character like 'ä' or '€' is 2-3 bytes. Stepping the
+    // caret by 1 byte would land inside a multi-byte sequence and make
+    // `text.replace_range` panic on the next edit. These walk to the
+    // nearest legal char boundary using `str::is_char_boundary`, which is
+    // O(1) per step.
+    let prev_char_boundary = |from: i32| -> i32 {
+        if from <= 0 { return 0; }
+        let mut p = (from as usize).min(text.len());
+        if p == 0 { return 0; }
+        p -= 1;
+        while p > 0 && !text.is_char_boundary(p) { p -= 1; }
+        p as i32
+    };
+    let next_char_boundary = |from: i32| -> i32 {
+        let n = text.len();
+        let mut p = (from as usize).min(n);
+        if p >= n { return n as i32; }
+        p += 1;
+        while p < n && !text.is_char_boundary(p) { p += 1; }
+        p as i32
+    };
     let line_start_of = |from: i32| -> i32 {
         let mut p = from.clamp(0, len) as usize;
         while p > 0 && bytes_for_nav[p - 1] != b'\r' && bytes_for_nav[p - 1] != b'\n' { p -= 1; }
@@ -137,7 +159,7 @@ pub(crate) fn apply_text_edit(
             } else if ctrl_or_meta {
                 prev_word_boundary(active)
             } else {
-                (active - 1).max(0)
+                prev_char_boundary(active)
             };
             if shift {
                 extend(sel_start, sel_end, anchor, new_pos, len);
@@ -151,7 +173,7 @@ pub(crate) fn apply_text_edit(
             } else if ctrl_or_meta {
                 next_word_boundary(active)
             } else {
-                (active + 1).min(len)
+                next_char_boundary(active)
             };
             if shift {
                 extend(sel_start, sel_end, anchor, new_pos, len);
@@ -213,8 +235,9 @@ pub(crate) fn apply_text_edit(
                 text.replace_range(lo as usize..hi as usize, "");
                 collapse(sel_start, sel_end, sel_anchor, lo, text.len() as i32);
             } else if lo > 0 {
-                text.replace_range((lo - 1) as usize..lo as usize, "");
-                collapse(sel_start, sel_end, sel_anchor, lo - 1, text.len() as i32);
+                let prev = prev_char_boundary(lo);
+                text.replace_range(prev as usize..lo as usize, "");
+                collapse(sel_start, sel_end, sel_anchor, prev, text.len() as i32);
             }
         }
         "Delete" => {
@@ -222,7 +245,8 @@ pub(crate) fn apply_text_edit(
                 text.replace_range(lo as usize..hi as usize, "");
                 collapse(sel_start, sel_end, sel_anchor, lo, text.len() as i32);
             } else if lo < len {
-                text.replace_range(lo as usize..(lo + 1) as usize, "");
+                let next = next_char_boundary(lo);
+                text.replace_range(lo as usize..next as usize, "");
                 collapse(sel_start, sel_end, sel_anchor, lo, text.len() as i32);
             }
         }
@@ -244,10 +268,24 @@ pub(crate) fn apply_text_edit(
             collapse(sel_start, sel_end, sel_anchor, new_caret, text.len() as i32);
         }
         _ => {
-            // Single ASCII char insertion. Any modifier other than Shift
+            // Single-character insertion. Browser keydown delivers printable
+            // chars as 1-codepoint strings: "a", "Ä", "ä", "ñ", "€", "ß".
+            // Named keys (Tab, Backspace, ArrowLeft, F5, ...) arrive as
+            // multi-char strings and are filtered out here. The previous
+            // `key.len() == 1` byte-length check rejected umlauts because
+            // "ä" is 2 bytes in UTF-8. Any modifier other than Shift still
             // suppresses insertion (Cmd+S, Ctrl+B, etc.).
-            if key.len() == 1 && !ctrl_or_meta {
+            let one_printable_char = {
+                let mut it = key.chars();
+                match (it.next(), it.next()) {
+                    (Some(c), None) => !c.is_control(),
+                    _ => false,
+                }
+            };
+            if one_printable_char && !ctrl_or_meta {
                 text.replace_range(lo as usize..hi as usize, key);
+                // `key.len()` is the UTF-8 byte length -- correct here
+                // because sel_start/sel_end are byte indices into `text`.
                 let new_caret = lo + key.len() as i32;
                 collapse(sel_start, sel_end, sel_anchor, new_caret, text.len() as i32);
             }
@@ -526,8 +564,22 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
                 return;
             }
             let shift = player.keyboard_manager.is_shift_down();
-            let ctrl_or_meta = player.keyboard_manager.is_control_down()
-                || player.keyboard_manager.is_command_down();
+            let ctrl = player.keyboard_manager.is_control_down();
+            let cmd = player.keyboard_manager.is_command_down();
+            let alt = player.keyboard_manager.is_alt_down();
+            let alt_graph = player.keyboard_manager.is_alt_graph_down();
+            // AltGr detection: German / Nordic / many EU layouts make the
+            // right Alt key produce printable characters like @, €, |, [, ].
+            // The browser tells us this two ways depending on platform:
+            //   (a) it fires `event.key = "AltGraph"` for the key itself
+            //   (b) Windows synthesizes Ctrl+Alt and the event also has
+            //       ctrlKey=true alongside altKey=true.
+            // Both signal "the user is typing a layout-modified character,
+            // not invoking a Ctrl shortcut". Treat either as AltGr and let
+            // insertion proceed. Cmd (Mac Meta) is never AltGr -- those
+            // shortcuts (Cmd+S, Cmd+C) keep getting suppressed.
+            let is_alt_gr = alt_graph || (ctrl && alt);
+            let ctrl_or_meta = cmd || (ctrl && !is_alt_gr);
 
             // Tab handled separately (advances focus across editable members);
             // hand off so apply_text_edit doesn't see it.
