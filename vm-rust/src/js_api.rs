@@ -49,6 +49,26 @@ impl ToJsValue for ScoreSpriteSpan {
     }
 }
 
+fn format_atom_summary(a: &crate::player::js_lingo::xdr::JsAtom) -> String {
+    use crate::player::js_lingo::xdr::JsAtom;
+    match a {
+        JsAtom::Null => "null".into(),
+        JsAtom::Void => "void".into(),
+        JsAtom::Bool(b) => b.to_string(),
+        JsAtom::Int(i) => i.to_string(),
+        JsAtom::Double(d) => format!("{}", d),
+        JsAtom::String(s) => format!("{:?}", s),
+        JsAtom::Function(f) => format!(
+            "function {}({})",
+            f.name.as_deref().unwrap_or("<anonymous>"),
+            f.bindings.iter()
+                .filter(|b| b.kind == crate::player::js_lingo::xdr::JsBindingKind::Argument)
+                .map(|b| b.name.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+        JsAtom::Unsupported(t) => format!("<unsupported tag={}>", t),
+    }
+}
+
 pub fn ascii_safe(string: &str) -> String {
     string
         .chars()
@@ -1459,6 +1479,120 @@ impl JsApi {
         return sprite_map;
     }
 
+    /// Emit one synthetic "handler" entry per JS function in `ir`. Walks
+    /// nested function atoms recursively so users can drill into closures
+    /// declared inside other handlers. The top-level program itself is
+    /// emitted under the name "(toplevel)" so global initialiser code is
+    /// inspectable too.
+    fn push_js_handlers(
+        ir: &crate::player::js_lingo::JsScriptIR,
+        path_prefix: &str,
+        out: &js_sys::Array,
+    ) {
+        use crate::player::js_lingo::xdr::JsAtom;
+
+        let toplevel_name = if path_prefix.is_empty() {
+            "(toplevel)".to_string()
+        } else {
+            format!("{} (toplevel)", path_prefix)
+        };
+        Self::push_one_js_handler(ir, &toplevel_name, &[], out);
+
+        for atom in &ir.atoms {
+            if let JsAtom::Function(fa) = atom {
+                let handler_name = match (path_prefix.is_empty(), &fa.name) {
+                    (true, Some(n)) => n.clone(),
+                    (true, None) => "(anonymous)".to_string(),
+                    (false, Some(n)) => format!("{}.{}", path_prefix, n),
+                    (false, None) => format!("{}.(anonymous)", path_prefix),
+                };
+                let arg_names: Vec<String> = fa.bindings.iter()
+                    .filter(|b| b.kind == crate::player::js_lingo::xdr::JsBindingKind::Argument)
+                    .map(|b| b.name.clone())
+                    .collect();
+                Self::push_one_js_handler(&fa.script, &handler_name, &arg_names, out);
+                Self::push_js_handlers(&fa.script, &handler_name, out);
+            }
+        }
+    }
+
+    fn push_one_js_handler(
+        ir: &crate::player::js_lingo::JsScriptIR,
+        name: &str,
+        arg_names: &[String],
+        out: &js_sys::Array,
+    ) {
+        use crate::player::js_lingo::opcodes::JsOpFormat;
+        use crate::player::js_lingo::variable_length::{read_i16_operand, read_u16_operand};
+        use crate::player::js_lingo::xdr::iter_ops;
+
+        let handler_map = js_sys::Map::new();
+        handler_map.str_set("name", &name.to_owned().to_js_value());
+
+        let args_array = js_sys::Array::new();
+        for a in arg_names { args_array.push(&a.clone().to_js_value()); }
+        handler_map.str_set("args", &args_array);
+
+        let bytecode_array = js_sys::Array::new();
+        let lingo_array = js_sys::Array::new();
+        let mut bc_to_line: Vec<(usize, usize)> = Vec::new();
+        for (i, ins) in iter_ops(&ir.bytecode).enumerate() {
+            let ins = match ins {
+                Ok(i) => i,
+                Err(e) => {
+                    let map = js_sys::Map::new();
+                    map.str_set("pos", &JsValue::from(0u32));
+                    map.str_set("text", &format!("<decode error: {}>", e).to_js_value());
+                    bytecode_array.push(&map.to_js_object());
+                    continue;
+                }
+            };
+            let info = ins.op.info();
+            let operand_str = match info.format {
+                JsOpFormat::Byte => String::new(),
+                JsOpFormat::Uint16 | JsOpFormat::Qarg | JsOpFormat::Qvar | JsOpFormat::Local => {
+                    read_u16_operand(ins.operand).map(|v| format!(" {}", v)).unwrap_or_default()
+                }
+                JsOpFormat::Const => {
+                    if let Ok(idx) = read_u16_operand(ins.operand) {
+                        let lbl = ir.atoms.get(idx as usize).map(format_atom_summary).unwrap_or_else(|| "<oob>".into());
+                        format!(" #{} ; {}", idx, lbl)
+                    } else { String::new() }
+                }
+                JsOpFormat::Jump => {
+                    read_i16_operand(ins.operand).map(|d| format!(" {:+} ; -> {}", d, ins.offset as i32 + d as i32)).unwrap_or_default()
+                }
+                JsOpFormat::Object => {
+                    read_u16_operand(ins.operand).map(|v| format!(" obj#{}", v)).unwrap_or_default()
+                }
+                JsOpFormat::Tableswitch | JsOpFormat::Lookupswitch => format!(" <{} bytes>", ins.operand.len()),
+            };
+            let text = format!("{:>4}: {:<14}{}", ins.offset, info.mnemonic, operand_str);
+            let map = js_sys::Map::new();
+            map.str_set("pos", &JsValue::from(ins.offset as u32));
+            map.str_set("text", &text.to_js_value());
+            bytecode_array.push(&map.to_js_object());
+
+            bc_to_line.push((i, lingo_array.length() as usize));
+            let line_map = js_sys::Map::new();
+            line_map.str_set("text", &text.to_js_value());
+            line_map.str_set("indent", &JsValue::from(0u32));
+            let idx_arr = js_sys::Array::new();
+            idx_arr.push(&JsValue::from(i as u32));
+            line_map.str_set("bytecodeIndices", &idx_arr);
+            line_map.str_set("spans", &js_sys::Array::new());
+            lingo_array.push(&line_map.to_js_object());
+        }
+        handler_map.str_set("bytecode", &bytecode_array);
+        handler_map.str_set("lingo", &lingo_array);
+        let mapping_obj = js_sys::Object::new();
+        for (bc, ln) in &bc_to_line {
+            js_sys::Reflect::set(&mapping_obj, &JsValue::from(*bc as u32), &JsValue::from(*ln as u32)).ok();
+        }
+        handler_map.str_set("bytecodeToLine", &mapping_obj);
+        out.push(&handler_map.to_js_object());
+    }
+
     pub fn get_script_snapshot(
         member: &ScriptMember,
         chunk: &ScriptChunk,
@@ -1477,6 +1611,26 @@ impl JsApi {
                 _ => "unknown".to_owned().to_js_value(),
             },
         );
+
+        // JS-Lingo path: the Lscr's literal-data region holds an XDR-serialized
+        // SpiderMonkey script. We replace the handler array with a synthetic
+        // one whose "bytecode" view is the JS disassembly and whose "lingo"
+        // view is a placeholder comment header. Lingo handlers in this
+        // chunk (if any) get appended afterwards.
+        if let Some(js_payload) = chunk.literals.iter().find_map(|l| match l {
+            crate::director::lingo::datum::Datum::JavaScript(b) => Some(b.as_slice()),
+            _ => None,
+        }) {
+            member_map.str_set("script_syntax", &"javascript".to_owned().to_js_value());
+            if let Ok(ir) = crate::player::js_lingo::decode_script(js_payload) {
+                let handlers_array = js_sys::Array::new();
+                Self::push_js_handlers(&ir, "", &handlers_array);
+                member_map.str_set("handlers", &handlers_array);
+                return member_map;
+            }
+        }
+
+        member_map.str_set("script_syntax", &"lingo".to_owned().to_js_value());
 
         // Calculate multiplier once
         let multiplier = get_variable_multiplier(capital_x, dir_version);

@@ -2706,6 +2706,16 @@ pub async fn player_call_script_handler_raw_args(
         Err(e) => return Err(e),
     }
 
+    // JS Lingo handlers: if the script's literal area was an XDR JSScript
+    // (recorded at cast-load time), route the call through the interpreter
+    // instead of walking Lingo bytecode.
+    if let Some(js_result) = js_lingo_loader::try_invoke_js_handler(script_member_ref, handler_name, arg_list) {
+        match js_result {
+            Ok(return_value) => return Ok(ScopeResult { return_value, passed: false }),
+            Err(msg) => return Err(ScriptError::new(format!("JS handler {} threw: {}", handler_name, msg))),
+        }
+    }
+
     // Check if this is a frame script handler
     let is_frame_script = reserve_player_ref(|player| {
         let frame_script = player.movie.score.get_script_in_frame(player.movie.current_frame);
