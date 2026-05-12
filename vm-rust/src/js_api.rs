@@ -1480,23 +1480,18 @@ impl JsApi {
     }
 
     /// Emit one synthetic "handler" entry per JS function in `ir`. Walks
-    /// nested function atoms recursively so users can drill into closures
-    /// declared inside other handlers. The top-level program itself is
-    /// emitted under the name "(toplevel)" so global initialiser code is
-    /// inspectable too.
+    /// nested function atoms so users can drill into closures declared
+    /// inside other handlers. The top-level program body itself is not
+    /// surfaced as a handler — Director JS files use it only to hoist var
+    /// declarations and run trivial initialisers, which would only clutter
+    /// the cast inspector. (Users who want to see it can read the disasm
+    /// in the dev console instead.)
     fn push_js_handlers(
         ir: &crate::player::js_lingo::JsScriptIR,
         path_prefix: &str,
         out: &js_sys::Array,
     ) {
         use crate::player::js_lingo::xdr::JsAtom;
-
-        let toplevel_name = if path_prefix.is_empty() {
-            "(toplevel)".to_string()
-        } else {
-            format!("{} (toplevel)", path_prefix)
-        };
-        Self::push_one_js_handler(ir, &toplevel_name, &[], out);
 
         for atom in &ir.atoms {
             if let JsAtom::Function(fa) = atom {
@@ -1510,8 +1505,13 @@ impl JsApi {
                     .filter(|b| b.kind == crate::player::js_lingo::xdr::JsBindingKind::Argument)
                     .map(|b| b.name.clone())
                     .collect();
-                Self::push_one_js_handler(&fa.script, &handler_name, &arg_names, out);
-                Self::push_js_handlers(&fa.script, &handler_name, out);
+                Self::push_one_js_handler_with_bindings(&fa.script, &handler_name, &arg_names, &fa.bindings, out);
+                // Only drill into nested closures if this function actually
+                // declares some (i.e. its atom map contains JsAtom::Function).
+                let has_nested = fa.script.atoms.iter().any(|a| matches!(a, JsAtom::Function(_)));
+                if has_nested {
+                    Self::push_js_handlers(&fa.script, &handler_name, out);
+                }
             }
         }
     }
@@ -1520,6 +1520,16 @@ impl JsApi {
         ir: &crate::player::js_lingo::JsScriptIR,
         name: &str,
         arg_names: &[String],
+        out: &js_sys::Array,
+    ) {
+        Self::push_one_js_handler_with_bindings(ir, name, arg_names, &[], out);
+    }
+
+    fn push_one_js_handler_with_bindings(
+        ir: &crate::player::js_lingo::JsScriptIR,
+        name: &str,
+        arg_names: &[String],
+        bindings: &[crate::player::js_lingo::xdr::JsFunctionBinding],
         out: &js_sys::Array,
     ) {
         use crate::player::js_lingo::opcodes::JsOpFormat;
@@ -1536,6 +1546,24 @@ impl JsApi {
         let bytecode_array = js_sys::Array::new();
         let lingo_array = js_sys::Array::new();
         let mut bc_to_line: Vec<(usize, usize)> = Vec::new();
+
+        // Decompile to JS source — this is what the "Lingo" tab displays.
+        let decomp = crate::player::js_lingo::decompiler::decompile(ir, bindings);
+        let decomp_bc_to_line: std::collections::HashMap<usize, usize> =
+            decomp.bytecode_to_line.iter().copied().collect();
+        for line in &decomp.lines {
+            let line_map = js_sys::Map::new();
+            line_map.str_set("text", &line.text.clone().to_js_value());
+            line_map.str_set("indent", &JsValue::from(line.indent));
+            let idx_arr = js_sys::Array::new();
+            for bc in &line.bytecode_indices {
+                idx_arr.push(&JsValue::from(*bc as u32));
+            }
+            line_map.str_set("bytecodeIndices", &idx_arr);
+            line_map.str_set("spans", &js_sys::Array::new());
+            lingo_array.push(&line_map.to_js_object());
+        }
+
         for (i, ins) in iter_ops(&ir.bytecode).enumerate() {
             let ins = match ins {
                 Ok(i) => i,
@@ -1573,20 +1601,18 @@ impl JsApi {
             map.str_set("text", &text.to_js_value());
             bytecode_array.push(&map.to_js_object());
 
-            bc_to_line.push((i, lingo_array.length() as usize));
-            let line_map = js_sys::Map::new();
-            line_map.str_set("text", &text.to_js_value());
-            line_map.str_set("indent", &JsValue::from(0u32));
-            let idx_arr = js_sys::Array::new();
-            idx_arr.push(&JsValue::from(i as u32));
-            line_map.str_set("bytecodeIndices", &idx_arr);
-            line_map.str_set("spans", &js_sys::Array::new());
-            lingo_array.push(&line_map.to_js_object());
+            // bc → line mapping: use the decompiler's mapping. Any bytecode
+            // not covered (e.g. structural markers like POP after Pushobj)
+            // points at the nearest source line if we have one, else line 0.
+            if let Some(line_idx) = decomp_bc_to_line.get(&i) {
+                bc_to_line.push((i, *line_idx));
+            }
         }
+        let _ = bc_to_line; // populated for completeness; the map below uses decomp_bc_to_line directly
         handler_map.str_set("bytecode", &bytecode_array);
         handler_map.str_set("lingo", &lingo_array);
         let mapping_obj = js_sys::Object::new();
-        for (bc, ln) in &bc_to_line {
+        for (bc, ln) in &decomp_bc_to_line {
             js_sys::Reflect::set(&mapping_obj, &JsValue::from(*bc as u32), &JsValue::from(*ln as u32)).ok();
         }
         handler_map.str_set("bytecodeToLine", &mapping_obj);

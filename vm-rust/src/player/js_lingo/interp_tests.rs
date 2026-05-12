@@ -351,6 +351,51 @@ fn synth_pre_increment_var() {
     assert!(matches!(result, JsValue::Int(6)), "expected 6, got {:?}", result);
 }
 
+// ===== Decompiler =====
+
+#[test]
+fn dump_add_function_bindings() {
+    let ir = decode_script(JS_MOV_PAYLOAD).expect("decode");
+    for a in &ir.atoms {
+        if let JsAtom::Function(f) = a {
+            if f.name.as_deref() == Some("add") {
+                println!("\n=== add bindings ===");
+                println!("nargs={} nvars={}", f.nargs, f.nvars);
+                for b in &f.bindings {
+                    println!("  {:?} short_id={} name={:?}", b.kind, b.short_id, b.name);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn decompile_jsMov_program_emits_recognisable_js() {
+    use super::decompiler::decompile;
+    let ir = decode_script(JS_MOV_PAYLOAD).expect("decode");
+    let dec = decompile(&ir, &[]);
+    let source: String = dec.lines.iter()
+        .map(|l| format!("{}{}", "  ".repeat(l.indent as usize), l.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    println!("\n=== Decompiled program ===\n{}\n", source);
+
+    // Top-level var declarations + assignments.
+    assert!(source.contains("var pCounter"));
+    assert!(source.contains("var pName"));
+    assert!(source.contains("pCounter = 0;"));
+    assert!(source.contains("pName = \"alice\";"));
+    // Each declared function appears as `function name(args) { ... }`.
+    assert!(source.contains("function on_prepareMovie()"));
+    assert!(source.contains("function on_mouseUp()"));
+    assert!(source.contains("function add(x, y)"));
+    // Inside on_prepareMovie we expect the trace call and pCounter = 42.
+    assert!(source.contains("pCounter = 42;"));
+    assert!(source.contains("trace("));
+    // Inside add we expect the return.
+    assert!(source.contains("return x + y;"));
+}
+
 // ===== Host bridge integration =====
 
 #[test]

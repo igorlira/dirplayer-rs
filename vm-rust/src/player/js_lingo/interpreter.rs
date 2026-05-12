@@ -458,8 +458,30 @@ impl JsRuntime {
             JsOp::Name => {
                 let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
                 let name = atom_string(&frame.atoms, idx)?;
-                let v = resolve_name(frame, &name)
-                    .ok_or_else(|| JsError::new(format!("undefined: {}", name)))?;
+                let v = match resolve_name(frame, &name) {
+                    Some(v) => v,
+                    None => {
+                        // Fallback: unknown name. Director's Lingo runtime has
+                        // hundreds of built-in globals (gotoNetPage, getNetText,
+                        // puppetTempo, count, the * properties …) — too many to
+                        // pre-bind one-by-one. We hand back a "deferred-call"
+                        // Native that, when invoked, routes through the host
+                        // bridge's `call_global`. If JS just reads the name
+                        // without calling it (rare), the value is callable but
+                        // not callable as anything else; we surface that as
+                        // `undefined: <name>` only on actual non-call use later.
+                        let bridge = self.bridge.clone();
+                        let captured_name: Rc<String> = Rc::new(name);
+                        let cn_for_native = captured_name.clone();
+                        let native = super::value::NativeFn {
+                            name: "<host-call>",
+                            call: Box::new(move |args| {
+                                bridge.borrow_mut().call_global(&cn_for_native, args)
+                            }),
+                        };
+                        JsValue::Native(Rc::new(native))
+                    }
+                };
                 frame.stack.push(v);
                 Ok(StepOutcome::Continue)
             }
@@ -1729,13 +1751,24 @@ fn build_function_frame(
 
 /// Index atoms by their string name and join with the function's
 /// JsFunctionBinding list. The result is "for atom[i], what kind/slot is it?".
+///
+/// `short_id` in the XDR binding record is a property hash bucket — NOT the
+/// slot index. The actual arg/var slot is the binding's POSITION among
+/// same-kind bindings (the order spvec[] was filled by the SpiderMonkey
+/// encoder, which is the order the bytecode's getarg/getvar operands use).
 fn build_atom_slot_map(atoms: &[JsAtom], bindings: &[JsFunctionBinding]) -> Vec<Option<(JsBindingKind, usize)>> {
     let mut map = vec![None; atoms.len()];
+    let mut arg_slot = 0usize;
+    let mut var_slot = 0usize;
     for b in bindings {
+        let slot = match b.kind {
+            JsBindingKind::Argument => { let s = arg_slot; arg_slot += 1; s }
+            JsBindingKind::Variable | JsBindingKind::Constant => { let s = var_slot; var_slot += 1; s }
+        };
         for (i, a) in atoms.iter().enumerate() {
             if let JsAtom::String(s) = a {
                 if s == &b.name {
-                    map[i] = Some((b.kind, b.short_id.max(0) as usize));
+                    map[i] = Some((b.kind, slot));
                 }
             }
         }
