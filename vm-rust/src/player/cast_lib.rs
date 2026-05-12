@@ -364,6 +364,9 @@ impl CastLib {
                     handler_names,
                     properties: RefCell::new(properties),
                 };
+                // JS Lingo diagnostic: decode and disassemble each XDR-wrapped JSScript
+                // in the literal data area. Phase 1 — read-only; translator hook lands later.
+                crate::player::js_lingo_loader::diagnose_js_script(&script);
                 self.scripts.insert(number, Rc::new(script));
             }
         } else if let CastMemberType::Palette(_) = &member.member_type {
