@@ -32,6 +32,7 @@ impl IntDatumHandlers {
             }
             "string" => Ok(player.alloc_datum(Datum::String(int_value.to_string()))),
             "magnitude" => Ok(player.alloc_datum(Datum::Int(int_value.abs()))),
+            "sprite" => Ok(player.alloc_datum(Datum::SpriteRef(int_value as i16))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get int property {}",
                 prop
