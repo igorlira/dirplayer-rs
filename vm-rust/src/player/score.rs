@@ -195,15 +195,24 @@ pub fn get_channel_number_from_index(index: u32) -> u32 {
 }
 
 /// Convert raw blend byte from score data to a 0-100 percentage.
-/// D8+ uses inverted 0-255 scale: 0 → 100% (opaque), 255 → 0% (transparent).
+/// D8+ uses inverted 0-255 scale: 0 → 100% (opaque), 255 → 0% (transparent
+/// / default not-set, treated as opaque).
 /// D5-D7 uses direct 0-100 percentage: 0 → 100% (opaque/not set).
+///
+/// Director quirk: both extremes of the score byte (0 AND 255) are treated
+/// as "default opaque" at render time. A v850 sprite authored without an
+/// explicit blend has raw=255, which our Lingo getter would otherwise
+/// report as `the blend = 0` and our renderer would draw at 0% alpha —
+/// invisible. Director's runtime instead skips blending entirely when the
+/// score byte is 0 or 255 and only applies blend for intermediate values.
+/// We mirror that by mapping raw=255 to 100% so the sprite renders
+/// normally. Scripts that need a sprite hidden should use `the visibility
+/// of sprite` (or set blend to a small non-zero value, matching Director).
 pub(crate) fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
     if dir_version > 600 {
-        // D8+: inverted 0-255 scale
-        if raw == 0 {
+        // D8+: inverted 0-255 scale, both 0 and 255 are "default opaque"
+        if raw == 0 || raw == 255 {
             100
-        } else if raw == 255 {
-            0
         } else {
             ((255.0 - raw as f32) * 100.0 / 255.0) as i32
         }
