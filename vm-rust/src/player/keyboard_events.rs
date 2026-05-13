@@ -92,19 +92,37 @@ pub(crate) fn apply_text_edit(
     }
 
     let bytes_for_nav = text.as_bytes().to_vec();
-    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    // Word-character predicate at byte level for the line-break helpers
+    // (which only consult ASCII \r / \n -- safe with bytes).
+    let _ = bytes_for_nav.len(); // suppress unused warning if only line helpers consult bytes
+    // Char-aware "is word char": alphanumeric or underscore. Unlike the
+    // earlier byte-based check, this returns true for umlauts (ä, é, ñ,
+    // å, etc.) so Ctrl+Arrow / double-click word-select treats "café" as
+    // one word instead of stopping at the multi-byte boundary.
+    let is_word_ch = |c: char| c.is_alphanumeric() || c == '_';
+
+    // Pre-snapshot (byte_pos, char) for the whole text. Allocates once per
+    // apply_text_edit call; text in real fields is short (chat input, name
+    // fields, descriptions) so memory is fine.
+    let nav_chars: Vec<(usize, char)> = text.char_indices().collect();
+    // Find the char-index in nav_chars whose byte_pos == `byte_pos`, or
+    // the index where it would be inserted (== nav_chars.len() for EOS).
+    let char_idx_of = |byte_pos: i32| -> usize {
+        let bp = byte_pos.clamp(0, len) as usize;
+        nav_chars.iter().position(|(b, _)| *b >= bp).unwrap_or(nav_chars.len())
+    };
     let prev_word_boundary = |from: i32| -> i32 {
-        let mut p = from.clamp(0, len) as usize;
-        while p > 0 && !is_word(bytes_for_nav[p - 1]) { p -= 1; }
-        while p > 0 && is_word(bytes_for_nav[p - 1]) { p -= 1; }
-        p as i32
+        let mut i = char_idx_of(from);
+        while i > 0 && !is_word_ch(nav_chars[i - 1].1) { i -= 1; }
+        while i > 0 && is_word_ch(nav_chars[i - 1].1) { i -= 1; }
+        nav_chars.get(i).map(|(b, _)| *b as i32).unwrap_or(len)
     };
     let next_word_boundary = |from: i32| -> i32 {
-        let n = bytes_for_nav.len();
-        let mut p = from.clamp(0, len) as usize;
-        while p < n && is_word(bytes_for_nav[p]) { p += 1; }
-        while p < n && !is_word(bytes_for_nav[p]) { p += 1; }
-        p as i32
+        let n = nav_chars.len();
+        let mut i = char_idx_of(from);
+        while i < n && is_word_ch(nav_chars[i].1) { i += 1; }
+        while i < n && !is_word_ch(nav_chars[i].1) { i += 1; }
+        nav_chars.get(i).map(|(b, _)| *b as i32).unwrap_or(len)
     };
     // Char-boundary helpers. The text buffer is UTF-8 (Rust String), so a
     // single visible character like 'ä' or '€' is 2-3 bytes. Stepping the
@@ -184,13 +202,23 @@ pub(crate) fn apply_text_edit(
         "ArrowUp" => {
             let cur_line_start = line_start_of(active);
             let col = active - cur_line_start;
-            let new_pos = if cur_line_start == 0 {
+            let mut new_pos = if cur_line_start == 0 {
                 0
             } else {
                 let prev_line_end = cur_line_start - 1;
                 let prev_line_start = line_start_of(prev_line_end);
                 prev_line_start + col.min(prev_line_end - prev_line_start)
             };
+            // `col` is a byte offset; preserving it across lines with
+            // different multi-byte char counts can land mid-codepoint
+            // (panic on next edit). Snap to the nearest legal char
+            // boundary, walking backwards so visual column stays close
+            // to where the user expects.
+            while (new_pos as usize) < text.len()
+                && !text.is_char_boundary(new_pos as usize)
+            {
+                new_pos -= 1;
+            }
             if shift {
                 extend(sel_start, sel_end, anchor, new_pos, len);
             } else {
@@ -201,13 +229,18 @@ pub(crate) fn apply_text_edit(
             let cur_line_start = line_start_of(active);
             let col = active - cur_line_start;
             let cur_line_end = line_end_of(active);
-            let new_pos = if cur_line_end >= len {
+            let mut new_pos = if cur_line_end >= len {
                 len
             } else {
                 let next_line_start = cur_line_end + 1;
                 let next_line_end = line_end_of(next_line_start);
                 next_line_start + col.min(next_line_end - next_line_start)
             };
+            while (new_pos as usize) < text.len()
+                && !text.is_char_boundary(new_pos as usize)
+            {
+                new_pos -= 1;
+            }
             if shift {
                 extend(sel_start, sel_end, anchor, new_pos, len);
             } else {
@@ -325,6 +358,15 @@ pub(crate) fn set_caret_at_screen(
         let sprite_loc_h = sprite.loc_h;
         let sprite_loc_v = sprite.loc_v;
         let sprite_width = sprite.width;
+        // Match the renderer's stage-scaling: the GPU/PFR text path
+        // rasterises glyphs at `font_size * stage_scale` (see
+        // rendering_gpu/webgl2/mod.rs render-text entry), so the rasterised
+        // atlas's `char_widths` reflect the scaled-up glyph widths. Without
+        // applying the same scale here, `xy_to_caret_index` walks a
+        // differently-sized font's char_widths than the renderer drew --
+        // the click maps to half the visual position on a 2x-scaled stage.
+        let (scale_x, scale_y) = crate::player::stage::stage_scale(player);
+        let stage_scale = scale_x.min(scale_y);
 
         // Resolve which editable member kind we have, and its text + style
         // properties needed to drive xy_to_caret_index. We work on a snapshot
@@ -381,40 +423,63 @@ pub(crate) fn set_caret_at_screen(
         let caret_idx = match &snapshot {
             MemberSnapshot::Field { text, font, font_size, font_id, alignment,
                                     fixed_line_space, top_spacing, word_wrap: _ } => {
-                let font_opt = crate::rendering::get_or_load_font_with_id(
-                    &mut player.font_manager,
-                    &player.movie.cast_manager,
+                // Mirror the renderer: rasterise the font at the SAME scaled
+                // size the PFR atlas uses (`font_size * stage_scale`), AND
+                // use the SAME font-lookup path as the renderer so we get
+                // the exact same cached BitmapFont (same char_widths, same
+                // first_char_num). The previous `get_or_load_font_with_id`
+                // path had a different cache-key scheme (case-sensitive)
+                // and could fall through to a fuzzy `starts_with` match
+                // that returned a DIFFERENT-size font than the renderer
+                // used -- when char_widths differed, multibyte chars
+                // diverged from ASCII chars because per-char proportional
+                // widths don't scale uniformly.
+                let scaled_font_size = ((*font_size as f64) * stage_scale)
+                    .round().max(1.0) as u16;
+                let font_opt = player.font_manager.get_font_with_cast_and_bitmap(
                     font,
-                    Some(*font_size),
+                    &player.movie.cast_manager,
+                    &mut player.bitmap_manager,
+                    Some(scaled_font_size),
                     None,
-                    *font_id,
-                );
+                ).or_else(|| {
+                    // Same font_id fallback the renderer uses when the
+                    // name-based lookup misses (rich-text spans reference
+                    // fonts by ID).
+                    font_id.and_then(|id| {
+                        player.font_manager.font_by_id.get(&id).copied()
+                            .and_then(|fr| player.font_manager.fonts.get(&fr).cloned())
+                    })
+                });
                 let Some(f) = font_opt else { return false };
-                let local_x = movie_x - sprite_loc_h;
-                let local_y = movie_y - sprite_loc_v - *top_spacing as i32;
+                // Scale the click coords into the renderer's coordinate
+                // space too. movie_x is in unscaled movie space; the
+                // renderer's char_widths sum is in scaled space.
+                let local_x = ((movie_x - sprite_loc_h) as f64 * stage_scale).round() as i32;
+                let local_y = ((movie_y - sprite_loc_v - *top_spacing as i32) as f64 * stage_scale).round() as i32;
+                let scaled_width = ((sprite_width as f64) * stage_scale).round() as i32;
                 let line_h = effective_line_height(&f, *fixed_line_space);
-                // Always pass sprite_width so xy_to_caret_index can compute the
-                // per-line alignment offset for centered/right text. Setting
-                // max_width to 0 when word_wrap is off makes the helper assume
-                // left alignment, which sends every click to the left edge of
-                // the sprite even when the visible glyphs are centered.
                 crate::player::bitmap::bitmap::Bitmap::xy_to_caret_index(
-                    text, &f, sprite_width, alignment, line_h, local_x, local_y,
+                    text, &f, scaled_width, alignment, line_h, local_x, local_y,
                 )
             }
             MemberSnapshot::Text { text, font, font_size, fixed_line_space, top_spacing } => {
-                let font_opt = crate::rendering::get_or_load_font(
-                    &mut player.font_manager,
-                    &player.movie.cast_manager,
+                // Same stage-scaled font lookup + coord scaling as the
+                // Field branch above. See its comment for the rationale.
+                let scaled_font_size = ((*font_size as f64) * stage_scale)
+                    .round().max(1.0) as u16;
+                let font_opt = player.font_manager.get_font_with_cast_and_bitmap(
                     font,
-                    Some(*font_size),
+                    &player.movie.cast_manager,
+                    &mut player.bitmap_manager,
+                    Some(scaled_font_size),
                     None,
                 );
                 let Some(f) = font_opt else { return false };
                 // For TextMember bitmap path we treat width as unbounded, matching
                 // the renderer (see rendering.rs draw_text-with-caret block).
-                let local_x = movie_x - sprite_loc_h;
-                let local_y = movie_y - sprite_loc_v - *top_spacing as i32;
+                let local_x = ((movie_x - sprite_loc_h) as f64 * stage_scale).round() as i32;
+                let local_y = ((movie_y - sprite_loc_v - *top_spacing as i32) as f64 * stage_scale).round() as i32;
                 let line_h = effective_line_height(&f, *fixed_line_space);
                 crate::player::bitmap::bitmap::Bitmap::xy_to_caret_index(
                     text, &f, 0, "left", line_h, local_x, local_y,
@@ -454,20 +519,41 @@ pub(crate) fn set_caret_at_screen(
                 *sel_end_ref = anchor.max(clamped);
             }
             CaretAtMode::SelectWord => {
-                let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-                let mut start = clamped as usize;
-                let mut end = clamped as usize;
-                let n = bytes.len();
-                if start < n && is_word(bytes[start]) {
-                    while start > 0 && is_word(bytes[start - 1]) { start -= 1; }
-                    while end < n && is_word(bytes[end]) { end += 1; }
-                } else if start > 0 && is_word(bytes[start - 1]) {
-                    while start > 0 && is_word(bytes[start - 1]) { start -= 1; }
-                    end = clamped as usize;
+                // Char-aware word selection: double-clicking inside "café"
+                // selects the whole word instead of stopping at the lead
+                // byte of 'é'. We use `text_snapshot` (Rust String) and
+                // walk char_indices to find the surrounding word boundaries.
+                let click_b = clamped as usize;
+                let is_word_ch = |c: char| c.is_alphanumeric() || c == '_';
+                // Materialise (byte_pos, char) for the line. Strings in
+                // editable fields are short -- one-shot collection is fine.
+                let chars: Vec<(usize, char)> =
+                    text_ref.char_indices().collect();
+                // Locate the char-index whose byte_pos straddles click_b.
+                // `i` is the first char-index whose byte_pos >= click_b;
+                // if there's a char strictly before that, prefer it for
+                // the "click_b is on a char boundary" case.
+                let i = chars.iter().position(|(b, _)| *b >= click_b)
+                    .unwrap_or(chars.len());
+                let (mut s, mut e) = (i, i);
+                // If the click lands on a word char, expand both sides;
+                // if it's right after one (caret between word and non-
+                // word), grab the trailing word -- matches the byte
+                // behaviour for ASCII text.
+                let on_word = chars.get(i).map_or(false, |(_, c)| is_word_ch(*c));
+                let after_word = i > 0 && is_word_ch(chars[i - 1].1);
+                if on_word {
+                    while s > 0 && is_word_ch(chars[s - 1].1) { s -= 1; }
+                    while e < chars.len() && is_word_ch(chars[e].1) { e += 1; }
+                } else if after_word {
+                    while s > 0 && is_word_ch(chars[s - 1].1) { s -= 1; }
+                    e = i;
                 }
-                *sel_start_ref = start as i32;
-                *sel_end_ref = end as i32;
-                *sel_anchor_ref = start as i32;
+                let start_b = chars.get(s).map(|(b, _)| *b).unwrap_or(text_ref.len());
+                let end_b = chars.get(e).map(|(b, _)| *b).unwrap_or(text_ref.len());
+                *sel_start_ref = start_b as i32;
+                *sel_end_ref = end_b as i32;
+                *sel_anchor_ref = start_b as i32;
             }
             CaretAtMode::SelectLine => {
                 let mut start = clamped as usize;

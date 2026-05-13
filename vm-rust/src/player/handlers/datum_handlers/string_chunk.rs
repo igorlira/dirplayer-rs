@@ -20,6 +20,33 @@ use super::string::{string_get_items, string_get_lines};
 pub struct StringChunkHandlers {}
 pub struct StringChunkUtils {}
 
+/// Convert a CHAR range (0-based, half-open) into a BYTE range suitable
+/// for `String::replace_range` / direct slicing. Without this, Director's
+/// `char N of t = "x"` / `delete char N of t` would panic on any text
+/// containing multi-byte codepoints (umlauts, accents, Euro, smart quotes,
+/// etc.) -- the call sites collected `chars().count()` as the max but then
+/// passed the resulting indices into byte-indexed APIs.
+///
+/// Out-of-range indices clamp to the string's byte length so the caller's
+/// "delete chars 100..200 of a 5-char string" still produces an empty
+/// range instead of panicking.
+pub(crate) fn char_range_to_byte_range(s: &str, char_start: usize, char_end: usize) -> (usize, usize) {
+    if char_start >= char_end {
+        // Caller already handles the "empty range" case for ranges that
+        // collapse during clamping; return a valid empty slice at the
+        // appropriate boundary so replace_range is still a no-op.
+        let bs = s.char_indices().nth(char_start).map(|(b, _)| b).unwrap_or(s.len());
+        return (bs, bs);
+    }
+    let mut iter = s.char_indices();
+    let byte_start = iter.by_ref().nth(char_start).map(|(b, _)| b).unwrap_or(s.len());
+    // We've consumed `char_start + 1` items from iter. To advance to the
+    // `char_end`th codepoint, step forward `char_end - char_start - 1` more.
+    let extra = char_end - char_start - 1;
+    let byte_end = iter.nth(extra).map(|(b, _)| b).unwrap_or(s.len());
+    (byte_start, byte_end)
+}
+
 impl StringChunkUtils {
     pub fn delete(
         player: &mut DirPlayer,
@@ -127,7 +154,11 @@ impl StringChunkUtils {
                 let mut new_string = string.to_owned();
                 let (start, end) =
                     Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
-                new_string.replace_range(start..end, "");
+                // (start, end) are CHAR indices; replace_range wants BYTE
+                // indices. Convert via char_indices so `delete char 3 of
+                // "öäüß"` doesn't try to slice mid-codepoint.
+                let (byte_start, byte_end) = char_range_to_byte_range(string, start, end);
+                new_string.replace_range(byte_start..byte_end, "");
                 Ok(new_string)
             }
             StringChunkType::Item => {
@@ -186,7 +217,8 @@ impl StringChunkUtils {
                 let mut new_string = string.to_owned();
                 let (start, end) =
                     Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
-                new_string.replace_range(start..end, &replace_with);
+                let (byte_start, byte_end) = char_range_to_byte_range(string, start, end);
+                new_string.replace_range(byte_start..byte_end, replace_with);
                 Ok(new_string)
             }
             _ => Err(ScriptError::new(
@@ -376,7 +408,8 @@ impl StringChunkUtils {
                 let mut new_string = string.to_owned();
                 let (start, end) =
                     StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
-                new_string.replace_range(start..end, replace_with);
+                let (byte_start, byte_end) = char_range_to_byte_range(string, start, end);
+                new_string.replace_range(byte_start..byte_end, replace_with);
                 Ok(new_string)
             }
             StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
