@@ -1312,9 +1312,14 @@ impl SpritePathKeyframes {
             .map(|i| (i.start_frame, i.end_frame))
             .collect();
 
-        // Process each interval
+        // Process each interval independently. The score's per-interval
+        // primary record carries the start_frame/end_frame for that
+        // tween span and (for 52+ byte primaries on v8.5+) the explicit
+        // authored keyframe indices. For 40/44/48-byte primaries the
+        // span has only its endpoint keyframes — `collect_property_keyframes`
+        // picks those up from the first/last entries in frame_channel_data.
         for interval in intervals {
-            // Ignore single-frame intervals
+            // Ignore single-frame intervals (can't tween in zero time)
             if interval.start_frame == interval.end_frame {
                 continue;
             }
@@ -1327,7 +1332,7 @@ impl SpritePathKeyframes {
             let start_frame = interval.start_frame;
             let end_frame = interval.end_frame;
 
-            // 1️⃣ Collect frames in Director frame range AND matching this channel
+            // Collect frames in Director frame range AND matching this channel
             let frames: Vec<_> = frame_channel_data
                 .iter()
                 .filter(|(frame_num, ch, _)| {
@@ -1342,7 +1347,7 @@ impl SpritePathKeyframes {
                 continue;
             }
 
-            // 2️⃣ Deduplicate by frame number (shouldn't be needed now, but keep for safety)
+            // Deduplicate by frame number (shouldn't be needed now, but keep for safety)
             let mut dedup: HashMap<u32, &(u32, u16, ScoreFrameChannelData)> = HashMap::new();
 
             for frame in frames {
@@ -1353,20 +1358,12 @@ impl SpritePathKeyframes {
             let mut sorted_frames: Vec<_> = dedup.into_iter().map(|(_, v)| v.clone()).collect();
             sorted_frames.sort_by_key(|(frame_num, _, _)| *frame_num);
 
-            // 3️⃣ Only treat as a real path tween if the span has at least one
-            // non-zero authored keyframe index in its trailing u32 list.
-            // See size-tween gate for details on why the single `0` padding
-            // u32 doesn't count as an authored keyframe.
-            if !interval.key_frames.iter().any(|&f| f != 0) {
-                continue;
-            }
-
-            // 4️⃣ Check if position ACTUALLY animates in this interval
+            // Check if position ACTUALLY animates in this interval
             if !has_real_animation::<Position>(&sorted_frames) {
                 continue;
             }
 
-            // 5️⃣ Collect effective keyframes for this interval
+            // Collect effective keyframes for this interval
             let property_frames = collect_property_keyframes::<Position>(&sorted_frames);
             // TODO: research if this is correct when, yes change also
             // other tweening properties to 1-based Director frame

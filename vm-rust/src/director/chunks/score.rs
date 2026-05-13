@@ -1185,7 +1185,7 @@ impl ScoreChunk {
                 ScoreFrameData::default()
             };
 
-            let frame_intervals = Self::analyze_behavior_attachment_entries(&entries)?;
+            let frame_intervals = Self::analyze_behavior_attachment_entries(&entries, dir_version)?;
             let sprite_details = Self::parse_sprite_details_from_entries(&entries);
 
             Ok(ScoreChunk {
@@ -1583,6 +1583,7 @@ impl ScoreChunk {
     /// Analyze score entries beyond Entry[0] for behavior attachment data
     fn analyze_behavior_attachment_entries(
         entries: &Vec<Vec<u8>>,
+        dir_version: u16,
     ) -> Result<Vec<(FrameIntervalPrimary, Option<FrameIntervalSecondary>)>, String> {
         let mut results = vec![];
         let mut i = 2; // Start at 2, skip entries 0 and 1
@@ -1615,10 +1616,21 @@ impl ScoreChunk {
                 continue;
             }
 
+            // Primary entries: 40 bytes base (5 x u32 fields + 20-byte
+            // TweenInfo) plus zero or more trailing u32s of authored
+            // keyframe indices. v8.0 movies only ever produce 40/44/48
+            // byte primaries (0-2 trailing keyframes); v8.5+ adds a
+            // 52-byte size for spans with 3 trailing keyframes (where
+            // path tweens with authored interior keyframes live —
+            // sprite 2 / sprites 41-42 of 15love_hs). Accepting 52+
+            // unconditionally previously over-matched non-primary
+            // chunks in Junkbot (v8.0), so we gate the wider sizes
+            // strictly on movie version.
+            let accept_extended = dir_version >= 850;
+            let size_accepted = matches!(entry_bytes.len(), 40 | 44 | 48)
+                || (accept_extended && entry_bytes.len() == 52);
             match entry_bytes.len() {
-                // Primary entries: 40 bytes base (10 x u32) + optional trailing data.
-                // D6/D7 typically produce 44 bytes, D8+ may produce 40 or 48.
-                40 | 44 | 48 => {
+                _ if size_accepted => {
                     // Primary entry
                     let mut reader = BinaryReader::from_u8(entry_bytes);
                     reader.set_endian(Endian::Big);
@@ -1671,7 +1683,11 @@ impl ScoreChunk {
                             // cast_lib/cast_member.  If the first u32 looks like a valid
                             // start_frame (1–10000) and the second u32 >= first, treat it as a
                             // primary rather than a behavior list.
-                            let looks_like_primary = if (next_size == 40 || next_size == 44 || next_size == 48) && next_size >= 8 {
+                            let primary_size_match = next_size == 40
+                                || next_size == 44
+                                || next_size == 48
+                                || (accept_extended && next_size == 52);
+                            let looks_like_primary = if primary_size_match && next_size >= 8 {
                                 let b = &entries[j];
                                 let first_u32 = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
                                 let second_u32 = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
