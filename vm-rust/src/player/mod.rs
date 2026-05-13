@@ -3622,9 +3622,17 @@ pub async fn run_single_frame() -> (bool, bool) {
             (player.has_frame_changed_in_go, player.go_same_frame));
 
         if go_same_frame {
-            // go(the frame) — stay on current frame, no advancement
+            // go(the frame) — stay on current frame, no advancement.
+            // Clear next_frame too: the go() handler sets it to Some(current)
+            // when it sets go_same_frame, and if we don't clear it here the
+            // stale value leaks into the next tick. On a subsequent tick where
+            // no go() is called the main loop would otherwise hit the "normal
+            // advance" path and feed the stale next_frame into advance_frame,
+            // pinning the playhead to the previously-go'd frame even though
+            // the script wanted to fall through.
             reserve_player_mut(|player| {
                 player.go_same_frame = false;
+                player.next_frame = None;
             });
             stayed_on_same_frame = true;
         } else if has_frame_changed {
