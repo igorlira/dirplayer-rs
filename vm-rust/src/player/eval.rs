@@ -841,6 +841,18 @@ pub fn parse_lingo_rule_runtime(
 
             Ok(LingoExpr::HandlerCall("put".to_string(), args))
         }
+        Rule::go_inline => {
+            // Skip the syntactic-noise keyword nodes (go/to/frame/of/movie).
+            // First term_arg is the destination, second (if any) is the
+            // movie path.
+            let mut args = vec![];
+            for child in pair.into_inner() {
+                if let Rule::term_arg = child.as_rule() {
+                    args.push(parse_lingo_rule_runtime(child, pratt)?);
+                }
+            }
+            Ok(LingoExpr::HandlerCall("go".to_owned(), args))
+        }
         Rule::handler_call | Rule::command_inline => {
             let mut inner = pair.into_inner();
             let handler_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?;
