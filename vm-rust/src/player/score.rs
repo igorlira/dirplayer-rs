@@ -3526,10 +3526,10 @@ fn sprite_set_prop_is_noop(
                     Ok(sprite.loc_h == x && sprite.loc_v == y)
                 }
                 Datum::Void => Ok(true),
-                _ => Err(ScriptError::new(format!(
-                    "loc must be a Point (received {})",
-                    value.type_str()
-                ))),
+                // Mirror the assignment path: silently ignore type-mismatched
+                // values so a value-equality check on a never-applied
+                // assignment doesn't error.
+                _ => Ok(false),
             },
             "rect" => {
                 let rect_values = match value {
@@ -4053,10 +4053,16 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                         })
                     }
                     Datum::Void => Ok(()), // no-op
-                    _ => Err(ScriptError::new(format!(
-                        "loc must be a Point (received {})",
-                        value.type_str()
-                    ))),
+                    // Director silently ignores type-mismatched assignments
+                    // here (e.g. `sprite.loc = 116`, a known script typo for
+                    // `.locV`). Mirror that — warn but keep the game running.
+                    _ => {
+                        log::warn!(
+                            "Ignoring sprite {} loc assignment with non-Point value ({})",
+                            sprite_id, value.type_str()
+                        );
+                        Ok(())
+                    }
                 }
             },
         ),
