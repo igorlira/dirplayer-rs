@@ -5915,7 +5915,14 @@ impl WebGL2Renderer {
                     // returns the start of the next line for byte indices that
                     // sit at a soft-wrap boundary, which makes a multi-line
                     // selection's right edge on line N collapse onto line N+1.
-                    let line_w: i32 = line.text.bytes().map(|b| font.get_char_advance(b) as i32).sum();
+                    // Walk chars, not bytes. Each visible character is one
+                    // glyph advance regardless of UTF-8 byte length; the
+                    // earlier byte-iteration variant gave umlauts 2x width
+                    // and stretched the selection-highlight past the end
+                    // of the actual text.
+                    let line_w: i32 = line.text.chars()
+                        .map(|c| font.get_char_advance_for(c) as i32)
+                        .sum();
                     let x_offset: i32 = if caret_max_width > 0 {
                         match alignment_key.as_str() {
                             "center" => ((caret_max_width - line_w) / 2).max(0),
@@ -5926,11 +5933,14 @@ impl WebGL2Renderer {
                         0
                     };
                     let advance_for = |start: usize, end: usize| -> i32 {
-                        let s = start.saturating_sub(line.start).min(line.text.len());
-                        let e = end.saturating_sub(line.start).min(line.text.len());
-                        line.text.as_bytes()[s..e]
-                            .iter()
-                            .map(|&b| font.get_char_advance(b) as i32)
+                        let mut s = start.saturating_sub(line.start).min(line.text.len());
+                        let mut e = end.saturating_sub(line.start).min(line.text.len());
+                        while s < line.text.len() && !line.text.is_char_boundary(s) { s += 1; }
+                        while e < line.text.len() && !line.text.is_char_boundary(e) { e += 1; }
+                        if e < s { return 0; }
+                        line.text[s..e]
+                            .chars()
+                            .map(|c| font.get_char_advance_for(c) as i32)
                             .sum()
                     };
                     let mut left = x_offset + advance_for(line.start, from);
