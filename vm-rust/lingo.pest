@@ -160,11 +160,34 @@ set_statement = { ^"set" ~ expr ~ ^"to" ~ expr }
 // Delete statement: "delete char 1 of s", "delete word 3 of myStr"
 delete_statement = { ^"delete" ~ chunk_expr }
 
+// Lingo "go" command. "to", "frame", and "movie" are syntactic noise; only
+// the destination value (and optional movie path) need to reach the
+// handler. Accepts: "go", "go N", "go "label"", "go to "label"",
+// "go to frame N", "go frame N of movie "path"", "go to N of movie "path"".
+// Skipped when followed by "(" so go(...) still parses as a normal
+// handler_call.
+//
+// Each keyword is an atomic rule so the word-boundary lookahead is checked
+// adjacent to the keyword (in a non-atomic context pest's implicit
+// WHITESPACE would be eaten between the keyword and the lookahead, making
+// it always pass).
+go_kw      = @{ ^"go"    ~ !(alpha | digit | "_") }
+go_to_kw   = @{ ^"to"    ~ !(alpha | digit | "_") }
+go_frame_kw = @{ ^"frame" ~ !(alpha | digit | "_") }
+go_movie_kw = @{ ^"movie" ~ !(alpha | digit | "_") }
+go_of_kw   = @{ ^"of"    ~ !(alpha | digit | "_") }
+go_inline = {
+    go_kw ~ !(WHITESPACE* ~ "(")
+    ~ go_to_kw?
+    ~ go_frame_kw?
+    ~ (term_arg ~ (go_of_kw ~ go_movie_kw? ~ term_arg)?)?
+}
+
 // Assignment can be to any expression (identifier, property access, list index, etc.)
 // The parser will validate that the left side is a valid lvalue
 assignment_expr = { term ~ (obj_prop ~ (prop_name | term) | list_index)* }
 assignment = { assignment_expr ~ "=" ~ expr }
-command    = _{ set_statement | delete_statement | assignment | put_statement | command_inline | expr }
+command    = _{ set_statement | delete_statement | assignment | put_statement | go_inline | command_inline | expr }
 obj_prop   =  { "." }
 add        =  { "+" }
 subtract   =  { "-" }
