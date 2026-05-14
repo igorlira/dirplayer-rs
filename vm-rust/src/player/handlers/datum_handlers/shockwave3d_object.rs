@@ -5475,6 +5475,12 @@ fn apply_translation(
     node_name: &str,
     dx: f32, dy: f32, dz: f32,
 ) {
+    // Flush any pending persistent Transform3d mutations into node_transforms
+    // first — otherwise a prior `transform.position = v` on the cached datum is
+    // invisible to get_or_init_node_transform (which reads node_transforms and
+    // the parsed scene), and our subsequent set_node_transform writes back the
+    // stale position, silently dropping the Lingo write. Mirrors apply_point_at.
+    sync_persistent_transforms(player);
     let mut m = get_or_init_node_transform(player, member_ref, node_name);
     m[12] += dx;
     m[13] += dy;
@@ -5488,6 +5494,8 @@ fn apply_rotation(
     node_name: &str,
     rx_deg: f32, ry_deg: f32, rz_deg: f32,
 ) {
+    // See apply_translation comment — same flush requirement.
+    sync_persistent_transforms(player);
     let m = get_or_init_node_transform(player, member_ref, node_name);
     // Director uses left-handed coordinates where Y rotation is opposite to OpenGL's
     // right-handed convention, so negate Y.
@@ -5506,6 +5514,8 @@ fn apply_scale(
     node_name: &str,
     sx: f32, sy: f32, sz: f32,
 ) {
+    // See apply_translation comment — same flush requirement.
+    sync_persistent_transforms(player);
     let mut m = get_or_init_node_transform(player, member_ref, node_name);
     // Scale the rotation columns
     for i in 0..3 { m[i] *= sx; }
