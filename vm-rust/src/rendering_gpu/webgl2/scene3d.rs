@@ -83,8 +83,14 @@ struct Shader3d {
     // Environment/cube map (sampler added when cubemaps are loaded)
     u_has_env_map: Option<WebGlUniformLocation>,
     u_reflectivity: Option<WebGlUniformLocation>,
-    // Texture coordinate transform
+    // Texture coordinate transform (post-projection UV-space tweak)
     u_tex_transform: Option<WebGlUniformLocation>,
+    // UV projection mode for the diffuse layer (matches W3dTextureLayer.tex_mode):
+    // 0 = mesh UVs (default), 5 = #wrapPlanar (project object-space XY).
+    u_uv_proj_mode: Option<WebGlUniformLocation>,
+    // wrapTransformList[i] for the diffuse layer — applied to model-space
+    // position before generating UVs (used by #wrapPlanar etc.).
+    u_wrap_transform: Option<WebGlUniformLocation>,
     // Skeletal skinning
     u_skinning_enabled: Option<WebGlUniformLocation>,
     u_bone_matrices: Option<WebGlUniformLocation>,
@@ -119,7 +125,9 @@ struct TextureLayerBinding<'a> {
 struct TextureBindResult<'a> {
     diffuse: Option<&'a WebGlTexture>,
     diffuse_tex_transform: [f32; 16], // texture coordinate transform for diffuse layer
+    diffuse_wrap_transform: [f32; 16], // wrapTransformList[i] for #wrapPlanar et al.
     diffuse_wrap: (u8, u8), // (repeat_s, repeat_t) for diffuse: 0=clamp, 1=repeat
+    diffuse_tex_mode: u8,   // W3dTextureLayer.tex_mode (0=mesh UVs, 5=#wrapPlanar)
     extra_layers: Vec<TextureLayerBinding<'a>>, // up to 2 extra layers (layer1 + layer2)
     specular: Option<&'a WebGlTexture>,
 }
@@ -299,9 +307,14 @@ uniform mat4 u_projection;
 uniform int u_skinning_enabled;
 uniform mat4 u_bone_matrices[48];
 
-// Texture coordinate transform
+// Texture coordinate transform (post-projection UV-space tweak)
 uniform mat4 u_tex_transform;
 uniform int u_texcoord2_direct;
+// Diffuse layer UV projection mode: 0=mesh UVs, 5=#wrapPlanar (object-space XY)
+uniform int u_uv_proj_mode;
+// Per Director spec: wrapTransformList[i] is applied to the mapping space
+// (model-space position) before texture coordinates are generated.
+uniform mat4 u_wrap_transform;
 
 out vec3 v_position;
 out vec3 v_normal;
@@ -334,7 +347,14 @@ void main() {
     // 3D meshes (u_skinning_enabled >= 0): CLOD UVs in [-0.5, 0.5] → remap to [0, 1]
     // Overlays (u_skinning_enabled == -1): UVs already [0,1], just flip V for OpenGL
     vec2 base_uv;
-    if (u_skinning_enabled == -1) {
+    if (u_uv_proj_mode == 5) {
+        // #wrapPlanar (per Director spec): the model-space position is first
+        // transformed by wrapTransformList[i], then UV is the XY of the result
+        // (Z is the projection axis, "extruded" — i.e. dropped). u_tex_transform
+        // is then applied below as a post-projection UV-space tweak.
+        vec4 mapping_pos = u_wrap_transform * vec4(a_position, 1.0);
+        base_uv = mapping_pos.xy;
+    } else if (u_skinning_enabled == -1) {
         base_uv = a_texcoord;  // overlay: pass through as-is
     } else {
         base_uv = vec2(a_texcoord.x + 0.5, 0.5 - a_texcoord.y);  // CLOD remap
@@ -624,6 +644,8 @@ void main() {
             u_has_env_map: u("u_has_env_map"),
             u_reflectivity: u("u_reflectivity"),
             u_tex_transform: u("u_tex_transform"),
+            u_uv_proj_mode: u("u_uv_proj_mode"),
+            u_wrap_transform: u("u_wrap_transform"),
             u_skinning_enabled: u("u_skinning_enabled"),
             u_bone_matrices: u("u_bone_matrices[0]"),
             u_shader_mode: u("u_shader_mode"),
@@ -1229,6 +1251,13 @@ void main() {
             let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
             gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &identity);
 
+            // Reset per-frame uniforms to known defaults (mirrors the main scene path)
+            let identity_uv = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0f32];
+            gl.uniform_matrix4fv_with_f32_array(shader.u_tex_transform.as_ref(), false, &identity_uv);
+            gl.uniform_matrix4fv_with_f32_array(shader.u_wrap_transform.as_ref(), false, &identity_uv);
+            gl.uniform1i(shader.u_uv_proj_mode.as_ref(), 0);
+            gl.uniform1i(shader.u_skinning_enabled.as_ref(), 0);
+
             // Try to find and bind material + texture from scene shaders
             let mut tex_bound = false;
             if let Some(mat) = scene.materials.iter().find(|m| !m.name.contains("Default")) {
@@ -1237,23 +1266,75 @@ void main() {
                 self.bind_default_material(gl, shader, scene);
             }
 
+            // Use the full texture-layer resolver so #wrapPlanar / wrapTransform /
+            // textureTransform reach the shader. Pick the first shader that resolves
+            // to a diffuse texture (mirror-trick W3D files have one shader, so this
+            // is fine; multi-shader scenes aren't supported by world.image anyway).
+            let mut bound_tex_mode: u8 = 0;
             for w3d_shader in &scene.shaders {
                 if tex_bound { break; }
-                for layer in &w3d_shader.texture_layers {
-                    if !layer.name.is_empty() {
-                        if let Some(tex) = gpu_data.textures.get(&layer.name.to_lowercase()) {
-                            gl.active_texture(WebGl2RenderingContext::TEXTURE0);
-                            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
-                            gl.uniform1i(shader.u_has_texture.as_ref(), 1);
-                            gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
-                            tex_bound = true;
-                            break;
-                        }
-                    }
+                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                if layers.diffuse.is_some() {
+                    bound_tex_mode = layers.diffuse_tex_mode;
+                    tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
             }
             if !tex_bound {
                 gl.uniform1i(shader.u_has_texture.as_ref(), 0);
+            }
+
+            // For #wrapPlanar with an identity wrapTransform (the typical
+            // newTexture-then-assign mirror trick case), Director auto-fits the
+            // texture to the model's XY bounding box. Compute that fit here and
+            // overwrite u_wrap_transform.
+            //
+            // Restrict the bbox to meshes whose owning node uses the bound shader —
+            // otherwise extras like the mirror frame / base inflate the bbox and the
+            // texture appears too small inside the actual reflective surface.
+            if tex_bound && bound_tex_mode == 5 {
+                use crate::director::chunks::w3d::types::W3dNodeType;
+                // Restrict to meshes that are actually drawn — i.e. referenced by a
+                // Model node. Unused mesh resources (e.g. "defaultmodel" placeholder)
+                // would otherwise inflate the bbox and shrink the projected texture.
+                let mut drawn_resources: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for node in &scene.nodes {
+                    if node.node_type != W3dNodeType::Model { continue; }
+                    if !node.model_resource_name.is_empty() {
+                        drawn_resources.insert(node.model_resource_name.to_lowercase());
+                    } else if !node.resource_name.is_empty() {
+                        drawn_resources.insert(node.resource_name.trim().to_lowercase());
+                    }
+                }
+                let mut min_x = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut min_y = f32::MAX;
+                let mut max_y = f32::MIN;
+                for (resource_name, meshes) in &scene.clod_meshes {
+                    if !drawn_resources.is_empty()
+                        && !drawn_resources.contains(&resource_name.to_lowercase())
+                    {
+                        continue;
+                    }
+                    for mesh in meshes {
+                        for p in &mesh.positions {
+                            if p[0] < min_x { min_x = p[0]; }
+                            if p[0] > max_x { max_x = p[0]; }
+                            if p[1] < min_y { min_y = p[1]; }
+                            if p[1] > max_y { max_y = p[1]; }
+                        }
+                    }
+                }
+                if min_x.is_finite() && max_x > min_x && max_y > min_y {
+                    let rx = (max_x - min_x).max(1e-6);
+                    let ry = (max_y - min_y).max(1e-6);
+                    let bbox_xform: [f32; 16] = [
+                        1.0 / rx,    0.0,         0.0, 0.0,
+                        0.0,         -1.0 / ry,   0.0, 0.0,
+                        0.0,         0.0,         1.0, 0.0,
+                        -min_x / rx, max_y / ry,  0.0, 1.0,
+                    ];
+                    gl.uniform_matrix4fv_with_f32_array(shader.u_wrap_transform.as_ref(), false, &bbox_xform);
+                }
             }
 
             for mesh_group in gpu_data.mesh_groups.values() {
@@ -1404,6 +1485,8 @@ void main() {
         // Default texture transform = identity
         let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0f32];
         gl.uniform_matrix4fv_with_f32_array(shader.u_tex_transform.as_ref(), false, &identity);
+        gl.uniform_matrix4fv_with_f32_array(shader.u_wrap_transform.as_ref(), false, &identity);
+        gl.uniform1i(shader.u_uv_proj_mode.as_ref(), 0);    // default: mesh UVs
         gl.uniform1i(shader.u_skinning_enabled.as_ref(), 0); // default: no skinning
         gl.uniform1i(shader.u_shader_mode.as_ref(), 0);     // default: phong
         gl.uniform1f(shader.u_toon_steps.as_ref(), 3.0);    // default toon steps
@@ -1763,6 +1846,8 @@ void main() {
         // Reset texture transform to identity for overlays
         let ov_identity = [1.0f32,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
         gl.uniform_matrix4fv_with_f32_array(shader.u_tex_transform.as_ref(), false, &ov_identity);
+        gl.uniform_matrix4fv_with_f32_array(shader.u_wrap_transform.as_ref(), false, &ov_identity);
+        gl.uniform1i(shader.u_uv_proj_mode.as_ref(), 0);  // overlays use authored UVs
         gl.uniform4f(shader.u_emissive_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
         gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
         gl.uniform4f(shader.u_ambient_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
@@ -2812,7 +2897,9 @@ void main() {
         let mut result = TextureBindResult {
             diffuse: None,
             diffuse_tex_transform: identity,
+            diffuse_wrap_transform: identity,
             diffuse_wrap: (1, 1), // default: repeat
+            diffuse_tex_mode: 0,
             extra_layers: Vec::new(),
             specular: None,
         };
@@ -2846,7 +2933,9 @@ void main() {
                 if layer.tex_transform != identity {
                     result.diffuse_tex_transform = layer.tex_transform;
                 }
+                result.diffuse_wrap_transform = layer.wrap_transform;
                 result.diffuse_wrap = (layer.repeat_s, layer.repeat_t);
+                result.diffuse_tex_mode = layer.tex_mode;
                 continue;
             }
 
@@ -2912,7 +3001,12 @@ void main() {
             let wrap_t = if result.diffuse_wrap.1 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
             gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, wrap_s as i32);
             gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, wrap_t as i32);
+            // Forward the tex_mode to the vertex shader so #wrapPlanar etc. branch
+            gl.uniform1i(shader.u_uv_proj_mode.as_ref(), result.diffuse_tex_mode as i32);
+            gl.uniform_matrix4fv_with_f32_array(shader.u_wrap_transform.as_ref(), false, &result.diffuse_wrap_transform);
             tex_bound = true;
+        } else {
+            gl.uniform1i(shader.u_uv_proj_mode.as_ref(), 0);
         }
 
         // Extra layer 0 → unit 1

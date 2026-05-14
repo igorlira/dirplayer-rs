@@ -2664,6 +2664,33 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                 }
                             }
+                        } else if prop_name == "textureModeList" {
+                            // Symbol → tex_mode int. Mirrors the getter at the bottom of this file.
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            let mode_val: u8 = match &value {
+                                Datum::Symbol(s) => match s.to_ascii_lowercase().as_str() {
+                                    "none" => 0,
+                                    "reflection" => 4,
+                                    "wrapplanar" => 5,
+                                    "specular" => 6,
+                                    _ => 0,
+                                },
+                                Datum::Int(i) => *i as u8,
+                                _ => 0,
+                            };
+                            let idx = (index as usize).saturating_sub(1);
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                            while shader.texture_layers.len() <= idx {
+                                                shader.texture_layers.push(crate::director::chunks::w3d::types::W3dTextureLayer::default());
+                                            }
+                                            shader.texture_layers[idx].tex_mode = mode_val;
+                                        }
+                                    }
+                                }
+                            }
                         } else if prop_name == "textureList" {
                             // Update the persistent textureList at the given index
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
@@ -3035,7 +3062,20 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                             }
                             "textureModeList" => {
-                                Some(player.alloc_datum(Datum::Void))
+                                let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                                let mode = member.and_then(|m| m.member_type.as_shockwave3d())
+                                    .and_then(|w3d| w3d.parsed_scene.as_ref())
+                                    .and_then(|scene| scene.shaders.iter().find(|s| s.name == s3d_ref.name))
+                                    .and_then(|shader| shader.texture_layers.get(idx))
+                                    .map(|layer| match layer.tex_mode {
+                                        0 => "none",
+                                        4 => "reflection",
+                                        5 => "wrapPlanar",
+                                        6 => "specular",
+                                        _ => "none",
+                                    })
+                                    .unwrap_or("none");
+                                Some(player.alloc_datum(Datum::Symbol(mode.to_string())))
                             }
                             "textureRepeatList" => {
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -4360,6 +4400,18 @@ impl Shockwave3dObjectDatumHandlers {
                 }
             },
             "textureModeList" => {
+                // Persist the list so `shader.textureModeList[i] = #wrapPlanar`
+                // (which compiles to a generic Datum::List mutation) is visible
+                // to sync_shader_texture_lists at render time.
+                let existing_ref = {
+                    let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                    member.and_then(|m| m.member_type.as_shockwave3d())
+                        .and_then(|w3d| w3d.runtime_state.shader_texture_mode_lists.get(shader_name))
+                        .cloned()
+                };
+                if let Some(list_ref) = existing_ref {
+                    return Ok(list_ref);
+                }
                 let mut items = VecDeque::new();
                 if let Some(s) = shader {
                     for layer in &s.texture_layers {
@@ -4376,9 +4428,16 @@ impl Shockwave3dObjectDatumHandlers {
                 while items.len() < 8 {
                     items.push_back(player.alloc_datum(Datum::Symbol("none".to_string())));
                 }
-                Ok(player.alloc_datum(Datum::List(
+                let list_ref = player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List, items, false,
-                )))
+                ));
+                let shader_name_owned = shader_name.to_string();
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        w3d.runtime_state.shader_texture_mode_lists.insert(shader_name_owned, list_ref.clone());
+                    }
+                }
+                Ok(list_ref)
             },
             "blendFunctionList" => {
                 let mut items = VecDeque::new();
@@ -5308,11 +5367,54 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
 pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
     // Collect (cast_lib, member_num, shader_name, list_ref) tuples
     let mut entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
+    let mut mode_entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
     for cast in &player.movie.cast_manager.casts {
         for (member_num, member) in &cast.members {
             if let Some(w3d) = member.member_type.as_shockwave3d() {
                 for (shader_name, list_ref) in &w3d.runtime_state.shader_texture_lists {
                     entries.push((cast.number as i32, *member_num, shader_name.clone(), list_ref.clone()));
+                }
+                for (shader_name, list_ref) in &w3d.runtime_state.shader_texture_mode_lists {
+                    mode_entries.push((cast.number as i32, *member_num, shader_name.clone(), list_ref.clone()));
+                }
+            }
+        }
+    }
+
+    // Sync texture modes (#wrapPlanar etc.) back to shader.texture_layers[].tex_mode.
+    // Done before the texture-name sync so layer slots already exist when names land.
+    for (cast_lib, cast_member, shader_name, list_ref) in mode_entries {
+        let modes: Vec<u8> = if let Datum::List(_, items, _) = player.get_datum(&list_ref) {
+            items.iter().map(|item_ref| {
+                match player.get_datum(item_ref) {
+                    Datum::Symbol(s) => match s.to_ascii_lowercase().as_str() {
+                        "none" => 0u8,
+                        "reflection" => 4,
+                        "wrapplanar" => 5,
+                        "specular" => 6,
+                        _ => 0,
+                    },
+                    Datum::Int(i) => *i as u8,
+                    _ => 0,
+                }
+            }).collect()
+        } else {
+            continue;
+        };
+
+        let member_ref = CastMemberRef { cast_lib, cast_member: cast_member as i32 };
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                if let Some(scene) = w3d.scene_mut() {
+                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == shader_name) {
+                        use crate::director::chunks::w3d::types::W3dTextureLayer;
+                        while shader.texture_layers.len() < modes.len() {
+                            shader.texture_layers.push(W3dTextureLayer::default());
+                        }
+                        for (i, mode) in modes.iter().enumerate() {
+                            shader.texture_layers[i].tex_mode = *mode;
+                        }
+                    }
                 }
             }
         }
