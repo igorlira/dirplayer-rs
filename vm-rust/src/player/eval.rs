@@ -1654,6 +1654,35 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 }
                 // Handle bracket-indexed assignment: list[index] = value
                 LingoExpr::ListAccess(list_expr, index_expr) => {
+                    // Lingo `obj.prop[i] = val` — generic List mutation only updates
+                    // the list datum, which for some object types (Shockwave3dObjectRef
+                    // shader properties) is just a runtime view of underlying scene
+                    // state. Dispatch to obj.setAt(prop, i, val) so the setter can
+                    // sync the assignment back into scene.shaders[].texture_layers[]
+                    // (and similar). Without this the Lingo write is invisible to the
+                    // renderer.
+                    if let LingoExpr::ObjProp(obj_expr, prop_name) = list_expr.as_ref() {
+                        let obj_ref = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
+                        let needs_writeback = reserve_player_mut(|player| {
+                            Ok(matches!(
+                                player.get_datum(&obj_ref),
+                                Datum::Shockwave3dObjectRef(_)
+                            ))
+                        })?;
+                        if needs_writeback {
+                            let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr.as_ref())).await?;
+                            let prop_ref = reserve_player_mut(|player| {
+                                Ok(player.alloc_datum(Datum::Symbol(prop_name.clone())))
+                            })?;
+                            player_call_datum_handler(
+                                &obj_ref,
+                                "setAt",
+                                &vec![prop_ref, index_ref, right_datum.clone()],
+                            ).await?;
+                            return Ok(right_datum);
+                        }
+                    }
+
                     let list_ref = Box::pin(eval_lingo_expr_ast_runtime(list_expr.as_ref())).await?;
                     let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr.as_ref())).await?;
                     reserve_player_mut(|player| {
