@@ -592,6 +592,21 @@ impl Shockwave3dMemberHandlers {
 
             // ─── Rendering ───
             "image" => {
+                // Force a sync of runtime shader-list mutations into scene data
+                // before reading. Per-frame draw_frame() does this, but world.image
+                // is often called inside a Lingo handler that just modified
+                // textureList/textureModeList — without this, the first read returns
+                // stale scene state and the avatar reflection is missing.
+                crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
+                // Re-clone scene_data to pick up the just-applied sync.
+                let scene_data = {
+                    let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                        .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+                    let w3d = member.member_type.as_shockwave3d()
+                        .ok_or_else(|| ScriptError::new("Not a Shockwave3D member".to_string()))?;
+                    w3d.parsed_scene.clone()
+                };
+
                 // member("3d").image returns the rendered 3D world as a bitmap.
                 let w = (info.default_rect.2 - info.default_rect.0).max(1) as u32;
                 let h = (info.default_rect.3 - info.default_rect.1).max(1) as u32;

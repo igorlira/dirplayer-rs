@@ -972,6 +972,9 @@ pub struct Shockwave3dRuntimeState {
     pub shader_texture_lists: std::collections::HashMap<String, crate::player::DatumRef>,
     /// Per-shader persistent textureTransformList DatumRefs: shader_name -> DatumRef to list of Transform3d
     pub shader_texture_transform_lists: std::collections::HashMap<String, crate::player::DatumRef>,
+    /// Per-shader persistent textureModeList DatumRefs: shader_name -> DatumRef to list of mode symbols.
+    /// Synced into shader.texture_layers[].tex_mode by sync_shader_texture_lists before render.
+    pub shader_texture_mode_lists: std::collections::HashMap<String, crate::player::DatumRef>,
 
     // ─── MeshDeform state ───
     /// Per-model mesh deform data: model_name -> list of mesh texture layers
