@@ -2923,11 +2923,13 @@ void main() {
                 continue;
             }
 
-            // Position 0 (textureList[1]) = diffuse base texture.
-            // Position 1+ (textureList[2+]) = extra layers (lightmaps).
-            // Use array position, not first-found, so lightmaps in position 1+
-            // don't get misclassified as diffuse when position 0 is empty.
-            if layer_idx == 0 && result.diffuse.is_none() {
+            // Diffuse base texture: first non-empty layer whose name doesn't
+            // look like a baked lighting layer. Phosphor Beta / Rasterwerks
+            // shifts its base texture to textureList[2] (slot 0 in the layer
+            // array left empty); a strict "position 0 only" rule misses it
+            // and the model renders as if untextured.
+            let is_baked_lighting = lower.contains("lightmap") || lower.contains("shadow");
+            if !is_baked_lighting && result.diffuse.is_none() {
                 result.diffuse = Some(tex);
                 diffuse_name = lower;
                 if layer.tex_transform != identity {
@@ -3010,15 +3012,19 @@ void main() {
         }
 
         // Extra layer 0 → unit 1
+        // Extra layers (shadow/lightmap) are authored per-mesh — UV 0..1 covers
+        // the whole mesh and sampling outside that range should never wrap to
+        // the opposite edge (visible as dark seams along cliff/floor edges in
+        // Phosphor). Force CLAMP_TO_EDGE regardless of the W3D file's repeat
+        // flag, which is typically left at REPEAT (the default) by authoring
+        // tools.
         if let Some(layer) = result.extra_layers.get(0) {
             gl.active_texture(WebGl2RenderingContext::TEXTURE1);
             gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(layer.tex));
             gl.uniform1i(shader.u_has_lightmap.as_ref(), layer.blend);
             gl.uniform1f(shader.u_lightmap_intensity.as_ref(), layer.intensity);
-            let wrap_s = if layer.wrap.0 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
-            let wrap_t = if layer.wrap.1 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
-            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, wrap_s as i32);
-            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, wrap_t as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
         } else {
             gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
         }
@@ -3029,10 +3035,8 @@ void main() {
             gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(layer.tex));
             gl.uniform1i(shader.u_layer2_blend.as_ref(), layer.blend);
             gl.uniform1f(shader.u_layer2_intensity.as_ref(), layer.intensity);
-            let wrap_s = if layer.wrap.0 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
-            let wrap_t = if layer.wrap.1 == 0 { WebGl2RenderingContext::CLAMP_TO_EDGE } else { WebGl2RenderingContext::REPEAT };
-            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, wrap_s as i32);
-            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, wrap_t as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
         } else {
             gl.uniform1i(shader.u_layer2_blend.as_ref(), 0);
         }
