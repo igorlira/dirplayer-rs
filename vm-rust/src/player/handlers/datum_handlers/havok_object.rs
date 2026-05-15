@@ -533,7 +533,34 @@ impl HavokObjectDatumHandlers {
             }
             "getProp" => {
                 let prop = player.get_datum(&args[0]).string_value()?;
-                Self::get_rigid_body_prop(player, member_ref, rb_name, &prop)
+                let result = Self::get_rigid_body_prop(player, member_ref, rb_name, &prop)?;
+                // Bytecode form `obj.prop[N]` compiles to obj.getProp(#prop, N).
+                // If a numeric index follows the prop name, return the Nth
+                // component of the prop's value (vector or list).
+                if args.len() >= 2 {
+                    let index = player.get_datum(&args[1]).int_value()?;
+                    let value = player.get_datum(&result).clone();
+                    return match value {
+                        Datum::Vector(arr) => {
+                            let i = (index - 1) as usize;
+                            if i < 3 {
+                                Ok(player.alloc_datum(Datum::Float(arr[i])))
+                            } else {
+                                Err(ScriptError::new(format!(
+                                    "Vector index {} out of range (1..3) for rigidBody.{}", index, prop
+                                )))
+                            }
+                        }
+                        Datum::List(_, items, _) => {
+                            let i = (index - 1) as usize;
+                            items.get(i).cloned().ok_or_else(|| ScriptError::new(format!(
+                                "List index {} out of range for rigidBody.{}", index, prop
+                            )))
+                        }
+                        _ => Ok(result),
+                    };
+                }
+                Ok(result)
             }
             _ => Err(ScriptError::new(format!("No handler {} for rigidBody", handler_name))),
         }
@@ -916,12 +943,37 @@ impl HavokObjectDatumHandlers {
             }
             "getProp" => {
                 let prop = player.get_datum(&args[0]).string_value()?;
-                match object_type {
-                    "spring" => Self::get_spring_prop(player, member_ref, name, &prop),
-                    "linearDashpot" => Self::get_linear_dashpot_prop(player, member_ref, name, &prop),
-                    "angularDashpot" => Self::get_angular_dashpot_prop(player, member_ref, name, &prop),
-                    _ => Err(ScriptError::new(format!("Unknown constraint type: {}", object_type))),
+                let result = match object_type {
+                    "spring" => Self::get_spring_prop(player, member_ref, name, &prop)?,
+                    "linearDashpot" => Self::get_linear_dashpot_prop(player, member_ref, name, &prop)?,
+                    "angularDashpot" => Self::get_angular_dashpot_prop(player, member_ref, name, &prop)?,
+                    _ => return Err(ScriptError::new(format!("Unknown constraint type: {}", object_type))),
+                };
+                // Optional indexed-access form: obj.getProp(#prop, N) → Nth element.
+                if args.len() >= 2 {
+                    let index = player.get_datum(&args[1]).int_value()?;
+                    let value = player.get_datum(&result).clone();
+                    return match value {
+                        Datum::Vector(arr) => {
+                            let i = (index - 1) as usize;
+                            if i < 3 {
+                                Ok(player.alloc_datum(Datum::Float(arr[i])))
+                            } else {
+                                Err(ScriptError::new(format!(
+                                    "Vector index {} out of range (1..3) for {}.{}", index, object_type, prop
+                                )))
+                            }
+                        }
+                        Datum::List(_, items, _) => {
+                            let i = (index - 1) as usize;
+                            items.get(i).cloned().ok_or_else(|| ScriptError::new(format!(
+                                "List index {} out of range for {}.{}", index, object_type, prop
+                            )))
+                        }
+                        _ => Ok(result),
+                    };
                 }
+                Ok(result)
             }
             _ => Err(ScriptError::new(format!(
                 "No handler {} for {} '{}'", handler_name, object_type, name
