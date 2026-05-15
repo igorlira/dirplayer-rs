@@ -740,67 +740,16 @@ pub async fn player_load_system_font(path: &str) {
 
     match result {
         Ok(result) => {
-            let blob = if let Ok(response) = result.clone().dyn_into::<web_sys::Response>() {
-                if !response.ok() {
-                    warn!(
-                        "System font fetch returned HTTP {} for {}",
-                        response.status(),
-                        path
-                    );
-                    return;
-                }
-
-                let blob_promise = match response.blob() {
-                    Ok(blob_promise) => blob_promise,
-                    Err(err) => {
-                        warn!("Failed to read system font response body for {}: {:?}", path, err);
-                        return;
-                    }
-                };
-
-                let blob = match JsFuture::from(blob_promise).await {
-                    Ok(blob) => blob,
-                    Err(err) => {
-                        warn!("Failed to resolve system font blob for {}: {:?}", path, err);
-                        return;
-                    }
-                };
-
-                match blob.dyn_into::<web_sys::Blob>() {
-                    Ok(blob) => blob,
-                    Err(err) => {
-                        warn!("System font response for {} was not a Blob: {:?}", path, err);
-                        return;
-                    }
-                }
-            } else if let Ok(blob) = result.dyn_into::<web_sys::Blob>() {
-                blob
+            let result = if let Some(blob) = result.dyn_ref::<web_sys::Blob>() {
+                web_sys::Response::new_with_opt_blob(Some(blob)).unwrap()
             } else {
-                warn!("System font fetch returned unexpected JS value for {}", path);
-                return;
+                result.dyn_into::<web_sys::Response>().unwrap()
             };
-
-            let image_data = match window.create_image_bitmap_with_blob(&blob) {
-                Ok(image_data) => image_data,
-                Err(err) => {
-                    warn!("Failed to create image bitmap for system font {}: {:?}", path, err);
-                    return;
-                }
-            };
-            let image_data = match JsFuture::from(image_data).await {
-                Ok(image_data) => image_data,
-                Err(err) => {
-                    warn!("Failed to resolve image bitmap for system font {}: {:?}", path, err);
-                    return;
-                }
-            };
-            let image_bitmap = match image_data.dyn_into::<web_sys::ImageBitmap>() {
-                Ok(image_bitmap) => image_bitmap,
-                Err(err) => {
-                    warn!("System font bitmap decode returned unexpected value for {}: {:?}", path, err);
-                    return;
-                }
-            };
+            let blob = JsFuture::from(result.blob().unwrap()).await.unwrap();
+            let blob = blob.dyn_into::<web_sys::Blob>().unwrap();
+            let image_data = window.create_image_bitmap_with_blob(&blob).unwrap();
+            let image_data = JsFuture::from(image_data).await.unwrap();
+            let image_bitmap = image_data.dyn_into::<web_sys::ImageBitmap>().unwrap();
 
             let canvas = web_sys::window()
                 .unwrap()
