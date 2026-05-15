@@ -297,8 +297,12 @@ function performInit(config: PolyfillConfig, source: string, version: string) {
   // Replace existing elements
   replaceDirPlayerElements(config);
 
-  // Observe for new elements
+  // Observe for new elements, but yield immediately if another source takes over.
   const observer = new MutationObserver((mutations) => {
+    if (root.getAttribute(ATTR_SOURCE) !== source) {
+      observer.disconnect();
+      return;
+    }
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
         if (!(node instanceof HTMLElement)) continue;
@@ -335,10 +339,18 @@ function performInit(config: PolyfillConfig, source: string, version: string) {
 export function initPolyfill(config: PolyfillConfig, version: string, source: 'extension' | 'polyfill') {
   const root = document.documentElement;
 
-  // Already fully initialized, too late to compete
+  // Already fully initialized — polyfill can always take over from the extension;
+  // anything else (e.g. extension arriving after polyfill) must yield.
   if (root.hasAttribute(ATTR_INITIALIZED)) {
-    console.log(`[DirPlayer] Already initialized, skipping ${source} v${version}`);
-    return;
+    if (source === 'polyfill' && root.getAttribute(ATTR_SOURCE) === 'extension') {
+      // Force takeover: clear the initialized flag and re-register as polyfill.
+      // The extension's MutationObserver will detect the source change and disconnect.
+      console.log(`[DirPlayer] Polyfill v${version} taking over from extension`);
+      root.removeAttribute(ATTR_INITIALIZED);
+    } else {
+      console.log(`[DirPlayer] Already initialized, skipping ${source} v${version}`);
+      return;
+    }
   }
 
   const existingVersion = root.getAttribute(ATTR_VERSION);
@@ -359,12 +371,25 @@ export function initPolyfill(config: PolyfillConfig, version: string, source: 'e
   root.setAttribute(ATTR_VERSION, version);
   root.setAttribute(ATTR_SOURCE, source);
 
-  // Schedule deferred initialization
+  // Schedule deferred initialization.
+  // The extension waits for the full 'load' event so that any async polyfill
+  // script on the page can load, call initPolyfill, and claim priority first.
+  // Once readyState is 'complete' all scripts are already evaluated, so a
+  // normal setTimeout(0) is fine — the polyfill has had its chance.
+  // The polyfill itself keeps the fast DOMContentLoaded / setTimeout(0) path.
   const doInit = () => performInit(config, source, version);
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', doInit, { once: true });
+  if (source === 'extension') {
+    if (document.readyState === 'complete') {
+      setTimeout(doInit, 0);
+    } else {
+      window.addEventListener('load', doInit, { once: true });
+    }
   } else {
-    setTimeout(doInit, 0);
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', doInit, { once: true });
+    } else {
+      setTimeout(doInit, 0);
+    }
   }
 }
 

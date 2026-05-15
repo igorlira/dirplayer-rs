@@ -95,23 +95,7 @@ function loadRuffle(): Promise<void> {
   });
 }
 
-function initCore() {
-  const requireClick = polyfillScript?.hasAttribute('data-require-click') ?? false;
-  const config = {
-    wasmUrl: getEmbeddedWasmUrl(),
-    systemFontUrl: getEmbeddedFontUrl(),
-    requireClickToPlay: requireClick,
-  };
-
-  // Register with version for priority negotiation (deferred init handled inside initPolyfill)
-  initPolyfill(config, DIRPLAYER_VERSION, 'polyfill');
-}
-
 function init() {
-  // `data-disable-flash` on the polyfill <script> tag completely skips
-  // Ruffle. The flag is also written to __dirplayerFlashConfig so
-  // flashPlayerManager.createFlashInstance() short-circuits cleanly
-  // instead of throwing "Ruffle not found" for every Flash member.
   const disableFlash = polyfillScript?.hasAttribute('data-disable-flash') ?? false;
   if (disableFlash) {
     const win = window as any;
@@ -120,12 +104,25 @@ function init() {
       disableFlash: true,
     };
     console.log('[DirPlayer] data-disable-flash set — skipping Ruffle. Lingo Flash calls will no-op.');
-    initCore();
-    return;
   }
 
-  // Default: ensure Ruffle is loaded before initializing
-  loadRuffle().then(initCore);
+  const requireClick = polyfillScript?.hasAttribute('data-require-click') ?? false;
+  const config = {
+    wasmUrl: getEmbeddedWasmUrl(),
+    systemFontUrl: getEmbeddedFontUrl(),
+    requireClickToPlay: requireClick,
+  };
+
+  // Register ownership SYNCHRONOUSLY, before any async work (like loadRuffle).
+  // This ensures the extension's MutationObserver sees ATTR_SOURCE='polyfill'
+  // before the page appends embed/object elements, so it yields immediately.
+  initPolyfill(config, DIRPLAYER_VERSION, 'polyfill');
+
+  // Load Ruffle in the background — it will be ready by the time any Flash
+  // content inside a Director movie actually needs to play.
+  if (!disableFlash) {
+    loadRuffle();
+  }
 }
 
 // Expose the API globally
