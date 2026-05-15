@@ -70,6 +70,7 @@ impl BitmapMemberHandlers {
                     .unwrap_or(0),
             )),
             "useAlpha" => Ok(Datum::Int(if bitmap_member.info.use_alpha { 1 } else { 0 })),
+            "trimWhiteSpace" => Ok(Datum::Int(if bitmap_member.info.trim_white_space { 1 } else { 0 })),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for bitmap",
                 prop
@@ -277,6 +278,31 @@ impl BitmapMemberHandlers {
                     let bitmap_ref = bitmap_member.image_ref;
                     if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(bitmap_ref) {
                         bitmap.use_alpha = use_alpha;
+                    }
+                    Ok(())
+                })
+            }
+            "trimWhiteSpace" => {
+                let trim_white_space = value.to_bool()?;
+                borrow_member_mut(
+                    member_ref,
+                    |_| {},
+                    |cast_member, _| {
+                        let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                        bitmap_member.info.trim_white_space = trim_white_space;
+                        Ok(())
+                    },
+                )?;
+                reserve_player_mut(|player| {
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(member_ref)
+                        .unwrap();
+                    let bitmap_member = member.member_type.as_bitmap().unwrap();
+                    let bitmap_ref = bitmap_member.image_ref;
+                    if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(bitmap_ref) {
+                        bitmap.trim_white_space = trim_white_space;
                     }
                     Ok(())
                 })
