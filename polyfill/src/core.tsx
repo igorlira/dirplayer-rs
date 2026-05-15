@@ -284,56 +284,43 @@ export function isPolyfillInitialized(): boolean {
   return document.documentElement.hasAttribute(ATTR_INITIALIZED);
 }
 
-function performInit(config: PolyfillConfig, source: string, version: string) {
-  const root = document.documentElement;
+function stealEmbedSrc(embed: HTMLEmbedElement) {
+  // Save the resolved src into data-src so replaceDirEmbed can still find it,
+  // then strip the src attribute so the browser never starts the resource download.
+  const resolved = embed.src;
+  if (resolved && !embed.hasAttribute('data-src')) {
+    embed.setAttribute('data-src', resolved);
+  }
+  embed.removeAttribute('src');
+}
 
-  // Re-check at execution time: am I still the winner?
-  if (root.getAttribute(ATTR_SOURCE) !== source) return;
-  if (root.hasAttribute(ATTR_INITIALIZED)) return;
-
-  root.setAttribute(ATTR_INITIALIZED, 'true');
-  console.log(`[DirPlayer] Initializing with ${source} v${version}`);
-
-  // Replace existing elements
-  replaceDirPlayerElements(config);
-
-  // Observe for new elements, but yield immediately if another source takes over.
-  const observer = new MutationObserver((mutations) => {
-    if (root.getAttribute(ATTR_SOURCE) !== source) {
-      observer.disconnect();
+function handleAddedNode(config: PolyfillConfig, node: Node) {
+  if (!(node instanceof HTMLElement)) return;
+  if (node.tagName === 'EMBED' && checkDirEmbed(node as HTMLEmbedElement)) {
+    stealEmbedSrc(node as HTMLEmbedElement);
+    replaceDirEmbed(config, node as HTMLEmbedElement);
+    return;
+  }
+  if (node.tagName === 'OBJECT') {
+    const { isDirObject, params } = checkDirObject(node as HTMLObjectElement);
+    if (isDirObject) {
+      replaceDirObject(config, node as HTMLObjectElement, params);
       return;
     }
-    for (const mutation of mutations) {
-      for (const node of mutation.addedNodes) {
-        if (!(node instanceof HTMLElement)) continue;
-        if (node.tagName === 'EMBED' && checkDirEmbed(node as HTMLEmbedElement)) {
-          replaceDirEmbed(config, node as HTMLEmbedElement);
-          continue;
-        }
-        if (node.tagName === 'OBJECT') {
-          const { isDirObject, params } = checkDirObject(node as HTMLObjectElement);
-          if (isDirObject) {
-            replaceDirObject(config, node as HTMLObjectElement, params);
-            continue;
-          }
-        }
-        // Node is a container — scan its descendants for embeds/objects
-        for (const embed of Array.from(node.getElementsByTagName('embed'))) {
-          if (checkDirEmbed(embed as HTMLEmbedElement)) {
-            replaceDirEmbed(config, embed as HTMLEmbedElement);
-          }
-        }
-        for (const object of Array.from(node.getElementsByTagName('object'))) {
-          const { isDirObject, params } = checkDirObject(object as HTMLObjectElement);
-          if (isDirObject) {
-            replaceDirObject(config, object as HTMLObjectElement, params);
-          }
-        }
-      }
+  }
+  // Node is a container — scan its descendants for embeds/objects
+  for (const embed of Array.from(node.getElementsByTagName('embed'))) {
+    if (checkDirEmbed(embed as HTMLEmbedElement)) {
+      stealEmbedSrc(embed as HTMLEmbedElement);
+      replaceDirEmbed(config, embed as HTMLEmbedElement);
     }
-  });
-
-  observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+  }
+  for (const object of Array.from(node.getElementsByTagName('object'))) {
+    const { isDirObject, params } = checkDirObject(object as HTMLObjectElement);
+    if (isDirObject) {
+      replaceDirObject(config, object as HTMLObjectElement, params);
+    }
+  }
 }
 
 export function initPolyfill(config: PolyfillConfig, version: string, source: 'extension' | 'polyfill') {
@@ -367,29 +354,37 @@ export function initPolyfill(config: PolyfillConfig, version: string, source: 'e
     console.log(`[DirPlayer] ${source} v${version} takes priority over ${existingSource} v${existingVersion}`);
   }
 
-  // Register as the current candidate via DOM attributes (visible across worlds)
   root.setAttribute(ATTR_VERSION, version);
   root.setAttribute(ATTR_SOURCE, source);
+  root.setAttribute(ATTR_INITIALIZED, 'true');
+  console.log(`[DirPlayer] Initializing with ${source} v${version}`);
 
-  // Schedule deferred initialization.
-  // The extension waits for the full 'load' event so that any async polyfill
-  // script on the page can load, call initPolyfill, and claim priority first.
-  // Once readyState is 'complete' all scripts are already evaluated, so a
-  // normal setTimeout(0) is fine — the polyfill has had its chance.
-  // The polyfill itself keeps the fast DOMContentLoaded / setTimeout(0) path.
-  const doInit = () => performInit(config, source, version);
-  if (source === 'extension') {
-    if (document.readyState === 'complete') {
-      setTimeout(doInit, 0);
-    } else {
-      window.addEventListener('load', doInit, { once: true });
+  // Set up the MutationObserver IMMEDIATELY — it fires as a microtask when an
+  // embed/object is inserted, which is before the browser's resource loader runs
+  // as a macrotask. This prevents the .dcr file from being downloaded.
+  const observer = new MutationObserver((mutations) => {
+    if (root.getAttribute(ATTR_SOURCE) !== source) {
+      observer.disconnect();
+      return;
     }
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        handleAddedNode(config, node);
+      }
+    }
+  });
+  observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+
+  // Scan elements already in the DOM. Deferred only when the DOM isn't ready yet.
+  const scanExisting = () => {
+    if (root.getAttribute(ATTR_SOURCE) !== source) return;
+    extractNoscriptElements();
+    replaceDirPlayerElements(config);
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', scanExisting, { once: true });
   } else {
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', doInit, { once: true });
-    } else {
-      setTimeout(doInit, 0);
-    }
+    scanExisting();
   }
 }
 
