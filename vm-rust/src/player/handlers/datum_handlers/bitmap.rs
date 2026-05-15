@@ -416,10 +416,21 @@ impl BitmapDatumHandlers {
                 Datum::BitmapRef(bitmap) => Ok(bitmap),
                 _ => Err(ScriptError::new("Cannot draw non-bitmap".to_string())),
             }?;
+            if args.is_empty() {
+                return Err(ScriptError::new(
+                    "draw requires arguments".to_string(),
+                ));
+            }
             let first_arg = player.get_datum(&args[0]);
             let mut arg_pos = 1;
             let (x1, y1, x2, y2) = match first_arg {
                 Datum::Int(x1) => {
+                    if args.len() < 4 {
+                        return Err(ScriptError::new(
+                            "draw(x1, y1, x2, y2, ...) requires at least 4 arguments"
+                                .to_string(),
+                        ));
+                    }
                     let y1 = player.get_datum(&args[arg_pos]).int_value()?;
                     arg_pos += 1;
                     let x2 = player.get_datum(&args[arg_pos]).int_value()?;
@@ -427,6 +438,15 @@ impl BitmapDatumHandlers {
                     let y2 = player.get_datum(&args[arg_pos]).int_value()?;
                     arg_pos += 1;
                     (*x1, y1, x2, y2)
+                }
+                Datum::Point(point_vals, _flags) => {
+                    let x1 = point_vals[0] as i32;
+                    let y1 = point_vals[1] as i32;
+                    let (point2_vals, _flags) = player.get_datum(&args[arg_pos]).to_point_inline()?;
+                    arg_pos += 1;
+                    let x2 = point2_vals[0] as i32;
+                    let y2 = point2_vals[1] as i32;
+                    (x1, y1, x2, y2)
                 }
                 Datum::Rect(rect_vals, _flags) => {
                     let x1 = rect_vals[0] as i32;
@@ -437,7 +457,8 @@ impl BitmapDatumHandlers {
                 }
                 _ => {
                     return Err(ScriptError::new(
-                        "First argument to draw must be a rect".to_string(),
+                        "First argument to draw must be coordinates, a point, or a rect"
+                            .to_string(),
                     ))
                 }
             };
@@ -497,10 +518,40 @@ impl BitmapDatumHandlers {
                 blend.int_value()?
             };
 
+            let line_thickness = ["lineSize", "lineWidth", "width", "strokeWidth"]
+                .into_iter()
+                .find_map(|key| {
+                    let value = PropListUtils::get_by_concrete_key(
+                        &draw_map,
+                        &Datum::Symbol(key.to_owned()),
+                        &player.allocator,
+                    )
+                    .ok()?;
+                    if player.get_datum(&value).is_void() {
+                        None
+                    } else {
+                        player.get_datum(&value).int_value().ok()
+                    }
+                })
+                .unwrap_or(1)
+                .max(1);
+
             let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
             match shape_type.as_str() {
                 "rect" => {
                     bitmap.stroke_rect(x1, y1, x2, y2, color, &palettes, blend as f32 / 100.0);
+                }
+                "line" => {
+                    bitmap.draw_line_thick(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        color,
+                        &palettes,
+                        blend as f32 / 100.0,
+                        line_thickness,
+                    );
                 }
                 _ => {
                     return Err(ScriptError::new("Invalid shapeType for draw".to_string()));
