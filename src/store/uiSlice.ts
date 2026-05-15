@@ -1,5 +1,6 @@
-import { PayloadAction, createSlice } from "@reduxjs/toolkit";
-import { ICastMemberRef } from "dirplayer-js-api";
+import { createAction } from "@reduxjs/toolkit";
+import type { ICastMemberRef } from "dirplayer-js-api";
+import { createCompatReducer } from "./createCompatReducer";
 
 export type TSelectedObjectSprite = {
   type: 'sprite',
@@ -40,11 +41,15 @@ const initialState: UISliceState = {
   scriptViewMode: 'lingo'
 }
 
-const uiSlice = createSlice({
-  name: 'ui',
-  initialState,
-  reducers: {
-    onMemberSelected(state, action: PayloadAction<ICastMemberRef>) {
+export const onMemberSelected = createAction<ICastMemberRef>('ui/onMemberSelected')
+export const channelSelected = createAction<number>('ui/channelSelected')
+export const scoreSpanSelected = createAction<TScoreSpanRef>('ui/scoreSpanSelected')
+export const scoreBehaviorSelected = createAction<{ frameNumber: number }>('ui/scoreBehaviorSelected')
+export const scriptViewModeChanged = createAction<TScriptViewMode>('ui/scriptViewModeChanged')
+
+const uiReducer = createCompatReducer(initialState, (builder) => {
+  builder
+    .addCase(onMemberSelected, (state, action) => {
       return {
         ...state,
         selectedObject: {
@@ -52,8 +57,8 @@ const uiSlice = createSlice({
           memberRef: action.payload
         }
       }
-    },
-    channelSelected(state, action: PayloadAction<number>) {
+    })
+    .addCase(channelSelected, (state, action) => {
       return {
         ...state,
         selectedObject: {
@@ -61,8 +66,8 @@ const uiSlice = createSlice({
           spriteNumber: action.payload
         }
       }
-    },
-    scoreSpanSelected(state, action: PayloadAction<TScoreSpanRef>) {
+    })
+    .addCase(scoreSpanSelected, (state, action) => {
       return {
         ...state,
         selectedObject: {
@@ -70,8 +75,8 @@ const uiSlice = createSlice({
           spanRef: action.payload
         }
       }
-    },
-    scoreBehaviorSelected(state, action: PayloadAction<{frameNumber: number}>) {
+    })
+    .addCase(scoreBehaviorSelected, (state, action) => {
       return {
         ...state,
         selectedObject: {
@@ -79,19 +84,16 @@ const uiSlice = createSlice({
           frameNumber: action.payload.frameNumber
         }
       }
-    },
-    scriptViewModeChanged(state, action: PayloadAction<TScriptViewMode>) {
+    })
+    .addCase(scriptViewModeChanged, (state, action) => {
       return {
         ...state,
         scriptViewMode: action.payload
       }
-    },
-  },
+    })
 })
 
 export const selectSelectedMemberRef = (state: UISliceState) => state.selectedObject?.type === 'member' ? state.selectedObject.memberRef : undefined
 export const selectScriptViewMode = (state: UISliceState) => state.scriptViewMode
 
-// Action creators are generated for each case reducer function
-export const { onMemberSelected, channelSelected, scoreBehaviorSelected, scoreSpanSelected, scriptViewModeChanged } = uiSlice.actions
-export default uiSlice.reducer
+export default uiReducer

@@ -1,6 +1,7 @@
-import { PayloadAction, createSlice } from "@reduxjs/toolkit";
-import { CastSnapshot, DatumRef, ICastMemberIdentifier, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot, ScriptInstanceId } from "../vm";
-import { DebugContent, ICastMemberRef, JsBridgeBreakpoint } from "dirplayer-js-api";
+import { createAction } from "@reduxjs/toolkit";
+import type { DebugContent, ICastMemberRef, JsBridgeBreakpoint } from "dirplayer-js-api";
+import type { CastSnapshot, DatumRef, ICastMemberIdentifier, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot, ScriptInstanceId } from "../vm";
+import { createCompatReducer } from "./createCompatReducer";
 
 export type DebugMessageText = { type: 'text'; content: string };
 export type DebugMessageBitmap = { type: 'bitmap'; width: number; height: number; data: Uint8Array };
@@ -54,36 +55,61 @@ interface CastMemberListChangedPayload {
   members: Record<number, MemberSnapshot>,
 }
 
-const vmSlice = createSlice({
-  name: 'vm',
-  initialState,
-  reducers: {
-    ready: (state) => {
+export const ready = createAction('vm/ready')
+export const castListChanged = createAction<string[]>('vm/castListChanged')
+export const castLibNameChanged = createAction<{ castNumber: number, name: string }>('vm/castLibNameChanged')
+export const castMemberListChanged = createAction<CastMemberListChangedPayload>('vm/castMemberListChanged')
+export const castMemberChanged = createAction<{ memberRef: ICastMemberRef, snapshot: MemberSnapshot }>('vm/castMemberChanged')
+export const scoreChanged = createAction<ScoreSnapshot>('vm/scoreChanged')
+export const frameChanged = createAction<number>('vm/frameChanged')
+export const scopeListChanged = createAction<IVMScope[]>('vm/scopeListChanged')
+export const onScriptError = createAction<string>('vm/onScriptError')
+export const scriptErrorCleared = createAction('vm/scriptErrorCleared')
+export const breakpointListChanged = createAction<JsBridgeBreakpoint[]>('vm/breakpointListChanged')
+export const globalsChanged = createAction<Record<string, DatumRef>>('vm/globalsChanged')
+export const setTimeoutHandle = createAction<{ name: string, handle: NodeJS.Timer }>('vm/setTimeoutHandle')
+export const removeTimeoutHandle = createAction<string>('vm/removeTimeoutHandle')
+export const datumSnapshot = createAction<{ datumRef: DatumRef, datum: JsBridgeDatum }>('vm/datumSnapshot')
+export const scriptInstanceSnapshot = createAction<{ scriptInstanceId: ScriptInstanceId, datum: JsBridgeDatum }>('vm/scriptInstanceSnapshot')
+export const channelChanged = createAction<{ channelNumber: number, channelData: ScoreSpriteSnapshot }>('vm/channelChanged')
+export const channelDisplayNameChanged = createAction<{ channelNumber: number, displayName: string }>('vm/channelDisplayNameChanged')
+export const memberSubscribed = createAction<TMemberSubscription>('vm/memberSubscribed')
+export const memberUnsubscribed = createAction<string>('vm/memberUnsubscribed')
+export const movieLoaded = createAction('vm/movieLoaded')
+export const movieLoadFailed = createAction<string>('vm/movieLoadFailed')
+export const movieUnloaded = createAction('vm/movieUnloaded')
+export const debugMessageAdded = createAction<string>('vm/debugMessageAdded')
+export const debugContentAdded = createAction<DebugContent>('vm/debugContentAdded')
+export const debugMessagesCleared = createAction('vm/debugMessagesCleared')
+
+const vmReducer = createCompatReducer(initialState, (builder) => {
+  builder
+    .addCase(ready, (state) => {
       return {
         ...state,
         isReady: true,
       }
-    },
-    castListChanged: (state, action: PayloadAction<string[]>) => {
+    })
+    .addCase(castListChanged, (state, action) => {
       return {
         ...state,
         castNames: action.payload,
       }
-    },
-    castLibNameChanged: (state, action: PayloadAction<{ castNumber: number, name: string }>) => {
+    })
+    .addCase(castLibNameChanged, (state, action) => {
       return {
         ...state,
         castSnapshots: {
           ...state.castSnapshots,
           [action.payload.castNumber]: {
-            ...state.castSnapshots[action.payload.castNumber],
+            ...(state.castSnapshots[action.payload.castNumber] as (CastSnapshot & { name?: string }) | undefined),
             name: action.payload.name,
-          }
+          } as CastSnapshot,
         },
         castNames: state.castNames.map((name, i) => i === action.payload.castNumber - 1 ? action.payload.name : name)
       }
-    },
-    castMemberListChanged: (state, action: PayloadAction<CastMemberListChangedPayload>) => {
+    })
+    .addCase(castMemberListChanged, (state, action) => {
       return {
         ...state,
         castSnapshots: {
@@ -94,8 +120,8 @@ const vmSlice = createSlice({
           }
         }
       }
-    },
-    castMemberChanged: (state, action: PayloadAction<{ memberRef: ICastMemberRef, snapshot: MemberSnapshot }>) => {
+    })
+    .addCase(castMemberChanged, (state, action) => {
       const castLibNum = action.payload.memberRef[0]
       const memberNum = action.payload.memberRef[1]
       return {
@@ -114,51 +140,51 @@ const vmSlice = createSlice({
           },
         }
       }
-    },
-    scoreChanged: (state, action: PayloadAction<ScoreSnapshot>) => {
+    })
+    .addCase(scoreChanged, (state, action) => {
       return {
         ...state,
         scoreSnapshot: action.payload
       }
-    },
-    frameChanged: (state, action: PayloadAction<number>) => {
+    })
+    .addCase(frameChanged, (state, action) => {
       return {
         ...state,
         currentFrame: action.payload,
       }
-    },
-    scopeListChanged: (state, action: PayloadAction<IVMScope[]>) => {
+    })
+    .addCase(scopeListChanged, (state, action) => {
       return {
         ...state,
         scopes: action.payload,
         datumSnapshots: {},
       }
-    },
-    onScriptError: (state, action: PayloadAction<string>) => {
+    })
+    .addCase(onScriptError, (state, action) => {
       return {
         ...state,
         scriptError: action.payload,
       }
-    },
-    scriptErrorCleared: (state) => {
+    })
+    .addCase(scriptErrorCleared, (state) => {
       return {
         ...state,
         scriptError: undefined,
       }
-    },
-    breakpointListChanged: (state, action: PayloadAction<JsBridgeBreakpoint[]>) => {
+    })
+    .addCase(breakpointListChanged, (state, action) => {
       return {
         ...state,
         breakpoints: action.payload,
       }
-    },
-    globalsChanged: (state, action: PayloadAction<Record<string, DatumRef>>) => {
+    })
+    .addCase(globalsChanged, (state, action) => {
       return {
         ...state,
         globals: action.payload,
       }
-    },
-    setTimeoutHandle: (state, action: PayloadAction<{ name: string, handle: NodeJS.Timer }>) => {
+    })
+    .addCase(setTimeoutHandle, (state, action) => {
       return {
         ...state,
         timeoutHandles: {
@@ -166,16 +192,16 @@ const vmSlice = createSlice({
           [action.payload.name]: action.payload.handle,
         }
       }
-    },
-    removeTimeoutHandle: (state, action: PayloadAction<string>) => {
+    })
+    .addCase(removeTimeoutHandle, (state, action) => {
       const newHandles = { ...state.timeoutHandles }
       delete newHandles[action.payload]
       return {
         ...state,
         timeoutHandles: newHandles,
       }
-    },
-    datumSnapshot: (state, action: PayloadAction<{ datumRef: DatumRef, datum: JsBridgeDatum }>) => {
+    })
+    .addCase(datumSnapshot, (state, action) => {
       return {
         ...state,
         datumSnapshots: {
@@ -183,8 +209,8 @@ const vmSlice = createSlice({
           [action.payload.datumRef]: action.payload.datum,
         }
       }
-    },
-    scriptInstanceSnapshot: (state, action: PayloadAction<{ scriptInstanceId: ScriptInstanceId, datum: JsBridgeDatum }>) => {
+    })
+    .addCase(scriptInstanceSnapshot, (state, action) => {
       return {
         ...state,
         scriptInstanceSnapshots: {
@@ -192,8 +218,8 @@ const vmSlice = createSlice({
           [action.payload.scriptInstanceId]: action.payload.datum,
         }
       }
-    },
-    channelChanged: (state, action: PayloadAction<{ channelNumber: number, channelData: ScoreSpriteSnapshot }>) => {
+    })
+    .addCase(channelChanged, (state, action) => {
       return {
         ...state,
         channelSnapshots: {
@@ -201,8 +227,8 @@ const vmSlice = createSlice({
           [action.payload.channelNumber]: action.payload.channelData,
         }
       }
-    },
-    channelDisplayNameChanged: (state, action: PayloadAction<{ channelNumber: number, displayName: string }>) => {
+    })
+    .addCase(channelDisplayNameChanged, (state, action) => {
       return {
         ...state,
         channelSnapshots: {
@@ -213,57 +239,56 @@ const vmSlice = createSlice({
           }
         }
       }
-    },
-    memberSubscribed: (state, action: PayloadAction<TMemberSubscription>) => {
+    })
+    .addCase(memberSubscribed, (state, action) => {
       return {
         ...state,
         subscribedMemberTokens: [...state.subscribedMemberTokens, action.payload],
       }
-    },
-    memberUnsubscribed: (state, action: PayloadAction<string>) => {
+    })
+    .addCase(memberUnsubscribed, (state, action) => {
       return {
         ...state,
         subscribedMemberTokens: state.subscribedMemberTokens.filter(t => t.id !== action.payload),
       }
-    },
-    movieLoaded: (state) => {
+    })
+    .addCase(movieLoaded, (state) => {
       return {
         ...state,
         isMovieLoaded: true,
         movieLoadError: undefined,
       }
-    },
-    movieLoadFailed: (state, action: PayloadAction<string>) => {
+    })
+    .addCase(movieLoadFailed, (state, action) => {
       return {
         ...state,
         movieLoadError: action.payload,
       }
-    },
-    movieUnloaded: (state) => {
+    })
+    .addCase(movieUnloaded, (state) => {
       return {
         ...initialState,
         isReady: state.isReady,
       }
-    },
-    debugMessageAdded: (state, action: PayloadAction<string>) => {
+    })
+    .addCase(debugMessageAdded, (state, action) => {
       return {
         ...state,
         debugMessages: [...state.debugMessages, { type: 'text' as const, content: action.payload }],
       }
-    },
-    debugContentAdded: (state, action: PayloadAction<DebugContent>) => {
+    })
+    .addCase(debugContentAdded, (state, action) => {
       return {
         ...state,
         debugMessages: [...state.debugMessages, action.payload as DebugMessage],
       }
-    },
-    debugMessagesCleared: (state) => {
+    })
+    .addCase(debugMessagesCleared, (state) => {
       return {
         ...state,
         debugMessages: [],
       }
-    },
-  }
+    })
 })
 
 export const selectCastSnapshot = (state: VMSliceState, number: number) => state.castSnapshots[number]
@@ -278,6 +303,4 @@ export const selectBreakpoints = (state: VMSliceState, scriptName?: string) => s
 export const selectGlobals = (state: VMSliceState) => state.globals
 export const selectDebugMessages = (state: VMSliceState) => state.debugMessages
 
-// Action creators are generated for each case reducer function
-export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, movieLoadFailed, movieUnloaded, debugMessageAdded, debugContentAdded, debugMessagesCleared } = vmSlice.actions
-export default vmSlice.reducer
+export default vmReducer
