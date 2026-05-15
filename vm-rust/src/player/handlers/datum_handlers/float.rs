@@ -33,6 +33,18 @@ impl FloatDatumHandlers {
             "magnitude" => Ok(player.alloc_datum(Datum::Float(float_value.abs()))),
             // Vector-like access: return 0.0 for x/y/z when a float is used where a vector was expected
             "x" | "y" | "z" => Ok(player.alloc_datum(Datum::Float(0.0))),
+            // Director allows trig/math functions as numeric properties via the dot
+            // syntax: `n.cos` is equivalent to `cos(n)`, `n.sqrt` to `sqrt(n)`, etc.
+            // Inputs/outputs are in radians for trig, matching Director's globals.
+            "sin" => Ok(player.alloc_datum(Datum::Float(float_value.sin()))),
+            "cos" => Ok(player.alloc_datum(Datum::Float(float_value.cos()))),
+            "tan" => Ok(player.alloc_datum(Datum::Float(float_value.tan()))),
+            "asin" => Ok(player.alloc_datum(Datum::Float(float_value.asin()))),
+            "acos" => Ok(player.alloc_datum(Datum::Float(float_value.acos()))),
+            "atan" => Ok(player.alloc_datum(Datum::Float(float_value.atan()))),
+            "sqrt" => Ok(player.alloc_datum(Datum::Float(float_value.sqrt()))),
+            "log" => Ok(player.alloc_datum(Datum::Float(float_value.ln()))),
+            "exp" => Ok(player.alloc_datum(Datum::Float(float_value.exp()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get float property {}",
                 prop
