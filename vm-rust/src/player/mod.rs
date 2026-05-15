@@ -2030,6 +2030,17 @@ impl DirPlayer {
                     Ok(self.alloc_datum(datum))
                 }
             },
+            "stageleft" | "stagetop" | "stageright" | "stagebottom" => {
+                let layout = crate::player::stage::stage_layout(self);
+                let value = match_ci!(prop, {
+                    "stageleft" => layout.stage_rect[0],
+                    "stagetop" => layout.stage_rect[1],
+                    "stageright" => layout.stage_rect[2],
+                    "stagebottom" => layout.stage_rect[3],
+                    _ => unreachable!(),
+                });
+                Ok(self.alloc_datum(Datum::Int(value as i32)))
+            },
             _ => {
                 let datum = self.movie.get_prop(prop)?;
                 Ok(self.alloc_datum(datum))
