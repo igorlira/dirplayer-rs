@@ -539,7 +539,33 @@ impl PhysXObjectDatumHandlers {
             },
             "getProp" => {
                 let prop = player.get_datum(&args[0]).string_value()?;
-                Self::get_rigid_body_prop(player, member_ref, rb_name, &prop)
+                let result = Self::get_rigid_body_prop(player, member_ref, rb_name, &prop)?;
+                // `obj.prop[N]` bytecode form: getProp(#prop, N) returns the
+                // Nth component when the prop value is a vector or list.
+                if args.len() >= 2 {
+                    let index = player.get_datum(&args[1]).int_value()?;
+                    let value = player.get_datum(&result).clone();
+                    return match value {
+                        Datum::Vector(arr) => {
+                            let i = (index - 1) as usize;
+                            if i < 3 {
+                                Ok(player.alloc_datum(Datum::Float(arr[i])))
+                            } else {
+                                Err(ScriptError::new(format!(
+                                    "Vector index {} out of range (1..3) for rigidBody.{}", index, prop
+                                )))
+                            }
+                        }
+                        Datum::List(_, items, _) => {
+                            let i = (index - 1) as usize;
+                            items.get(i).cloned().ok_or_else(|| ScriptError::new(format!(
+                                "List index {} out of range for rigidBody.{}", index, prop
+                            )))
+                        }
+                        _ => Ok(result),
+                    };
+                }
+                Ok(result)
             },
             "setConvexHull" => {
                 // setConvexHull(vertList, faceList)
@@ -827,7 +853,31 @@ impl PhysXObjectDatumHandlers {
             },
             "getProp" => {
                 let prop = player.get_datum(&args[0]).string_value()?;
-                Self::get_constraint_prop(player, member_ref, object_type, name, &prop)
+                let result = Self::get_constraint_prop(player, member_ref, object_type, name, &prop)?;
+                if args.len() >= 2 {
+                    let index = player.get_datum(&args[1]).int_value()?;
+                    let value = player.get_datum(&result).clone();
+                    return match value {
+                        Datum::Vector(arr) => {
+                            let i = (index - 1) as usize;
+                            if i < 3 {
+                                Ok(player.alloc_datum(Datum::Float(arr[i])))
+                            } else {
+                                Err(ScriptError::new(format!(
+                                    "Vector index {} out of range (1..3) for {}.{}", index, object_type, prop
+                                )))
+                            }
+                        }
+                        Datum::List(_, items, _) => {
+                            let i = (index - 1) as usize;
+                            items.get(i).cloned().ok_or_else(|| ScriptError::new(format!(
+                                "List index {} out of range for {}.{}", index, object_type, prop
+                            )))
+                        }
+                        _ => Ok(result),
+                    };
+                }
+                Ok(result)
             },
             _ => Err(ScriptError::new(format!(
                 "No handler {} for {} '{}'", handler_name, object_type, name
