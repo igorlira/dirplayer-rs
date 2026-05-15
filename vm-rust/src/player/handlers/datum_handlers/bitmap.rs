@@ -541,6 +541,18 @@ impl BitmapDatumHandlers {
                 "rect" => {
                     bitmap.stroke_rect(x1, y1, x2, y2, color, &palettes, blend as f32 / 100.0);
                 }
+                "oval" => {
+                    bitmap.stroke_ellipse(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        color,
+                        &palettes,
+                        blend as f32 / 100.0,
+                        line_thickness,
+                    );
+                }
                 "line" => {
                     bitmap.draw_line_thick(
                         x1,
