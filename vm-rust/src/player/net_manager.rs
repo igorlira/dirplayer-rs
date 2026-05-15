@@ -313,6 +313,12 @@ impl NetManager {
 }
 
 fn normalize_task_url(url: &str, base_path: Option<&Url>) -> Url {
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
     let slash_norm = url.replace("\\", "/");
     let parsed_path = Path::new(slash_norm.as_str());
     let parsed_url = Url::parse(&slash_norm);
