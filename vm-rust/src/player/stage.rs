@@ -150,6 +150,13 @@ pub fn stage_scale(player: &DirPlayer) -> (f64, f64) {
 /// global projection transform — keeps text/bitmaps sharp at the target size.
 pub fn apply_stage_draw_rect(player: &DirPlayer) {
     let (draw_w, draw_h) = stage_canvas_dims(player);
+    // 1x1 only occurs before any movie has loaded (movie.rect is 0x0, clamped).
+    // Skip resizing to avoid triggering external canvas-size observers (e.g.
+    // third-party embed wrappers that read the first canvas resize to infer
+    // the player dimensions) before the real movie dimensions are known.
+    if draw_w <= 1 && draw_h <= 1 {
+        return;
+    }
     with_renderer_mut(|renderer_opt| {
         if let Some(renderer) = renderer_opt {
             use crate::rendering_gpu::Renderer;
