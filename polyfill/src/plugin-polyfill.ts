@@ -25,7 +25,7 @@ const DIRECTOR_MIMETYPE = "application/x-director";
 const PLUGIN_NAME = "Shockwave for Director";
 // Description MUST contain both "Shockwave" AND "Director" — that's what
 // every legacy detection script greps for.
-const PLUGIN_DESCRIPTION = "Adobe Shockwave for Director";
+const PLUGIN_DESCRIPTION = "Adobe Shockwave for Director 11.0.3.141";
 const PLUGIN_FILENAME = "dirplayer.js";
 
 class DirPlayerMimeTypeArray implements MimeTypeArray {

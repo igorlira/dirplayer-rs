@@ -10,7 +10,7 @@
 
   var DIRECTOR_MIMETYPE = "application/x-director";
   var PLUGIN_NAME = "Shockwave for Director";
-  var PLUGIN_DESCRIPTION = "Adobe Shockwave for Director";
+  var PLUGIN_DESCRIPTION = "Adobe Shockwave for Director 11.0.3.141";
   var PLUGIN_FILENAME = "dirplayer.js";
 
   // Bail when a real Shockwave plugin or another emulator already
