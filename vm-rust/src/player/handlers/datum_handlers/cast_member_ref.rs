@@ -389,8 +389,16 @@ impl CastMemberRefHandlers {
                     )));
                 }
             };
-            // preload/unload/stop/play/pause/rewind are no-ops for all member types in a web player
-            if matches!(handler_name, "preload" | "unload" | "stop" | "play" | "pause" | "rewind") {
+            // preload/unload/stop/play/pause/rewind are no-ops for all member types in a web player.
+            // preLoadBuffer is a SWA (Shockwave Audio) member method that preloads the audio
+            // buffer; we decode on demand so it's a no-op too.
+            if matches!(
+                handler_name,
+                "preload" | "preLoad"
+                    | "preloadBuffer" | "preLoadBuffer"
+                    | "unload" | "unLoad"
+                    | "stop" | "play" | "pause" | "rewind"
+            ) {
                 return Ok(DatumRef::Void);
             }
             match &cast_member.member_type {
