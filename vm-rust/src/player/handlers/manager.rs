@@ -4,6 +4,7 @@ use wasm_bindgen::prelude::*;
 use super::{
     cast::CastHandlers,
     datum_handlers::{
+        bitmap::BitmapDatumHandlers,
         list_handlers::ListDatumHandlers,
         player_call_datum_handler,
         point::PointDatumHandlers,
@@ -130,6 +131,17 @@ impl BuiltInHandlerManager {
                 }
             }
         })
+    }
+
+    fn forward_bitmap_handler(handler_name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let Some(bitmap_ref) = args.first() else {
+            return Err(ScriptError::new(format!(
+                "{} requires an image argument",
+                handler_name
+            )));
+        };
+        let handler_args = args[1..].to_vec();
+        BitmapDatumHandlers::call(bitmap_ref, handler_name, &handler_args)
     }
 
     fn get_pos_global(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -830,6 +842,8 @@ impl BuiltInHandlerManager {
             "void" => TypeHandlers::void(args),
             "param" => Self::param(args),
             "count" => Self::count(args),
+            "createmask" => Self::forward_bitmap_handler("createMask", args),
+            "creatematte" => Self::forward_bitmap_handler("createMatte", args),
             "getat" => Self::get_at(args),
             "getlast" => Self::get_last(args),
             "getpos" => Self::get_pos_global(args),
