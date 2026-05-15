@@ -213,6 +213,9 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         PlayerVMCommand::SetExternalParams(params) => {
             reserve_player_mut(|player| {
                 player.external_params = params;
+                crate::player::stage::apply_stage_draw_rect(player);
+                let (w, h) = crate::player::stage::stage_canvas_dims(player);
+                crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
             });
         }
         PlayerVMCommand::SetBasePath(path) => {
@@ -251,6 +254,9 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
         PlayerVMCommand::SetStageSize(width, height) => {
             reserve_player_mut(|player| {
                 player.stage_size = (width, height);
+                crate::player::stage::apply_stage_draw_rect(player);
+                let (w, h) = crate::player::stage::stage_canvas_dims(player);
+                crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
             });
         }
         PlayerVMCommand::TimeoutTriggered(timeout_ref) => {

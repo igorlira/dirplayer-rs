@@ -22,6 +22,11 @@ export default function EmbedPlayer({width, height, src, externalParams, require
   const movieLoadError = useSelector<RootState, string | undefined>(state => state.vm.movieLoadError);
   const [userClicked, setUserClicked] = useState(!requireClickToPlay);
 
+  const normalizeCssSize = useCallback((value: string) => {
+    const trimmed = value.trim();
+    return /^\d+(?:\.\d+)?$/.test(trimmed) ? `${trimmed}px` : trimmed;
+  }, []);
+
   useEffect(() => {
     async function loadMovie() {
       const fullPath = getFullPathFromOrigin(src);
@@ -39,15 +44,10 @@ export default function EmbedPlayer({width, height, src, externalParams, require
     setUserClicked(true);
   }, []);
 
-  const [widthValue, heightValue] = useMemo(() => {
-    const widthInt = parseInt(width);
-    const heightInt = parseInt(height);
-    if (isNaN(widthInt) || isNaN(heightInt)) {
-      return [width, height];
-    } else {
-      return [`${widthInt}px`, `${heightInt}px`];
-    }
-  }, [width, height]);
+  const [widthValue, heightValue] = useMemo(
+    () => [normalizeCssSize(width), normalizeCssSize(height)],
+    [height, normalizeCssSize, width]
+  );
 
   if (!userClicked) {
     return (

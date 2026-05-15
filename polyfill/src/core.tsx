@@ -77,6 +77,30 @@ function parseDataExternalParams(element: HTMLElement): Record<string, string> {
   return params;
 }
 
+function parseEmbedExternalParams(element: HTMLEmbedElement): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const attr of Array.from(element.attributes)) {
+    const name = attr.name;
+    if (/^sw\d+$/i.test(name) || /^sw[a-z]/i.test(name)) {
+      params[name] = attr.value;
+    }
+  }
+  return params;
+}
+
+function parseObjectExternalParams(params: Record<string, string | null>): Record<string, string> {
+  const externalParams: Record<string, string> = {};
+  for (const [name, value] of Object.entries(params)) {
+    if (value == null) {
+      continue;
+    }
+    if (/^sw\d+$/i.test(name) || /^sw[a-z]/i.test(name)) {
+      externalParams[name] = value;
+    }
+  }
+  return externalParams;
+}
+
 function checkDirObject(object: HTMLObjectElement): { isDirObject: boolean; params: Record<string, string | null> } {
   const paramTags = object.getElementsByTagName('param');
   const params: Record<string, string | null> = Array.from(paramTags).reduce((acc, param) => {
@@ -128,40 +152,58 @@ function renderPlayer(
   );
 }
 
+function resolveDimensionValue(
+  attrValue: string | null,
+  styleValue: string,
+  rectValue: number,
+  fallback: string
+): string {
+  if (attrValue && attrValue.trim()) {
+    return attrValue.trim();
+  }
+  if (styleValue && styleValue !== 'auto' && styleValue !== '0px') {
+    return styleValue;
+  }
+  if (rectValue > 0) {
+    return `${Math.round(rectValue)}px`;
+  }
+  return fallback;
+}
+
+function resolveReplacementSize(element: HTMLElement): { width: string; height: string } {
+  const rect = element.getBoundingClientRect();
+  const computed = window.getComputedStyle(element);
+  const fallbackWidth = (element as HTMLObjectElement | HTMLEmbedElement).width || '';
+  const fallbackHeight = (element as HTMLObjectElement | HTMLEmbedElement).height || '';
+  return {
+    width: resolveDimensionValue(element.getAttribute('width'), computed.width, rect.width, fallbackWidth),
+    height: resolveDimensionValue(element.getAttribute('height'), computed.height, rect.height, fallbackHeight),
+  };
+}
+
 function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
-  let { width, height, src } = element;
+  let { src } = element;
   if (!src) {
     src = element.getAttribute('data-src') || '';
   }
-  const externalParams: Record<string, string> = {};
-  for (let i = 1; i <= 30; i++) {
-    const swValue = element.getAttribute(`sw${i}`);
-    if (swValue === null) {
-      break;
-    }
-    externalParams[`sw${i}`] = swValue;
-  }
+  const externalParams: Record<string, string> = parseEmbedExternalParams(element);
   Object.assign(externalParams, parseDataExternalParams(element));
 
   const enableGestures = element.hasAttribute('data-enable-gestures')
     || (element.parentElement?.tagName === 'OBJECT' && element.parentElement.hasAttribute('data-enable-gestures'))
     || undefined;
 
+  let size = resolveReplacementSize(element);
   const newElement = document.createElement('div');
   if (element.parentElement && element.parentElement.tagName === 'OBJECT') {
     // If the EMBED is inside an OBJECT, replace the OBJECT instead
     const objectElement = element.parentElement as HTMLObjectElement;
-    if (objectElement.width) {
-      width = objectElement.width;
-    }
-    if (objectElement.height) {
-      height = objectElement.height;
-    }
+    size = resolveReplacementSize(objectElement);
     element.parentElement.replaceWith(newElement);
   } else {
     element.replaceWith(newElement);
   }
-  renderPlayer(config, newElement, width, height, src, externalParams, enableGestures);
+  renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures);
 }
 
 function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, params: Record<string, string | null>) {
@@ -170,15 +212,8 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
     console.error('No src attribute found on object element', element);
     return;
   }
-  const { width, height } = element;
-  const externalParams: Record<string, string> = {};
-  for (let i = 1; i <= 30; i++) {
-    const swValue = params[`sw${i}`];
-    if (swValue === undefined || swValue === null) {
-      break;
-    }
-    externalParams[`sw${i}`] = swValue;
-  }
+  const size = resolveReplacementSize(element);
+  const externalParams: Record<string, string> = parseObjectExternalParams(params);
   Object.assign(externalParams, parseDataExternalParams(element));
 
   const enableGestures = element.hasAttribute('data-enable-gestures')
@@ -187,7 +222,7 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
 
   const newElement = document.createElement('div');
   element.replaceWith(newElement);
-  renderPlayer(config, newElement, width, height, src, externalParams, enableGestures);
+  renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures);
 }
 
 function extractNoscriptElements() {

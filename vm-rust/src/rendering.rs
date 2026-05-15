@@ -3720,12 +3720,7 @@ fn get_canvas_size() -> (u32, u32) {
         if let Some(renderer) = renderer_lock {
             renderer.size()
         } else {
-            reserve_player_ref(|player| {
-                (
-                    player.movie.rect.width() as u32,
-                    player.movie.rect.height() as u32,
-                )
-            })
+            reserve_player_ref(crate::player::stage::stage_canvas_dims)
         }
     })
 }
@@ -3764,12 +3759,7 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
 
     with_renderer_mut(|renderer_lock| {
         if renderer_lock.is_none() {
-            let canvas_size = reserve_player_ref(|player| {
-                (
-                    player.movie.rect.width() as u32,
-                    player.movie.rect.height() as u32,
-                )
-            });
+            let canvas_size = reserve_player_ref(crate::player::stage::stage_canvas_dims);
 
             // Try WebGL2 first, fall back to Canvas2D
             let dynamic_renderer = if let Some(webgl2_renderer) = try_create_webgl2_renderer(canvas_size) {

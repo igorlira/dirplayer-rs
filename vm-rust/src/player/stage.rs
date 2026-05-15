@@ -5,38 +5,139 @@ use super::{
     DatumRef, DirPlayer, ScriptError,
 };
 
-/// Dimensions of the drawn stage: stage_draw_rect if Lingo set one, otherwise
-/// the authored movie rect. Independent of the JS host's `set_stage_size`
-/// (which tracks the outer container).
-pub fn stage_canvas_dims(player: &DirPlayer) -> (u32, u32) {
-    draw_rect_dims(player)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StretchStyle {
+    Meet,
+    Fill,
+    Stage,
+    None,
 }
 
-fn draw_rect_dims(player: &DirPlayer) -> (u32, u32) {
-    if let Some(r) = player.stage_draw_rect {
-        let w = (r[2] - r[0]).max(1.0) as u32;
-        let h = (r[3] - r[1]).max(1.0) as u32;
-        (w, h)
-    } else {
-        (player.movie.rect.width() as u32, player.movie.rect.height() as u32)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageLayout {
+    pub canvas_width: u32,
+    pub canvas_height: u32,
+    pub stage_rect: [f64; 4],
+    pub draw_rect: [f64; 4],
+}
+
+impl StageLayout {
+    pub fn scale_x(&self, movie_width: f64) -> f64 {
+        if movie_width <= 0.0 {
+            1.0
+        } else {
+            (self.draw_rect[2] - self.draw_rect[0]).max(1.0) / movie_width
+        }
+    }
+
+    pub fn scale_y(&self, movie_height: f64) -> f64 {
+        if movie_height <= 0.0 {
+            1.0
+        } else {
+            (self.draw_rect[3] - self.draw_rect[1]).max(1.0) / movie_height
+        }
     }
 }
 
-/// Stage auto-scale factor — ratio of drawRect to the authored movie rect.
-/// Returns (1.0, 1.0) if drawRect isn't set or matches movie.rect exactly,
-/// so movies that manage their own scaling (e.g. FurniFactory2 via 1_resize
-/// scripts) don't get double-scaled. For movies that set drawRect larger
-/// than movie.rect without per-sprite scaling (e.g. Coke Studios), this
-/// factor is used to auto-stretch sprites at render time.
+fn stretch_style(player: &DirPlayer) -> StretchStyle {
+    match player
+        .external_params
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("swStretchStyle"))
+        .map(|(_, value)| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("meet") => StretchStyle::Meet,
+        Some("fill") => StretchStyle::Fill,
+        Some("stage") => StretchStyle::Stage,
+        _ => StretchStyle::None,
+    }
+}
+
+fn compute_stage_layout(
+    movie_width: f64,
+    movie_height: f64,
+    stage_width: u32,
+    stage_height: u32,
+    style: StretchStyle,
+) -> StageLayout {
+    let movie_width = movie_width.max(1.0);
+    let movie_height = movie_height.max(1.0);
+    let stage_width = stage_width.max(1);
+    let stage_height = stage_height.max(1);
+
+    match style {
+        StretchStyle::Meet => {
+            let scale = f64::min(stage_width as f64 / movie_width, stage_height as f64 / movie_height);
+            let draw_width = movie_width * scale;
+            let draw_height = movie_height * scale;
+            let left = ((stage_width as f64 - draw_width) / 2.0).max(0.0);
+            let top = ((stage_height as f64 - draw_height) / 2.0).max(0.0);
+            StageLayout {
+                canvas_width: stage_width,
+                canvas_height: stage_height,
+                stage_rect: [0.0, 0.0, stage_width as f64, stage_height as f64],
+                draw_rect: [left, top, left + draw_width, top + draw_height],
+            }
+        }
+        StretchStyle::Fill => StageLayout {
+            canvas_width: stage_width,
+            canvas_height: stage_height,
+            stage_rect: [0.0, 0.0, stage_width as f64, stage_height as f64],
+            draw_rect: [0.0, 0.0, stage_width as f64, stage_height as f64],
+        },
+        StretchStyle::Stage => StageLayout {
+            canvas_width: stage_width,
+            canvas_height: stage_height,
+            stage_rect: [0.0, 0.0, stage_width as f64, stage_height as f64],
+            draw_rect: [0.0, 0.0, movie_width, movie_height],
+        },
+        StretchStyle::None => StageLayout {
+            canvas_width: movie_width as u32,
+            canvas_height: movie_height as u32,
+            stage_rect: [0.0, 0.0, movie_width, movie_height],
+            draw_rect: [0.0, 0.0, movie_width, movie_height],
+        },
+    }
+}
+
+pub fn stage_layout(player: &DirPlayer) -> StageLayout {
+    if let Some(r) = player.stage_draw_rect {
+        let width = (r[2] - r[0]).max(1.0) as u32;
+        let height = (r[3] - r[1]).max(1.0) as u32;
+        StageLayout {
+            canvas_width: width,
+            canvas_height: height,
+            stage_rect: r,
+            draw_rect: r,
+        }
+    } else {
+        compute_stage_layout(
+            player.movie.rect.width() as f64,
+            player.movie.rect.height() as f64,
+            player.stage_size.0,
+            player.stage_size.1,
+            stretch_style(player),
+        )
+    }
+}
+
+/// Dimensions of the stage canvas: explicit drawRect if Lingo set one,
+/// otherwise the effective layout derived from `swStretchStyle`.
+pub fn stage_canvas_dims(player: &DirPlayer) -> (u32, u32) {
+    let layout = stage_layout(player);
+    (layout.canvas_width, layout.canvas_height)
+}
+
+/// Stage content scale — ratio of the effective draw rect to the authored
+/// movie rect.
 pub fn stage_scale(player: &DirPlayer) -> (f64, f64) {
-    let Some(r) = player.stage_draw_rect else { return (1.0, 1.0); };
+    let layout = stage_layout(player);
     let movie_w = player.movie.rect.width() as f64;
     let movie_h = player.movie.rect.height() as f64;
     if movie_w <= 0.0 || movie_h <= 0.0 { return (1.0, 1.0); }
-    let draw_w = (r[2] - r[0]).max(1.0);
-    let draw_h = (r[3] - r[1]).max(1.0);
-    let sx = draw_w / movie_w;
-    let sy = draw_h / movie_h;
+    let sx = layout.scale_x(movie_w);
+    let sy = layout.scale_y(movie_h);
     if (sx - 1.0).abs() < 1e-3 && (sy - 1.0).abs() < 1e-3 {
         (1.0, 1.0)
     } else {
@@ -48,7 +149,7 @@ pub fn stage_scale(player: &DirPlayer) -> (f64, f64) {
 /// scaled per-rect via `get_concrete_sprite_render_rect` rather than via a
 /// global projection transform — keeps text/bitmaps sharp at the target size.
 pub fn apply_stage_draw_rect(player: &DirPlayer) {
-    let (draw_w, draw_h) = draw_rect_dims(player);
+    let (draw_w, draw_h) = stage_canvas_dims(player);
     with_renderer_mut(|renderer_opt| {
         if let Some(renderer) = renderer_opt {
             use crate::rendering_gpu::Renderer;
@@ -61,14 +162,18 @@ pub fn apply_stage_draw_rect(player: &DirPlayer) {
 /// drawRect scaling so Lingo's mouseH/mouseV and script-facing APIs see the
 /// authored coordinate system.
 pub fn canvas_to_movie_coords(player: &DirPlayer, x: f64, y: f64) -> (f64, f64) {
-    let (draw_w, draw_h) = draw_rect_dims(player);
+    let layout = stage_layout(player);
+    let draw_w = (layout.draw_rect[2] - layout.draw_rect[0]).max(1.0);
+    let draw_h = (layout.draw_rect[3] - layout.draw_rect[1]).max(1.0);
     let movie_w = player.movie.rect.width() as f64;
     let movie_h = player.movie.rect.height() as f64;
-    if player.stage_draw_rect.is_some()
-        && draw_w > 0 && draw_h > 0
+    if draw_w > 0.0 && draw_h > 0.0
         && movie_w > 0.0 && movie_h > 0.0
     {
-        (x * movie_w / draw_w as f64, y * movie_h / draw_h as f64)
+        (
+            (x - layout.draw_rect[0]) * movie_w / draw_w,
+            (y - layout.draw_rect[1]) * movie_h / draw_h,
+        )
     } else {
         (x, y)
     }
@@ -76,22 +181,20 @@ pub fn canvas_to_movie_coords(player: &DirPlayer, x: f64, y: f64) -> (f64, f64) 
 
 pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, ScriptError> {
     match prop {
-        "rect" | "drawRect" => {
-            if let Some(r) = player.stage_draw_rect {
-                Ok(Datum::Rect(r, 0))
-            } else {
-                Ok(Datum::Rect([0.0, 0.0, player.movie.rect.width() as f64, player.movie.rect.height() as f64], 0))
-            }
-        }
+        "rect" => Ok(Datum::Rect(stage_layout(player).stage_rect, 0)),
+        "drawRect" => Ok(Datum::Rect(stage_layout(player).draw_rect, 0)),
         "sourceRect" => {
             // TODO where does this come from?
             Ok(Datum::Rect([0.0, 0.0, player.movie.rect.width() as f64, player.movie.rect.height() as f64], 0))
         }
         "bgColor" => Ok(Datum::ColorRef(player.bg_color.clone())),
         "image" => {
+            let layout = stage_layout(player);
+            let w = layout.stage_rect[2] - layout.stage_rect[0];
+            let h = layout.stage_rect[3] - layout.stage_rect[1];
             let mut new_bitmap = Bitmap::new(
-                player.movie.rect.width() as u16,
-                player.movie.rect.height() as u16,
+                w as u16,
+                h as u16,
                 32,
                 32,
                 0,
@@ -165,5 +268,46 @@ pub fn set_stage_prop(
                 prop
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_stage_layout, StretchStyle};
+
+    #[test]
+    fn stretch_meet_letterboxes_inside_stage() {
+        let layout = compute_stage_layout(640.0, 480.0, 1000, 1000, StretchStyle::Meet);
+        assert_eq!(layout.canvas_width, 1000);
+        assert_eq!(layout.canvas_height, 1000);
+        assert_eq!(layout.stage_rect, [0.0, 0.0, 1000.0, 1000.0]);
+        assert_eq!(layout.draw_rect, [0.0, 125.0, 1000.0, 875.0]);
+    }
+
+    #[test]
+    fn stretch_fill_matches_container() {
+        let layout = compute_stage_layout(640.0, 480.0, 1000, 600, StretchStyle::Fill);
+        assert_eq!(layout.canvas_width, 1000);
+        assert_eq!(layout.canvas_height, 600);
+        assert_eq!(layout.stage_rect, [0.0, 0.0, 1000.0, 600.0]);
+        assert_eq!(layout.draw_rect, [0.0, 0.0, 1000.0, 600.0]);
+    }
+
+    #[test]
+    fn stretch_stage_resizes_stage_without_scaling_content() {
+        let layout = compute_stage_layout(640.0, 480.0, 1000, 600, StretchStyle::Stage);
+        assert_eq!(layout.canvas_width, 1000);
+        assert_eq!(layout.canvas_height, 600);
+        assert_eq!(layout.stage_rect, [0.0, 0.0, 1000.0, 600.0]);
+        assert_eq!(layout.draw_rect, [0.0, 0.0, 640.0, 480.0]);
+    }
+
+    #[test]
+    fn stretch_none_keeps_authored_movie_size() {
+        let layout = compute_stage_layout(640.0, 480.0, 1000, 600, StretchStyle::None);
+        assert_eq!(layout.canvas_width, 640);
+        assert_eq!(layout.canvas_height, 480);
+        assert_eq!(layout.stage_rect, [0.0, 0.0, 640.0, 480.0]);
+        assert_eq!(layout.draw_rect, [0.0, 0.0, 640.0, 480.0]);
     }
 }

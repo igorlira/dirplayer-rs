@@ -4526,16 +4526,16 @@ pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Opti
 /// consistently across bitmap/text/etc.
 pub fn get_concrete_sprite_render_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect {
     let rect = get_concrete_sprite_rect(player, sprite);
+    let layout = crate::player::stage::stage_layout(player);
     let (sx, sy) = crate::player::stage::stage_scale(player);
     if (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
         return rect;
     }
-    let scale = sx.min(sy);
     IntRect::from(
-        (rect.left as f64 * scale).round() as i32,
-        (rect.top as f64 * scale).round() as i32,
-        (rect.right as f64 * scale).round() as i32,
-        (rect.bottom as f64 * scale).round() as i32,
+        (layout.draw_rect[0] + rect.left as f64 * sx).round() as i32,
+        (layout.draw_rect[1] + rect.top as f64 * sy).round() as i32,
+        (layout.draw_rect[0] + rect.right as f64 * sx).round() as i32,
+        (layout.draw_rect[1] + rect.bottom as f64 * sy).round() as i32,
     )
 }
 

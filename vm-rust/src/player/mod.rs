@@ -665,12 +665,13 @@ impl DirPlayer {
         with_renderer_mut(|renderer_opt| {
             if let Some(renderer) = renderer_opt {
                 use crate::rendering_gpu::Renderer;
-                renderer.set_size(
-                    self.movie.rect.width() as u32,
-                    self.movie.rect.height() as u32,
-                );
+                let (stage_w, stage_h) = crate::player::stage::stage_canvas_dims(self);
+                renderer.set_size(stage_w, stage_h);
             }
         });
+
+        let (stage_w, stage_h) = crate::player::stage::stage_canvas_dims(self);
+        crate::js_api::JsApi::dispatch_stage_size_changed(stage_w, stage_h, self.center_stage);
 
         JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
 
