@@ -952,6 +952,12 @@ fn normalize_cast_lib_path(base_path: &Option<Url>, file_path: &str) -> Option<S
     }
 
     // bind temporary String to a variable so slices can borrow from it
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
     let normalized = file_path.replace("\\", "/");
 
     // split on both slashes and colons

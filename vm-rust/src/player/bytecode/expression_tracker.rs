@@ -760,6 +760,12 @@ impl StackExpressionTracker {
 
     fn format_literal(literal: &Datum) -> String {
         match literal {
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
             Datum::String(s) => format!("\"{}\"", s.replace("\"", "\\\"")),
             Datum::Symbol(s) => format!("#{}", s),
             Datum::Int(i) => format!("{}", i),
