@@ -10,7 +10,7 @@ pub mod webgl2;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
-use crate::player::DirPlayer;
+use crate::player::{bitmap::bitmap::Bitmap, DirPlayer};
 
 /// Renderer backend selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +31,10 @@ impl Default for RendererBackend {
 pub trait Renderer {
     /// Draw the main stage frame
     fn draw_frame(&mut self, player: &mut DirPlayer);
+
+    /// Capture the current visible stage output as a bitmap using this
+    /// backend's own rendering path.
+    fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap;
 
     /// Reset per-movie state (texture caches, rendered-text cache, any
     /// scene-level GPU data). Call between tests so sprites from a previous
@@ -141,6 +145,13 @@ impl Renderer for DynamicRenderer {
         match self {
             DynamicRenderer::Canvas2D(r) => r.draw_frame(player),
             DynamicRenderer::WebGL2(r) => r.draw_frame(player),
+        }
+    }
+
+    fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
+        match self {
+            DynamicRenderer::Canvas2D(r) => r.capture_stage_bitmap(player),
+            DynamicRenderer::WebGL2(r) => r.capture_stage_bitmap(player),
         }
     }
 

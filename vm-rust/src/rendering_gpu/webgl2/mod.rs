@@ -511,6 +511,45 @@ impl WebGL2Renderer {
         }
     }
 
+    pub fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
+        self.draw_frame(player);
+
+        let (width, height) = self.size;
+        let gl = self.context.gl();
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, None);
+        let _ = gl.read_pixels_with_opt_u8_array(
+            0,
+            0,
+            width as i32,
+            height as i32,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            Some(&mut pixels),
+        );
+
+        let row_size = (width * 4) as usize;
+        let mut flipped = vec![0u8; pixels.len()];
+        for y in 0..height as usize {
+            let src_row = (height as usize - 1 - y) * row_size;
+            let dst_row = y * row_size;
+            flipped[dst_row..dst_row + row_size]
+                .copy_from_slice(&pixels[src_row..src_row + row_size]);
+        }
+
+        let mut bitmap = Bitmap::new(
+            width as u16,
+            height as u16,
+            32,
+            32,
+            8,
+            PaletteRef::BuiltIn(get_system_default_palette()),
+        );
+        bitmap.data = flipped;
+        bitmap.use_alpha = true;
+        bitmap
+    }
+
     /// Draw the custom cursor sprite at the mouse position.
     /// Mirrors the logic from `draw_cursor` in rendering.rs.
     fn draw_cursor(&mut self, player: &mut DirPlayer) {
@@ -6240,6 +6279,10 @@ impl WebGL2Renderer {
 impl super::Renderer for WebGL2Renderer {
     fn draw_frame(&mut self, player: &mut DirPlayer) {
         WebGL2Renderer::draw_frame(self, player)
+    }
+
+    fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
+        WebGL2Renderer::capture_stage_bitmap(self, player)
     }
 
     fn reset_for_new_movie(&mut self) {

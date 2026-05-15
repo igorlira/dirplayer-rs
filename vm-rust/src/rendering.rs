@@ -3334,6 +3334,27 @@ impl PlayerCanvasRenderer {
         }
     }
 
+    pub fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
+        self.draw_frame(player);
+
+        let (width, height) = self.size;
+        let image_data = self
+            .ctx2d
+            .get_image_data(0.0, 0.0, width as f64, height as f64)
+            .expect("Canvas2D stage capture failed");
+        let mut bitmap = Bitmap::new(
+            width as u16,
+            height as u16,
+            32,
+            32,
+            8,
+            PaletteRef::BuiltIn(get_system_default_palette()),
+        );
+        bitmap.data = image_data.data().0;
+        bitmap.use_alpha = true;
+        bitmap
+    }
+
     /// Get the backend name
     pub fn backend_name(&self) -> &'static str {
         "Canvas2D"
@@ -3343,6 +3364,10 @@ impl PlayerCanvasRenderer {
 impl Renderer for PlayerCanvasRenderer {
     fn draw_frame(&mut self, player: &mut DirPlayer) {
         PlayerCanvasRenderer::draw_frame(self, player)
+    }
+
+    fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
+        PlayerCanvasRenderer::capture_stage_bitmap(self, player)
     }
 
     fn draw_preview_frame(&mut self, player: &mut DirPlayer) {

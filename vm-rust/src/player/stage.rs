@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::Datum, player::bitmap::bitmap::PaletteRef, rendering::{render_stage_to_bitmap, with_renderer_mut}};
+use crate::{director::lingo::datum::Datum, player::bitmap::bitmap::PaletteRef, rendering::{render_stage_to_bitmap, with_renderer_mut}, rendering_gpu::Renderer};
 
 use super::{
     bitmap::bitmap::{get_system_default_palette, Bitmap},
@@ -189,18 +189,30 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
         }
         "bgColor" => Ok(Datum::ColorRef(player.bg_color.clone())),
         "image" => {
-            let layout = stage_layout(player);
-            let w = layout.stage_rect[2] - layout.stage_rect[0];
-            let h = layout.stage_rect[3] - layout.stage_rect[1];
-            let mut new_bitmap = Bitmap::new(
-                w as u16,
-                h as u16,
-                32,
-                32,
-                0,
-                PaletteRef::BuiltIn(get_system_default_palette()),
-            );
-            render_stage_to_bitmap(player, &mut new_bitmap, None);
+            let mut captured_bitmap = None;
+            with_renderer_mut(|renderer_opt| {
+                if let Some(renderer) = renderer_opt {
+                    captured_bitmap = Some(renderer.capture_stage_bitmap(player));
+                }
+            });
+
+            let new_bitmap = if let Some(bitmap) = captured_bitmap {
+                bitmap
+            } else {
+                let layout = stage_layout(player);
+                let w = layout.stage_rect[2] - layout.stage_rect[0];
+                let h = layout.stage_rect[3] - layout.stage_rect[1];
+                let mut bitmap = Bitmap::new(
+                    w as u16,
+                    h as u16,
+                    32,
+                    32,
+                    0,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                render_stage_to_bitmap(player, &mut bitmap, None);
+                bitmap
+            };
             // Ephemeral: a fresh stage snapshot per call. Once no DatumRef
             // wraps it (e.g. after the script's `(the stage).image` Lingo
             // expression goes out of scope) the bitmap is freed. RemoteControl
