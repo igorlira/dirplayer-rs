@@ -469,7 +469,7 @@ impl WebGL2Renderer {
         // Draw custom cursor sprite
         self.draw_cursor(player);
 
-        // Draw debug text overlay (datum count, script count)
+        #[cfg(feature = "alloc-debug-overlay")]
         self.draw_debug_text_overlay(player);
 
         // Unbind

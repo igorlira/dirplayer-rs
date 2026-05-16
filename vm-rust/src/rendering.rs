@@ -3283,6 +3283,7 @@ impl PlayerCanvasRenderer {
         let bitmap = &mut self.bitmap;
         render_stage_to_bitmap(player, bitmap, self.debug_selected_channel_num);
 
+        #[cfg(feature = "alloc-debug-overlay")]
         if let Some(font) = player.font_manager.get_system_font() {
             let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
             let txt = format!(
