@@ -67,7 +67,7 @@
     "postbuild": "npm run copy-ruffle-electron",
     "postbuild-extension": "npm run copy-ruffle-extension",
     "postbuild-polyfill": "npm run copy-ruffle-polyfill",
-    "e2e-test-native": "cd vm-rust && cargo test --test mod e2e",
+    "e2e-test-native": "node ./scripts/run-native-tests.mjs",
     "e2e-test-browser": "node ./scripts/run-browser-tests.mjs",
     "e2e-update-native": "node ./scripts/update-test-snapshots.mjs",
     "e2e-update-browser": "node ./scripts/run-browser-tests.mjs --update",
