@@ -34,6 +34,8 @@ env:
   HABBO_V7_PASSWORD: ${{ secrets.HABBO_V7_PASSWORD }}
   HABBO_V7_INFO_HOST: ${{ secrets.HABBO_V7_INFO_HOST }}
   HABBO_V7_INFO_PORT: ${{ secrets.HABBO_V7_INFO_PORT }}
+  HABBO_V7_WS_SSL: ${{ vars.HABBO_V7_WS_SSL }}
+  HABBO_V7_WS_PATH: ${{ vars.HABBO_V7_WS_PATH }}
 
 jobs:
   update:
