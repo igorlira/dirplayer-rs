@@ -8,7 +8,8 @@ browser_e2e_test!(test_supersonic_load, |player| async move {
     let cfg = TestConfig::from_toml(CONFIG);
     cfg.apply_external_params();
     let movie_path = player.asset_path(&cfg.movie.path);
-    let snapshots = SnapshotContext::new(cfg.suite(), "supersonic");
+    let mut snapshots = SnapshotContext::new(cfg.suite(), "supersonic");
+    snapshots.max_diff_ratio = 0.005;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;

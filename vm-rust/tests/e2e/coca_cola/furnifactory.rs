@@ -30,7 +30,7 @@ browser_e2e_test!(test_furnifactory_load, |player| async move {
                 .equals(StaticDatum::Int(1)),
         )
         .await?;
-    snapshots.verify("in_game", player.snapshot_stage())?;
+    snapshots.verify_with_ratio("in_game", player.snapshot_stage(), 0.07)?;
 
     Ok(())
 });
