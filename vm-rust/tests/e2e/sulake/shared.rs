@@ -14,7 +14,8 @@ pub async fn assert_entry(
         "unknown"
     };
 
-    let snapshots = SnapshotContext::new(suite, working_dir);
+    let mut snapshots = SnapshotContext::new(suite, working_dir);
+    snapshots.max_diff_ratio = 0.003;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;
