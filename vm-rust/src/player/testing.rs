@@ -170,7 +170,10 @@ impl StageSnapshot {
     /// `name` is the snapshot step name (e.g. "preload").
     ///
     /// Files are stored as `snapshots/{suite}/native/{test}/{name}.png`.
-    pub fn assert_snapshot(&self, snapshot_path: &str, name: &str, max_diff_ratio: f64) -> Result<(), String> {
+    /// Returns `Ok(Some(ratio))` when a comparison was made and passed,
+    /// `Ok(None)` when there is no reference or the reference was updated,
+    /// and `Err` when the diff exceeds the threshold.
+    pub fn assert_snapshot(&self, snapshot_path: &str, name: &str, max_diff_ratio: f64) -> Result<Option<f64>, String> {
         let (suite, test) = snapshot_path.split_once('/')
             .unwrap_or((snapshot_path, "default"));
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -190,8 +193,7 @@ impl StageSnapshot {
 
         if std::env::var("SNAPSHOT_UPDATE").unwrap_or_default() == "1" {
             std::fs::write(&reference_path, &actual_png).unwrap();
-            eprintln!("Updated reference: {}", reference_path.display());
-            return Ok(());
+            return Ok(None);
         }
 
         if reference_path.exists() {
@@ -259,13 +261,8 @@ impl StageSnapshot {
                     output_path.display(), reference_path.display(),
                 ));
             }
-        } else {
-            eprintln!(
-                "No reference for '{}'; actual saved to {}. \
-                 Run with SNAPSHOT_UPDATE=1 to create.",
-                name, output_path.display(),
-            );
+            return Ok(Some(ratio));
         }
-        Ok(())
+        Ok(None)
     }
 }

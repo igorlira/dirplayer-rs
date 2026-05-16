@@ -79,17 +79,26 @@ impl SnapshotContext {
 
     /// Like [`verify`], but overrides the diff tolerance for this snapshot only.
     pub fn verify_with_ratio(&self, name: &str, output: SnapshotOutput, max_diff_ratio: f64) -> Result<(), String> {
-        super::log_test_action(&format!("Snapshot: {}", name));
         let snapshot_path = format!("{}/{}", self.suite, self.test);
 
-        // Emit to browser snapshot collector (no-op on native)
+        // Browser: emit to the JS collector; logging happens async via __saveSnapshot callback.
+        #[cfg(target_arch = "wasm32")]
         emit_snapshot(&snapshot_path, name, &output, max_diff_ratio);
 
-        // Compare against reference files on native
+        // Native: compare synchronously and log the result in one line.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            crate::player::testing::StageSnapshot::from_output(output)
-                .assert_snapshot(&snapshot_path, name, max_diff_ratio)?;
+            match crate::player::testing::StageSnapshot::from_output(output)
+                .assert_snapshot(&snapshot_path, name, max_diff_ratio)
+            {
+                Ok(Some(ratio)) => super::log_test_action(&format!(
+                    "Snapshot: {} — {:.3}% diff", name, ratio * 100.0
+                )),
+                Ok(None) => super::log_test_action(&format!(
+                    "Snapshot: {} — no reference", name
+                )),
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(())
