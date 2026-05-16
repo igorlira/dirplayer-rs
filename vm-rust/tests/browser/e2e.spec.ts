@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
@@ -70,6 +71,8 @@ function compareSnapshots(
   if (diffImg && diffPixels > 0 && diffPath) {
     fs.mkdirSync(path.dirname(diffPath), { recursive: true });
     fs.writeFileSync(diffPath, new Uint8Array(PNG.sync.write(diffImg)));
+  } else if (diffPath && fs.existsSync(diffPath)) {
+    fs.unlinkSync(diffPath);
   }
 
   return { diffRatio: diffPixels / totalPixels, diffPixels, totalPixels };
@@ -120,6 +123,8 @@ function processSnapshot(
         `(${diff.diffPixels}/${diff.totalPixels}, threshold: ${(maxDiffRatio * 100).toFixed(4)}%)`
     );
   }
+  // Snapshot passed — remove any stale diff so the report doesn't flag it as changed.
+  if (fs.existsSync(diffPath)) fs.unlinkSync(diffPath);
   return `${(diff.diffRatio * 100).toFixed(3)}% diff`;
 }
 
@@ -199,6 +204,21 @@ test("browser e2e tests", async ({ page }) => {
   if (snapshotErrors.length > 0) {
     errors.push(
       `${snapshotErrors.length} snapshot comparison failure(s):\n${snapshotErrors.join("\n")}`
+    );
+  }
+
+  // In debug mode, generate the snapshot report while the browser is still
+  // open so the user doesn't need to Ctrl+C to trigger it.
+  if (process.env.E2E_KEEP_OPEN === "1") {
+    const repoRoot = path.resolve(__dirname, "../../..");
+    spawnSync(
+      "node",
+      [
+        path.join(repoRoot, "scripts", "generate-snapshot-report.mjs"),
+        path.join(repoRoot, "vm-rust", "tests", "snapshots"),
+        path.join(repoRoot, "test-results", "snapshot-report"),
+      ],
+      { stdio: "inherit" }
     );
   }
 
