@@ -40,9 +40,12 @@ function run(cmd, args, opts = {}) {
 const cliArgs = process.argv.slice(2);
 const forwardArgs = [];
 let updateSnapshots = loadedEnv.SNAPSHOT_UPDATE === "1";
+let keepOpen = false;
 for (const arg of cliArgs) {
   if (arg === "--update" || arg === "-u") {
     updateSnapshots = true;
+  } else if (arg === "--debug") {
+    keepOpen = true;
   } else {
     forwardArgs.push(arg);
   }
@@ -175,6 +178,7 @@ console.log(`Generated test runner in ${RUNNER_DIR}`);
 console.log("Running Playwright tests...");
 const playwrightEnv = { ...process.env };
 if (updateSnapshots) playwrightEnv.SNAPSHOT_UPDATE = "1";
+if (keepOpen) playwrightEnv.E2E_KEEP_OPEN = "1";
 const pw = spawnSync("npx", ["playwright", "test", ...forwardArgs], {
   cwd: REPO_ROOT,
   stdio: "inherit",
