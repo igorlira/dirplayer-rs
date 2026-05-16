@@ -142,13 +142,16 @@ jobs:
         id: upload_report
         if: always()
         run: |
-          if [ -z "$S3_BUCKET" ] || [ ! -f test-results/snapshot-report/report.html ]; then exit 0; fi
+          if [ -z "$S3_BUCKET" ] || [ ! -f test-results/snapshot-report/index.html ]; then exit 0; fi
           PREFIX="dirplayer/snapshots/${GITHUB_RUN_ID}/native-report"
           [ -d test-results/snapshot-report/images ] && \
             aws s3 sync test-results/snapshot-report/images/ "s3://${S3_BUCKET}/${PREFIX}/images/"
-          aws s3 cp test-results/snapshot-report/report.html \
-            "s3://${S3_BUCKET}/${PREFIX}/report.html" --content-type "text/html; charset=utf-8"
-          echo "url=https://${S3_BUCKET}.s3.${S3_REGION:-us-east-1}.amazonaws.com/${PREFIX}/report.html" >> "$GITHUB_OUTPUT"
+          [ -d test-results/snapshot-report/suites ] && \
+            aws s3 sync test-results/snapshot-report/suites/ "s3://${S3_BUCKET}/${PREFIX}/suites/" \
+              --content-type "text/html; charset=utf-8"
+          aws s3 cp test-results/snapshot-report/index.html \
+            "s3://${S3_BUCKET}/${PREFIX}/index.html" --content-type "text/html; charset=utf-8"
+          echo "url=https://${S3_BUCKET}.s3.${S3_REGION:-us-east-1}.amazonaws.com/${PREFIX}/index.html" >> "$GITHUB_OUTPUT"
 
       - name: Upload test artifacts
         if: always()
@@ -334,13 +337,16 @@ jobs:
         id: upload_report
         if: always()
         run: |
-          if [ -z "$S3_BUCKET" ] || [ ! -f test-results/snapshot-report/report.html ]; then exit 0; fi
+          if [ -z "$S3_BUCKET" ] || [ ! -f test-results/snapshot-report/index.html ]; then exit 0; fi
           PREFIX="dirplayer/snapshots/${GITHUB_RUN_ID}/browser-report"
           [ -d test-results/snapshot-report/images ] && \
             aws s3 sync test-results/snapshot-report/images/ "s3://${S3_BUCKET}/${PREFIX}/images/"
-          aws s3 cp test-results/snapshot-report/report.html \
-            "s3://${S3_BUCKET}/${PREFIX}/report.html" --content-type "text/html; charset=utf-8"
-          echo "url=https://${S3_BUCKET}.s3.${S3_REGION:-us-east-1}.amazonaws.com/${PREFIX}/report.html" >> "$GITHUB_OUTPUT"
+          [ -d test-results/snapshot-report/suites ] && \
+            aws s3 sync test-results/snapshot-report/suites/ "s3://${S3_BUCKET}/${PREFIX}/suites/" \
+              --content-type "text/html; charset=utf-8"
+          aws s3 cp test-results/snapshot-report/index.html \
+            "s3://${S3_BUCKET}/${PREFIX}/index.html" --content-type "text/html; charset=utf-8"
+          echo "url=https://${S3_BUCKET}.s3.${S3_REGION:-us-east-1}.amazonaws.com/${PREFIX}/index.html" >> "$GITHUB_OUTPUT"
 
       - name: Upload test artifacts
         if: always()
