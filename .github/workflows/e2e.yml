@@ -284,14 +284,14 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
       - name: Install Microsoft Core Fonts
         run: |
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get install -y ttf-mscorefonts-installer
           sudo fc-cache -fv
-
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
 
       - name: Cargo fetch
         working-directory: ./vm-rust
