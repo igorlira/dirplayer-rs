@@ -2,7 +2,7 @@
 // Called by actions/github-script in the e2e workflow.
 // Accepts { github, context, label, artifactName } where label distinguishes
 // native vs browser comments and artifactName is the artifact to link to.
-module.exports = async ({ github, context, label, artifactName }) => {
+module.exports = async ({ github, context, label, artifactName, prNumber, reportUrl }) => {
   const fs = require("fs");
 
   const commentPath = "/tmp/diff-report/comment.md";
@@ -37,7 +37,10 @@ module.exports = async ({ github, context, label, artifactName }) => {
     );
   }
 
-  body += `\n[View full run & download artifacts](${runUrl})\n`;
+  const links = [];
+  if (reportUrl) links.push(`[View snapshot report](${reportUrl})`);
+  links.push(`[View full run & download artifacts](${runUrl})`);
+  body += `\n${links.join(' · ')}\n`;
 
   // Find and update existing comment for this label, or create new one
   const marker = `<!-- snapshot-test-report:${label} -->`;
@@ -45,7 +48,7 @@ module.exports = async ({ github, context, label, artifactName }) => {
   const { data: comments } = await github.rest.issues.listComments({
     owner: context.repo.owner,
     repo: context.repo.repo,
-    issue_number: context.issue.number,
+    issue_number: prNumber ?? context.issue.number,
   });
   const existing = comments.find((c) => c.body?.includes(marker));
   if (existing) {
@@ -59,7 +62,7 @@ module.exports = async ({ github, context, label, artifactName }) => {
     await github.rest.issues.createComment({
       owner: context.repo.owner,
       repo: context.repo.repo,
-      issue_number: context.issue.number,
+      issue_number: prNumber ?? context.issue.number,
       body,
     });
   }

@@ -157,7 +157,7 @@ function renderCard(s, imgPrefix = '') {
 
 function buildPage({ title, nav, filter, passCount, diffCount, totalCount, body }) {
   return template
-    .replace('{{TITLE}}',       title)
+    .replaceAll('{{TITLE}}',    title)
     .replace('{{NAV}}',         nav)
     .replace('{{CSS}}',         css)
     .replace('{{JS}}',          js)
