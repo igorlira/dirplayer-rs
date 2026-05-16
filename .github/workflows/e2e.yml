@@ -170,31 +170,12 @@ jobs:
         uses: actions/github-script@v7
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
+          REPORT_URL: ${{ steps.upload_report.outputs.url }}
         with:
           script: |
             const script = require('./scripts/post-snapshot-comment.cjs');
             const prNumber = process.env.PR_NUMBER ? parseInt(process.env.PR_NUMBER, 10) : context.issue.number;
-            await script({ github, context, label: 'native', artifactName: 'native-test-results', prNumber });
-
-      - name: Post report link on PR commit
-        if: always() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
-        uses: actions/github-script@v7
-        env:
-          OUTCOME: ${{ steps.native_tests.outcome }}
-          REPORT_URL: ${{ steps.upload_report.outputs.url }}
-        with:
-          script: |
-            const sha = context.payload.pull_request?.head.sha;
-            if (!sha || !process.env.REPORT_URL) return;
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha,
-              state: process.env.OUTCOME === 'success' ? 'success' : 'failure',
-              context: 'E2E / native snapshot report',
-              description: 'Snapshot comparison report',
-              target_url: process.env.REPORT_URL,
-            });
+            await script({ github, context, label: 'native', artifactName: 'native-test-results', prNumber, reportUrl: process.env.REPORT_URL || null });
 
       - name: Post final status
         if: always() && inputs.pr_number != ''
@@ -365,31 +346,12 @@ jobs:
         uses: actions/github-script@v7
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
+          REPORT_URL: ${{ steps.upload_report.outputs.url }}
         with:
           script: |
             const script = require('./scripts/post-snapshot-comment.cjs');
             const prNumber = process.env.PR_NUMBER ? parseInt(process.env.PR_NUMBER, 10) : context.issue.number;
-            await script({ github, context, label: 'browser', artifactName: 'browser-test-results', prNumber });
-
-      - name: Post report link on PR commit
-        if: always() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
-        uses: actions/github-script@v7
-        env:
-          OUTCOME: ${{ steps.browser_tests.outcome }}
-          REPORT_URL: ${{ steps.upload_report.outputs.url }}
-        with:
-          script: |
-            const sha = context.payload.pull_request?.head.sha;
-            if (!sha || !process.env.REPORT_URL) return;
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha,
-              state: process.env.OUTCOME === 'success' ? 'success' : 'failure',
-              context: 'E2E / browser snapshot report',
-              description: 'Snapshot comparison report',
-              target_url: process.env.REPORT_URL,
-            });
+            await script({ github, context, label: 'browser', artifactName: 'browser-test-results', prNumber, reportUrl: process.env.REPORT_URL || null });
 
       - name: Post final status
         if: always() && inputs.pr_number != ''
