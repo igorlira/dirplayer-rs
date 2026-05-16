@@ -80,7 +80,7 @@ function processSnapshot(
   name: string,
   base64data: string,
   maxDiffRatio: number
-) {
+): string {
   const slashIdx = suitePath.indexOf("/");
   const suite = slashIdx >= 0 ? suitePath.substring(0, slashIdx) : suitePath;
   const testName =
@@ -103,15 +103,11 @@ function processSnapshot(
       referencePath,
       new Uint8Array(Buffer.from(base64data, "base64"))
     );
-    console.log(`Updated reference: ${suite}/browser/${testName}/${fileName}`);
-    return;
+    return "reference updated";
   }
 
   if (!fs.existsSync(referencePath)) {
-    console.log(
-      `No reference for '${suite}/browser/${testName}/${name}'. Run with SNAPSHOT_UPDATE=1 to create.`
-    );
-    return;
+    return "no reference";
   }
 
   const diffDir = path.join(SNAPSHOTS_BASE, "diff", suite, "browser", testName);
@@ -124,6 +120,7 @@ function processSnapshot(
         `(${diff.diffPixels}/${diff.totalPixels}, threshold: ${(maxDiffRatio * 100).toFixed(4)}%)`
     );
   }
+  return `${(diff.diffRatio * 100).toFixed(3)}% diff`;
 }
 
 test("browser e2e tests", async ({ page }) => {
@@ -132,11 +129,14 @@ test("browser e2e tests", async ({ page }) => {
   // Expose snapshot handler so snapshots are saved as they're taken
   await page.exposeFunction(
     "__playwrightSaveSnapshot",
-    (suite: string, name: string, data: string, maxDiffRatio: number) => {
+    async (suite: string, name: string, data: string, maxDiffRatio: number) => {
       try {
-        processSnapshot(suite, name, data, maxDiffRatio);
+        const status = processSnapshot(suite, name, data, maxDiffRatio);
+        return { ok: true, status };
       } catch (err: any) {
-        snapshotErrors.push(err?.message ?? String(err));
+        const msg = err?.message ?? String(err);
+        snapshotErrors.push(msg);
+        return { ok: false, status: msg };
       }
     }
   );

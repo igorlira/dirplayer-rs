@@ -34,9 +34,20 @@
     window.__onScriptError = function(msg) {
       window.__scriptErrors.push(msg);
     };
+    window.__pendingSnapshots = 0;
+    window.__snapshotErrors = [];
     window.__saveSnapshot = function(suite, name, base64png, maxDiffRatio) {
       if (window.__playwrightSaveSnapshot) {
-        window.__playwrightSaveSnapshot(suite, name, base64png, maxDiffRatio || 0);
+        window.__pendingSnapshots++;
+        window.__playwrightSaveSnapshot(suite, name, base64png, maxDiffRatio || 0).then(function(result) {
+          window.__pendingSnapshots--;
+          if (!result) return;
+          if (result.ok) {
+            window.__testLog('Snapshot: ' + name + ' — ' + result.status);
+          } else {
+            window.__snapshotErrors.push('Snapshot FAIL: ' + name + ' — ' + result.status);
+          }
+        });
       }
     };
     window.__currentTestLog = null;
@@ -151,12 +162,26 @@
       console.log((pass ? '✓ ' : '✗ ') + name + (error ? ': ' + error : ''));
     }
 
+    async function drainSnapshots() {
+      while (window.__pendingSnapshots > 0) {
+        await new Promise(r => setTimeout(r, 10));
+      }
+      const errors = window.__snapshotErrors.splice(0);
+      return errors;
+    }
+
     async function runTest(name) {
       const group = startTest(name);
       try {
         await wasm[name]();
-        endTest(group, name, true);
+        const snapErrors = await drainSnapshots();
+        if (snapErrors.length > 0) {
+          endTest(group, name, false, snapErrors.join('\n'));
+        } else {
+          endTest(group, name, true);
+        }
       } catch (e) {
+        await drainSnapshots(); // flush log entries even on failure
         const panicMsg = window.__testPanic;
         const error = panicMsg || e.message || String(e);
         window.__testPanic = undefined;
@@ -179,10 +204,19 @@
         const group = startTest(name);
         try {
           await wasm[name]();
-          results.tests.push({ name, status: 'pass' });
-          results.passed++;
-          endTest(group, name, true);
+          const snapErrors = await drainSnapshots();
+          if (snapErrors.length > 0) {
+            const error = snapErrors.join('\n');
+            results.tests.push({ name, status: 'fail', error });
+            results.failed++;
+            endTest(group, name, false, error);
+          } else {
+            results.tests.push({ name, status: 'pass' });
+            results.passed++;
+            endTest(group, name, true);
+          }
         } catch (e) {
+          await drainSnapshots(); // flush log entries even on failure
           // Check for a Rust panic message (set by our panic hook)
           const panicMsg = window.__testPanic;
           const error = panicMsg || e.message || String(e);
