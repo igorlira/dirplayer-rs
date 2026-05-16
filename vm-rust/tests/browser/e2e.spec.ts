@@ -164,8 +164,11 @@ test("browser e2e tests", async ({ page }) => {
     page.evaluate(() => ((window as any).__scriptErrors ?? []) as string[]),
   ]);
 
+  // Collect all errors before acting on them so keep-open can fire first.
+  const errors: string[] = [];
+
   if (panicMessage) {
-    throw new Error(`Rust panic during browser test:\n${panicMessage}`);
+    errors.push(`Rust panic during browser test:\n${panicMessage}`);
   }
 
   if (scriptErrors.length > 0) {
@@ -173,13 +176,11 @@ test("browser e2e tests", async ({ page }) => {
     for (const err of scriptErrors) {
       console.log(`  ✗ ${err}`);
     }
-    throw new Error(
-      `${scriptErrors.length} script error(s) during test:\n${scriptErrors.join("\n")}`
-    );
+    errors.push(`${scriptErrors.length} script error(s) during test:\n${scriptErrors.join("\n")}`);
   }
 
   if (!testResults) {
-    throw new Error("Browser test harness exited without publishing test results.");
+    errors.push("Browser test harness exited without publishing test results.");
   }
 
   if (testResults) {
@@ -196,9 +197,19 @@ test("browser e2e tests", async ({ page }) => {
   }
 
   if (snapshotErrors.length > 0) {
-    throw new Error(
+    errors.push(
       `${snapshotErrors.length} snapshot comparison failure(s):\n${snapshotErrors.join("\n")}`
     );
+  }
+
+  // In debug mode, keep the browser open so the log can be inspected.
+  if (process.env.E2E_KEEP_OPEN === "1" && errors.length > 0) {
+    console.log("\nKeeping browser open for inspection — press Ctrl+C to exit.");
+    await new Promise<void>(() => {});
+  }
+
+  if (errors.length > 0) {
+    throw new Error(errors.join("\n\n"));
   }
 
   // Assert all tests passed
