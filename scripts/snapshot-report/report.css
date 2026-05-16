@@ -1,14 +1,14 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg: #0d1117;
-  --surface: #161b22;
-  --border: #30363d;
-  --text: #e6edf3;
-  --muted: #8b949e;
+  --bg: #1a1a1a;
+  --surface: #222;
+  --border: #333;
+  --text: #e8e8e8;
+  --muted: #888;
   --green: #3fb950;
   --red: #f85149;
-  --accent: #58a6ff;
+  --accent: #f5a623;
 }
 
 body {
@@ -26,16 +26,40 @@ body {
   z-index: 100;
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 12px 20px;
+  gap: 16px;
+  padding: 10px 20px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
 
 .page-header h1 {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
+  color: var(--muted);
+}
+
+.dirplayer {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-right: 16px;
+  border-right: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.dirplayer-logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  opacity: 0.5;
+}
+
+.dirplayer-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #505050;
+  letter-spacing: 0.01em;
 }
 
 .summary {
@@ -125,7 +149,7 @@ main {
 }
 .badge-pass { background: rgba(63,185,80,.15);  color: var(--green);  border: 1px solid rgba(63,185,80,.3); }
 .badge-fail { background: rgba(248,81,73,.15);  color: var(--red);    border: 1px solid rgba(248,81,73,.3); }
-.badge-new  { background: rgba(88,166,255,.15); color: var(--accent); border: 1px solid rgba(88,166,255,.3); }
+.badge-new  { background: rgba(245,166,35,.12); color: var(--accent); border: 1px solid rgba(245,166,35,.3); }
 
 /* ── Cards grid ── */
 .cards-grid {
@@ -252,7 +276,7 @@ main {
 }
 
 .view-tab:hover { color: var(--text); border-color: var(--muted); }
-.view-tab.active { color: var(--accent); border-color: var(--accent); background: rgba(88,166,255,.08); }
+.view-tab.active { color: var(--accent); border-color: var(--accent); background: rgba(245,166,35,.08); }
 
 /* ── Diff image ── */
 .img-diff {
@@ -309,7 +333,7 @@ main {
   color: var(--text);
   transition: border-color .15s, background .15s;
 }
-.suite-row:hover { border-color: var(--accent); background: rgba(88,166,255,.04); }
+.suite-row:hover { border-color: var(--accent); background: rgba(245,166,35,.04); }
 .suite-row.suite-changed { border-left: 3px solid var(--red); }
 
 .suite-crumbs {
