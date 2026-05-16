@@ -122,8 +122,7 @@ jobs:
       - name: Run native e2e tests
         id: native_tests
         continue-on-error: true
-        working-directory: ./vm-rust
-        run: cargo test --test mod -- e2e --nocapture
+        run: node scripts/run-native-tests.mjs
 
       - name: Generate snapshot diff grid
         if: always()
@@ -139,6 +138,18 @@ jobs:
           aws s3 cp /tmp/diff-report/diff-grid.png "s3://${S3_BUCKET}/${KEY}" --content-type image/png
           echo "https://${S3_BUCKET}.s3.${S3_REGION:-us-east-1}.amazonaws.com/${KEY}" > /tmp/diff-report/image-url.txt
 
+      - name: Upload snapshot report to S3
+        id: upload_report
+        if: always()
+        run: |
+          if [ -z "$S3_BUCKET" ] || [ ! -f test-results/snapshot-report/report.html ]; then exit 0; fi
+          PREFIX="dirplayer/snapshots/${GITHUB_RUN_ID}/native-report"
+          [ -d test-results/snapshot-report/images ] && \
+            aws s3 sync test-results/snapshot-report/images/ "s3://${S3_BUCKET}/${PREFIX}/images/"
+          aws s3 cp test-results/snapshot-report/report.html \
+            "s3://${S3_BUCKET}/${PREFIX}/report.html" --content-type "text/html; charset=utf-8"
+          echo "url=https://${S3_BUCKET}.s3.${S3_REGION:-us-east-1}.amazonaws.com/${PREFIX}/report.html" >> "$GITHUB_OUTPUT"
+
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -148,6 +159,7 @@ jobs:
             vm-rust/tests/snapshots/output/
             vm-rust/tests/snapshots/diff/
             /tmp/diff-report/
+            test-results/
           retention-days: 7
 
       - name: Post snapshot test report on PR
@@ -161,22 +173,45 @@ jobs:
             const prNumber = process.env.PR_NUMBER ? parseInt(process.env.PR_NUMBER, 10) : context.issue.number;
             await script({ github, context, label: 'native', artifactName: 'native-test-results', prNumber });
 
+      - name: Post report link on PR commit
+        if: always() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
+        uses: actions/github-script@v7
+        env:
+          OUTCOME: ${{ steps.native_tests.outcome }}
+          REPORT_URL: ${{ steps.upload_report.outputs.url }}
+        with:
+          script: |
+            const sha = context.payload.pull_request?.head.sha;
+            if (!sha || !process.env.REPORT_URL) return;
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha,
+              state: process.env.OUTCOME === 'success' ? 'success' : 'failure',
+              context: 'E2E / native snapshot report',
+              description: 'Snapshot comparison report',
+              target_url: process.env.REPORT_URL,
+            });
+
       - name: Post final status
         if: always() && inputs.pr_number != ''
         uses: actions/github-script@v7
         env:
           PR_SHA: ${{ steps.resolve_pr.outputs.sha }}
           OUTCOME: ${{ steps.native_tests.outcome }}
+          REPORT_URL: ${{ steps.upload_report.outputs.url }}
         with:
           script: |
             const state = process.env.OUTCOME === 'success' ? 'success' : 'failure';
+            const targetUrl = process.env.REPORT_URL ||
+              `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
               sha: process.env.PR_SHA,
               state,
               context: 'E2E / native',
-              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              target_url: targetUrl,
             });
 
       - name: Fail if native tests failed
@@ -295,6 +330,18 @@ jobs:
           aws s3 cp /tmp/diff-report/diff-grid.png "s3://${S3_BUCKET}/${KEY}" --content-type image/png
           echo "https://${S3_BUCKET}.s3.${S3_REGION:-us-east-1}.amazonaws.com/${KEY}" > /tmp/diff-report/image-url.txt
 
+      - name: Upload snapshot report to S3
+        id: upload_report
+        if: always()
+        run: |
+          if [ -z "$S3_BUCKET" ] || [ ! -f test-results/snapshot-report/report.html ]; then exit 0; fi
+          PREFIX="dirplayer/snapshots/${GITHUB_RUN_ID}/browser-report"
+          [ -d test-results/snapshot-report/images ] && \
+            aws s3 sync test-results/snapshot-report/images/ "s3://${S3_BUCKET}/${PREFIX}/images/"
+          aws s3 cp test-results/snapshot-report/report.html \
+            "s3://${S3_BUCKET}/${PREFIX}/report.html" --content-type "text/html; charset=utf-8"
+          echo "url=https://${S3_BUCKET}.s3.${S3_REGION:-us-east-1}.amazonaws.com/${PREFIX}/report.html" >> "$GITHUB_OUTPUT"
+
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -318,22 +365,45 @@ jobs:
             const prNumber = process.env.PR_NUMBER ? parseInt(process.env.PR_NUMBER, 10) : context.issue.number;
             await script({ github, context, label: 'browser', artifactName: 'browser-test-results', prNumber });
 
+      - name: Post report link on PR commit
+        if: always() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
+        uses: actions/github-script@v7
+        env:
+          OUTCOME: ${{ steps.browser_tests.outcome }}
+          REPORT_URL: ${{ steps.upload_report.outputs.url }}
+        with:
+          script: |
+            const sha = context.payload.pull_request?.head.sha;
+            if (!sha || !process.env.REPORT_URL) return;
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha,
+              state: process.env.OUTCOME === 'success' ? 'success' : 'failure',
+              context: 'E2E / browser snapshot report',
+              description: 'Snapshot comparison report',
+              target_url: process.env.REPORT_URL,
+            });
+
       - name: Post final status
         if: always() && inputs.pr_number != ''
         uses: actions/github-script@v7
         env:
           PR_SHA: ${{ steps.resolve_pr.outputs.sha }}
           OUTCOME: ${{ steps.browser_tests.outcome }}
+          REPORT_URL: ${{ steps.upload_report.outputs.url }}
         with:
           script: |
             const state = process.env.OUTCOME === 'success' ? 'success' : 'failure';
+            const targetUrl = process.env.REPORT_URL ||
+              `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
               sha: process.env.PR_SHA,
               state,
               context: 'E2E / browser',
-              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              target_url: targetUrl,
             });
 
       - name: Fail if browser tests failed

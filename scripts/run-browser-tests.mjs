@@ -181,4 +181,16 @@ const pw = spawnSync("npx", ["playwright", "test", ...forwardArgs], {
   shell: IS_WIN,
   env: playwrightEnv,
 });
+
+// 9. Always generate the HTML snapshot report regardless of test outcome.
+spawnSync(
+  "node",
+  [
+    path.join(__dirname, "generate-snapshot-report.mjs"),
+    path.join(VM_RUST_DIR, "tests", "snapshots"),
+    path.join(REPO_ROOT, "test-results", "snapshot-report"),
+  ],
+  { cwd: REPO_ROOT, stdio: "inherit", shell: IS_WIN },
+);
+
 process.exit(pw.status ?? 1);
