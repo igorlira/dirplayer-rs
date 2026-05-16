@@ -6,13 +6,12 @@
   <style>
     * { box-sizing: border-box; }
     body { font-family: monospace; margin: 0; padding: 16px; background: #1a1a1a; color: #eee; height: 100vh; overflow: hidden; display: flex; flex-direction: column; gap: 8px; }
-    #layout { display: flex; gap: 16px; flex: 1; overflow: hidden; }
+    #layout { display: flex; flex-direction: column; gap: 8px; flex: 1; overflow: hidden; }
     #stage_canvas_container { background: #000; display: inline-block; flex-shrink: 0; align-self: flex-start; }
     #stage_canvas_container canvas { display: block; }
-    #output { background: #222; border-radius: 4px; flex: 1; overflow-y: auto; margin: 0; padding: 4px 0; }
+    #output { background: #222; border-radius: 4px; flex: 1; overflow-y: auto; margin: 0; padding: 0 0 4px; }
     #output .status-line { padding: 3px 8px; color: #aaa; white-space: pre-wrap; }
-    #output details { border-top: 1px solid #2a2a2a; }
-    #output summary { padding: 3px 8px; cursor: pointer; user-select: none; list-style: none; outline: none; display: flex; align-items: center; gap: 6px; }
+    #output summary { padding: 3px 8px; cursor: pointer; user-select: none; list-style: none; outline: none; display: flex; align-items: center; gap: 6px; position: sticky; top: 0; background: #222; z-index: 1; border-top: 1px solid #2a2a2a; }
     #output summary::-webkit-details-marker { display: none; }
     #output summary .summary-name { flex: 1; }
     #output summary.running { color: #888; }
